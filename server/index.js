@@ -1131,6 +1131,38 @@ httpServer.listen(PORT, () => {
       setInterval(runFirstTouchHoldSweep, 5 * 60 * 1000).unref();
     }
 
+    // Stranded wizard-series activation sweep (codex #3504 r6) — a worker
+    // dying between the booking commit and the post-commit series
+    // activation leaves a billable pay-at-visit parent with no follow-ups
+    // and a live quote draft. The sweep strips the stranded pricing
+    // (fail-safe: price-less single visit, office converts from the live
+    // draft) and rings an admin bell. No-op when nothing is stranded.
+    {
+      const runWizardActivationSweep = async () => {
+        try {
+          // runExclusive: one replica per tick (codex #3504 r10) — the
+          // heal pass can re-create a missed welcome enqueue, and
+          // sms_sequences has no customer/sequence unique constraint, so
+          // two replicas racing the same parent could both pass the
+          // hasWelcomeSequence check and double-text the customer.
+          const { runExclusive } = require('./utils/cron-lock');
+          await runExclusive('wizard-series-recovery-sweep', async () => {
+            const { sweepStrandedWizardActivations, healActivatedFollowThroughs } = require('./services/wizard-series-activation-recovery');
+            await sweepStrandedWizardActivations({ limit: 10 });
+            // Second pass: re-run the idempotent post-activation
+            // follow-through (tier sync, welcome, lead conversion) for
+            // recently activated parents — a worker death after the
+            // activation commit loses it with no other recovery path.
+            await healActivatedFollowThroughs();
+          });
+        } catch (err) {
+          logger.error(`[wizard-series-recovery] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runWizardActivationSweep, 2 * 60 * 1000).unref();
+      setInterval(runWizardActivationSweep, 10 * 60 * 1000).unref();
+    }
+
     // WDO report attention sweep — exception-based bell for reports stalled
     // BEFORE send (inspection never closed out, signed-but-unsent drafts,
     // holds failing release). Quiet when clean; gated + cross-replica

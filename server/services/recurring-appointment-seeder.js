@@ -656,7 +656,14 @@ async function findActiveRecurringSeries(conn, {
   const query = conn('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // Only a CANCELLED parent is out of the candidate set. A 'rescheduled'
+    // parent is a live first visit awaiting re-placement (customer
+    // reschedule path, streamline gates off) whose follow-ups stay
+    // active — excluding it here let a later booking activate a second
+    // same-family billable series over them (codex #3504 r16). Whether
+    // the series is still active is decided below by the ongoing flag /
+    // upcoming-row probe, exactly as for pending/confirmed parents.
+    .whereNotIn('status', ['cancelled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
   if (columns.property_id) query.select('property_id');
@@ -697,7 +704,7 @@ async function findActiveRecurringSeries(conn, {
       let parentPid = parent.property_id ? String(parent.property_id) : '';
       if (serviceAddressScope.estimatePropertyId && !parentPid && parent.source_estimate_id) {
         try {
-          const srcRow = await conn('estimates').where({ id: parent.source_estimate_id }).first('property_id');
+          const srcRow = await sourceEstimateForScope(conn, parent.source_estimate_id);
           if (srcRow?.property_id) parentPid = String(srcRow.property_id);
         } catch { /* fall through to the address branch / fail-closed default */ }
       }
@@ -736,7 +743,7 @@ async function findActiveRecurringSeries(conn, {
           // estimate's address committed in the SAME transaction as the parent,
           // so it is authoritative and race-free.
           try {
-            const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
+            const src = await sourceEstimateForScope(conn, parent.source_estimate_id);
             const recovered = parentKeyFromRaw(src?.address);
             if (recovered) {
               parentStreet = recovered;
@@ -809,8 +816,27 @@ async function findActiveRecurringSeries(conn, {
         this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });
       })
       .where('is_recurring', true)
-      .whereIn('status', ['pending', 'confirmed'])
-      .where('scheduled_date', '>=', etDateString())
+      // 'rescheduled' is a LIVE visit awaiting re-placement (the customer
+      // reschedule path leaves it on the books with that status when the
+      // streamline gates are off) — a fixed-length series whose last
+      // outstanding visit sits in that state is not lapsed, and reading
+      // it as lapsed let a second same-family billable series activate
+      // (codex #3504 r15).
+      // en_route / on_site are IN-PROGRESS (codex #3504 r25): a fixed
+      // series on its final occurrence is not lapsed while that visit is
+      // being served — only completion/cancellation ends it.
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
+      // A 'rescheduled' placeholder stays active PAST its original date
+      // (codex #3504 r21): it is awaiting re-placement, and its date is
+      // the slot it left, not one it will be served on. In-progress rows
+      // likewise stay active across a midnight boundary. The date bound
+      // applies to pending/confirmed rows only.
+      .where(function activeBound() {
+        this.where('scheduled_date', '>=', etDateString())
+          .orWhere('status', 'rescheduled')
+          .orWhere('status', 'en_route')
+          .orWhere('status', 'on_site');
+      })
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     const ongoing = columns.recurring_ongoing ? parent.recurring_ongoing === true : false;
@@ -853,6 +879,26 @@ async function findActiveRecurringSeries(conn, {
 // commit. Fail-open BY DESIGN (the guard is protective, not load-bearing):
 // errors are returned — never thrown — as { matches: [], guardError } so the
 // caller logs and proceeds with seeding.
+// The creating estimate's address/property stands in for an UNSTAMPED
+// parent's ONLY while that estimate row is immutable. A quote-wizard draft
+// is not: the funnel REVIVES and rewrites the same draft row for the
+// customer's next quote (any address) while a self-booked series keeps
+// pointing at it through source_estimate_id — reading a live draft back
+// would re-home an older series to whatever was quoted LAST, and the
+// duplicate guard would then strip the legitimate new-property booking
+// (codex #3504 r14). A live wizard draft therefore yields NOTHING and the
+// parent falls to the primary-street heuristic (over-suppression, never a
+// wrong match); archived/promoted wizard rows no longer revive and stay
+// usable, as do accept-path estimates.
+async function sourceEstimateForScope(conn, estimateId) {
+  const row = await conn('estimates')
+    .where({ id: estimateId })
+    .first('property_id', 'address', 'source', 'status', 'archived_at');
+  if (!row) return null;
+  if (row.source === 'quote_wizard' && row.status === 'draft' && !row.archived_at) return null;
+  return row;
+}
+
 async function checkActiveSeriesLocked(trx, opts = {}) {
   try {
     const matches = await trx.transaction(async (guardTrx) => {
@@ -1013,6 +1059,55 @@ async function customerPrefersNoWeekends(conn, customerId) {
   }
 }
 
+// Blackout set over the whole seeding horizon (generous 15 months covers
+// every planned-count/pattern combination) — the sync builder nudges any
+// follow-up off a blocked date. Fail-open helper.
+// Blackout reads run on the CALLER's connection (codex #3504 r20): the
+// seeder is called from inside booking/activation transactions that each
+// hold a pool connection, and a read through the global pool would need a
+// second one — at pool saturation every activation waits on every other
+// until the acquire timeout. getBlackoutLayers is the existing caller-
+// aware mechanism (savepoint-wrapped, throws on failure — a failed read
+// rolls its savepoint back instead of aborting the caller's transaction,
+// and this helper's catch keeps the fail-open contract).
+async function seedingBlackoutDates(conn, parent, opts = {}) {
+  try {
+    const { getBlackoutLayers } = require('./scheduling/blackout-dates');
+    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
+    const layers = await getBlackoutLayers(
+      baseDate,
+      etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
+      conn,
+    );
+    return layers?.dates || null;
+  } catch { return null; /* fail open */ }
+}
+
+// The dates a seedFollowUpsForParent call with the SAME opts would insert —
+// plain reads + the deterministic builder, no locks taken and nothing
+// written. Lets a caller acquire the per-date occupancy locks (rung 1 of
+// the scheduling/occupancy.js ordering contract) BEFORE its comms/row
+// locks; the caller must re-verify the actual seeded dates stayed inside
+// this plan (a concurrent series write between plan and seed can shift
+// them) and fail closed on drift (codex #3504 r3 hook). Mirrors the seed
+// call's B6 weekday-preference resolution so the planned dates match what
+// the seeder will actually place.
+async function planFollowUpSeedDates(conn, parent, opts = {}) {
+  const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
+  if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) return [];
+  const columns = opts.columns || await scheduledServiceColumns(conn);
+  const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  const skipWeekends = stampSkipWeekends
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
+  const existingDates = await existingSeriesDates(conn, parent, columns);
+  const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
+  return [...new Set(
+    buildRecurringFollowUpRows(parent, { ...opts, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
+      .map((row) => dateOnly(row.scheduled_date))
+      .filter(Boolean),
+  )];
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
@@ -1034,18 +1129,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   });
 
   const existingDates = await existingSeriesDates(conn, parent, columns);
-  // Owner blackout days over the whole seeding horizon (generous 15 months
-  // covers every planned-count/pattern combination) — the sync builder
-  // nudges any follow-up off a blocked date. Fail-open helper.
-  let blackoutDates = null;
-  try {
-    const { getBlackoutDates } = require('./scheduling/blackout-dates');
-    const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
-    blackoutDates = await getBlackoutDates(
-      baseDate,
-      etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
-    );
-  } catch { /* fail open */ }
+  const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
@@ -1112,6 +1196,7 @@ module.exports = {
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,
+  sourceEstimateForScope,
   customerPrefersNoWeekends,
   findActiveRecurringSeries,
   seriesCreateLockKeys,
@@ -1124,6 +1209,7 @@ module.exports = {
   normalizeRecurringPattern,
   patternFromVisitsPerYear,
   plannedVisitCountForPattern,
+  planFollowUpSeedDates,
   seedFollowUpsForParent,
   serviceKeyFor,
   shiftPastWeekend,

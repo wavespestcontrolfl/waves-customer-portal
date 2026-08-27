@@ -2095,7 +2095,10 @@ async function createSelfBooking(payload = {}) {
     // Internal callback bookings carry a server-owned catalog name (the
     // caller read it from the services row) — same trust level as the
     // allowlist labels, never client-influenced.
-    const resolvedServiceType = (callbackVisit && cleanBookingServiceLabel(callbackVisit.serviceType))
+    // `let`, not `const`: a trusted palm-only wizard plan overrides this to
+    // the quoted palm label below (codex #3504 r2) — still server-owned,
+    // never a client echo.
+    let resolvedServiceType = (callbackVisit && cleanBookingServiceLabel(callbackVisit.serviceType))
       || canonicalBookingServiceLabel(serviceKey)
       || canonicalBookingServiceLabel(quoted_service_label)
       || canonicalBookingServiceLabel(service_type)
@@ -2113,6 +2116,16 @@ async function createSelfBooking(payload = {}) {
     let visitPrice = null;
     let followUpVisitPrice = null;
     let paymentPref = null;
+    // Quote GENERATION the trusted wizard pricing was read from (the
+    // draft's updated_at at pricing time) — stamped on the parent so the
+    // stranded-activation recovery has parent-owned, immutable proof of
+    // which generation of the reusable draft this visit was booked from
+    // (codex #3504 r22–r24 P0s; migration 20260827000001).
+    let sourceEstimateGeneration = null;
+    // Non-pest wizard series plan (owner GO 2026-08-26): resolved from the
+    // TRUSTED handoff estimate below; non-null drives series seeding + the
+    // pricing divisor for e.g. a monthly-12 mosquito plan.
+    let wizardSeriesPlan = null;
     if (payAtVisit) {
       try {
         const { resolveBookingVisitPrice } = require('../services/booking-pay-at-visit');
@@ -2121,6 +2134,10 @@ async function createSelfBooking(payload = {}) {
         // crafted/stale payload can't pair one service's booking with another
         // service's price. service_type is client-influenced, hence the bind.
         const bookedServiceKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+        // The family the wizard plan/pricing binds to — the signed funnel
+        // key, except palm-only quotes (resolved from the trusted estimate
+        // below; see wizardPlanServiceKey).
+        let wizardPlanKey = bookedServiceKey;
         // Bind the pricing cadence to the ACTUAL series this route creates, NOT
         // the client's recurring_pattern: a quarterly (4-visit) pest series is
         // seeded ONLY under this exact condition (mirrors
@@ -2134,7 +2151,7 @@ async function createSelfBooking(payload = {}) {
           // Mirror the seeding gate's signed-service bind (see below): the
           // pricing divisor must track the series that is actually created.
           && RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
-        const bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
+        let bookingVisits = willSeedQuarterlyPestSeries ? 4 : null;
         // Pay-at-visit prices from the quote→book handoff estimate
         // (pricing_estimate_id) — deliberately SEPARATE from the identity
         // `estimate_id`. A quote-wizard draft is linked to a customer by
@@ -2185,8 +2202,52 @@ async function createSelfBooking(payload = {}) {
         const linkedEstimatePriceable = !!estimate
           && estimate.source !== 'quote_wizard'
           && String(estimate.customer_id) === String(custId);
+        // NON-pest wizard series: the quote's own cadence supplies the
+        // divisor, under the same trust (token + shape + customer match)
+        // and the same signed-service bind the pest rule uses — and ONLY
+        // when the seeding branch below will actually create that series,
+        // so the divisor always tracks a real series (pest stays
+        // 4-or-nothing).
+        if (!bookingVisits && pricingTrusted
+          && !isOneTimeBookingSource(source)
+          && bookedServiceKey && bookedServiceKey !== 'pest_control'
+          && RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === bookedServiceKey) {
+          const { resolveWizardSeriesPlan, wizardPlanServiceKey } = require('../services/booking-pay-at-visit');
+          // Palm-only quotes ride the SIGNED tree_shrub funnel service for
+          // availability while quoting Palm Injections (public-quote's
+          // bookingServiceId mapping) — the plan/pricing family follows the
+          // trusted estimate's own line, or palm never resolves a plan
+          // (codex #3504 r2 P1). Availability scope stays the signed key.
+          wizardPlanKey = wizardPlanServiceKey(pricingEstimate, bookedServiceKey);
+          wizardSeriesPlan = resolveWizardSeriesPlan(pricingEstimate, wizardPlanKey);
+          if (wizardSeriesPlan?.pattern === 'seasonal_feb_oct') {
+            // The generic /book availability does not know the cadence and
+            // can offer Nov-Jan dates; seeding seasonal_feb_oct from a
+            // winter parent would count a prohibited out-of-season visit
+            // as visit one and produce only 8 in-season follow-ups (the
+            // estimate-slot flow filters these dates for exactly this
+            // reason). Fail closed to a single office-scheduled visit.
+            const startMonth = Number(String(slot_date).slice(5, 7));
+            if (!(startMonth >= 2 && startMonth <= 10)) wizardSeriesPlan = null;
+          }
+          if (wizardSeriesPlan) {
+            bookingVisits = wizardSeriesPlan.visits;
+            if (wizardPlanKey === 'palm_injection') {
+              // Persist what was QUOTED, not the funnel vehicle: the parent's
+              // service_type drives the duplicate-series guard family and the
+              // under-lock activation re-resolution, and a palm series filed
+              // as tree_shrub would both miss palm duplicates and block a
+              // real tree/shrub series later. Server-owned constant — the
+              // client's quoted_service_label is never echoed.
+              resolvedServiceType = 'Palm Injections';
+            }
+            // (Termite/rodent bait never reach here: the resolver's
+            // seedable-family allowlist fails them closed to today's
+            // single-visit office-converted behavior — codex #3504 r5.)
+          }
+        }
         const priced = pricingTrusted
-          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: bookedServiceKey, bookingVisits })
+          ? resolveBookingVisitPrice({ estimate: pricingEstimate, serviceKey: wizardPlanKey, bookingVisits })
           : (linkedEstimatePriceable
             ? resolveBookingVisitPrice({ estimate, serviceKey: bookedServiceKey, bookingVisits })
             : null);
@@ -2197,6 +2258,18 @@ async function createSelfBooking(payload = {}) {
           visitPrice = priced.amount;
           followUpVisitPrice = priced.followUpAmount ?? priced.amount;
           paymentPref = 'pay_at_visit';
+          sourceEstimateGeneration = pricingTrusted && pricingEstimate?.updated_at ? pricingEstimate.updated_at : null;
+          // Server-side correlation for TRUSTED wizard pricing (codex
+          // #3504 r7 hook P0): the parent's source_estimate_id is the
+          // binding every activation/recovery surface keys off (activation
+          // priced-state check, crash-retry replay bind, stranded-recovery
+          // sweep join, fee machinery) — but the client's source_estimate_id
+          // field is a SEPARATE optional input. An omitted/substituted
+          // value would mint an annual/N-priced visit whose activation
+          // stale-skips and whose stranded shape the sweep can never find.
+          // The HMAC-verified, customer-matched pricing draft IS the
+          // correlation; never trust the client field for it.
+          if (pricingTrusted) sourceEstimateId = String(pricing_estimate_id);
         }
       } catch (err) {
         logger.warn(`[booking:confirm] pay-at-visit price resolution failed for customer=${custId}: ${err.message}`);
@@ -2473,7 +2546,11 @@ async function createSelfBooking(payload = {}) {
         service_type: resolvedServiceType,
       }).returning('*');
 
+      const hasGenerationColumn = await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation');
       const [scheduledRow] = await trx('scheduled_services').insert({
+        ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
+          ? { source_estimate_generation: sourceEstimateGeneration }
+          : {}),
         customer_id: custId,
         technician_id: technician_id || null,
         scheduled_date: slotDateStr,
@@ -2838,6 +2915,761 @@ async function createSelfBooking(payload = {}) {
               });
     };
 
+    // Deduped admin bell for a pricing strip, in the SAME transaction as
+    // the strip (codex #3504 r8 hook): a stripped parent is invisible to
+    // the stranded-recovery sweep (payment_method_preference cleared), so
+    // a log-only strip lets the office perform an unbilled visit without
+    // learning the live quote needs conversion. SAVEPOINT-wrapped: the
+    // strip is the money-safety action and must never be voided by a bell
+    // failure — a savepoint failure logs loud and the strip stands.
+    // Deduped admin bell INSIDE the activation transaction, savepoint-
+    // wrapped so a bell failure never voids the decision it rides with.
+    // Shared by the pricing strips and the short-slot notice below.
+    const notifySeriesOfficeBellInTx = async (trx, { dedupeKey, title, body, metadata, failLabel }) => {
+      try {
+        await trx.transaction(async (sp) => {
+          await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+          const existingBell = await sp('notifications')
+            .where({ recipient_type: 'admin' })
+            .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+            .first('id');
+          if (existingBell) return;
+          const created = await require('../services/notification-service').create({
+            recipientType: 'admin',
+            category: 'alert',
+            title,
+            body,
+            link: `/admin/customers/${custId}`,
+            bell: true,
+            metadata: { dedupeKey, customer_id: custId, ...metadata },
+            connection: sp,
+          });
+          if (!created) throw new Error(`${failLabel} bell insert returned null`);
+        });
+      } catch (bellErr) {
+        logger.warn(`[booking:confirm] ${failLabel} bell failed for ${metadata?.scheduled_service_id} (${failLabel} stands): ${bellErr.message}`);
+      }
+    };
+    const notifySeriesStripInTx = async (trx, parentId, reason) => notifySeriesOfficeBellInTx(trx, {
+      dedupeKey: `wizard-activation-stripped:${parentId}`,
+      title: 'Self-booked plan did not activate',
+      body: `A self-booked recurring plan for customer ${custId} could not activate (${reason}). The booked first visit was kept but its per-application pricing was removed — convert the live quote to schedule and bill the plan.`,
+      metadata: { scheduled_service_id: parentId, reason },
+      failLabel: 'strip',
+    });
+
+    // Shared activation: series + conflict sweep + fee stamp + draft
+    // retirement in ONE transaction, with the parent's billable pricing
+    // STRIPPED on drift or failure — the all-or-nothing contract (codex
+    // #3504 P0s). Idempotent via the duplicate-series guard and the
+    // locked-draft shape recheck, so the crash-retry replay can safely
+    // re-run it for a parent that committed billable but never activated.
+    const activateWizardSeries = async (seriesParentRow) => {
+      // Set when the parent's reservation is extended to the program
+      // duration (codex #3504 r21): the confirm response serializes the
+      // pre-activation booking row, so the caller patches end_time /
+      // duration_minutes from this or the customer sees the funnel's
+      // shorter reservation while the database holds the longer one.
+      let parentExtension = null;
+      try {
+        const outcome = await db.transaction(async (trx) => {
+          // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
+          // per-date occupancy locks precede every other lock, and taking
+          // them after the comms/row locks below can deadlock with normal
+          // scheduling writers; codex #3504 r3 hook). The dates this plan
+          // will seed are pre-computed with the seeder's own deterministic
+          // planner (plain reads, nothing locked or written), plus the
+          // parent's own date; the actual seeded dates are re-verified
+          // against this locked set after seeding and any drift aborts the
+          // transaction (fail-safe strip, never an unordered lock).
+          const plannedSeedDates = await RecurringAppointmentSeeder.planFollowUpSeedDates(trx, seriesParentRow, {
+            pattern: wizardSeriesPlan.pattern,
+            plannedCount: wizardSeriesPlan.visits,
+            skipWeekends: true,
+            weekendShift: 'forward',
+          });
+          const { acquireOccupancyLocks } = require('../services/scheduling/occupancy');
+          const lockedSeedDates = [...new Set([slotDateStr, ...plannedSeedDates])].filter(Boolean).sort();
+          await acquireOccupancyLocks(trx, lockedSeedDates);
+          const lockedSeedDateSet = new Set(lockedSeedDates);
+          await lockCustomerComms(trx, custId);
+          // Duplicate-confirmation idempotency (codex #3504 r2 P1): a replay
+          // can observe the pricing draft still live BEFORE the winner's
+          // activation commits, pass the replay pre-checks, and wait here on
+          // the comms lock. By the time it proceeds the winner has archived
+          // the draft — which reads as pricing drift below and would strip
+          // the WINNER's activated parent price while its billable children
+          // survive. The parent only becomes recurring inside this
+          // activation (markParentRecurring), so an is_recurring parent
+          // under the lock IS a completed activation: return success and
+          // touch nothing.
+          // FOR UPDATE (codex #3504 r7): cancellation writers (e.g.
+          // transitionJobStatus) do not take the comms advisory lock, so
+          // without the row lock a staff cancel can commit between this
+          // read and the seed — markParentRecurring would then flip a
+          // CANCELLED parent recurring and insert billable children. The
+          // row lock holds through the transaction: a concurrent cancel
+          // now either commits first (the priced-state check below reads
+          // it and skips) or waits for this activation to finish.
+          const lockedParent = await trx('scheduled_services')
+            .where({ id: seriesParentRow.id })
+            .forUpdate()
+            .first('id', 'is_recurring', 'status', 'payment_method_preference',
+              'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
+              'scheduled_date', 'window_start', 'window_end', 'technician_id',
+              'service_type', 'service_id',
+              ...((await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation')) ? ['source_estimate_generation'] : []));
+          if (lockedParent && lockedParent.is_recurring) {
+            // is_recurring alone is NOT activation-owned evidence (codex
+            // #3504 r18): staff can make the committed parent recurring
+            // from the schedule editor before a crash-retry replay, with
+            // the wizard draft still live and no seeded children. The
+            // activation archives its draft in the SAME transaction as
+            // markParentRecurring, so the archived draft is the durable
+            // proof a completed activation owns this row; a live draft
+            // beside a recurring parent means the office took the series
+            // over — seed nothing, archive nothing, and bell the office to
+            // reconcile the still-live quote against their series.
+            // PARENT-scoped evidence (codex #3504 r23): the shared draft's
+            // archived_at is cleared by any later wizard rerun, so it is
+            // not this parent's marker — its seeded children are (seeded
+            // in the same transaction as markParentRecurring; every
+            // seedable plan has ≥2 visits; rows persist even cancelled).
+            const activationChild = await trx('scheduled_services')
+              .where({ recurring_parent_id: seriesParentRow.id })
+              .first('id');
+            if (activationChild) return { alreadyActivated: true };
+            await notifySeriesOfficeBellInTx(trx, {
+              dedupeKey: `wizard-activation-foreign-recurring:${seriesParentRow.id}`,
+              title: 'Self-booked plan: office series pre-empted activation',
+              body: `A self-booked recurring plan for customer ${custId} committed its first visit, but that visit was made recurring by staff before the plan activated and the quote draft is still live. The self-booked plan did NOT seed or archive — reconcile the live quote against the office-scheduled series (price, cadence, setup fee).`,
+              metadata: { scheduled_service_id: seriesParentRow.id, source_estimate_id: pricing_estimate_id },
+              failLabel: 'foreign-recurring',
+            });
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} is recurring but its draft ${pricing_estimate_id} is still live — staff-made series, activation skipped (office belled)`);
+            return { stale: true, foreignRecurring: true };
+          }
+          // The locked parent must still BE the billable row this closure
+          // priced (codex #3504 r6 hook P0): the stranded-activation
+          // recovery sweep (or any other writer) can strip/cancel the
+          // parent while a delayed activation waits on the comms lock —
+          // seeding billable children from the stale in-memory row would
+          // then produce a series whose parent never bills the first
+          // application (underbills the quoted annual). Any mismatch =
+          // stale: seed nothing, touch nothing (there is no pricing left
+          // to strip — the mismatch IS the strip or a cancellation).
+          if (!lockedParent
+            || !['pending', 'confirmed'].includes(String(lockedParent.status || ''))
+            || lockedParent.payment_method_preference !== 'pay_at_visit'
+            || lockedParent.create_invoice_on_complete !== true
+            || Number(lockedParent.estimated_price) !== Number(visitPrice)
+            || String(lockedParent.source_estimate_id || '') !== String(pricing_estimate_id)
+            // Service IDENTITY too (codex #3504 r27): an admin can switch
+            // the committed visit's service while activation waits on its
+            // locks; seeding the quoted family onto a re-typed visit (and
+            // overwriting the staff-chosen catalog identity) is drift.
+            || RecurringAppointmentSeeder.serviceKeyFor({ service_type: lockedParent.service_type })
+              !== RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType })
+            || (lockedParent.service_id != null && seriesParentRow.service_id != null
+              && String(lockedParent.service_id) !== String(seriesParentRow.service_id))) {
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} no longer matches its priced state under lock (stripped/cancelled concurrently) — activation skipped`);
+            return { stale: true };
+          }
+          // Placement must be unchanged too (codex #3504 r9): a reschedule
+          // that commits between the booking transaction and this row lock
+          // leaves status/pricing intact, but seeding from the stale
+          // in-memory parent would anchor every child (and the pre-locked
+          // occupancy plan) to the OLD date/window — the activated cadence
+          // detaches from the visit that actually happens. Any move =
+          // drift: strip (with the office note + bell) and let the office
+          // convert from the live draft around the placement they chose.
+          const lockedDateStr = typeof lockedParent.scheduled_date === 'string'
+            ? lockedParent.scheduled_date.slice(0, 10)
+            : (lockedParent.scheduled_date instanceof Date
+              ? lockedParent.scheduled_date.toISOString().slice(0, 10)
+              : String(lockedParent.scheduled_date || '').slice(0, 10));
+          const parentDateStr = typeof seriesParentRow.scheduled_date === 'string'
+            ? seriesParentRow.scheduled_date.slice(0, 10)
+            : (seriesParentRow.scheduled_date instanceof Date
+              ? seriesParentRow.scheduled_date.toISOString().slice(0, 10)
+              : String(seriesParentRow.scheduled_date || '').slice(0, 10));
+          const timeKey = (v) => String(v || '').slice(0, 5);
+          if (lockedDateStr !== parentDateStr
+            || timeKey(lockedParent.window_start) !== timeKey(seriesParentRow.window_start)
+            || timeKey(lockedParent.window_end) !== timeKey(seriesParentRow.window_end)
+            || String(lockedParent.technician_id || '') !== String(seriesParentRow.technician_id || '')) {
+            await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (visit was moved before the plan started); office converts from the live quote'"),
+                updated_at: trx.fn.now(),
+              });
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the first visit was moved before the plan activated');
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} placement changed before activation (date/window/technician) — pricing stripped, plan not seeded`);
+            return { stale: true };
+          }
+          // Re-resolve the plan and price against the LOCKED draft (codex
+          // #3504 r1): /calculate refreshes drafts in place, so the
+          // pre-transaction plan/price can be stale — a monthly-12 quote
+          // changed to seasonal-9 must not commit a stale 12-visit series
+          // at stale per-visit amounts. Any drift = skip seeding entirely
+          // (single visit; office schedules from the live draft).
+          const { resolveWizardSeriesPlan: freshPlanFor, resolveBookingVisitPrice: freshPriceFor } = require('../services/booking-pay-at-visit');
+          const lockedDraft = await trx('estimates')
+            .where({ id: pricing_estimate_id })
+            .forUpdate()
+            .first();
+          // Full self-serve shape revalidation under the lock (codex
+          // #3504): a concurrent refresh/promotion can leave the same
+          // recurring line on an archived/promoted/commercial/mixed draft.
+          const { wizardDraftSelfServeBookable: lockedShapeOk } = require('../services/booking-pay-at-visit');
+          const freshPlan = (lockedDraft
+            && String(lockedDraft.customer_id) === String(custId)
+            && lockedShapeOk(lockedDraft))
+            ? freshPlanFor(lockedDraft, RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }))
+            : null;
+          const freshPriced = freshPlan
+            ? freshPriceFor({ estimate: lockedDraft, serviceKey: RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }), bookingVisits: freshPlan.visits })
+            : null;
+          // PROPERTY identity under the lock (codex #3504 r15): the plan/
+          // price compare above is blind to a /calculate refresh that kept
+          // the same service, cadence, and annual but moved the draft to
+          // ANOTHER address (the wizard reuses the draft row). The visit
+          // was booked at the customer row's on-file address (the booking
+          // gate refuses any other), so the locked draft must still quote
+          // THAT property — otherwise the activation would seed, scope,
+          // and stamp a series for a property the customer did not book.
+          // Uncertain parses read as a different property (fail closed).
+          // FOR UPDATE (codex #3504 r19): this read doubles as the CUSTOMER
+          // ROW LOCK, taken here — BEFORE the recurring-series advisory
+          // guard below — to keep the estimate-converter's customer→series
+          // lock order (it locks customers FOR UPDATE first, then takes the
+          // same advisory). The activation used to acquire the advisory
+          // first and the customer row only later (the setup-fee stamp), so
+          // a concurrent accept for the same family could deadlock; with
+          // the converter's guard savepoint as the victim its fail-open
+          // guard would proceed and BOTH would seed billable series.
+          const bookedCustomerRow = await trx('customers')
+            .where({ id: custId })
+            .forUpdate()
+            .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+          const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
+          const quotedPropertyIsBooked = !!lockedDraft
+            && !!bookedCustomerRow
+            && estimateQuotesCustomerAddress(lockedDraft.address, bookedCustomerRow);
+          // GENERATION bind (codex #3504 r25): the parent carries the
+          // draft generation it was priced from (source_estimate_generation,
+          // migration 20260827000001). A crash-retry that arrives after
+          // /calculate rewrote the draft could otherwise pass every content
+          // check (same family + first-visit price on a different cadence)
+          // and seed the NEWER quote's cadence onto the OLDER parent while
+          // archiving the newer handoff. When the parent is stamped, the
+          // locked draft must be that exact generation — else drift.
+          const draftGenerationMatches = !lockedParent?.source_estimate_generation
+            || (!!lockedDraft?.updated_at
+              && new Date(lockedDraft.updated_at).getTime() === new Date(lockedParent.source_estimate_generation).getTime());
+          if (!freshPlan
+            || !quotedPropertyIsBooked
+            || !draftGenerationMatches
+            || freshPlan.pattern !== wizardSeriesPlan.pattern
+            || freshPlan.visits !== wizardSeriesPlan.visits
+            || !freshPriced
+            // BOTH legs of the anchored split must agree — two annuals can
+            // share a floored follow-up amount while the remainder-bearing
+            // parent amount differs (codex #3504 P0).
+            || freshPriced.followUpAmount !== followUpVisitPrice
+            || freshPriced.amount !== visitPrice) {
+            // The parent already committed with pay-at-visit pricing from
+            // the PRE-lock read — a drifted draft (concurrent /calculate
+            // refresh, promotion, or a rival slot's booking consuming it)
+            // must not leave a billable visit priced off a quote that no
+            // longer says that (codex #3504 P0). Strip the pricing in the
+            // SAME transaction as the decision: the visit survives as a
+            // price-less single booking and the office converts from the
+            // live draft, exactly the pre-feature behavior.
+            await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (quote changed); office converts from the live quote'"),
+                updated_at: trx.fn.now(),
+              });
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the quote changed while the booking was confirming');
+            logger.warn(`[booking:confirm] wizard-series plan drifted under lock for ${seriesParentRow.id} — seeding skipped, parent pricing stripped (price-less single visit kept)`);
+            return { stale: true };
+          }
+          // Per-property duplicate scope from the TRUSTED locked draft
+          // (codex #3504 r4): without it the customer+family guard reads a
+          // multi-property customer's property-A series as a duplicate of
+          // the property-B plan just quoted and strips the new parent's
+          // pricing. Shared builder with every estimate-converter guard
+          // call; a scope-build failure falls back to null — the exact
+          // legacy guard (over-suppression, never a double series).
+          let seriesAddressScope = null;
+          try {
+            const { buildSeriesAddressScope } = require('../services/estimate-converter');
+            seriesAddressScope = await buildSeriesAddressScope(trx, lockedDraft, custId);
+          } catch (scopeErr) {
+            logger.warn(`[booking:confirm] series address scope build failed for ${seriesParentRow.id} (legacy guard applies): ${scopeErr.message}`);
+          }
+          const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+            customerId: custId,
+            serviceId: seriesParentRow.service_id || null,
+            serviceType: seriesParentRow.service_type || resolvedServiceType,
+            excludeParentId: seriesParentRow.id,
+            serviceAddressScope: seriesAddressScope,
+          });
+          if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (wizard-series seeding proceeds): ${guardError.message}`);
+          if (matches.length > 0) {
+            // An active series already exists — this booking's plan does
+            // NOT activate, so the new parent must not stay billable at
+            // annual/N pricing (an extra auto-invoiced visit; codex #3504
+            // P0). Strip atomically with the decision; the draft stays
+            // live for the office, but the waiver rechecks still run so a
+            // fee this customer no longer owes freezes to zero.
+            await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                updated_at: trx.fn.now(),
+              });
+            // Duplicate-kept strips ring the SAME deduped bell as the
+            // drift/failure strips (codex #3504 r9): the stripped row is
+            // invisible to the recovery sweep, and the activity-log entry
+            // alone is passive — the office must decide whether this extra
+            // visit rides the existing series or gets billed another way.
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'the customer already has an active series for this service');
+            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
+            return { kept: matches[0] };
+          }
+          const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          // Children seed at the CATALOG row's duration when it resolves
+          // (codex #3504 r10): the coarse funnel duration (mosquito books
+          // 45min) undershoots the cadence catalog's owner-directed
+          // default (60min), releasing each follow-up's slot early and
+          // overlapping the next job. The parent's signed slot is not
+          // rewritten — only the seeded follow-ups.
+          // The converter's duration AUTHORITY comes first (codex #3504
+          // r12): lawn/palm/tree book flat 60-minute slots and their
+          // catalog identity links are deliberately duration-silent — the
+          // lawn rows' 45-minute catalog default CONTRADICTS the slot
+          // authority and would release each follow-up early. Only a
+          // family the authority leaves null (mosquito) falls through to
+          // the stamped catalog row's default, then to the funnel duration.
+          const { durationMinutesForRecurringService } = require('../services/estimate-converter');
+          const authorityDuration = durationMinutesForRecurringService(
+            { service: activationFamilyKey },
+            wizardSeriesPlan.pattern,
+            { service_type: resolvedServiceType },
+          );
+          let seededChildDuration = Number(authorityDuration) > 0 ? Number(authorityDuration) : duration;
+          if (activationFamilyKey === 'palm_injection') {
+            // Recurring palm bills per-application against the RECURRING
+            // catalog row: a name-only 'Palm Injections' visit resolves the
+            // ONE-TIME palm_injection completion profile, whose typed
+            // completion invoices work the plan already billed — the exact
+            // money bug the converter's palm doctrine fails closed on
+            // (codex #3349 r15; #3504 r4). Stamp the semiannual catalog id
+            // on the parent BEFORE seeding so every child inherits it
+            // (seeder copyIfPresent: service_id + service_key_snapshot);
+            // catalog row missing ⇒ the plan cannot bill correctly ⇒ abort
+            // (rollback + the outer catch's fail-safe strip — the visit
+            // survives price-less and office-scheduled, pre-feature
+            // behavior).
+            const palmCatalogRow = await trx('services')
+              .where({ service_key: 'palm_injection_semiannual' })
+              .first('id', 'default_duration_minutes');
+            if (!(Number(authorityDuration) > 0) && Number(palmCatalogRow?.default_duration_minutes) > 0) {
+              seededChildDuration = Number(palmCatalogRow.default_duration_minutes);
+            }
+            if (!palmCatalogRow?.id) {
+              throw new Error('recurring palm catalog row (palm_injection_semiannual) unavailable — aborting series activation');
+            }
+            const palmPatch = { service_id: palmCatalogRow.id, updated_at: trx.fn.now() };
+            // Snapshot moves with the id (codex #3485 r6): a later catalog
+            // outage (ON DELETE SET NULL) must leave the key, not a
+            // mutable-label resolution. Column-guarded like the converter's
+            // relink patch.
+            if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+              palmPatch.service_key_snapshot = 'palm_injection_semiannual';
+              seriesParentRow.service_key_snapshot = 'palm_injection_semiannual';
+            }
+            await trx('scheduled_services').where({ id: seriesParentRow.id }).update(palmPatch);
+            seriesParentRow.service_id = palmCatalogRow.id;
+          } else {
+            // Cadence catalog identity for the other seedable families
+            // (codex #3504 r6): the coarse funnel labels ('Mosquito
+            // Control', 'Lawn Care', 'Tree & Shrub') cannot name a
+            // cadence-specific catalog row at completion —
+            // service-completion-profiles refuses ambiguous short-name
+            // matches, so unstamped series fall back to the generic
+            // profile. slot-reservation's exact-visit-count resolver is
+            // the single authority (never re-implement its table); an
+            // off-table combination stays unlinked, the documented
+            // fail-open contract — unlike palm, no wrong-money identity
+            // rides on it, so absence never aborts the activation.
+            const { cadenceCatalogKeyForProfile } = require('../services/slot-reservation');
+            const cadenceKey = cadenceCatalogKeyForProfile(
+              { service: activationFamilyKey, visitsPerYear: wizardSeriesPlan.visits },
+              false,
+            );
+            const catalogRow = cadenceKey
+              ? await trx('services').where({ service_key: cadenceKey }).first('id', 'default_duration_minutes')
+              : null;
+            if (!(Number(authorityDuration) > 0) && Number(catalogRow?.default_duration_minutes) > 0) {
+              seededChildDuration = Number(catalogRow.default_duration_minutes);
+            }
+            if (catalogRow?.id) {
+              const cadencePatch = { service_id: catalogRow.id, updated_at: trx.fn.now() };
+              if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+                cadencePatch.service_key_snapshot = cadenceKey;
+                seriesParentRow.service_key_snapshot = cadenceKey;
+              }
+              await trx('scheduled_services').where({ id: seriesParentRow.id }).update(cadencePatch);
+              seriesParentRow.service_id = catalogRow.id;
+            } else if (cadenceKey) {
+              logger.warn(`[booking:confirm] cadence catalog row ${cadenceKey} missing — series ${seriesParentRow.id} stays name-resolved (fail-open)`);
+            }
+          }
+          // Activation-time ADDRESS EVIDENCE on the parent (codex #3504
+          // r14): the duplicate-series guard resolves an UNSTAMPED parent's
+          // property through its source estimate, and a wizard parent's
+          // source is the REUSABLE draft — the funnel revives and rewrites
+          // that same row for the customer's next quote (any address), so
+          // the older series would read as belonging to the newly quoted
+          // property and strip the legitimate second-property booking. The
+          // property linkage only stamps behind GATE_CUSTOMER_PROPERTIES
+          // (and deliberately leaves primary-address rows unstamped), so
+          // the parent carries its address ITSELF before the children seed
+          // (copyIfPresent inherits it). The source is the BOOKED customer
+          // row's on-file address — the property the visit was actually
+          // booked at (r15) — which the drift check above has just proven
+          // the locked draft still quotes; never the draft text itself,
+          // which a refresh can rewrite. Coordinates stay — the funnel
+          // geocoded this same address at booking.
+          if (!String(seriesParentRow.service_address_line1 || '').trim()) {
+            if (String(bookedCustomerRow?.address_line1 || '').trim()) {
+              const addressStamp = {
+                service_address_line1: bookedCustomerRow.address_line1,
+                service_address_line2: bookedCustomerRow.address_line2 || null,
+                service_address_city: bookedCustomerRow.city || null,
+                service_address_state: bookedCustomerRow.state || 'FL',
+                service_address_zip: bookedCustomerRow.zip || null,
+              };
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({ ...addressStamp, updated_at: trx.fn.now() });
+              Object.assign(seriesParentRow, addressStamp);
+            } else {
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id}: booked customer row has no street — parent stays unstamped (duplicate guard uses the primary-street heuristic)`);
+            }
+          }
+          // The PARENT is reserved at the program duration too (codex
+          // #3504 r13): the funnel booked/signed the first visit at its
+          // coarse duration (mosquito 45) while the program's authority is
+          // longer (60), so stamping the recurring identity alone left the
+          // first treatment under-reserved. Extend only when the extended
+          // window is CLEAR — we hold the parent's date occupancy lock at
+          // rung 1 and the SHARED tech-blind guard decides — mirroring the
+          // booking row's own end/duration; a clash keeps the signed slot
+          // and notes the row for the office rather than double-booking.
+          const parentDurationNow = Number(seriesParentRow.estimated_duration_minutes) > 0
+            ? Number(seriesParentRow.estimated_duration_minutes)
+            : duration;
+          if (seededChildDuration > parentDurationNow) {
+            const { findConflictingVisits: parentExtensionGuard } = require('../services/scheduling/occupancy');
+            const parentEndMin = timeToMin(slot_start) + seededChildDuration;
+            const extendedEnd = `${String(Math.floor(parentEndMin / 60)).padStart(2, '0')}:${String(parentEndMin % 60).padStart(2, '0')}`;
+            const extensionClashes = await parentExtensionGuard({
+              db: trx,
+              date: parentDateStr,
+              windowStart: slot_start,
+              windowEnd: extendedEnd,
+              excludeServiceIds: [seriesParentRow.id],
+            });
+            if (extensionClashes.length === 0) {
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({ estimated_duration_minutes: seededChildDuration, window_end: extendedEnd, updated_at: trx.fn.now() });
+              if (seriesParentRow.self_booking_id) {
+                await trx('self_booked_appointments')
+                  .where({ id: seriesParentRow.self_booking_id })
+                  .update({ end_time: extendedEnd, duration_minutes: seededChildDuration });
+              }
+              seriesParentRow.estimated_duration_minutes = seededChildDuration;
+              seriesParentRow.window_end = extendedEnd;
+              parentExtension = { end_time: extendedEnd, duration_minutes: seededChildDuration };
+            } else {
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({
+                  notes: trx.raw("COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
+                  updated_at: trx.fn.now(),
+                });
+              // The note alone is passive (codex #3504 r14): ring the
+              // deduped office bell in the SAME transaction so the short
+              // slot is acted on before the visit day — the signed slot is
+              // the customer's confirmed time (kept, no persisted overlap);
+              // aborting the plan or demoting a confirmed visit for a
+              // 15-minute placement problem would trade a sale for a
+              // roster edit the office makes in seconds.
+              await notifySeriesOfficeBellInTx(trx, {
+                dedupeKey: `wizard-activation-short-slot:${seriesParentRow.id}`,
+                title: 'Self-booked plan: first visit reserved short',
+                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and the following time is already occupied. Move the neighbouring work or re-place this visit so the technician has the full slot.`,
+                metadata: { scheduled_service_id: seriesParentRow.id, reserved_minutes: parentDurationNow, needed_minutes: seededChildDuration },
+                failLabel: 'short-slot',
+              });
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted + belled`);
+            }
+          }
+          const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
+            pattern: wizardSeriesPlan.pattern,
+            plannedCount: wizardSeriesPlan.visits,
+            skipWeekends: true,
+            weekendShift: 'forward',
+            durationMinutes: seededChildDuration,
+            // Children's window must SPAN their duration — they inherit
+            // the parent's window otherwise, and a 60-min catalog visit
+            // inside the funnel's 45-min window would under-reserve
+            // exactly the way the raw funnel duration did.
+            ...(seededChildDuration !== duration ? (() => {
+              const childEndMin = timeToMin(slot_start) + seededChildDuration;
+              return { windowEnd: `${String(Math.floor(childEndMin / 60)).padStart(2, '0')}:${String(childEndMin % 60).padStart(2, '0')}` };
+            })() : {}),
+            source: source || 'self_booked',
+            // FIXED-length plan, never Ongoing (codex #3504 hook P0): the
+            // auto-extend maintenance templates every extension visit off
+            // the PARENT's estimated_price — the remainder-bearing first
+            // visit of the anchored split — so an Ongoing wizard series
+            // would renew future cycles at N × the first-visit price and
+            // overbill the quoted annual by the remainder every year. The
+            // quote authorizes exactly `visits` visits at the quoted
+            // annual; when the plan finishes, the maintenance queues the
+            // standard plan_ending alert and the office renews at current
+            // pricing.
+            recurringOngoing: false,
+            ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
+          });
+          // Conflict guard for every seeded occurrence: the seeder only
+          // nudges weekends/blackouts and inherits the parent's window, so
+          // a generated date can land on existing work. The SHARED
+          // tech-blind occupancy guard decides what occupies (AGENTS.md
+          // booking conflict-check class; codex #3504 r2 P1 — a custom
+          // tech-scoped predicate missed a DIFFERENT technician's visit):
+          // findConflictingVisits covers every technician, live estimate
+          // holds, and the windowless-row conventions. A colliding
+          // follow-up KEEPS its date but drops its technician and flags
+          // itself for office placement — never a silent double-booking,
+          // never a silently shrunken plan.
+          // The per-date occupancy locks were taken at rung 1 above from
+          // the pre-computed plan. Every ACTUAL seeded date must fall
+          // inside that locked set — a concurrent series write between
+          // plan and seed can shift the builder's dates onto days this
+          // transaction never locked, and sweeping an unlocked date would
+          // race other scheduling writers. Abort instead (rollback + the
+          // outer catch's fail-safe strip); never acquire a date lock
+          // after the comms/row locks (codex #3504 r3 hook).
+          // findConflictingVisits comes from scheduling/occupancy — its
+          // exporting module: availability.js only imports the lock
+          // helpers and does not re-export them (codex #3504 r3).
+          const { findConflictingVisits } = require('../services/scheduling/occupancy');
+          const seededDates = [...new Set((seedResult?.insertedRows || [])
+            .map((r) => (typeof r?.scheduled_date === 'string'
+              ? r.scheduled_date.slice(0, 10)
+              : (r?.scheduled_date instanceof Date ? r.scheduled_date.toISOString().slice(0, 10) : null)))
+            .filter(Boolean))].sort();
+          const unplannedDate = seededDates.find((d) => !lockedSeedDateSet.has(d));
+          if (unplannedDate) {
+            throw new Error(`seeded follow-up date ${unplannedDate} fell outside the pre-locked plan — aborting activation`);
+          }
+          const seededRows = seedResult?.insertedRows || [];
+          // Exclude the series' own rows (parent + every seeded sibling) —
+          // the guard's documented batch-sweep semantics; siblings land on
+          // distinct dates, so this only prevents self-matches.
+          const sweepExcludeIds = [seriesParentRow.id, ...seededRows.map((r) => r?.id)].filter(Boolean);
+          for (const row of seededRows) {
+            if (!row?.id) continue;
+            const rowDate = typeof row.scheduled_date === 'string'
+              ? row.scheduled_date.slice(0, 10)
+              : (row.scheduled_date instanceof Date ? row.scheduled_date.toISOString().slice(0, 10) : null);
+            // A row the guard cannot window (missing date/window) returns no
+            // conflicts — same fail-open the guard's own input contract keeps.
+            const clashes = await findConflictingVisits({
+              db: trx,
+              date: rowDate,
+              windowStart: row.window_start,
+              windowEnd: row.window_end,
+              excludeServiceIds: sweepExcludeIds,
+            });
+            if (clashes.length > 0) {
+              // Demote the colliding occurrence to the documented
+              // WINDOWLESS placeholder (findConflictingVisits: a
+              // window_start-NULL row "stays inert") — clearing only the
+              // technician left the row occupying the slot in the
+              // tech-blind model, so the overlap persisted for every
+              // availability/conflict consumer (codex #3504 r4). The visit
+              // keeps its date and the plan keeps its count; the office
+              // assigns a real window from the flag note.
+              await trx('scheduled_services')
+                .where({ id: row.id })
+                .update({
+                  technician_id: null,
+                  window_start: null,
+                  window_end: null,
+                  notes: trx.raw("COALESCE(notes, '') || ' — auto-seeded follow-up: time conflicts with an existing visit; office to place'"),
+                  updated_at: trx.fn.now(),
+                });
+              // Patch the RETURNED row too: insertedRows feeds the
+              // reminder-registration loop, which must see this visit as
+              // windowless and register the pre-closed placeholder — not
+              // arm 72/24h reminders for the demoted time (codex #3504 r5).
+              row.window_start = null;
+              row.window_end = null;
+            }
+          }
+          if (setupFeeHandoffEligible) {
+            await stampDisclosedSetupFee(trx, { stampServiceRow: seriesParentRow });
+          }
+          // Fee-exempt families (lawn/tree quotes freeze no setup fee):
+          // the stamp helper returns without consuming the draft, but the
+          // series NOW EXISTS — correlate the parent and retire the draft
+          // regardless, or the still-live handoff can be accepted/booked
+          // again into duplicate billable visits (codex #3504 r1).
+          // Idempotent with the fee path's own stamp + archive.
+          await trx('scheduled_services')
+            .where({ id: seriesParentRow.id })
+            .whereNull('source_estimate_id')
+            .update({ source_estimate_id: pricing_estimate_id, updated_at: trx.fn.now() });
+          await trx('estimates')
+            .where({ id: pricing_estimate_id, source: 'quote_wizard', status: 'draft' })
+            .whereNull('archived_at')
+            .update({ archived_at: trx.fn.now(), updated_at: trx.fn.now() });
+          // Property stamping ATOMIC with the activation (codex #3504 r10):
+          // the wizard draft row is REUSED — /calculate revives an archived
+          // draft and overwrites its address — so any post-commit heal that
+          // re-reads the draft could stamp THIS activated series with a
+          // LATER quote's address. The draft is row-locked (forUpdate
+          // above) in this transaction, so linking here reads the exact
+          // address the plan was activated for, and a wizard re-run
+          // serializes behind the commit. Shared accept-path mechanism;
+          // never throws by contract (internally best-effort).
+          // ...but "never throws" is NOT "never aborts the transaction"
+          // (codex #3504 r15): the helper swallows its own SQL errors and
+          // returns null, which leaves THIS PostgreSQL transaction in the
+          // aborted state — the COMMIT below would then silently ROLLBACK
+          // while the request reports the series, fee stamp, and draft
+          // archive as activated. Run it inside an explicit SAVEPOINT and
+          // roll back to it when the sub-transaction cannot be released;
+          // the post-probe then proves the outer transaction is still
+          // live (an aborted one throws here → outer catch → rollback +
+          // fail-safe strip). Linkage stays non-blocking: the parent
+          // already carries the booked address (stamp above).
+          await trx.raw('SAVEPOINT wizard_activation_linkage');
+          try {
+            const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
+            await linkAcceptedEstimateProperty({
+              estimateId: pricing_estimate_id,
+              customerId: custId,
+              database: trx,
+              // Pin the visit stamps to THIS activation's rows (codex
+              // #3504 r10 hook P0): the draft id is reused by later
+              // quotes, and an unscoped stamp could retarget an OLDER
+              // still-unstamped series sharing it.
+              onlyServiceIds: sweepExcludeIds,
+            });
+            await trx.raw('RELEASE SAVEPOINT wizard_activation_linkage');
+          } catch (linkErr) {
+            logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking, rolled back to savepoint): ${linkErr.message}`);
+            await trx.raw('ROLLBACK TO SAVEPOINT wizard_activation_linkage');
+          }
+          // Transaction-health probe: throws if anything above left the
+          // transaction aborted, so the activation can never "commit" as
+          // a silent rollback.
+          await trx.raw('SELECT 1');
+          return { seedResult, parentExtension };
+        });
+        return outcome;
+      } catch (err) {
+        logger.error(`[booking:confirm] wizard-series seeding failed for ${seriesParentRow.id} (${wizardSeriesPlan.pattern}): ${err.message}`);
+        // The rolled-back transaction took the series, stamp, and archive
+        // with it — the committed parent must not stay billable for a plan
+        // that never activated (codex #3504 P0). The strip runs under the
+        // comms lock with an is_recurring re-check (codex #3504 r3 hook
+        // P0): after THIS attempt rolls back, a waiting crash-retry replay
+        // can activate the same parent — a bare unconditional strip would
+        // then race it and remove the activated parent's first-visit price
+        // while its billable children survive (the series underbills the
+        // quoted annual). is_recurring is set only inside a committed
+        // activation, so under the lock it cleanly separates the two.
+        // Best-effort; if even this fails the loud error above is the ops
+        // breadcrumb.
+        try {
+          await db.transaction(async (trx) => {
+            await lockCustomerComms(trx, custId);
+            const freshParent = await trx('scheduled_services')
+              .where({ id: seriesParentRow.id })
+              .first('id', 'is_recurring');
+            if (!freshParent || freshParent.is_recurring) return;
+            // Strip ONLY the exact priced state this activation minted
+            // (codex #3504 r22): between the rollback and this lock an
+            // admin reprice, a completion, or another writer can
+            // legitimately change the row — the conditional update
+            // re-checks the same predicate the activation's locked-parent
+            // check uses, so an edited/performed visit is never blanked.
+            const stripped = await trx('scheduled_services')
+              .where({
+                id: seriesParentRow.id,
+                payment_method_preference: 'pay_at_visit',
+                create_invoice_on_complete: true,
+                source_estimate_id: pricing_estimate_id,
+              })
+              .whereIn('status', ['pending', 'confirmed'])
+              .where('estimated_price', visitPrice)
+              .update({
+                estimated_price: null,
+                payment_method_preference: null,
+                create_invoice_on_complete: false,
+                notes: trx.raw("COALESCE(notes, '') || ' — self-booked plan did not activate (seeding failed); office converts from the live quote'"),
+                updated_at: trx.fn.now(),
+              });
+            if (!stripped) {
+              logger.warn(`[booking:confirm] failure-cleanup strip skipped for ${seriesParentRow.id} — priced state changed under lock (edited/completed concurrently)`);
+              return;
+            }
+            await notifySeriesStripInTx(trx, seriesParentRow.id, 'series seeding failed');
+          });
+        } catch (stripErr) {
+          logger.error(`[booking:confirm] pricing strip after failed seeding ALSO failed for ${seriesParentRow.id}: ${stripErr.message}`);
+        }
+        return { failed: true };
+      }
+    };
+
+    // Post-activation follow-through (codex #3504 r6) — property stamping
+    // (the accept path's linkAcceptedEstimateProperty), tier sync ahead of
+    // the tagger/welcome re-run. Everything keys off state that only
+    // exists once the activation committed; every step is idempotent and
+    // individually best-effort. The logic lives in the RECOVERY SERVICE
+    // (codex #3504 r9): the in-request call is the fast path, and the
+    // 10-minute heal sweep re-runs it for recently activated parents so a
+    // worker death here can never permanently lose the property stamps.
+    const runWizardActivationFollowThrough = async (parentRowId) => {
+      const { runActivationFollowThroughForParent } = require('../services/wizard-series-activation-recovery');
+      await runActivationFollowThroughForParent({
+        id: parentRowId,
+        customer_id: custId,
+        source_estimate_id: pricing_estimate_id,
+      });
+    };
+
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
@@ -2855,6 +3687,141 @@ async function createSelfBooking(payload = {}) {
         }
       }
       logger.info(`[booking:confirm] Double-submit replay for customer ${custId} on ${slotDateStr} ${slot_start} — returning existing booking ${txResult.existing.id}`);
+      // Crash-retry series activation (codex #3504 P0): the first request
+      // can commit a billable pay-at-visit parent and die before the
+      // activation transaction — this retry must finish the job.
+      // Idempotent: the duplicate-series guard and the locked-draft shape
+      // recheck no-op a completed activation, and the drift path strips a
+      // stranded parent's pricing instead of seeding a stale plan.
+      if (wizardSeriesPlan) {
+        try {
+          const replayParent = await db('scheduled_services')
+            .where({ self_booking_id: txResult.existing.id })
+            .whereNot('status', 'cancelled')
+            .first('*');
+          const hasChildren = replayParent
+            ? await db('scheduled_services')
+              .where({ recurring_parent_id: replayParent.id })
+              .whereNot('status', 'cancelled')
+              .first('id')
+            : null;
+          // Activation-pending marker: the pricing draft is STILL a live
+          // wizard draft (activation archives it atomically). Children
+          // absence alone re-runs annual plans forever, and
+          // source_estimate_id can be stamped at parent INSERT by the
+          // estimate-correlation path — neither distinguishes committed
+          // from activated (codex #3504 P0s).
+          const draftStillLive = await db('estimates')
+            .where({ id: pricing_estimate_id, source: 'quote_wizard', status: 'draft' })
+            .whereNull('archived_at')
+            .first('id');
+          // Bind the replay activation to THIS quote's own parent: the
+          // replay lookup matches customer+date+start only, so a SECOND
+          // live wizard quote confirming the same slot can be handed the
+          // other quote's parent — activating this closure's plan on it
+          // would seed this quote's cadence/price under that parent's
+          // label and first-visit price (codex #3504 r3). Every parent
+          // this flow mints carries the pricing draft's id (stamped at
+          // INSERT via source_estimate_id, re-stamped by the fee paths),
+          // so a mismatch here is never a genuine crash-retry.
+          const replayParentIsOwn = replayParent
+            && replayParent.source_estimate_id
+            && String(replayParent.source_estimate_id) === String(pricing_estimate_id)
+            && RecurringAppointmentSeeder.serviceKeyFor({ service_type: replayParent.service_type })
+              === RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          let replaySeriesActivated = false;
+          if (replayParentIsOwn
+            && replayParent.payment_method_preference === 'pay_at_visit'
+            && draftStillLive
+            && !hasChildren) {
+            const replayActivation = await activateWizardSeries(replayParent);
+            // The replay response serializes the ORIGINAL booking row
+            // (codex #3504 r22): echo an extended reservation here too.
+            if (replayActivation?.parentExtension) Object.assign(txResult.existing, replayActivation.parentExtension);
+            // Reminder rows for the replay-activated series (codex #3504
+            // r5 hook): this path returns before the main registration
+            // loop, so without this the parent (if the first request died
+            // before registering it) and every replay-seeded child would
+            // never enter appointment_reminders. registerAppointment is
+            // idempotent per scheduled_service_id (already_registered
+            // no-ops), a conflict-demoted child registers as the
+            // pre-closed windowless placeholder, and no confirmation is
+            // (re)sent from a replay.
+            try {
+              const replaySeeded = replayActivation?.seedResult?.insertedRows || [];
+              // Gate on ACTIVATION SUCCESS, not on child count (codex
+              // #3504 r6 hook): a one-visit annual plan activates with a
+              // successful seedResult and zero children, and its PARENT
+              // still needs the reminder rows a pre-registration crash
+              // lost.
+              if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
+                const AppointmentReminders = require('../services/appointment-reminders');
+                for (const row of [replayParent, ...replaySeeded].filter((r) => r?.id)) {
+                  const rowDate = typeof row.scheduled_date === 'string'
+                    ? row.scheduled_date.slice(0, 10)
+                    : (row.scheduled_date instanceof Date
+                      ? row.scheduled_date.toISOString().slice(0, 10)
+                      : String(row.scheduled_date || '').slice(0, 10));
+                  const windowless = !row.window_start;
+                  const rowStart = windowless ? '08:00' : String(row.window_start).slice(0, 5);
+                  await AppointmentReminders.registerAppointment(
+                    row.id,
+                    custId,
+                    `${rowDate}T${rowStart}`,
+                    row.service_type || resolvedServiceType,
+                    'booking_followup',
+                    {
+                      sendConfirmation: false,
+                      ...(windowless ? { closeReminderWindows: true } : {}),
+                    },
+                  );
+                }
+              }
+            } catch (remErr) {
+              logger.warn(`[booking:confirm] replay series reminder registration failed for ${txResult.existing.id} (self-heal sweep will recover): ${remErr.message}`);
+            }
+            // Same post-activation follow-through as the primary path
+            // (property stamping, tier sync, tagger/welcome re-run) — a
+            // replay-completed activation must not skip it, and an
+            // alreadyActivated replay heals a first request that died
+            // before its own follow-through (every step idempotent;
+            // codex #3504 r6 + hook).
+            if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
+              replaySeriesActivated = true;
+              await runWizardActivationFollowThrough(replayParent.id);
+            }
+          } else if (replayParentIsOwn && replayParent.is_recurring) {
+            // Activation COMMITTED on a prior attempt (children exist,
+            // draft archived — the activation branch above can't run), but
+            // that attempt may have died before its follow-through: heal
+            // the property stamps / tier sync / welcome on the retry —
+            // every step is idempotent (codex #3504 r6 hook).
+            replaySeriesActivated = true;
+            await runWizardActivationFollowThrough(replayParent.id);
+          }
+          // Lead conversion on the REPLAY too (codex #3504 r7): the first
+          // request can die after the activation commits but before the
+          // primary path's conversion block, and this branch returns
+          // before ever reaching it — the quote-wizard lead would stay in
+          // its pre-sale stage despite a booked recurring plan. Same
+          // idempotent call the primary path makes (enforceOriginating;
+          // an already-won lead no-ops).
+          if (replaySeriesActivated) {
+            try {
+              const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+              await convertLeadFromEvent({
+                source: 'recurring_service_booked',
+                customerId: custId,
+                enforceOriginating: true,
+              });
+            } catch (leadErr) {
+              logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
+            }
+          }
+        } catch (err) {
+          logger.warn(`[booking:confirm] replay series activation skipped for ${txResult.existing.id}: ${err.message}`);
+        }
+      }
       // Waiver disposition on the REPLAY too (Codex #3500 r6): the first
       // request can commit and die before its post-commit waiver recheck,
       // leaving the consumed draft live with a positive setupFeeQuote that
@@ -3064,24 +4031,62 @@ async function createSelfBooking(payload = {}) {
         logger.error(`[booking:confirm] Quarterly follow-up seeding failed for ${serviceRow.id}: ${err.message}`);
       }
     }
-    if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
-      // Solo non-pest recurring wizard booking (e.g. mosquito): stamp the
-      // disclosed fee in its own transaction — but ONLY when the committed
-      // visit can actually mint it (priced + invoice-on-complete). A
-      // price-less visit would strand the stamp forever while archiving
-      // the one estimate staff could convert (Codex #3500) — leave the
-      // draft LIVE instead so conversion still bills the fee. The booking
-      // is already committed; a stamp error must not fail it.
+
+
+    if (!shouldSeedQuarterlyPestFollowUps && !isOneTimeEstimateBooking
+      && wizardSeriesPlan && paymentPref === 'pay_at_visit') {
+      // NON-pest wizard series (owner GO 2026-08-26): the quote priced a
+      // per-application recurring plan (e.g. monthly-12 mosquito) and this
+      // booking is its first visit — seed the rest of the year at the
+      // QUOTE's cadence, guard against a duplicate series, and stamp the
+      // disclosed setup fee atomically with the series (the same
+      // plan-activation contract the pest path keeps: no series, no fee).
+      // Requires paymentPref === 'pay_at_visit': plan, per-visit price,
+      // series, and fee land together or not at all — an unpriced booking
+      // stays a single visit with the waiver-only disposition below.
+      const seriesOutcome = await activateWizardSeries(serviceRow);
+      // Echo the extended reservation on the response object (r21) — the
+      // public shape allowlists end_time + duration_minutes.
+      if (seriesOutcome?.parentExtension) Object.assign(booking, seriesOutcome.parentExtension);
+      if (seriesOutcome?.kept) duplicateSeriesKept = seriesOutcome.kept;
+      else if (seriesOutcome?.seedResult || seriesOutcome?.alreadyActivated) {
+        followUpRows = seriesOutcome.seedResult?.insertedRows || [];
+        // AWAITED, not fire-and-forget (codex #3504 r6 hook): a worker
+        // exiting after the activation commit would otherwise lose the
+        // property stamps for a secondary-property plan with no retry path
+        // (each step is individually best-effort and never throws). Also
+        // runs on alreadyActivated so a crash-retry that lost this step
+        // heals it — every step is idempotent (linkage stamps only
+        // unstamped rows, sync converges, tagger/welcome dedupe).
+        await runWizardActivationFollowThrough(serviceRow.id);
+      } else if (setupFeeHandoffEligible) {
+        // Activation FAILED or went stale (seeding error, catalog abort,
+        // locked-draft drift): no series activated and the draft usually
+        // survives LIVE — run the same waiver-only disposition the solo
+        // path runs (codex #3504 r8). Without it, a membership or a
+        // queued setup-fee claim that arrived after the quote leaves the
+        // draft's positive frozen fee standing, and a later office
+        // conversion charges a fee the shared recheck would have waived.
+        // allowStamp:false — never a stamp from a failure path; the
+        // helper's shape checks no-op an archived draft.
+        try {
+          await db.transaction(async (trx) => {
+            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: serviceRow });
+          });
+        } catch (err) {
+          logger.warn(`[booking:confirm] post-failure setup-fee waiver recheck failed for ${serviceRow.id} (booking kept): ${err.message}`);
+        }
+      }
+
+    } else if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
       try {
-        // The stamp is EXCLUSIVE to the atomic quarterly-pest seeding path
-        // above: a solo booking creates one visit and does NOT activate the
-        // quoted recurring plan (plan activation + setup-fee billing ride
-        // staff conversion of the draft), so charging the fee here would
-        // bill an obligation whose plan was never created (Codex #3500).
-        // The helper still ALWAYS runs with allowStamp:false — the locked
-        // membership recheck and queued-elsewhere waiver must freeze the
-        // zero-waiver into the live draft, so a fee this customer no
-        // longer owes can never be re-added at conversion.
+        // No series was created for this booking, so the stamp stays OFF
+        // (plan activation + setup-fee billing ride staff conversion of
+        // the draft — Codex #3500). The helper still ALWAYS runs with
+        // allowStamp:false: the locked membership recheck and
+        // queued-elsewhere waiver must freeze the zero-waiver into the
+        // live draft, so a fee this customer no longer owes can never be
+        // re-added at conversion.
         await db.transaction(async (trx) => {
           await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: serviceRow });
         });
@@ -3090,12 +4095,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
     if (duplicateSeriesKept) {
-      logger.warn(`[booking:confirm] Skipped quarterly follow-up seeding for booking ${serviceRow.id} — customer ${custId} already has an active recurring series (series ${duplicateSeriesKept.id}); existing series kept`);
+      // Cadence-neutral wording (codex #3504 r5 P2): this block also fires
+      // for non-pest wizard plans (monthly/seasonal mosquito, every-6-weeks
+      // lawn/tree, semiannual palm) — "quarterly" would misreport what was
+      // actually skipped in the ops log and the customer activity audit.
+      logger.warn(`[booking:confirm] Skipped recurring follow-up seeding for booking ${serviceRow.id} — customer ${custId} already has an active recurring series (series ${duplicateSeriesKept.id}); existing series kept`);
       try {
         await db('activity_log').insert({
           customer_id: custId,
           action: 'recurring_series_skipped',
-          description: `Self-booking on ${slotDateStr}: existing recurring series kept (${duplicateSeriesKept.service_type}, series #${duplicateSeriesKept.id}${duplicateSeriesKept.next_upcoming_date ? `, next visit ${duplicateSeriesKept.next_upcoming_date}` : ''}) — no second quarterly series was seeded. The booked visit itself is unchanged.`,
+          description: `Self-booking on ${slotDateStr}: existing recurring series kept (${duplicateSeriesKept.service_type}, series #${duplicateSeriesKept.id}${duplicateSeriesKept.next_upcoming_date ? `, next visit ${duplicateSeriesKept.next_upcoming_date}` : ''}) — no second recurring series was seeded. The booked visit itself is unchanged.`,
         });
       } catch (noteErr) {
         logger.warn(`[booking:confirm] duplicate-series skip note failed: ${noteErr.message}`);
@@ -3128,7 +4137,15 @@ async function createSelfBooking(payload = {}) {
               : row.scheduled_date instanceof Date
                 ? row.scheduled_date.toISOString().slice(0, 10)
                 : String(row.scheduled_date || '').slice(0, 10));
-        const windowStart = String(row.window_start || slot_start || '08:00').slice(0, 5);
+        // A follow-up demoted to the windowless placeholder (conflict
+        // sweep) registers PRE-CLOSED at the canonical 08:00 slot — the
+        // office has not chosen its time, so falling back to the parent's
+        // slot_start would arm 72/24h reminders for a time nobody picked
+        // (codex #3504 r5; see registerAppointment's closeReminderWindows).
+        const isWindowlessFollowUp = row.id !== serviceRow.id && !row.window_start;
+        const windowStart = isWindowlessFollowUp
+          ? '08:00'
+          : String(row.window_start || slot_start || '08:00').slice(0, 5);
         // The primary visit confirms through the shared appointment_confirmation
         // flow (prefs/channel-aware, email fallback, reschedule link) — the
         // bespoke self_booking_confirmation template was retired 2026-07-06.
@@ -3139,7 +4156,10 @@ async function createSelfBooking(payload = {}) {
           `${scheduledDate}T${windowStart}`,
           row.service_type || resolvedServiceType,
           row.id === serviceRow.id ? 'booking_new' : 'booking_followup',
-          { sendConfirmation: row.id === serviceRow.id },
+          {
+            sendConfirmation: row.id === serviceRow.id,
+            ...(isWindowlessFollowUp ? { closeReminderWindows: true } : {}),
+          },
         );
       }
     } catch (err) {

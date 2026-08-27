@@ -238,6 +238,10 @@ describe('appointment reminder registration deduplication', () => {
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([insertedPlaceholder]),
     });
+    // Per-SERVICE idempotency re-check inside insertPreClosedPlaceholderRowInTx
+    // (shared with the self-heal sweep, which has no outer existing-check) —
+    // keyed on scheduled_service_id only, NOT the same-slot dedupe.
+    const placeholderIdempotency = chain({ first: jest.fn().mockResolvedValue(null) });
     const markConfirmationSkipped = chain();
     // NO same-slot dedupe read and NO owner label-merge update in this
     // queue: an existing real 8 AM owner must never absorb the date-only
@@ -246,7 +250,7 @@ describe('appointment reminder registration deduplication', () => {
     // placeholder path skips the dedupe entirely, inserting identically
     // whether or not an owner holds the slot. Any extra
     // appointment_reminders query would misalign this queue and fail loudly.
-    const reminderQueries = [byScheduledService, insertPlaceholder, markConfirmationSkipped];
+    const reminderQueries = [byScheduledService, placeholderIdempotency, insertPlaceholder, markConfirmationSkipped];
 
     db.mockImplementation((table) => {
       if (table === 'appointment_reminders') return reminderQueries.shift();
@@ -264,6 +268,8 @@ describe('appointment reminder registration deduplication', () => {
     );
 
     expect(result).toBe(insertedPlaceholder);
+    // The in-helper re-check is per-service only — never the slot dedupe.
+    expect(placeholderIdempotency.where).toHaveBeenCalledWith({ scheduled_service_id: 'svc-untimed' });
     const payload = insertPlaceholder.insert.mock.calls[0][0];
     expect(payload).toMatchObject({
       scheduled_service_id: 'svc-untimed',

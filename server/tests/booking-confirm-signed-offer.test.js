@@ -414,7 +414,13 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
     });
     db.transaction = jest.fn(async (fn) => fn(Object.assign(
       (table) => trxTable(table),
-      { raw: jest.fn().mockResolvedValue(undefined), fn: { now: () => new Date() } },
+      {
+        raw: jest.fn().mockResolvedValue(undefined),
+        fn: { now: () => new Date() },
+        // Real knex exposes trx.schema; the insert path introspects the
+        // deploy-order-guarded source_estimate_generation column.
+        schema: { hasColumn: jest.fn().mockResolvedValue(true) },
+      },
     )));
   }
 

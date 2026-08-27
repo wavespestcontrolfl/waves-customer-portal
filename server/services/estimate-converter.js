@@ -4160,43 +4160,7 @@ const EstimateConverter = {
     // guard. Keys are unit-aware (codex #3431 r2): the scope carries its
     // own candidate-key builders so the seeder compares parents in the
     // same mode the estimate key was built in.
-    let seriesAddressScope = null;
-    if (estimate?.address || estimate?.property_id) {
-      // makeEstimateScopeKeys keeps the whole street portion (unit lines
-      // survive) — a naive split(',')[0] mis-scoped "Unit 4, 100 Beach Rd"
-      // (codex #3244 r5) — and drops the unit from BOTH sides when the
-      // estimate itself is unitless. A property_id-linked estimate scopes
-      // even when its address is blank or rejected as non-address evidence
-      // (codex #3431 r4): the seeder compares parent property ids first.
-      const { makeEstimateScopeKeys } = require('./estimate-property-linkage');
-      const scopeKeys = estimate?.address ? makeEstimateScopeKeys(estimate.address) : null;
-      const estimateStreet = scopeKeys ? scopeKeys.estimateKey : '';
-      let customerPrimaryStreet = '';
-      let customerPrimaryBlind = '';
-      let customerPrimaryRetained = '';
-      if (scopeKeys) {
-        try {
-          const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
-          customerPrimaryStreet = scopeKeys.primaryKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
-          customerPrimaryBlind = scopeKeys.blindKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
-          customerPrimaryRetained = scopeKeys.candidateKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
-        } catch { /* scope falls back to stamped addresses only */ }
-      }
-      if (estimateStreet || estimate?.property_id) {
-        seriesAddressScope = {
-          estimateStreet,
-          customerPrimaryStreet,
-          customerPrimaryBlind,
-          customerPrimaryRetained,
-          blindEstimateKey: scopeKeys ? scopeKeys.blindEstimateKey : '',
-          estimatePropertyId: estimate?.property_id ? String(estimate.property_id) : null,
-          candidateKey: scopeKeys ? scopeKeys.candidateKey : null,
-          candidateKeyFromRaw: scopeKeys ? scopeKeys.candidateKeyFromRaw : null,
-          blindKey: scopeKeys ? scopeKeys.blindKey : null,
-          blindKeyFromRaw: scopeKeys ? scopeKeys.blindKeyFromRaw : null,
-        };
-      }
-    }
+    const seriesAddressScope = await buildSeriesAddressScope(database, estimate, customerId);
     // Series-seeding transaction wrapper (P0: check-then-insert race). Every
     // converter path that can CREATE a recurring series runs its duplicate-
     // series re-check (checkActiveSeriesLocked — advisory lock per
@@ -6233,7 +6197,54 @@ const EstimateConverter = {
   },
 };
 
+// Per-property duplicate-series scope for checkActiveSeriesLocked /
+// findActiveRecurringSeries — shared by conversion AND the wizard
+// self-book series activation (codex #3504 r4: the booking guard without
+// this scope reads a customer's property-A series as a duplicate of the
+// property-B plan and strips the new parent's pricing). Unparseable /
+// absent address AND no property link → null → the exact legacy
+// customer+family guard. Keys are unit-aware (codex #3431 r2): the scope
+// carries its own candidate-key builders so the seeder compares parents
+// in the same mode the estimate key was built in; makeEstimateScopeKeys
+// keeps the whole street portion (unit lines survive — codex #3244 r5)
+// and a property_id-linked estimate scopes even with a blank/rejected
+// address (codex #3431 r4).
+async function buildSeriesAddressScope(database, estimate, customerId) {
+  if (!estimate?.address && !estimate?.property_id) return null;
+  const { makeEstimateScopeKeys } = require('./estimate-property-linkage');
+  const scopeKeys = estimate?.address ? makeEstimateScopeKeys(estimate.address) : null;
+  const estimateStreet = scopeKeys ? scopeKeys.estimateKey : '';
+  let customerPrimaryStreet = '';
+  let customerPrimaryBlind = '';
+  let customerPrimaryRetained = '';
+  if (scopeKeys) {
+    try {
+      const custRow = await database('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'zip');
+      customerPrimaryStreet = scopeKeys.primaryKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+      customerPrimaryBlind = scopeKeys.blindKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+      customerPrimaryRetained = scopeKeys.candidateKey(custRow?.address_line1, custRow?.address_line2, custRow?.city, custRow?.zip);
+    } catch { /* scope falls back to stamped addresses only */ }
+  }
+  if (!estimateStreet && !estimate?.property_id) return null;
+  return {
+    estimateStreet,
+    customerPrimaryStreet,
+    customerPrimaryBlind,
+    customerPrimaryRetained,
+    blindEstimateKey: scopeKeys ? scopeKeys.blindEstimateKey : '',
+    estimatePropertyId: estimate?.property_id ? String(estimate.property_id) : null,
+    candidateKey: scopeKeys ? scopeKeys.candidateKey : null,
+    candidateKeyFromRaw: scopeKeys ? scopeKeys.candidateKeyFromRaw : null,
+    blindKey: scopeKeys ? scopeKeys.blindKey : null,
+    blindKeyFromRaw: scopeKeys ? scopeKeys.blindKeyFromRaw : null,
+  };
+}
+
 module.exports = EstimateConverter;
+module.exports.buildSeriesAddressScope = buildSeriesAddressScope;
+module.exports.visitCountAliasValues = visitCountAliasValues;
+module.exports.visitCountFieldsConflict = visitCountFieldsConflict;
+module.exports.visitCountFieldsInvalid = visitCountFieldsInvalid;
 module.exports.findGrassTypeDeep = findGrassTypeDeep;
 module.exports.grassTypeToPersist = grassTypeToPersist;
 module.exports.calculateAnnualPrepayAmount = calculateAnnualPrepayAmount;

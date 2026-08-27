@@ -120,6 +120,15 @@ mockDb.schema = {
   hasTable: jest.fn(async (table) => ['sms_sequences', 'customer_interactions'].includes(table)),
 };
 
+// Transaction shim (codex #3504 r12: the welcome enqueue is now a
+// check-and-insert atomic under a per-customer advisory lock): the trx
+// delegates table calls to the same mock and swallows the raw lock
+// statement, so the existing table-level fixtures drive both branches.
+const mockTrx = Object.assign((table) => mockDb(table), { raw: jest.fn().mockResolvedValue({}) });
+// The trx shim carries the schema probe too (codex #3504 r17: the lookup
+// probes hasTable on the SUPPLIED connection, never the pool).
+mockTrx.schema = mockDb.schema;
+mockDb.transaction = jest.fn(async (fn) => fn(mockTrx));
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => mockLogger);
 jest.mock('../services/messaging/send-customer-message', () => ({

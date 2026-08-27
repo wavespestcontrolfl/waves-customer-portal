@@ -26,6 +26,12 @@ jest.mock('../services/recurring-appointment-seeder', () => ({
   },
 }));
 jest.mock('../services/estimate-converter', () => ({
+  // The REAL pure count-validation helpers (codex #3504 r5): the resolver
+  // shares the converter's visit-count vocabulary/validation, and mocking
+  // them would test a contract the production module doesn't have.
+  visitCountAliasValues: jest.requireActual('../services/estimate-converter').visitCountAliasValues,
+  visitCountFieldsConflict: jest.requireActual('../services/estimate-converter').visitCountFieldsConflict,
+  visitCountFieldsInvalid: jest.requireActual('../services/estimate-converter').visitCountFieldsInvalid,
   // Real-enough mirror of the fee-mix rule (solo pest / solo mosquito only)
   // so estimate-public's breakdown/fee gates work under this module mock.
   recurringMixHasMembershipFeeService: (services = []) => {

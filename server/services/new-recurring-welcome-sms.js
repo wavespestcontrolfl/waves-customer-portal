@@ -79,12 +79,16 @@ async function isNewRecurringSignupCandidate(customerId, { excludeServiceId = nu
 
 // Any row of this sequence type — queued, sent, or abandoned — blocks a new
 // enqueue, keeping the once-ever guarantee across every booking path.
-async function hasWelcomeSequence(customerId) {
+async function hasWelcomeSequence(customerId, conn = db) {
   if (!customerId) return false;
 
   try {
-    if (!(await db.schema.hasTable('sms_sequences'))) return false;
-    const existing = await db('sms_sequences')
+    // Schema probe on the SUPPLIED connection (codex #3504 r17): callers
+    // inside a transaction already hold one pool connection, and a probe
+    // on the global pool would need a second — at pool saturation every
+    // enqueue waits on every other until an acquire timeout.
+    if (!(await conn.schema.hasTable('sms_sequences'))) return false;
+    const existing = await conn('sms_sequences')
       .where({ customer_id: customerId, sequence_type: SEQUENCE_TYPE })
       .first('id');
     return !!existing;
@@ -176,10 +180,6 @@ async function sendNewRecurringWelcome({
     logger.warn(`[new-recurring-welcome] sms_sequences table missing; welcome not queued for customer ${customer.id}`);
     return { sent: false, skipped: true, reason: 'no_sequence_table' };
   }
-  if (await hasWelcomeSequence(customer.id)) {
-    return { sent: false, skipped: true, reason: 'already_sent' };
-  }
-
   try {
     const cols = await db('sms_sequences').columnInfo();
     const data = {
@@ -199,7 +199,18 @@ async function sendNewRecurringWelcome({
         queued_at: new Date().toISOString(),
       });
     }
-    await db('sms_sequences').insert(data);
+    // Check-and-insert ATOMIC under a per-customer advisory lock (codex
+    // #3504 r12): sms_sequences has no customer/sequence uniqueness, and
+    // concurrent callers (a booking confirmation racing its own
+    // double-submit replay, overlapping accept paths) could each pass the
+    // existence check and enqueue two welcome sequences — two texts.
+    const outcome = await db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`new-recurring-welcome:${customer.id}`]);
+      if (await hasWelcomeSequence(customer.id, trx)) return 'already_sent';
+      await trx('sms_sequences').insert(data);
+      return 'queued';
+    });
+    if (outcome === 'already_sent') return { sent: false, skipped: true, reason: 'already_sent' };
     logger.info(`[new-recurring-welcome] welcome queued for customer ${customer.id} (+${WELCOME_DELAY_MINUTES}m)`);
     return { sent: false, queued: true };
   } catch (err) {
