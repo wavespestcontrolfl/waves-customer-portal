@@ -42,11 +42,16 @@ exports.up = async function up(knex) {
   // unconditionally $75, and a staff-scheduled inspection copies this
   // catalog value (uncapped audit P1 on #3521). NULL (variable pricing)
   // is left alone; the prior value rides the state for rollback.
+  const isNull = row.base_price == null;
   const currentPrice = Number(row.base_price);
-  if (row.base_price != null && Number.isFinite(currentPrice) && currentPrice !== NEW_PRICE) {
+  // NULL is pinned too (uncapped audit P1 on #3521): a variable-priced
+  // row let buildAppointmentPricing fall back to whatever price the
+  // request carried, so staff-created inspections could stay unpriced or
+  // divergent. The NULL is recorded so rollback restores it.
+  if (isNull || (Number.isFinite(currentPrice) && currentPrice !== NEW_PRICE)) {
     patch.base_price = NEW_PRICE;
     state.priceChanged = true;
-    state.priorPrice = currentPrice;
+    state.priorPrice = isNull ? null : currentPrice;
   }
   if (String(row.description || '') === LEGACY_DESCRIPTION) {
     patch.description = NEW_DESCRIPTION;
@@ -67,7 +72,9 @@ exports.down = async function down(knex) {
   if (row) {
     const patch = {};
     if (state.priceChanged && Number(row.base_price) === NEW_PRICE) {
-      patch.base_price = Number.isFinite(Number(state.priorPrice)) ? Number(state.priorPrice) : LEGACY_PRICE;
+      patch.base_price = state.priorPrice === null
+        ? null
+        : (Number.isFinite(Number(state.priorPrice)) ? Number(state.priorPrice) : LEGACY_PRICE);
     }
     if (state.descriptionChanged && String(row.description || '') === NEW_DESCRIPTION) patch.description = LEGACY_DESCRIPTION;
     if (Object.keys(patch).length) {

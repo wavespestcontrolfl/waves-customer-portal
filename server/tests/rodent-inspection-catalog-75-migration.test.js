@@ -58,9 +58,12 @@ describe('20260826000004 rodent_inspection catalog $75', () => {
     expect(insp(db).base_price).toBe(99);
   });
 
-  test('a NULL (variable-priced) row keeps NULL', async () => {
+  test('a NULL (variable-priced) row is pinned to $75; down() restores the NULL', async () => {
     const db = seedDb({ base_price: null });
     await migration.up(fakeKnex(db));
+    expect(insp(db).base_price).toBe(NEW_PRICE);
+    expect(JSON.parse(stateRow(db).value)).toMatchObject({ priceChanged: true, priorPrice: null });
+    await migration.down(fakeKnex(db));
     expect(insp(db).base_price).toBeNull();
   });
 

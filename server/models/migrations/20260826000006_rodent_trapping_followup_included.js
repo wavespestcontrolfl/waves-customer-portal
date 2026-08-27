@@ -44,11 +44,17 @@ exports.up = async function up(knex) {
   // ANY nonzero price goes to $0 — an admin-edited $60 is just as billable
   // as the seeded $95, and an included callback is never billable (uncapped
   // audit P0 on #3521). The prior value rides the state for rollback.
+  const isNull = row.base_price == null;
   const currentPrice = Number(row.base_price);
-  if (Number.isFinite(currentPrice) && currentPrice > 0) {
+  // NULL normalizes to $0 as well (uncapped audit P1 on #3521): the
+  // scheduling route accepts an explicit appointment price when the
+  // catalog value is NULL, and completionInvoiceAmount gives a positive
+  // estimated_price precedence over is_callback — so a variable-priced
+  // follow-up could still invoice. The NULL is recorded for rollback.
+  if (isNull || (Number.isFinite(currentPrice) && currentPrice !== NEW_PRICE)) {
     patch.base_price = NEW_PRICE;
     state.priceChanged = true;
-    state.priorPrice = currentPrice;
+    state.priorPrice = isNull ? null : currentPrice;
   }
   if (String(row.description || '') === LEGACY_DESCRIPTION) {
     patch.description = NEW_DESCRIPTION;
@@ -74,9 +80,9 @@ exports.down = async function down(knex) {
   if (row) {
     const patch = {};
     if (state.priceChanged && Number(row.base_price) === NEW_PRICE) {
-      patch.base_price = Number.isFinite(Number(state.priorPrice)) && Number(state.priorPrice) > 0
-        ? Number(state.priorPrice)
-        : LEGACY_PRICE;
+      patch.base_price = state.priorPrice === null
+        ? null
+        : (Number.isFinite(Number(state.priorPrice)) && Number(state.priorPrice) > 0 ? Number(state.priorPrice) : LEGACY_PRICE);
     }
     if (state.descriptionChanged && String(row.description || '') === NEW_DESCRIPTION) patch.description = LEGACY_DESCRIPTION;
     if (state.notesChanged && String(row.internal_notes || '') === NEW_INTERNAL_NOTES) patch.internal_notes = LEGACY_INTERNAL_NOTES;

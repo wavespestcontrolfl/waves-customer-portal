@@ -57,12 +57,14 @@ describe('20260826000006 rodent_trapping_followup included at $0', () => {
     expect(fu(db).base_price).toBe(60);
   });
 
-  test('a row already priced NULL/variable still gets the included copy', async () => {
+  test('a NULL/variable-priced row is normalized to $0 and gets the included copy; down() restores the NULL', async () => {
     const db = seedDb({ base_price: null });
     await migration.up(fakeKnex(db));
-    expect(fu(db).base_price).toBeNull();
+    expect(fu(db).base_price).toBe(NEW_PRICE);
     expect(fu(db).description).toBe(NEW_DESCRIPTION);
-    expect(JSON.parse(stateRow(db).value)).toMatchObject({ priceChanged: false, descriptionChanged: true });
+    expect(JSON.parse(stateRow(db).value)).toMatchObject({ priceChanged: true, priorPrice: null, descriptionChanged: true });
+    await migration.down(fakeKnex(db));
+    expect(fu(db).base_price).toBeNull();
   });
 
   test('missing table or row is a no-op', async () => {
