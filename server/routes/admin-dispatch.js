@@ -14180,10 +14180,8 @@ router.post('/:serviceId/rain-out/target-check', async (req, res, next) => {
 // target-check above, same requireTechOrAdmin inheritance and the same
 // caller-driven nameScope (admins get names, everyone else window-only).
 // Warn-only + read-only: none of these surfaces disable saving on this
-// data. Gated behind GATE_SLOT_CONFLICT_HINTS inside checkSlots — while
-// off it answers { ok, gated: true, results: [] } and clients render
-// nothing. Validation (cap 25, YYYY-MM-DD dates, HH:MM windows) also
-// lives in checkSlots; !ok maps to 400 here.
+// data. Always on — no gate. Validation (cap 25, YYYY-MM-DD dates, HH:MM
+// windows) lives in checkSlots; !ok maps to 400 here.
 router.post('/slot-check', async (req, res, next) => {
   try {
     const RainOut = require('../services/rain-out');

@@ -4116,6 +4116,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             : {}),
         }),
       });
+      // Advisory warnings (the promised first visit overlaps another job) —
+      // blocking on purpose, and BEFORE the delivery check: the invoice and
+      // term are already minted either way, and onSaved closes this modal.
+      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       if (result?.delivery && result.delivery.ok === false) {
         const reason = result.delivery.error || result.delivery.sms?.error || result.delivery.email?.error || "delivery failed";
         setError(`Invoice created, but delivery failed: ${reason}. Open Invoices to resend.`);
@@ -4160,6 +4164,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           chargeInPerson: true,
         }),
       });
+      // Same advisory-overlap surfacing as the send path (blocking: the
+      // modal closes / hands off to the payment sheet right after).
+      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       // Credit covered the whole invoice — it's already settled server-side,
       // so there's nothing for the payment sheet to collect.
       if (result?.settledByDepositCredit) {

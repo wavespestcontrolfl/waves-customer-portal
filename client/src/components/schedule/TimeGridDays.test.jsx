@@ -107,10 +107,11 @@ describe('TimeGridDays week loading', () => {
 });
 
 describe('TimeGridDays bookable rows', () => {
-  it('rows before 8 AM are not bookable, drops snap to the hour, and late rows respect the visit duration', async () => {
+  it('every row from 6 AM is bookable (no 8 AM floor), drops snap to the hour, and late rows respect the visit duration', async () => {
     const { snapSlotIdxToHourMin, isBookableSlotIdx } = await import('./TimeGridDays');
-    // 30-min rows from 06:00: idx 4 = 08:00.
-    expect(isBookableSlotIdx(3)).toBe(false);
+    // 30-min rows from 06:00: idx 0 = 06:00, idx 4 = 08:00.
+    expect(isBookableSlotIdx(0)).toBe(true);
+    expect(isBookableSlotIdx(3)).toBe(true);
     expect(isBookableSlotIdx(4)).toBe(true);
     expect(snapSlotIdxToHourMin(5)).toBe(8 * 60);
     const IDX_19 = (19 - 6) * 2;

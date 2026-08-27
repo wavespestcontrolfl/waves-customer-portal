@@ -69,7 +69,7 @@ describe('TimeGridDay bulk reconciliation', () => {
 });
 
 describe('TimeGridDay hour-aligned grid', () => {
-  it('still DISPLAYS from 6 AM (existing early rows render) but only rows from 8 AM accept drops / drag-create, snapped to the hour', async () => {
+  it('displays from 6 AM and EVERY row accepts drops / drag-create (no 8 AM floor), snapped to the hour', async () => {
     const { snapSlotIdxToHourMin, isBookableSlotIdx } = await import('./TimeGridDay');
     const { container } = render(
       <TimeGridDay
@@ -78,6 +78,18 @@ describe('TimeGridDay hour-aligned grid', () => {
           id: 'svc-early', customerName: 'Early Customer', status: 'confirmed',
           windowStart: '07:00', windowEnd: '08:00', windowDisplay: '7–8 AM',
           technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-predawn', customerName: 'Predawn Customer', status: 'confirmed',
+          windowStart: '05:00', windowEnd: '06:00', windowDisplay: '5–6 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-predawn-2', customerName: 'Night Customer', status: 'confirmed',
+          windowStart: '01:00', windowEnd: '02:00', windowDisplay: '1–2 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-crossing', customerName: 'Crossing Customer', status: 'confirmed',
+          windowStart: '05:00', windowEnd: '07:00', windowDisplay: '5–7 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
         }]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={vi.fn()}
@@ -85,18 +97,36 @@ describe('TimeGridDay hour-aligned grid', () => {
     );
     expect(screen.getByText('6 AM')).toBeInTheDocument();
     expect(screen.getByText('8 AM')).toBeInTheDocument();
-    // A legacy 7 AM visit is not hidden from dispatch.
+    // A 7 AM visit is not hidden from dispatch, and neither is one timed
+    // BEFORE the grid's first row — it is pinned to the 6 AM row instead.
     expect(screen.getByTitle(/Early Customer/)).toBeInTheDocument();
-    // Rows before 8 AM are muted + disabled (no droppable, no drag-create).
+    expect(screen.getByTitle(/Predawn Customer/)).toBeInTheDocument();
+    // Two pre-grid visits that don't overlap in real time DO overlap once
+    // pinned — they get separate lanes, never one block hiding the other.
+    const predawn = screen.getByTitle(/Predawn Customer/).closest('[style]');
+    const night = screen.getByTitle(/Night Customer/).closest('[style]');
+    expect(night).toBeInTheDocument();
+    expect(predawn.style.left).not.toBe(night.style.left);
+    // A visit that CROSSES the first row is clipped to its visible portion
+    // (05:00–07:00 draws as one 60-min block from 06:00), not shifted — so
+    // it never fakes an overlap with the real 07:00 visit, which keeps a
+    // full-width lane of its own.
+    const crossing = screen.getByTitle(/Crossing Customer/).closest('[style]');
+    const early = screen.getByTitle(/Early Customer/).closest('[style]');
+    const first = screen.getByTitle(/First Customer/).closest('[style]');
+    expect(crossing.style.top).toBe(night.style.top); // pinned on the first row
+    expect(early.style.left).toBe(first.style.left); // 07:00 visit: its own full-width lane, no fake overlap
+    // No row is muted for being early — the former 8 AM floor is gone.
     const rows = container.querySelectorAll('[data-slot-min]');
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) {
-      const min = Number(row.getAttribute('data-slot-min'));
-      expect(row.getAttribute('aria-disabled')).toBe(min < 8 * 60 ? 'true' : null);
+      expect(row.getAttribute('aria-disabled')).toBe(null);
     }
-    // 30-min visual rows from 06:00: idx 0..3 (06:00–07:30) are not bookable;
-    // idx 4 = 08:00 and idx 5 = 08:30 both snap to 08:00. Nothing lands on :30.
-    expect(isBookableSlotIdx(3)).toBe(false);
+    // 30-min visual rows from 06:00: idx 0 (06:00) and idx 3 (07:30 → 07:00)
+    // are bookable; idx 4 = 08:00 and idx 5 = 08:30 both snap to 08:00.
+    // Nothing lands on :30.
+    expect(isBookableSlotIdx(0)).toBe(true);
+    expect(isBookableSlotIdx(3)).toBe(true);
     expect(isBookableSlotIdx(4)).toBe(true);
     expect(snapSlotIdxToHourMin(4)).toBe(8 * 60);
     expect(snapSlotIdxToHourMin(5)).toBe(8 * 60);

@@ -1109,7 +1109,7 @@ describe('annual prepay renewal helpers', () => {
     }));
   });
 
-  test('drops the promised window (keeping the date) when it collides at seeding time', async () => {
+  test('keeps the promised window when it overlaps at seeding time — overlaps are advisory', async () => {
     const columnQuery = query({
       columnInfo: {
         scheduled_date: {},
@@ -1142,12 +1142,64 @@ describe('annual prepay renewal helpers', () => {
       first_visit_window_start: '08:00',
     }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
 
-    // Right date, no time — an overlapping timed promise is never materialized.
+    // Right date AND the promised time — an overlap warns, it never drops
+    // the time the customer was quoted.
+    expect(seeded.insert).toHaveBeenCalledWith(expect.objectContaining({
+      scheduled_date: '2026-08-01',
+      window_start: '08:00',
+      window_end: '09:00',
+    }));
+  });
+
+  test('seeds WITHOUT a window (and files window_unverified) when the date lock cannot be taken — an unprobed overlap is not kept', async () => {
+    // The rung-1 occupancy date lock (first raw probe) loses to a concurrent
+    // writer; later probes (customer-comms lock, rung 6) succeed.
+    db.raw = jest.fn()
+      .mockResolvedValueOnce({ rows: [{ locked: false }] })
+      .mockResolvedValue({ rows: [{ locked: true }] });
+    const columnQuery = query({
+      columnInfo: {
+        scheduled_date: {},
+        service_type: {},
+        annual_prepay_term_id: {},
+        window_start: {},
+        window_end: {},
+        time_window: {},
+        technician_id: {},
+        estimated_duration_minutes: {},
+        notes: {},
+      },
+    });
+    const rowsQuery = query({ rows: [] });
+    const unlockedRecheck = query({ rows: [] }); // post-failure adoption recheck
+    const seeded = query({ returning: [{ id: 'svc-x2', scheduled_date: '2026-08-01' }] });
+    setDbQueues({
+      scheduled_services: [columnQuery, rowsQuery, query({ first: undefined }), unlockedRecheck, seeded],
+      notifications: [query({ first: undefined })], // coverage-exception dedupe probe: none open
+    });
+
+    await expect(_private.ensureCoverageRowsForTerm({
+      id: 'term-lock',
+      customer_id: 'customer-x',
+      term_start: '2026-08-01',
+      term_end: '2027-08-01',
+      coverage_service_type: 'Quarterly Pest Control',
+      coverage_visit_count: 1,
+      coverage_cadence: 'annual',
+      first_visit_date: '2026-08-01',
+      first_visit_window_start: '08:00',
+    }, undefined, { today: '2026-07-31' })).resolves.toMatchObject({ createdCount: 1 });
+
     expect(seeded.insert).toHaveBeenCalledWith(expect.objectContaining({
       scheduled_date: '2026-08-01',
       window_start: null,
       window_end: null,
     }));
+    const { notifyAdmin } = require('../services/notification-service');
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.stringContaining('could not be checked'),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'window_unverified' }) }),
+    );
   });
 
   test('does not let a cancelled in-window visit consume a sold coverage slot', async () => {

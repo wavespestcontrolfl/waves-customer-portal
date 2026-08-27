@@ -23,11 +23,10 @@ import { etStartOfWeek } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
-// DISPLAY from 6 (existing early rows render); CREATION / MOVES from 8, on
-// the hour, ending by DAY_END_HOUR — same rules as TimeGridDay and the
-// server's window validator (scheduling/window-rules.js).
+// Grid runs 6am–8pm; every displayed row is bookable — on the hour, ending
+// by DAY_END_HOUR, no earliest-start floor — same rules as TimeGridDay and
+// the server's window validator (scheduling/window-rules.js).
 const DAY_START_HOUR = 6;
-const BOOKABLE_START_HOUR = 8;
 const DAY_END_HOUR = 20;
 const SLOT_MIN = 30;
 const SLOT_HEIGHT = 32;
@@ -167,7 +166,16 @@ function computeLanes(services) {
       const endRaw = parseHHMM(s.windowEnd);
       const dur = effectiveDuration(s);
       const end = endRaw != null ? endRaw : (start != null ? start + dur : null);
-      return { svc: s, start: start ?? 0, end: end ?? 30 };
+      // Lanes are computed from the DISPLAYED interval (see the render
+      // clip): a visit that starts before the grid's first row is clipped to
+      // the part that falls inside the grid; one wholly before it collapses
+      // to a compact block pinned on the first row. Two such pinned blocks
+      // overlap on screen even when their real times don't, so they get
+      // separate lanes.
+      const rawStart = start ?? 0;
+      const rawEnd = end ?? rawStart + 30;
+      const dispStart = Math.max(rawStart, DAY_START_HOUR * 60);
+      return { svc: s, start: dispStart, end: Math.max(rawEnd, dispStart + SLOT_MIN) };
     })
     .sort((a, b) => a.start - b.start || a.end - b.end);
 
@@ -295,11 +303,11 @@ export function snapSlotIdxToHourMin(slotIdx) {
   return DAY_START_HOUR * 60 + Math.floor((slotIdx * SLOT_MIN) / 60) * 60;
 }
 
-// Bookable only from 8 AM and only if a `durationMin` visit ends by 8 PM.
+// Bookable only if a `durationMin` visit starting there ends by 8 PM.
 export function isBookableSlotIdx(slotIdx, durationMin = 60) {
   const startMin = snapSlotIdxToHourMin(slotIdx);
   const dur = Number.isFinite(durationMin) && durationMin > 0 ? durationMin : 60;
-  return startMin >= BOOKABLE_START_HOUR * 60 && startMin + dur <= DAY_END_HOUR * 60;
+  return startMin + dur <= DAY_END_HOUR * 60;
 }
 
 function SlotDroppable({ date, slotIdx, onCreateStart }) {
@@ -390,8 +398,8 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
       if (!cur) return;
       const lo = Math.min(cur.startIdx, cur.endIdx);
       const hi = Math.max(cur.startIdx, cur.endIdx);
-      // Hour-aligned block clamped to the bookable day (8 AM – 8 PM).
-      const startMin = Math.max(snapSlotIdxToHourMin(lo), BOOKABLE_START_HOUR * 60);
+      // Hour-aligned block clamped to the grid day (6 AM – 8 PM).
+      const startMin = Math.max(snapSlotIdxToHourMin(lo), DAY_START_HOUR * 60);
       const endMin = Math.min(
         DAY_END_HOUR * 60,
         Math.max(startMin + 60, Math.ceil(((hi + 1) * SLOT_MIN) / 60) * 60 + DAY_START_HOUR * 60),
@@ -461,10 +469,18 @@ function DayColumn({ day, onEdit, onTreatmentPlan, onViewCustomer, onCreateSlot 
           const lanes = computeLanes(services);
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
-            if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
-            const top = minutesToTopPx(startMin);
+            if (startMin == null || startMin >= DAY_END_HOUR * 60) return null;
+            // A visit timed before the grid's first row (there is no server
+            // floor any more) is never dropped: one that CROSSES the first
+            // row is clipped to its visible portion (05:00–07:00 draws as
+            // 06:00–07:00, so it can't fake an overlap with a real 07:00
+            // visit); one wholly before it is a compact block pinned on the
+            // first row. The block still carries its real window label.
             const dur = effectiveDuration(svc);
-            const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
+            const dispStart = Math.max(startMin, DAY_START_HOUR * 60);
+            const dispEnd = Math.max(startMin + dur, dispStart + SLOT_MIN);
+            const top = minutesToTopPx(dispStart);
+            const height = ((dispEnd - dispStart) / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };
             return (
               <AppointmentBlock
@@ -853,9 +869,9 @@ export default function TimeGridDays({
     if (fromDate === toDate && fromMin === toMin) return;
 
     const dur = effectiveDuration(svc);
-    // Pre-opening / past-day-end landings are disabled droppables; belt and
-    // braces for a stale drop payload (the server would 422 it anyway).
-    if (toMin == null || toMin < BOOKABLE_START_HOUR * 60 || toMin + dur > DAY_END_HOUR * 60) return;
+    // Past-day-end landings are disabled droppables; belt and braces for a
+    // stale drop payload (the server would 422 it anyway).
+    if (toMin == null || toMin + dur > DAY_END_HOUR * 60) return;
     const newWindow = `${minutesToHHMM(toMin)}-${minutesToHHMM(toMin + dur)}`;
 
     const updatedSvc = {

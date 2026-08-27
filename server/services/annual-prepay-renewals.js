@@ -559,6 +559,24 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
 // admin notification (dedupe-keyed per term+reason) alongside the log line so
 // the operator resolves it with the customer. Best-effort — a notification
 // failure never blocks payment activation.
+// Same notice, but deferred until the transaction that owns the write
+// COMMITS: fileCoverageException writes through the global connection and
+// dedupes per term+reason for 7 days, so a notice filed inside a trx that
+// later rolls back (attach/stamp failure downstream in refreshTermSnapshot)
+// would outlive the rollback and suppress the correct retry's notice.
+// `scope` is the outermost knex transaction (the caller-supplied conn when
+// it is one, else the transaction opened here); its executionPromise
+// settles at COMMIT (resolves) or ROLLBACK (rejects — nothing is filed).
+// A bare connection (or a test double) files immediately.
+function fileCoverageExceptionAfterCommit(scope, term, reason, body) {
+  const done = scope && scope !== db && scope.executionPromise;
+  if (done && typeof done.then === 'function') {
+    done.then(() => fileCoverageException(term, reason, body)).catch(() => {});
+    return Promise.resolve();
+  }
+  return fileCoverageException(term, reason, body);
+}
+
 async function fileCoverageException(term, reason, body) {
   try {
     // notifyAdmin does not interpret dedupeKey — enforce it here (same
@@ -1060,6 +1078,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
     let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
+    let overlapConflict = null;
     try {
       // SAVEPOINT: Postgres aborts the whole transaction on any statement
       // error, so catching a failed lock/conflict query on `trx` directly would
@@ -1072,7 +1091,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         // invoice/term row locks here, so reaching rung 1 late and WAITING
         // could deadlock against a booking that holds the date lock and wants
         // those rows (AGENTS.md occupancy ordering). Failing to get the lock
-        // degrades to a windowless seed — never an overlap, never a deadlock.
+        // degrades to a windowless seed (see the catch below) — never a
+        // deadlock, never a timed insert behind a writer we could not see.
         const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
         if (!(await tryAcquireOccupancyLock(sp, scheduledDate))) {
           throw new Error('occupancy date lock unavailable');
@@ -1094,15 +1114,24 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           durationMinutes: baseDuration,
           adoptableFor: { customerId: term.customer_id, coverageServiceType, isAdoptable: adoptableCoverageRow },
         });
+        // ADVISORY (owner ruling 2026-08-27 — schedule overlaps never block
+        // or drop a booking): the promised window is kept either way; a hit
+        // is surfaced as a coverage exception so the office can eyeball the
+        // day's route.
         if (conflict) {
-          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} collides with visit ${conflict.id} — seeding without a window`);
-          windowStart = null;
+          logger.warn(`[annual-prepay] term ${term.id} first-visit window ${windowStart} on ${scheduledDate} overlaps visit ${conflict.id} — keeping the promised window (overlaps are advisory)`);
+          overlapConflict = conflict;
         }
       });
     } catch (err) {
-      // Fail CLOSED: an unverifiable window must not become an overlapping
-      // timed promise. The visit still seeds on the right date, windowless.
-      logger.warn(`[annual-prepay] term ${term.id} first-visit conflict check failed (${err.message}) — seeding without a window`);
+      // A FOUND overlap is advisory (kept above), but an overlap we could
+      // not even probe is different: the date lock is held by a concurrent
+      // writer whose own capacity check still blocks (public self-booking),
+      // and a timed insert behind its probe would commit a second timed
+      // visit it never saw (occupancy.js lock contract). Degrade to a
+      // windowless seed — the visit still lands on the right date and the
+      // exception below tells the office to time it by hand.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit overlap probe could not complete (${err.message}) — seeding without a window`);
       windowStart = null;
       // The savepoint died before its adoption recheck ran (e.g. the date
       // lock was held by a concurrent booking — which may be creating exactly
@@ -1125,10 +1154,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
-    if (!windowStart && firstVisitWindowStart) {
-      await fileCoverageException(term, 'window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} now overlaps another job. The visit is on the schedule without a time — re-slot it with the customer.`);
-    }
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
     // activation already holds invoice/term row locks, and a merge-undo
     // holds customer-comms while FOR-UPDATE-ing journaled invoices, so a
@@ -1147,6 +1172,18 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    // Filed only once the visit actually exists: fileCoverageException writes
+    // through the global connection and dedupes for 7 days, so a notice
+    // emitted before a deferred/aborted insert would outlive the rollback
+    // and describe a visit that is not on the calendar.
+    const commitScope = conn === db ? trx : conn;
+    if (overlapConflict) {
+      await fileCoverageExceptionAfterCommit(commitScope, term, 'window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
+    } else if (!windowStart && firstVisitWindowStart) {
+      await fileCoverageExceptionAfterCommit(commitScope, term, 'window_unverified',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} could not be checked against the schedule while payment landed. The visit is on the schedule without a time — time it by hand.`);
+    }
     return row;
   };
 
@@ -1166,6 +1203,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     const row = adoptedPromisedRow;
     let windowStart = firstVisitWindowStart;
     let staleAdoption = false;
+    let overlapConflict = null;
     try {
       await trx.transaction(async (sp) => {
         // Same late-rung-1 posture as the timed seed: try, never wait.
@@ -1192,13 +1230,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
           durationMinutes: adoptedDuration,
           excludeServiceIds: [row.id],
         });
+        // ADVISORY (owner ruling 2026-08-27): the adopted visit is retimed
+        // to the promise regardless; a hit is filed for the office to see.
         if (conflict) {
-          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} collides with visit ${conflict.id} — leaving adopted visit ${row.id} untimed`);
-          windowStart = null;
+          logger.warn(`[annual-prepay] term ${term.id} promised window ${windowStart} on ${promisedTarget} overlaps visit ${conflict.id} — retiming adopted visit ${row.id} anyway (overlaps are advisory)`);
+          overlapConflict = conflict;
         }
       });
     } catch (err) {
-      logger.warn(`[annual-prepay] term ${term.id} adopted-visit window check failed (${err.message}) — leaving visit ${row.id} as-is`);
+      // The savepoint died before the identity recheck ran, so the row is
+      // unverified — that (not the overlap) is why it is left as-is.
+      logger.warn(`[annual-prepay] term ${term.id} adopted-visit recheck failed (${err.message}) — leaving visit ${row.id} as-is`);
       windowStart = null;
     }
     if (staleAdoption) {
@@ -1208,8 +1250,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       return;
     }
     if (!windowStart) {
-      await fileCoverageException(term, 'adopted_window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (it overlaps another job). Re-slot it with the customer.`);
+      await fileCoverageException(term, 'adopted_window_unverified',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} could not be applied to the existing visit (the schedule recheck failed). Re-time it by hand.`);
       return;
     }
     const updates = { updated_at: new Date() };
@@ -1221,6 +1263,13 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (cols.time_window) updates.time_window = null;
     if (cols.window_display) updates.window_display = null;
     await trx('scheduled_services').where({ id: row.id }).update(updates);
+    // Filed only once the retime is written (same rule as the seed path):
+    // the notice claims the visit WAS retimed, so it must never outlive a
+    // failed update.
+    if (overlapConflict) {
+      await fileCoverageExceptionAfterCommit(conn === db ? trx : conn, term, 'adopted_window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${promisedTarget} overlaps another job on the schedule. The visit was retimed as promised — confirm the day's route.`);
+    }
   };
   // Skip when the adopted visit is already completed (or otherwise terminal):
   // annual prepay collected at the completion appointment can adopt the

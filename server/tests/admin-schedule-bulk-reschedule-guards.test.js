@@ -766,17 +766,23 @@ test('a 06:30 windowStart lands in failed[] with the shared validator\'s reason 
   expect(updateChain.update).not.toHaveBeenCalled();
 });
 
-test('a pre-8am on-the-hour windowStart is refused the same way', async () => {
+test('a pre-8am on-the-hour windowStart moves (no day-start floor) and derives its end', async () => {
+  const updateChain = chain();
   wireTrx({
-    scheduled_services: [chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) })],
+    scheduled_services: [
+      chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
+      updateChain,
+    ],
+    reschedule_log: [chain()],
   });
   const { body } = await bulk({
     action: 'reschedule',
     serviceIds: ['svc-1'],
     payload: { scheduledDate: '2099-01-15', windowStart: '07:00' },
   });
-  expect(body.updated).toEqual([]);
-  expect(body.failed[0].reason).toMatch(/before 08:00/);
+  expect(body.updated).toEqual(['svc-1']);
+  expect(updateChain.update.mock.calls[0][0]).toMatchObject({ window_start: '07:00', window_end: '08:00' });
 });
 
 describe('always-on advisory occupancy probe', () => {
@@ -845,18 +851,20 @@ describe('always-on advisory occupancy probe', () => {
   });
 });
 
-test('a DATE-ONLY move of a legacy 07:00 row lands in failed[] — the stored window must satisfy the rules before it rides to a new date', async () => {
+test('a DATE-ONLY move of a 07:00 row moves — the stored window rides to the new date (no day-start floor)', async () => {
   const updateChain = chain();
   wireTrx({
     scheduled_services: [
       chain({ first: jest.fn().mockResolvedValue({ ...SVC, status: 'pending', window_start: '07:00:00', window_end: '08:00:00' }) }),
+      chain(), // always-on advisory occupancy probe (clean)
       updateChain,
     ],
+    reschedule_log: [chain()],
   });
   const { body } = await bulk({ action: 'reschedule', serviceIds: ['svc-1'], payload: { scheduledDate: '2099-01-15' } });
-  expect(body.updated).toEqual([]);
-  expect(body.failed[0].reason).toMatch(/before 08:00/);
-  expect(updateChain.update).not.toHaveBeenCalled();
+  expect(body.updated).toEqual(['svc-1']);
+  expect(body.failed).toEqual([]);
+  expect(updateChain.update).toHaveBeenCalled();
 });
 
 test('presence is not change: a row ALREADY on the target date with an unchanged block is not probed and draws no overlap note', async () => {

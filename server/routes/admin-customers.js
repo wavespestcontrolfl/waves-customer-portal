@@ -4401,24 +4401,33 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     if (firstVisitWindowStart && !AnnualPrepayTimes._private.addMinutesHHMM(firstVisitWindowStart, 60)) {
       return res.status(400).json({ error: 'firstVisitWindowStart is too late in the day to fit a service visit' });
     }
-    // Reject a promised time that already collides, so the operator picks
-    // another one while the customer is still on the phone. The seeder
-    // re-checks at payment time (the board can move in between) and drops the
-    // window rather than materializing an overlap.
+    // ADVISORY overlap probe (owner ruling 2026-08-27 — schedule overlaps
+    // never block a booking anywhere): a promised time that already collides
+    // is still accepted; the warning rides the response in the SAME
+    // `warnings[]` shape every other staff booking surface returns
+    // (window-rules slotOverlapWarning — consumed by CreateAppointmentModal
+    // and Customer 360), so the operator can eyeball the day while the
+    // customer is on the phone. The seeder re-probes at payment time and
+    // likewise keeps the window, filing a coverage exception. A probe
+    // failure is ignored — it can only warn.
+    let overlapWarning = null;
     if (firstVisitDate && firstVisitWindowStart) {
-      const conflict = await AnnualPrepayTimes.findVisitWindowConflict(db, {
-        scheduledDate: firstVisitDate,
-        windowStart: firstVisitWindowStart,
-        // A visit of this same coverage service already sitting at that hour is
-        // the one coverage will adopt, not a clash. The customer's OTHER
-        // services still count — they can't be performed simultaneously.
-        adoptableFor: { customerId: customer.id, coverageServiceType },
-      });
-      if (conflict) {
-        return res.status(409).json({
-          error: `${firstVisitWindowStart} on ${firstVisitDate} overlaps an existing visit. Pick another time.`,
-          conflictId: conflict.id,
+      try {
+        const conflict = await AnnualPrepayTimes.findVisitWindowConflict(db, {
+          scheduledDate: firstVisitDate,
+          windowStart: firstVisitWindowStart,
+          // A visit of this same coverage service already sitting at that hour is
+          // the one coverage will adopt, not a clash. The customer's OTHER
+          // services still count — they can't be performed simultaneously.
+          adoptableFor: { customerId: customer.id, coverageServiceType },
         });
+        if (conflict) {
+          // Future tense on purpose: the promised visit is seeded when the
+          // term ACTIVATES (payment / credit), not when this invoice is minted.
+          overlapWarning = `Heads up: the promised ${firstVisitWindowStart} first visit on ${firstVisitDate} overlaps another appointment on the schedule. It will still be booked at that time when the invoice is paid — check the day's route.`;
+        }
+      } catch (probeErr) {
+        logger.warn(`[annual-prepay] first-visit overlap probe failed (${probeErr.message}) — continuing without a warning`);
       }
     }
 
@@ -4713,6 +4722,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       settledByDepositCredit,
       annualPrepayTerm: term ? mapAnnualPrepayTerm(term) : null,
       delivery,
+      ...(overlapWarning ? { warnings: [overlapWarning] } : {}),
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);

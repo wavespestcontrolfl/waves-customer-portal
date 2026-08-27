@@ -92,9 +92,13 @@ test('END-only edit on a windowless row → 422 (a start is required)', async ()
   expect(body.error).toMatch(/without a start/);
 });
 
-test('START-only pre-8am / half-hour edits → 422', async () => {
-  expect((await put({ windowStart: '07:00' })).body.error).toMatch(/before 08:00/);
+test('START-only half-hour edit → 422; a pre-8am on-the-hour start passes validation (no day-start floor)', async () => {
   expect((await put({ windowStart: '09:30' })).body.error).toMatch(/on the hour/);
+  expect(db.transaction).not.toHaveBeenCalled();
+  db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+  const { status } = await put({ windowStart: '07:00' });
+  expect(db.transaction).toHaveBeenCalledTimes(1);
+  expect(status).toBe(418);
 });
 
 describe('rung-1 wiring (source-pattern guards)', () => {
@@ -172,12 +176,12 @@ describe('adminMoveProbeExcludeIds — batch-move exclusion for the admin move p
 });
 
 describe('date-only moves + the scheduling-field CAS', () => {
-  test('a DATE-ONLY move of a legacy 07:00 row → 422 before the transaction', async () => {
+  test('a DATE-ONLY move of a 07:00 row passes validation and opens the transaction (no day-start floor)', async () => {
     db.mockImplementation(() => chain({ ...STORED, window_start: '07:00:00', window_end: '08:00:00' }));
-    const { status, body } = await put({ scheduledDate: '2099-02-01' });
-    expect(status).toBe(422);
-    expect(body.error).toMatch(/before 08:00/);
-    expect(db.transaction).not.toHaveBeenCalled();
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('reached trx'), { status: 418 }); });
+    const { status } = await put({ scheduledDate: '2099-02-01' });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(status).toBe(418);
   });
 
   test('a DATE-ONLY move of a windowless row (both null) passes validation and opens the transaction', async () => {

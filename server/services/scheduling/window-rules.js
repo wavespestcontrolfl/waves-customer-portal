@@ -6,10 +6,13 @@
  * Rules (owner rulings):
  *   - every appointment is a 60-minute slot that starts ON THE HOUR (HH:00)
  *     — same rule admin-leads' schedule-appointment route already enforces;
- *   - no client appointment before 08:00 ET;
  *   - end > start, end <= 20:00 — the admin dispatch grid's day end
  *     (TimeGridDay DAY_END_HOUR); the customer slot finder stops at 17:00
  *     but admins book evening visits the self-booking path never offers.
+ *
+ * There is deliberately NO earliest-start floor (owner ruling 2026-08-27:
+ * the former "no client appointments before 08:00" 422 blocked real saves
+ * and was removed outright — an early start is the operator's call).
  *
  * Overlap (probeSlotOverlap) reuses the shared occupancy mechanism
  * (scheduling/occupancy.js — tech-blind findConflictingVisits under the
@@ -21,13 +24,12 @@
  * removed on PR #3486 once the probe stopped blocking.)
  */
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./occupancy');
-const { DAY_START_HOUR } = require('./find-time');
 
 // Admin day END is the dispatch grid's bound (TimeGridDay DAY_END_HOUR = 20),
 // not the customer slot-finder's 17:00: operators legitimately book/move
-// evening visits the self-booking path never offers. Start bound is shared.
+// evening visits the self-booking path never offers. There is no start
+// bound — any on-the-hour start from 00:00 is accepted.
 const ADMIN_DAY_END_HOUR = 20;
-const ADMIN_DAY_START_MINUTES = DAY_START_HOUR * 60;
 const ADMIN_DAY_END_MINUTES = ADMIN_DAY_END_HOUR * 60;
 const DEFAULT_DURATION_MINUTES = 60;
 
@@ -68,9 +70,6 @@ function assertAdminAppointmentWindow({ windowStart, windowEnd, durationMinutes 
   }
   if (startMin % 60 !== 0) {
     throw invalidWindow(`Appointment windows start on the hour — got "${minutesToHHMM(startMin)}"; use "${minutesToHHMM(startMin - (startMin % 60))}"`);
-  }
-  if (startMin < ADMIN_DAY_START_MINUTES) {
-    throw invalidWindow(`No client appointments before ${minutesToHHMM(ADMIN_DAY_START_MINUTES)} — got "${minutesToHHMM(startMin)}"`);
   }
   let endMin;
   if (windowEnd != null && windowEnd !== '') {
@@ -164,7 +163,6 @@ module.exports = {
   slotOverlapWarning,
   acquireAdminSlotLocks,
   ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-  ADMIN_DAY_START_MINUTES,
   ADMIN_DAY_END_MINUTES,
   _internals: { parseHHMM, minutesToHHMM },
 };

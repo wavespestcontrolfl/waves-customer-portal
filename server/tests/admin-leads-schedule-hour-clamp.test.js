@@ -100,13 +100,16 @@ describe('POST /admin/leads/:id/schedule-appointment shared window rules (schedu
     db.transaction = jest.fn(async () => { throw new Error('transaction must not open on a refused window'); });
   }
 
-  it('rejects a pre-8am on-the-hour start with 400', async () => {
+  it('lets a pre-8am on-the-hour start through validation (no day-start floor)', async () => {
     await withServer(async (baseUrl) => {
       leadFound();
       const res = await postAppointment(baseUrl, { time: '07:00' });
-      expect(res.status).toBe(400);
-      expect((await res.json()).error).toMatch(/before 08:00/);
-      expect(db.transaction).not.toHaveBeenCalled();
+      const body = await res.json();
+      // The window validator no longer 400s an early start; the route moves
+      // on past the lead lookup (the rest of the booking is not mocked here).
+      expect(res.status).not.toBe(400);
+      expect(body.error || '').not.toMatch(/before 08:00/);
+      expect(db).toHaveBeenCalledWith('leads');
     });
   });
 
