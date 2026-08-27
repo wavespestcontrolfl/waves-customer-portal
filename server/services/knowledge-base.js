@@ -407,12 +407,17 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       const GBP_PLATFORMS = { gbp_lwr: 'LWR', gbp_parrish: 'PARRISH', gbp_sarasota: 'SARASOTA', gbp_venice: 'VENICE' };
       for (const [platform, envKey] of Object.entries(GBP_PLATFORMS)) {
         const res = await TokenHealthService.checkSingle(platform);
+        // TokenHealth vocabulary → this route's contract (healthy / expired /
+        // expiring-soon / error): a missing credential set was always reported
+        // here as status 'error' with the reason, and the KB page has no badge
+        // for 'not_configured'.
+        const notConfigured = res.status === 'not_configured';
         results.push({
           platform,
           credential_type: 'refresh-token',
           env_var_name: `GBP_REFRESH_TOKEN_${envKey}`,
-          status: res.status,
-          error: res.lastError || null,
+          status: notConfigured ? 'error' : res.status,
+          error: res.lastError || (notConfigured ? `Missing GBP OAuth credentials for ${envKey}` : null),
           expires_at: res.expiresAt || null,
         });
       }
@@ -459,7 +464,10 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── Alert on failures ──
-    const failures = results.filter(r => r.status === 'expired' || r.status === 'expiring-soon');
+    // 'error' (invalid credentials, provider/API failure, not configured) is a
+    // failure needing attention too — excluding it made an all-error check
+    // report zero failures and send no alert.
+    const failures = results.filter(r => r.status === 'expired' || r.status === 'expiring-soon' || r.status === 'error');
     if (failures.length > 0) {
       const alertMsg = `Token Alert: ${failures.length} credential(s) need attention:\n${failures.map(f => `- ${f.platform}: ${f.status}${f.error ? ' — ' + f.error.substring(0, 100) : ''}`).join('\n')}`;
       logger.warn(`[token-health] ${alertMsg}`);
