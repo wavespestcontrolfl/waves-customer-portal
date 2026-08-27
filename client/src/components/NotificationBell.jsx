@@ -14,14 +14,18 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // worker's badge-ordering state under the same Web Lock (sw.js
 // applyAppBadge): a push issued before this count but delivered after —
 // the delayed-push case — must not resurrect a number the admin already
-// cleared by reading. Never rejects; callers fire-and-forget.
-async function syncAppBadge(count) {
+// cleared by reading. `at` is the SERVER-clock stamp the response carried
+// (unread-count/read/read-all all return one) — the same clock domain as
+// the push payload's badgeAt, so device clock skew can never invert the
+// ordering; without a stamp the seq write is skipped and ordering
+// advances on the next stamped call. Never rejects; fire-and-forget.
+async function syncAppBadge(count, at) {
   if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
   const apply = async () => {
     try {
-      if (typeof caches !== 'undefined') {
+      if (Number.isFinite(at) && typeof caches !== 'undefined') {
         const cache = await caches.open('waves-badge-state');
-        await cache.put('/__badge-seq', new Response(JSON.stringify({ seq: Date.now(), count })));
+        await cache.put('/__badge-seq', new Response(JSON.stringify({ seq: at, count })));
       }
     } catch { /* ordering state is best-effort */ }
     try {
@@ -88,7 +92,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       requestJson(`${basePath}/unread-count`)
         .then(d => {
           setUnreadCount(d.count || 0);
-          if (type === 'admin') syncAppBadge(d.count || 0);
+          if (type === 'admin') syncAppBadge(d.count || 0, d.at);
         })
         .catch(() => {});
     };
@@ -234,25 +238,27 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
     // write (expired token the refresh couldn't save) must not clear badges.
+    let readRes;
     try {
-      await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
+      readRes = await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
     setUnreadCount(prev => {
       const next = Math.max(0, prev - 1);
       // Idempotent, so a double-invoked updater (StrictMode) is harmless.
-      if (type === 'admin') syncAppBadge(next);
+      if (type === 'admin') syncAppBadge(next, readRes?.at);
       return next;
     });
   };
 
   const markAllRead = async () => {
+    let readAllRes;
     try {
-      await requestJson(`${basePath}/read-all`, { method: 'PUT' });
+      readAllRes = await requestJson(`${basePath}/read-all`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
-    if (type === 'admin') syncAppBadge(0);
+    if (type === 'admin') syncAppBadge(0, readAllRes?.at);
   };
 
   // Group by time: Today, Yesterday, This Week, Older

@@ -599,7 +599,9 @@ describe('live dashboard-alert overlay under the bell policy', () => {
       const res = await fetch(`${baseUrl}/admin/notifications/unread-count`);
       const json = await res.json();
       expect(res.status).toBe(200);
-      expect(json).toEqual({ count: 3 });
+      // `at` is the server-clock badge-ordering stamp added for the
+      // app-icon badge (PR #3541) — shape-asserted, value is wall-clock.
+      expect(json).toEqual({ count: 3, at: expect.any(Number) });
     });
     expect(computeDashboardAlerts).not.toHaveBeenCalled();
   });

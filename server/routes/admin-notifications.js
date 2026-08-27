@@ -92,7 +92,10 @@ router.get('/issues', requireAdmin, async (req, res, next) => {
 router.get('/unread-count', async (req, res, next) => {
   try {
     const count = await getUnreadCountForAdmin({ adminUserId: req.technicianId, role: req.techRole });
-    res.json({ count });
+    // `at` is the badge-ordering stamp: the SERVER clock, same domain as
+    // the push payload's badgeAt (notification-triggers), so the client
+    // never compares its own wall clock against the server's.
+    res.json({ count, at: Date.now() });
   } catch (err) { next(err); }
 });
 
@@ -184,7 +187,8 @@ router.put('/read-all', async (req, res, next) => {
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
     if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
-    res.json({ success: true });
+    // Server-clock badge-ordering stamp — see /unread-count.
+    res.json({ success: true, at: Date.now() });
   } catch (err) { next(err); }
 });
 
@@ -306,11 +310,12 @@ router.put('/:id/read', async (req, res, next) => {
       }
       const alertId = id.slice('live:'.length);
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
-      return res.json({ success: true, live: true, dismissed: recorded > 0 });
+      return res.json({ success: true, live: true, dismissed: recorded > 0, at: Date.now() });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
     const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
-    res.json({ success: true, updated });
+    // Server-clock badge-ordering stamp — see /unread-count.
+    res.json({ success: true, updated, at: Date.now() });
   } catch (err) { next(err); }
 });
 
