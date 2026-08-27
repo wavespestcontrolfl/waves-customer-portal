@@ -2208,6 +2208,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('    ```\n| A | B |\n| --- | --- |\n')).toBe(true);
     // A same-marker line with trailing text does not close a fence.
     expect(guardrails.hasRawMarkdownTable('```\n``` not a close\n| A | B |\n| --- | --- |\n```\n')).toBe(false);
+    // A table indented under a list item is a live table (list child block), not code.
+    expect(guardrails.hasRawMarkdownTable('1. Comparison:\n\n    | Option | Cost |\n    | --- | --- |\n    | DIY | $10 |\n')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

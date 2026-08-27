@@ -1831,16 +1831,26 @@ function extractRawMarkdownTables(text) {
   // CommonMark fences: a fence closes only on the SAME marker character with
   // at least the opening run length — a ``` inside a ~~~ block is content.
   let fence = null; // { ch, len }
+  // List context: a 4-space-indented line is an indented CODE block only at
+  // top level — under a list item ("1. Comparison:" then indented `| … |`
+  // rows) it is the item's child block and a table there is a live table.
+  // Context ends at a blank line followed by a non-indented, non-list line.
+  let listContext = false;
+  let prevBlank = true;
   const lines = raw.map((l) => {
     // Strip blockquote prefixes first so fences/tables inside quotes are seen.
     const stripped = l.replace(/^\s*(?:>\s*)+/, '');
     if (!fence) {
-      // 4-space / tab indent is an indented code block (CommonMark) — never a
-      // fence and never a table row.
-      if (/^(?: {4}|\t)/.test(stripped)) return '';
+      const blank = stripped.trim() === '';
+      const indented = /^(?: {4}|\t)/.test(stripped);
+      const listItem = /^ {0,3}(?:[-*+]|\d+[.)])\s+/.test(stripped);
+      if (listItem) listContext = true;
+      else if (!blank && !indented && prevBlank) listContext = false;
+      prevBlank = blank;
+      if (indented && !listContext) return '';
       const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
-      return stripped;
+      return stripped.replace(/^\s+/, '');
     }
     // Inside a fence: closes only on the same marker char, >= opening length,
     // <=3 leading spaces, and NOTHING but trailing whitespace after it.

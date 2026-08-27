@@ -423,7 +423,9 @@ function badCtaAnchor(body, brief = {}) {
   const allowed = briefService ? allowedAnchorServices(briefService) : null;
   const bad = conversionCtaLinks(body).find((link) => {
     if (link.hasEstimateWording) {
-      return allowed && link.named.length > 0 && !link.named.every((svc) => allowed.has(svc));
+      // With a known brief service, EVERY estimate/quote anchor must name it
+      // (or its family) — a generic "Request a Quote" is not tied to the post.
+      return allowed && (link.named.length === 0 || !link.named.every((svc) => allowed.has(svc)));
     }
     return !PROSE_REFERENCE_ANCHOR_RE.test(link.anchor);
   });

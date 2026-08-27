@@ -209,6 +209,13 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(genericOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    // …and beside a valid service-tied CTA it is still a wording violation.
+    const genericExtra = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/pest-control-quote/) or [Request a Quote](/contact/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(genericExtra.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
   test('a wrong-service estimate anchor does not satisfy the CTA check', () => {
