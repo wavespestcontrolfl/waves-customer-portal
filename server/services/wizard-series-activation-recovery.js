@@ -61,15 +61,34 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   for (const parent of stranded) {
     try {
       const didStrip = await database.transaction(async (trx) => {
-        // Same serialization + re-check the activation failure-strip uses:
-        // under the comms lock, an is_recurring parent IS a completed
-        // activation (a slow in-flight request can finish between the
-        // sweep read and this lock) — touch nothing.
+        // Re-validate the ENTIRE stranded predicate under the comms lock
+        // and a parent row lock (codex #3504 r6 hook): everything can have
+        // moved since the sweep's unlocked read — a slow in-flight request
+        // can finish activating (is_recurring), children can appear, the
+        // visit can complete/cancel, and the draft can be archived or
+        // promoted (in which case the bell's "live convertible quote"
+        // promise would be false). Any drift → touch nothing; a still-
+        // stranded row is re-noticed next sweep.
         await lockCustomerComms(trx, parent.customer_id);
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
-          .first('id', 'is_recurring', 'payment_method_preference');
-        if (!fresh || fresh.is_recurring || fresh.payment_method_preference !== 'pay_at_visit') return false;
+          .forUpdate()
+          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id');
+        if (!fresh
+          || fresh.is_recurring
+          || fresh.payment_method_preference !== 'pay_at_visit'
+          || !['pending', 'confirmed'].includes(String(fresh.status || ''))
+          || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
+        const freshChild = await trx('scheduled_services')
+          .where({ recurring_parent_id: parent.id })
+          .whereNot('status', 'cancelled')
+          .first('id');
+        if (freshChild) return false;
+        const freshDraft = await trx('estimates')
+          .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
+          .whereNull('archived_at')
+          .first('id');
+        if (!freshDraft) return false;
         await trx('scheduled_services')
           .where({ id: parent.id })
           .update({

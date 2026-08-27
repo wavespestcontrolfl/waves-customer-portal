@@ -379,9 +379,14 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/linkAcceptedEstimateProperty\(\{ estimateId: pricing_estimate_id, customerId: custId \}\)/);
     expect(booking).toMatch(/syncCustomerWaveGuardPlanFromScheduledServices\(\{ database: trx, customerId: custId \}\)/);
     expect(booking).toMatch(/runWizardActivationFollowThrough = async \(parentRowId\)[\s\S]{0,3000}AppointmentTagger\.onServiceScheduled\(parentRowId\)/);
-    // Both activation completions run it — primary and replay.
-    expect(booking).toMatch(/void runWizardActivationFollowThrough\(serviceRow\.id\);/);
-    expect(booking).toMatch(/void runWizardActivationFollowThrough\(replayParent\.id\);/);
+    // Both activation completions run it AWAITED — primary and replay —
+    // and alreadyActivated retries heal a lost follow-through (codex
+    // #3504 r6 hook: unawaited, a worker exit lost the property stamps
+    // with no retry path).
+    expect(booking).toMatch(/seriesOutcome\?\.seedResult \|\| seriesOutcome\?\.alreadyActivated/);
+    expect(booking).toMatch(/await runWizardActivationFollowThrough\(serviceRow\.id\);/);
+    expect(booking).toMatch(/replayActivation\?\.seedResult \|\| replayActivation\?\.alreadyActivated/);
+    expect(booking).toMatch(/await runWizardActivationFollowThrough\(replayParent\.id\);/);
   });
 
   test('a stranded activation (worker died between booking commit and activation) is recovered by the strip sweep', () => {
@@ -392,7 +397,13 @@ describe('booking route wiring (source contracts)', () => {
     expect(recovery).toMatch(/whereNotNull\('ss\.self_booking_id'\)/);
     expect(recovery).toMatch(/where\('e\.status', 'draft'\)/);
     expect(recovery).toMatch(/lockCustomerComms\(trx, parent\.customer_id\)/);
-    expect(recovery).toMatch(/if \(!fresh \|\| fresh\.is_recurring \|\| fresh\.payment_method_preference !== 'pay_at_visit'\) return false;/);
+    // The FULL stranded predicate re-validates under the lock (codex
+    // #3504 r6 hook): status, activation, children, and the live draft.
+    expect(recovery).toMatch(/\.forUpdate\(\)/);
+    expect(recovery).toMatch(/\['pending', 'confirmed'\]\.includes\(String\(fresh\.status \|\| ''\)\)/);
+    expect(recovery).toMatch(/freshChild/);
+    expect(recovery).toMatch(/freshDraft/);
+    expect(recovery).toMatch(/whereNull\('archived_at'\)/);
     expect(recovery).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
     const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     expect(indexSrc).toMatch(/sweepStrandedWizardActivations\(\{ limit: 10 \}\)/);

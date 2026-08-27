@@ -3394,9 +3394,12 @@ async function createSelfBooking(payload = {}) {
             }
             // Same post-activation follow-through as the primary path
             // (property stamping, tier sync, tagger/welcome re-run) — a
-            // replay-completed activation must not skip it (codex #3504 r6).
-            if (replayActivation?.seedResult) {
-              void runWizardActivationFollowThrough(replayParent.id);
+            // replay-completed activation must not skip it, and an
+            // alreadyActivated replay heals a first request that died
+            // before its own follow-through (every step idempotent;
+            // codex #3504 r6 + hook).
+            if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
+              await runWizardActivationFollowThrough(replayParent.id);
             }
           }
         } catch (err) {
@@ -3627,11 +3630,16 @@ async function createSelfBooking(payload = {}) {
       // stays a single visit with the waiver-only disposition below.
       const seriesOutcome = await activateWizardSeries(serviceRow);
       if (seriesOutcome?.kept) duplicateSeriesKept = seriesOutcome.kept;
-      else if (seriesOutcome?.seedResult) {
-        followUpRows = seriesOutcome.seedResult.insertedRows || [];
-        // Fire-and-forget: the booking response never waits on property
-        // stamping / tier sync / the tagger re-run (all best-effort).
-        void runWizardActivationFollowThrough(serviceRow.id);
+      else if (seriesOutcome?.seedResult || seriesOutcome?.alreadyActivated) {
+        followUpRows = seriesOutcome.seedResult?.insertedRows || [];
+        // AWAITED, not fire-and-forget (codex #3504 r6 hook): a worker
+        // exiting after the activation commit would otherwise lose the
+        // property stamps for a secondary-property plan with no retry path
+        // (each step is individually best-effort and never throws). Also
+        // runs on alreadyActivated so a crash-retry that lost this step
+        // heals it — every step is idempotent (linkage stamps only
+        // unstamped rows, sync converges, tagger/welcome dedupe).
+        await runWizardActivationFollowThrough(serviceRow.id);
       }
 
     } else if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
