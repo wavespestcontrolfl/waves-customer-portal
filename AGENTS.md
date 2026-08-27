@@ -530,7 +530,7 @@ violations at the severity noted.
   `timezone: 'America/New_York'` explicitly.
 - **Payment processor.** Stripe only — Payment Element (card / Apple Pay
   / Google Pay / ACH). Card-family pays a surcharge (up to 2.9%); ACH pays the base.
-  Surcharge math is centralized in `server/services/stripe.js`
+  Surcharge math is centralized in `server/services/stripe-pricing.js`
   (`computeChargeAmount`, `isCardMethodType`). Square is fully phased out
   and must not be reintroduced.
 - **Webhooks.** Single Stripe webhook router at
