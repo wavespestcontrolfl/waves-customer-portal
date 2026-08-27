@@ -1395,6 +1395,51 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(callLed.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Canonical stinging-insect wording names the wasp service — both the
+    // umbrella tag and "yellow jacket" pass on a Stinging Insects post.
+    for (const anchor of ['Request a Stinging Insect Quote', 'Request a Yellow Jacket Quote']) {
+      const stinging = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `W. [${anchor}](/contact/) now.` }),
+        brief: baseBrief({ service: 'Stinging Insects' }),
+        shadowMode: true,
+      });
+      expect(stinging.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+      expect(stinging.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    }
+
+    // A definition whose bare destination has UNBALANCED parentheses is
+    // ordinary text — the reference cannot satisfy presence.
+    const unbalancedDefDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'See [Get a Termite Estimate][cta] now.\n\n[cta]: /x(/../contact/' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(unbalancedDefDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // An UNTERMINATED "<!--" comments out everything through EOF — its
+    // hidden link never satisfies presence.
+    const openComment = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Intro.\n\n<!--\n[Get a Termite Estimate](/contact/)' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(openComment.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // CRLF is one line ending inside inline link syntax — the CTA is live;
+    // a CRLF blank line still rejects it.
+    const crlfDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](\r\n/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(crlfDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    const crlfBlank = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](\r\n\r\n/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(crlfBlank.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

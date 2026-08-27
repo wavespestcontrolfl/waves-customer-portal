@@ -291,7 +291,9 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   spider: /\bspiders?\b/i,
   flea: /\bfleas?\b/i,
   tick: /\bticks?\b/i,
-  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b/i,
+  // "Stinging insects" and "yellow jackets" are the canonical aliases for
+  // this service (blog-writer's TAG_ALIASES uses the same equivalence).
+  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b|\bstinging[ -]insects?\b|\byellow[ -]?jackets?\b/i,
   // WDI (wood-destroying insect) is the established inspection-report
   // acronym alongside WDO — both name this service in CTA wording.
   wdo: /\bwd[oi]\b|wood[- ]destroying/i,
@@ -365,8 +367,25 @@ function isProseReferenceAnchor(anchor) {
 // SAME alias table the brief builder uses (termite-inspection → termite,
 // lawn-fertilization → lawn), so an established brief service can never be
 // parked by a partial local normalization.
+// The canonical BLOG_TAGS taxonomy (blog-writer.js) includes tags that
+// name MULTIPLE services or don't reduce to a vocabulary key by
+// suffix-stripping — resolve them explicitly so a tag-shaped service value
+// still arms the service-aware checks. Multi-service entries union in
+// collectForbiddenCtaAnchors; the single-service brief path takes the
+// first entry.
+const CANONICAL_TAG_SERVICES = {
+  'fleas & ticks': ['flea', 'tick'],
+  'fleas and ticks': ['flea', 'tick'],
+  'stinging insects': ['wasp'],
+  'lawn disease': ['lawn'],
+  'lawn pests': ['lawn'],
+  'lawn pest': ['lawn'],
+};
+
 function ctaBriefService(rawService) {
   if (!rawService) return null;
+  const canonical = CANONICAL_TAG_SERVICES[String(rawService).toLowerCase().trim()];
+  if (canonical) return canonical[0];
   const base = String(rawService).toLowerCase().trim().replace(/\s+/g, '-');
   // Try the id itself, then plural-stripped and "-control"/"-care"/
   // "-treatment"-stripped forms against the anchor vocabulary first, so
@@ -507,8 +526,22 @@ function extractLinks(body) {
   // is ordinary text, not a definition (CommonMark).
   const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)([^\n]*)/gm;
   const defTail = /^[ \t]*$|^[ \t]+(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^()\\])*\))[ \t]*$/;
+  // A BARE definition destination must balance its parentheses (escapes
+  // aside) — "[cta]: /x(/../contact/" is ordinary text, not a definition
+  // (same rule the inline-destination walk enforces).
+  const balancedBareDest = (d) => {
+    if (/^<[^<>\n]*>$/.test(d)) return true;
+    let depth = 0;
+    for (let k = 0; k < d.length; k += 1) {
+      if (d[k] === '\\') { k += 1; continue; }
+      if (d[k] === '(') depth += 1;
+      else if (d[k] === ')') { depth -= 1; if (depth < 0) return false; }
+    }
+    return depth === 0;
+  };
   while ((m = def.exec(sMd)) !== null) {
     if (!defTail.test(m[3])) continue;
+    if (!balancedBareDest(m[2])) continue;
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
     consumed.push([m.index, m.index + m[0].length]);
@@ -565,7 +598,9 @@ function extractLinks(body) {
   const skipInlineWs = (str, from) => {
     let k = from;
     let nl = 0;
-    while (k < str.length && /[ \t\n]/.test(str[k])) {
+    // "\r" rides along with its "\n" (CRLF is one line ending); only the
+    // second NEWLINE — a blank line — rejects the link.
+    while (k < str.length && /[ \t\n\r]/.test(str[k])) {
       if (str[k] === '\n') { nl += 1; if (nl > 1) return -1; }
       k += 1;
     }
@@ -925,19 +960,6 @@ function forbiddenCtaAnchor(body) {
 // coarse legacy category ("pest-control") never authorizes sibling
 // specialties when a more specific tag resolves too ("Termites" must not
 // admit a cockroach quote). Equally specific candidates still union.
-// The canonical BLOG_TAGS taxonomy (blog-writer.js) includes tags that
-// name MULTIPLE services or don't reduce to a vocabulary key by
-// suffix-stripping — resolve them explicitly so a legacy row carrying one
-// still arms the service-aware check.
-const CANONICAL_TAG_SERVICES = {
-  'fleas & ticks': ['flea', 'tick'],
-  'fleas and ticks': ['flea', 'tick'],
-  'stinging insects': ['wasp'],
-  'lawn disease': ['lawn'],
-  'lawn pests': ['lawn'],
-  'lawn pest': ['lawn'],
-};
-
 function collectForbiddenCtaAnchors(body, { service = null } = {}) {
   const out = [];
   let allowed = null;

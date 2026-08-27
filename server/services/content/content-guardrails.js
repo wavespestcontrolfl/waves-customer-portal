@@ -1975,7 +1975,9 @@ function blankNonRenderedMarkdownWithDepths(text) {
     || fenceIntervals.some(([a, b]) => pos >= a && pos < b)
     || attrIntervals.some(([a, b]) => pos >= a && pos < b);
   const afterComments = raw
-    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
+    // An UNTERMINATED "<!--" comments out everything through EOF
+    // (CommonMark HTML block type 2 ends only at "-->").
+    .replace(/<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
   // lines), masked BEFORE fences so a span opened after prose can close at a
   // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
