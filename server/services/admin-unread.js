@@ -33,18 +33,21 @@ const DISMISS_WINDOW_HOURS = 24;
 // never break the bell.
 //
 // trx (optional): run the per-admin dismissal queries on an existing
-// transaction's connection (see getUnreadCountForAdmin). NOT threaded
-// into computeDashboardAlerts — that is a shared 30s-memoized global
-// whose pool usage is identical to what the bell route already did on
-// main before this feature; a transaction handle would defeat the memo.
-async function liveAlertNotifications(adminUserId, trx = null) {
-  let alerts = [];
-  try {
-    const result = await computeDashboardAlerts();
-    alerts = result.alerts || [];
-  } catch (err) {
-    logger.error(`[admin-unread] computeDashboardAlerts failed: ${err.message}`);
-    return { live: [], liveKeys: new Set() };
+// transaction's connection (see getUnreadCountForAdmin).
+// precomputedAlerts (optional): use this alert snapshot instead of
+// calling the shared aggregator — badge sections compute the snapshot
+// BEFORE reserving their transaction and hand it in, so the aggregator
+// never runs while a pool connection is held (codex rounds 12–13).
+async function liveAlertNotifications(adminUserId, trx = null, precomputedAlerts = null) {
+  let alerts = precomputedAlerts;
+  if (!alerts) {
+    try {
+      const result = await computeDashboardAlerts();
+      alerts = result.alerts || [];
+    } catch (err) {
+      logger.error(`[admin-unread] computeDashboardAlerts failed: ${err.message}`);
+      return { live: [], liveKeys: new Set() };
+    }
   }
 
   // liveKeys covers all currently-active alerts at their current count,
@@ -171,10 +174,10 @@ function isLiveDuplicate(persisted, liveKeys) {
 // holding one (codex #3541 round 11 — twenty concurrent staff polls
 // could otherwise hold twenty transactions all waiting for compute
 // connections).
-async function computeUnreadCount({ adminUserId, role } = {}, trx = null) {
+async function computeUnreadCount({ adminUserId, role } = {}, trx = null, precomputedAlerts = null) {
   const liveCtx = isBellPolicyEnabled() || role !== 'admin'
     ? { live: [], liveKeys: new Set() }
-    : await liveAlertNotifications(adminUserId, trx);
+    : await liveAlertNotifications(adminUserId, trx, precomputedAlerts);
   let persistedCount = await NotificationService.getAdminUnreadCount({ role }, trx);
   if (liveCtx.liveKeys.size > 0) {
     try {
@@ -309,17 +312,26 @@ async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandon
 // fan-out only); opts.abandoned lets a queued caller that already gave
 // up cancel the task before it starts.
 async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
-  // Pre-warm the shared alert memo BEFORE the section reserves its
-  // transaction (codex round 12): a cold computeDashboardAlerts run
-  // borrows pool connections, and it must not do so while we already
-  // hold one — inside the section the 30s-memoized call then returns
-  // the warmed snapshot without touching the pool. Failure is fine:
-  // liveAlertNotifications already degrades to an empty overlay.
+  // Compute the shared alert aggregate BEFORE the section reserves its
+  // transaction and hand the SNAPSHOT into the locked count (codex
+  // rounds 12–13): a cold aggregation borrows pool connections and must
+  // never run while we hold one, and merely pre-warming the 30s memo is
+  // not enough — its timestamp is set when computation STARTS, so an
+  // aggregation slower than the TTL expires on arrival and an in-section
+  // call would recompute. With the snapshot passed in, the section never
+  // touches the aggregator at all. Failure degrades to an empty overlay,
+  // exactly as liveAlertNotifications does on its own.
+  let alerts = null;
   if (role === 'admin' && !isBellPolicyEnabled()) {
-    try { await computeDashboardAlerts(); } catch { /* section degrades to empty overlay */ }
+    try {
+      alerts = (await computeDashboardAlerts()).alerts || [];
+    } catch (err) {
+      logger.error(`[admin-unread] computeDashboardAlerts failed: ${err.message}`);
+      alerts = [];
+    }
   }
   return withBadgeOrderingStamp(adminUserId, async (trx) => ({
-    count: await computeUnreadCount({ adminUserId, role }, trx),
+    count: await computeUnreadCount({ adminUserId, role }, trx, alerts),
   }), opts);
 }
 
