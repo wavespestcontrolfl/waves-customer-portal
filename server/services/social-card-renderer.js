@@ -285,9 +285,73 @@ function renderBlogSvg(input = {}, logoDataUri = null) {
   `;
 }
 
+// Versus card: side-by-side pest ID comparison (the "X vs Y" format local pest
+// audiences engage with most). Two named columns of short diagnostic points, a
+// center VS badge, and a one-line verdict. Deterministic text-only render — no
+// pest imagery — so it is GBP-eligible (no AI imagery on GBP) by construction.
+function renderVersusSvg(input = {}, logoDataUri = null) {
+  const { w: W, h: H } = resolveSize(input.platform);
+  const city = cleanText(input.city || input.location, 60);
+  const service = cleanText(input.service, 70) || 'Pest ID';
+  const left = input.left || {};
+  const right = input.right || {};
+  const leftName = cleanText(left.name, 40) || 'Pest A';
+  const rightName = cleanText(right.name, 40) || 'Pest B';
+  const leftPoints = (Array.isArray(left.points) ? left.points : []).slice(0, 3);
+  const rightPoints = (Array.isArray(right.points) ? right.points : []).slice(0, 3);
+  const verdict = cleanText(input.verdict, 120);
+
+  const { svg: frame, box } = chrome({ W, H, city, service, logoDataUri });
+  const eyebrowY = box.panelY + 128;
+  const midX = Math.round((box.padL + box.padR) / 2);
+  const colGap = 44;
+  const colW = midX - colGap - box.padL;
+
+  const nameSize = Math.round(W * 0.034);
+  const pointSize = Math.round(W * 0.022);
+  const namesY = eyebrowY + 62 + nameSize;
+
+  function column(x, name, points, nameFill) {
+    const nameLines = wrapText(name, fitChars(colW, nameSize, 0.60), 2);
+    let svg = textBlock(nameLines, { x, y: namesY, size: nameSize, weight: 800, fill: nameFill, family: FONTS.display, lineHeight: 1.08 });
+    // Accumulate y per point so a wrapped (two-line) point pushes the next
+    // bullet down instead of crowding it.
+    let y = namesY + (nameLines.length - 1) * nameSize + Math.round(nameSize * 1.5);
+    for (const point of points) {
+      const lines = wrapText(point, fitChars(colW - 30, pointSize, 0.56), 2);
+      svg += `<circle cx="${x + 8}" cy="${y - pointSize * 0.32}" r="6" fill="${COLORS.gold}"/>`;
+      svg += textBlock(lines, { x: x + 26, y, size: pointSize, weight: 600, fill: COLORS.textBody, family: FONTS.body, lineHeight: 1.22 });
+      y += Math.round(lines.length * pointSize * 1.22) + Math.round(pointSize * 1.2);
+    }
+    return svg;
+  }
+
+  const dividerTop = eyebrowY + 78;
+  const dividerBottom = box.panelY + box.panelH - 200;
+  const vsY = Math.round((dividerTop + dividerBottom) / 2);
+  const verdictY = box.panelY + box.panelH - 128;
+  const verdictLines = wrapText(verdict, fitChars(box.padR - box.padL, Math.round(W * 0.026), 0.56), 2);
+
+  return `
+    <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+      ${frame}
+      ${eyebrow('Pest ID: know the difference', box.padL, eyebrowY, COLORS.wavesBlue)}
+      <line x1="${midX}" y1="${dividerTop}" x2="${midX}" y2="${dividerBottom}" stroke="${COLORS.blueLight}" stroke-width="4"/>
+      <circle cx="${midX}" cy="${vsY}" r="44" fill="${COLORS.gold}" stroke="${COLORS.blueDeeper}" stroke-width="3"/>
+      <text x="${midX}" y="${vsY + 12}" text-anchor="middle" font-family="${FONTS.display}" font-size="34" font-weight="800" fill="${COLORS.blueDeeper}">VS</text>
+      ${column(box.padL, leftName, leftPoints, COLORS.blueDeeper)}
+      ${column(midX + colGap, rightName, rightPoints, COLORS.blueDark)}
+      ${verdict ? `<line x1="${box.padL}" y1="${verdictY - 44}" x2="${box.padR - 180}" y2="${verdictY - 44}" stroke="${COLORS.blueLight}" stroke-width="4"/>` : ''}
+      ${textBlock(verdictLines, { x: box.padL, y: verdictY, size: Math.round(W * 0.026), weight: 700, fill: COLORS.blueDeeper, family: FONTS.heading, lineHeight: 1.3 })}
+      ${waveMotif(box.padR - 60, verdictY - 8, W / 1080)}
+    </svg>
+  `;
+}
+
 function renderSocialCardSvg(input = {}, logoDataUri = null) {
   if (input.variant === 'review') return renderReviewSvg(input, logoDataUri);
   if (input.variant === 'blog') return renderBlogSvg(input, logoDataUri);
+  if (input.variant === 'versus') return renderVersusSvg(input, logoDataUri);
   return renderCampaignSvg(input, logoDataUri);
 }
 

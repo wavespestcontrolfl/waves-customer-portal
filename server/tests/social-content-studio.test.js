@@ -421,3 +421,51 @@ describe('assessApprovalPublish (round 5: unresolved channels block)', () => {
     expect(a.complete).toBe(false);
   });
 });
+
+describe('autonomous versus lane (pest showdown)', () => {
+  // ET noon on the given date keeps the ET calendar day equal to the UTC day.
+  const etNoon = (iso) => new Date(`${iso}T16:00:00Z`);
+
+  afterEach(() => {
+    delete process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS;
+  });
+
+  test('lane is dark by default (flag unset -> no versus plan)', () => {
+    expect(Studio.selectAutonomousVersusPlan(etNoon('2026-06-10'))).toBeNull();
+  });
+
+  test('fires only on ET days with day % 4 === 2 when enabled', () => {
+    process.env.SOCIAL_AUTONOMOUS_INCLUDE_VERSUS = 'true';
+    expect(Studio.selectAutonomousVersusPlan(etNoon('2026-06-08'))).toBeNull(); // review lane day
+    expect(Studio.selectAutonomousVersusPlan(etNoon('2026-06-09'))).toBeNull();
+    const plan = Studio.selectAutonomousVersusPlan(etNoon('2026-06-10'));
+    expect(plan).not.toBeNull();
+    expect(plan.versusPair).toBeDefined();
+    expect(plan.angle).toBe('pest showdown');
+    expect(plan.topic).toBe(`${plan.versusPair.left.name} vs ${plan.versusPair.right.name}`);
+    expect(plan.preview.drafts.gbp).toContain(plan.city);
+    expect(plan.preview.drafts.gbp).not.toMatch(/\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
+  });
+
+  test('every pair in the bank produces drafts that pass the compliance validators', () => {
+    for (const pair of Studio.PEST_VERSUS_PAIRS) {
+      const drafts = Studio.buildVersusDrafts(pair, 'Sarasota');
+      const validation = Studio.validateDrafts(drafts);
+      for (const [platform, result] of Object.entries(validation)) {
+        expect({ pair: pair.key, platform, issues: result.issues || [], valid: result.valid })
+          .toEqual({ pair: pair.key, platform, issues: [], valid: true });
+      }
+      expect(drafts.facebook).toContain(pair.left.name);
+      expect(drafts.facebook).toContain(pair.right.name);
+      expect(drafts.instagram).toContain('#wavespestcontrol');
+    }
+  });
+
+  test('versus card input renders through the split-panel variant', () => {
+    const pair = Studio.PEST_VERSUS_PAIRS[0];
+    const card = Studio.buildVersusCardInput(pair, { city: 'Venice', service: pair.service });
+    expect(card.variant).toBe('versus');
+    expect(card.left.name).toBe(pair.left.name);
+    expect(card.verdict).toBe(pair.verdict);
+  });
+});

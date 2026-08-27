@@ -56,6 +56,44 @@ describe('social card renderer', () => {
     expect(svg).not.toMatch(/#007f83/i);
   });
 
+  test('renders a split-panel versus card with both pests, VS badge, and verdict', () => {
+    const svg = Renderer.renderSocialCardSvg({
+      variant: 'versus',
+      city: 'Venice',
+      service: 'Termite',
+      left: { name: 'Termite Swarmer', points: ['Straight antennae', 'Both wing pairs equal length', 'Thick, straight waist'] },
+      right: { name: 'Winged Ant', points: ['Bent antennae', 'Front wings longer than back', 'Pinched waist'] },
+      verdict: 'Wings on the windowsill? Check the waist first.',
+    });
+
+    expect(svg).toContain('VENICE');
+    expect(svg).toContain('PEST ID: KNOW THE DIFFERENCE');
+    expect(svg).toContain('Termite Swarmer');
+    expect(svg).toContain('Winged Ant');
+    expect(svg).toContain('>VS</text>');
+    expect(svg).toContain('Straight antennae');
+    expect(svg).toContain('Pinched waist');
+    expect(svg).toContain('windowsill?'); // verdict words survive wrapping
+    expect(svg).toContain('wavespestcontrol.com');
+    expect(svg).toContain('#009CDE');
+    expect(svg).not.toMatch(/#007f83/i);
+  });
+
+  test('versus card escapes untrusted pest names and renders 4:3 for GBP', () => {
+    const svg = Renderer.renderSocialCardSvg({
+      variant: 'versus',
+      platform: 'gbp',
+      left: { name: 'A<script>alert(1)</script>', points: ['x & y'] },
+      right: { name: 'B', points: [] },
+      verdict: '"Quotes" too',
+    });
+    expect(svg).toContain('width="1200"');
+    expect(svg).toContain('height="900"');
+    expect(svg).not.toContain('<script>');
+    expect(svg).toContain('&lt;script&gt;');
+    expect(svg).toContain('x &amp; y');
+  });
+
   test('sizes the card per platform (square for IG/FB, 4:3 for GBP)', () => {
     const square = Renderer.renderSocialCardSvg({ variant: 'campaign', topic: 'x', platform: 'instagram' });
     expect(square).toContain('width="1080"');
