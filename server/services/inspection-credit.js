@@ -106,34 +106,31 @@ function configuredCreditAmountForServiceKey(serviceKey) {
  * Read-only and fail-soft: a lookup error is a null, never a thrown
  * closeout.
  */
-// The recurring-customer one-time perk rate that netted a stored row: the
-// rate the mapper persisted on the row (new rows), else the estimate's
-// recurring-customer input flag with the configured perk rate. 0 when the
-// estimate was not for a recurring customer.
-function perkRateForStoredRow(row, estData) {
-  const own = Number(row?.recurringCustomerDiscountRate);
-  if (Number.isFinite(own) && own > 0 && own < 1) return own;
-  const inputs = estData?.inputs || estData?.engineInputs || estData?.engineRequest || {};
-  // The V2 estimator persists isRecurringCustomer as the STRINGS "YES"/"NO"
-  // — a truthiness check reads "NO" as recurring and inflates a non-member's
-  // face (codex #3521 r9 P1). Parse explicitly; anything unrecognised is
-  // "not recurring" (never invent a perk to undo).
-  const asFlag = (value) => {
-    if (value === true || value === 1) return true;
-    if (value === false || value === 0 || value == null) return false;
-    const text = String(value).trim().toLowerCase();
-    if (['yes', 'y', 'true', '1'].includes(text)) return true;
-    return false;
-  };
-  const flagged = inputs.recurringCustomer !== undefined
-    ? asFlag(inputs.recurringCustomer)
-    : asFlag(inputs.isRecurringCustomer);
-  if (!flagged) return 0;
+// Every fee the rodent inspection has ever carried: the fee configured
+// today, every value in the pricing_config audit trail (20260826000002
+// records 125 → 75 there), and the legacy $125 as a seed for a database
+// without that trail. Read-only; fail-soft to the seeds.
+const LEGACY_INSPECTION_FACES = [125];
+async function knownInspectionFaces(db) {
+  const faces = new Set(LEGACY_INSPECTION_FACES);
+  const add = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0) faces.add(round2(n)); };
+  add(configuredCreditAmountForServiceKey('rodent_inspection'));
   try {
-    const { WAVEGUARD } = require('./pricing-engine/constants');
-    const configured = Number(WAVEGUARD?.recurringCustomerOneTimePerk);
-    return Number.isFinite(configured) && configured > 0 && configured < 1 ? configured : 0;
-  } catch { return 0; }
+    if (typeof db === 'function') {
+      const rows = await db('pricing_config_audit')
+        .where({ config_key: 'rodent_inspection' })
+        .select('old_value', 'new_value');
+      for (const row of (Array.isArray(rows) ? rows : [])) {
+        for (const raw of [row?.old_value, row?.new_value]) {
+          try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            add(parsed?.fee);
+          } catch { /* unparseable audit value — skip */ }
+        }
+      }
+    }
+  } catch { /* no audit table / lookup error — seeds only */ }
+  return [...faces];
 }
 
 async function soldInspectionAmountForVisit(db, svc) {
@@ -192,8 +189,21 @@ async function soldInspectionAmountForVisit(db, svc) {
           const net = positive([row.price, row.amount]);
           if (net.length) {
             const netFace = Math.max(...net);
-            const perk = perkRateForStoredRow(row, estData);
-            return round2(perk > 0 && perk < 1 ? netFace / (1 - perk) : netFace);
+            // A row that persisted its own perk rate is self-describing.
+            const ownRate = Number(row.recurringCustomerDiscountRate);
+            if (Number.isFinite(ownRate) && ownRate > 0 && ownRate < 1) return round2(netFace / (1 - ownRate));
+            // Otherwise recover the HISTORICAL face without consulting live
+            // config (codex #3521 r13 P1 — the perk rate is admin-editable,
+            // so dividing by today's rate would drift the promise): match
+            // the net against the fees this inspection has ever carried
+            // (configured today + every value in the pricing_config audit
+            // trail + the legacy $125). A net that IS a known face is a
+            // non-member's; otherwise the smallest known face the net could
+            // have been discounted from (≥ 50% of it) is the promise.
+            const faces = await knownInspectionFaces(db);
+            if (faces.some((f) => Math.abs(f - netFace) < 0.005)) return round2(netFace);
+            const candidates = faces.filter((f) => f > netFace && netFace / f >= 0.5).sort((a, b) => a - b);
+            return round2(candidates.length ? candidates[0] : netFace);
           }
         }
       }

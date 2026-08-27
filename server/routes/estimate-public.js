@@ -454,8 +454,25 @@ function bookingServiceFor(name) {
 // is correct for routing the /book link's ?service= param but reads wrong
 // as confirmation copy once a real appointment exists. Falls back to the
 // estimate's service_interest, then the supplied bucket label.
+// An itemized job's component rows share a "<Job> — <Section>" label. For
+// acceptance/confirmation copy the customer accepted the JOB, so a label
+// that is one section of a multi-section job collapses to the job name
+// (codex #3521 r13 P2); a lone section-labelled row keeps its label.
+function jobLevelOneTimeLabel(label, rows = []) {
+  const text = String(label || '').trim();
+  const sep = text.indexOf(' — ');
+  if (sep <= 0) return text;
+  const prefix = text.slice(0, sep).trim();
+  const siblings = (Array.isArray(rows) ? rows : []).filter((r) => {
+    const name = String(r?.name || r?.label || r?.displayName || '').trim();
+    const i = name.indexOf(' — ');
+    return i > 0 && name.slice(0, i).trim().toLowerCase() === prefix.toLowerCase();
+  });
+  return siblings.length > 1 ? prefix : text;
+}
+
 function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
-  const specific = (Array.isArray(oneTimeList) ? oneTimeList[0]?.name : '')
+  const specific = (Array.isArray(oneTimeList) ? jobLevelOneTimeLabel(oneTimeList[0]?.name, oneTimeList) : '')
     || estimate?.service_interest
     || fallbackLabel
     || '';
@@ -1588,7 +1605,10 @@ function buildOneTimeInvoiceServiceLabel({
   // a customer-facing label — prefer the mapped category label.
   const rowLabelIsRawServiceKey = !!rowLabel && !!row
     && rowLabel.toLowerCase() === String(row.service || '').toLowerCase();
-  if (rowLabel && !rowLabelIsRawServiceKey) return rowLabel;
+  if (rowLabel && !rowLabelIsRawServiceKey) {
+    // Job-level name for a multi-section itemized job (codex #3521 r13 P2).
+    return jobLevelOneTimeLabel(rowLabel, listRow ? oneTimeList : (breakdown?.items || []));
+  }
   return oneTimeInvoiceLabelForCategory(category);
 }
 
