@@ -183,7 +183,12 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Naples' } });
     fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '34103' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
-    expect(await screen.findByText('State must be a two-letter code (e.g. FL).')).toBeInTheDocument();
+    expect(await screen.findByText('State is required as a two-letter code (e.g. FL).')).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'POST')).toBe(false);
+    // Cleared state is a visible error too — never a silent FL default.
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+    expect(await screen.findByText('State is required as a two-letter code (e.g. FL).')).toBeInTheDocument();
     expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'POST')).toBe(false);
     fireEvent.change(screen.getByLabelText('State'), { target: { value: 'fl' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save address' }));

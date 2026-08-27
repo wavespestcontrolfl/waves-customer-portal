@@ -90,9 +90,11 @@ export default function CustomerPropertiesPanelV2({
       setSaveErr("Street, city and ZIP are required.");
       return;
     }
+    // Required: the server defaults a missing state to FL, so an empty field
+    // must be a visible validation error rather than a silent Florida.
     const stateCode = form.state.trim().toUpperCase();
-    if (stateCode && !/^[A-Z]{2}$/.test(stateCode)) {
-      setSaveErr("State must be a two-letter code (e.g. FL).");
+    if (!/^[A-Z]{2}$/.test(stateCode)) {
+      setSaveErr("State is required as a two-letter code (e.g. FL).");
       return;
     }
     if (writeBusy) return;
@@ -104,7 +106,7 @@ export default function CustomerPropertiesPanelV2({
           address_line1: form.address_line1.trim(),
           address_line2: form.address_line2.trim() || null,
           city: form.city.trim(),
-          state: stateCode || null,
+          state: stateCode,
           zip: form.zip.trim(),
           occupancy_type: form.occupancy_type || "unknown",
           label: form.label.trim() || null,

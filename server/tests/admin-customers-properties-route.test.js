@@ -50,7 +50,7 @@ describe('POST /admin/customers/:id/properties', () => {
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', state: 'Florida', zip: '34103' });
       expect(res.status).toBe(400);
-      await expect(res.json()).resolves.toEqual({ error: 'state must be a two-letter code' });
+      await expect(res.json()).resolves.toEqual({ error: 'state is required as a two-letter code' });
     });
     expect(mockProps.recordCallProperty).not.toHaveBeenCalled();
   });
@@ -68,15 +68,17 @@ describe('POST /admin/customers/:id/properties', () => {
     }));
   });
 
-  test('missing state is allowed (stored as null); city/zip still required', async () => {
+  test('state is REQUIRED — the service would otherwise default a missing state to FL silently', async () => {
     await withServer(async (baseUrl) => {
-      const missing = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples' });
-      expect(missing.status).toBe(400);
-      const ok = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', zip: '34103' });
-      expect(ok.status).toBe(201);
+      const missingZip = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', state: 'FL' });
+      expect(missingZip.status).toBe(400);
+      const missingState = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', zip: '34103' });
+      expect(missingState.status).toBe(400);
+      await expect(missingState.json()).resolves.toEqual({ error: 'state is required as a two-letter code' });
+      const blankState = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', zip: '34103', state: '  ' });
+      expect(blankState.status).toBe(400);
     });
-    expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
-    expect(mockProps.recordCallProperty.mock.calls[0][0].state).toBeNull();
+    expect(mockProps.recordCallProperty).not.toHaveBeenCalled();
   });
 
   test('label longer than varchar(100) is a 400 on POST and PATCH, never a DB error', async () => {

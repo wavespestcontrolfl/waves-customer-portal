@@ -2401,12 +2401,13 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     if (!String(city || '').trim() || !String(zip || '').trim()) {
       return res.status(400).json({ error: 'city and zip are required' });
     }
-    // customer_properties.state is varchar(2): reject "Florida" here with a
-    // real validation error instead of letting PostgreSQL bounce the insert
-    // as a generic save failure.
+    // customer_properties.state is varchar(2) and recordCallProperty stores
+    // `state || 'FL'` — an omitted state would silently persist as Florida.
+    // Require an explicit two-letter code here (reject "Florida" with a real
+    // validation error instead of a PostgreSQL bounce).
     const stateCode = String(state || '').trim().toUpperCase();
-    if (stateCode && !/^[A-Z]{2}$/.test(stateCode)) {
-      return res.status(400).json({ error: 'state must be a two-letter code' });
+    if (!/^[A-Z]{2}$/.test(stateCode)) {
+      return res.status(400).json({ error: 'state is required as a two-letter code' });
     }
     // customer_properties.label is varchar(100) — same reasoning as state.
     if (!propertyLabelFits(label)) {
@@ -2426,7 +2427,7 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const result = await customerProperties.recordCallProperty({
       customerId: req.params.id,
-      address_line1, address_line2, city, state: stateCode || null, zip,
+      address_line1, address_line2, city, state: stateCode, zip,
       occupancyType: occupancy_type,
       label,
       source: 'manual',
