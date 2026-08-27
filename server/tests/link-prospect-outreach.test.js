@@ -378,16 +378,20 @@ describe('reconcileSendError', () => {
 });
 
 describe('dailySendCount', () => {
-  test('sums current + prior attempt per row with each side COALESCEd (a NULL timestamp must not zero the row)', async () => {
-    const raws = [];
+  test('counts the current attempt (COALESCEd — a NULL must not zero the row) PLUS every in-window entry of the append-only prior_outreach_attempts ledger', async () => {
+    const wheres = [], raws = [];
     const q = Object.assign(() => q, {
-      whereRaw: jest.fn(() => q),
+      whereRaw: jest.fn((sql, bind) => { wheres.push([sql, bind]); return q; }),
       select: jest.fn(() => q),
       first: jest.fn(async () => ({ c: '3' })),
       raw: jest.fn((sql, bind) => { raws.push([sql, bind]); return { sql, bind }; }),
     });
     expect(await Outreach.dailySendCount(q)).toBe(3);
-    const [sql] = raws[0];
-    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ COALESCE\(\(NULLIF\(quality_signals->>'prior_outreach_attempted_at', ''\)::timestamptz >= \?\)::int, 0\)\)/);
+    const [sql, bind] = raws[0];
+    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ \(SELECT count\(\*\) FROM jsonb_array_elements_text\(.*'prior_outreach_attempts'.*\) AS a WHERE a::timestamptz >= \?\)\)/);
+    // both raws compile through knex with exactly two bindings each (since, since) — no stray '?'
+    const knex = require('knex')({ client: 'pg' });
+    expect(knex('seo_link_prospects').select(knex.raw(sql, bind)).toSQL().toNative().bindings).toHaveLength(2);
+    expect(knex('seo_link_prospects').whereRaw(wheres[0][0], wheres[0][1]).toSQL().toNative().bindings).toHaveLength(2);
   });
 });

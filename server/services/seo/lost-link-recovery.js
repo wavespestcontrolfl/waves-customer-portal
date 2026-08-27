@@ -154,13 +154,14 @@ async function queueOne(loss, out, scoreMod) {
         link_type: reopenType,
         claimed_at: null, claimed_by: null,
         attempts: 0,
-        // The prior attempt MOVES to quality_signals.prior_outreach_attempted_at
-        // (dailySendCount counts that too): a resend of this reopened row then
-        // stamps its own outreach_attempted_at, so two attempts inside one
-        // trailing-24h window count as two against the cap, not one.
+        // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
+        // (an append-only ledger dailySendCount also counts): a resend of this
+        // reopened row stamps its own outreach_attempted_at, so every attempt
+        // inside one trailing-24h window counts against the cap — however many
+        // times the row is recovered, lost and reopened.
         outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
         quality_signals: db.raw(
-          "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempted_at}', COALESCE(to_jsonb(outreach_attempted_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempted_at', 'null'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
+          "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
           [loss.lost_reason || 'unknown'],
         ),
         notes: exists.notes ? `${exists.notes}\n${note}` : note,

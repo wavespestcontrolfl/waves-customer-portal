@@ -479,9 +479,13 @@ describe('lost-link recovery', () => {
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'queued' }] });
     expect(updates[0].where).toEqual({ id: 'p-lost', status: 'lost' }); // conditional reopen
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, attempts: 0, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
-    // the prior attempt MOVES to quality_signals.prior_outreach_attempted_at so a resend of this row counts as a 2nd attempt against the cap
+    // the prior attempt is APPENDED to quality_signals.prior_outreach_attempts (append-only) so every resend counts against the cap
     expect(updates[0].patch.outreach_attempted_at).toBeNull();
-    expect(updates[0].patch.quality_signals.__raw).toMatch(/'\{prior_outreach_attempted_at\}', COALESCE\(to_jsonb\(outreach_attempted_at\)/);
+    expect(updates[0].patch.quality_signals.__raw).toMatch(/'\{prior_outreach_attempts\}', CASE WHEN jsonb_typeof\(.*'prior_outreach_attempts'\) = 'array' THEN .* ELSE '\[\]'::jsonb END \|\| COALESCE\(to_jsonb\(outreach_attempted_at\), '\[\]'::jsonb\)/);
+    // compiles through knex with exactly one binding (lost_reason) — no stray '?' in the jsonb SQL
+    const knex = require('knex')({ client: 'pg' });
+    const compiled = knex('seo_link_prospects').update({ quality_signals: knex.raw(updates[0].patch.quality_signals.__raw, updates[0].patch.quality_signals.bind) }).toSQL().toNative();
+    expect(compiled.bindings).toEqual(['link_removed']);
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
