@@ -500,6 +500,28 @@ describe('seo-completion-gate', () => {
     expect(inverse.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(inverse.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    const possessive = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get an Estimate for Your Termite Problem](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(possessive.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(possessive.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    const mixedUnknown = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite and Pool Cleaning Quote](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(mixedUnknown.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    const jsxHref = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. <a href={"/contact/"}>Get a Termite Estimate</a> today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(jsxHref.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),
       brief: baseBrief({ service: 'mosquito-control' }),

@@ -417,8 +417,9 @@ function extractLinks(body) {
     }
   }
   // Quoted OR unquoted href (`<a href=/contact/>` is legal HTML).
-  const html = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>([\s\S]*?)<\/a>/gi;
-  while ((m = html.exec(s)) !== null) links.push({ anchor: m[4].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3]) });
+  // Quoted, unquoted, or literal JSX string-expression href (`href={"/contact/"}`).
+  const html = /<a\b[^>]*\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = html.exec(s)) !== null) links.push({ anchor: m[5].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4]) });
   return links;
 }
 
@@ -434,20 +435,39 @@ function conversionCtaLinks(body) {
     // to and including the estimate/quote keyword. Trailing context ("…for
     // Your Lawn", "…on your property") is not a service declaration.
     const kw = anchor.match(/(estimat|quot)\w*/i);
+    const termsIn = (text) => Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+      .filter(([, re]) => re.test(text))
+      .map(([svc]) => svc);
     let subject = anchor;
+    let named;
     if (kw) {
       const end = kw.index + kw[0].length;
       subject = anchor.slice(0, end);
-      // Inverse phrasing names the service AFTER the keyword — "Get an
-      // Estimate for Termite Control". Keep a "for/on <service>" phrase
-      // unless it is environmental (a determiner/possessive follows: "for
-      // your lawn", "on the property").
-      const after = anchor.slice(end).match(/^\s+(?:for|on)\s+(?!(?:your|my|our|the|a|an|this|that)\b)((?:[a-z&-]+\s?){1,4})/i);
-      if (after) subject += ` ${after[1]}`;
+      named = termsIn(subject);
+      // A "for/on <phrase>" suffix can NAME the service ("…for Termite
+      // Control", "…for Your Termite Problem") — count service terms in it.
+      // Property-context nouns after a determiner/possessive ("for your
+      // lawn", "on the trees") describe WHERE, not a service, so the
+      // place-shaped services (lawn, tree-shrub) are dropped in that form.
+      const after = anchor.slice(end).match(/^\s+(?:for|on)\s+((?:[a-z&-]+\s?){1,5})/i);
+      if (after) {
+        const phrase = after[1];
+        const environmental = /^(?:your|my|our|the|a|an|this|that)\b/i.test(phrase);
+        const suffixNamed = termsIn(phrase).filter((svc) => !(environmental && (svc === 'lawn' || svc === 'tree-shrub')));
+        named = [...new Set([...named, ...suffixNamed])];
+      }
+      // Coordinated subjects ("Termite and Pool Cleaning Quote") must be
+      // service-bearing in EVERY part — a part naming no known service is an
+      // unrecognized service, not harmless filler.
+      const parts = subject.split(/\s+(?:and|&|or|\/|,)\s+/i);
+      if (parts.length > 1) {
+        const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price)\s*)+$/i;
+        const unknownPart = parts.some((part) => termsIn(part).length === 0 && !filler.test(part.trim()));
+        if (unknownPart) named = [...named, 'unknown'];
+      }
+    } else {
+      named = termsIn(subject);
     }
-    let named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
-      .filter(([, re]) => re.test(subject))
-      .map(([svc]) => svc);
     // "Lawn pest control" is ONE service (lawn-pest-control → lawn), not
     // lawn + pest — don't let the compound phrase read as a wrong-service mix.
     if (/\blawn[- ]pest/i.test(subject)) named = named.filter((svc) => svc !== 'pest');

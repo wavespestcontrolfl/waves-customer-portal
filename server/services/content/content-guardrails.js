@@ -1842,7 +1842,9 @@ function blankNonRenderedMarkdown(text) {
   return raw.map((l) => {
     // A blockquote marker counts only after 0–3 leading spaces — 4+ spaces
     // before ">" is an indented code block (CommonMark), handled below.
-    const stripped = l.replace(/^ {0,3}(?:>\s*)+/, '');
+    // Only the marker plus ONE optional space is prefix — remaining spaces
+    // are content ("> " + 4 spaces = indented code inside the quote).
+    const stripped = l.replace(/^ {0,3}(?:> ?)+/, '');
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
