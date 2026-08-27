@@ -7051,7 +7051,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // A treatment-applied protocol action is evidence too: products are
             // optional on inspection/bait lanes, so an interior/exterior action
             // marked treatmentApplied must keep the guidance (codex inline r4).
-            const reentryApplicationsRecorded = productReentryMin != null
+            // A label REI counts only when genuinely PRESENT: productReentryFloor
+            // maps a null rei_hours to 0, so `!= null` alone would read a bait
+            // cartridge row as treatment evidence (codex inline r13). A real
+            // 0-hr spray is still caught by its spray-class method or product
+            // identity below.
+            const reentryApplicationsRecorded = (productReentryMin != null && productReentryMin > 0)
               || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
                 p?.applicationMethod || p?.method || p?.application_method,
               )))
