@@ -98,40 +98,45 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'"),
             updated_at: trx.fn.now(),
           });
+        // Bell ATOMIC with the strip (codex #3504 r6 hook): the strip
+        // removes the row from every future sweep, so a bell sent
+        // best-effort afterwards could silently vanish and the office
+        // would never learn to convert the live quote. Insert the
+        // notification row in THIS transaction — a failed insert throws,
+        // the strip rolls back, and the still-stranded row retries next
+        // sweep. Dedupe mirrors notifyAdmin's mechanism (advisory lock +
+        // metadata dedupeKey) so a retried strip never stacks bells.
+        const dedupeKey = `wizard-activation-stranded:${parent.id}`;
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
+        const existingBell = await trx('notifications')
+          .where({ recipient_type: 'admin' })
+          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
+          .first('id');
+        if (!existingBell) {
+          const created = await require('./notification-service').create({
+            recipientType: 'admin',
+            category: 'alert',
+            title: 'Self-booked plan never activated',
+            body: `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
+            link: `/admin/customers/${parent.customer_id}`,
+            bell: true,
+            metadata: {
+              dedupeKey,
+              customer_id: parent.customer_id,
+              scheduled_service_id: parent.id,
+              source_estimate_id: parent.source_estimate_id,
+            },
+            connection: trx,
+          });
+          // create() returns null on insert failure — throw so the strip
+          // rolls back with it and the row stays sweepable.
+          if (!created) throw new Error('recovery bell insert failed — strip rolled back for retry');
+        }
         return true;
       });
       if (!didStrip) continue;
       stripped += 1;
       logger.warn(`[wizard-series-recovery] stranded activation stripped for parent=${parent.id} customer=${parent.customer_id} (draft ${parent.source_estimate_id} still live — office converts)`);
-      // Same bell convention as the seeder's shortfall notice: dedupe on a
-      // stable key so a re-noticed row never stacks identical bells.
-      const dedupeKey = `wizard-activation-stranded:${parent.id}`;
-      try {
-        const existing = await database('notifications')
-          .where({ recipient_type: 'admin' })
-          .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-          .first('id')
-          .catch(() => null);
-        if (!existing) {
-          await require('./notification-service').notifyAdmin(
-            'alert',
-            'Self-booked plan never activated',
-            `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
-            {
-              link: `/admin/customers/${parent.customer_id}`,
-              bell: true,
-              metadata: {
-                dedupeKey,
-                customer_id: parent.customer_id,
-                scheduled_service_id: parent.id,
-                source_estimate_id: parent.source_estimate_id,
-              },
-            },
-          );
-        }
-      } catch (bellErr) {
-        logger.warn(`[wizard-series-recovery] admin bell failed for parent=${parent.id} (non-blocking): ${bellErr.message}`);
-      }
     } catch (err) {
       logger.error(`[wizard-series-recovery] strip failed for parent=${parent.id}: ${err.message}`);
     }

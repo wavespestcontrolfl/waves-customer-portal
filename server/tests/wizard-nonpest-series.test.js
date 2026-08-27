@@ -235,6 +235,24 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/wizardPlanKey === 'palm_injection'[\s\S]{0,600}resolvedServiceType = 'Palm Injections';/);
   });
 
+  test('activation re-validates the locked parent IS still the priced row (sweep-strip/cancel race)', () => {
+    // codex #3504 r6 hook P0: the recovery sweep can strip the parent
+    // while a delayed activation waits on the comms lock — seeding from
+    // the stale in-memory row would underbill the series by the first
+    // application. Any mismatch = stale, no seed, no write.
+    expect(booking).toMatch(/first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id'\)/);
+    expect(booking).toMatch(/lockedParent\.payment_method_preference !== 'pay_at_visit'\s*\n\s*\|\| lockedParent\.create_invoice_on_complete !== true\s*\n\s*\|\| Number\(lockedParent\.estimated_price\) !== Number\(visitPrice\)/);
+    expect(booking).toMatch(/no longer matches its priced state under lock/);
+    // Ordering: the alreadyActivated fast-path stays FIRST (an activated
+    // parent is success, not staleness), then the priced-state check,
+    // then the draft drift comparison.
+    const activatedAt = booking.indexOf('alreadyActivated: true');
+    const pricedStateAt = booking.indexOf('no longer matches its priced state under lock');
+    const driftAt = booking.indexOf('freshPlan.pattern !== wizardSeriesPlan.pattern');
+    expect(pricedStateAt).toBeGreaterThan(activatedAt);
+    expect(driftAt).toBeGreaterThan(pricedStateAt);
+  });
+
   test('a duplicate confirmation reads a completed activation as success, never as drift', () => {
     // The under-lock is_recurring re-check must run BEFORE the locked-draft
     // drift comparison, or the loser strips the winner's activated parent.
@@ -387,6 +405,13 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/await runWizardActivationFollowThrough\(serviceRow\.id\);/);
     expect(booking).toMatch(/replayActivation\?\.seedResult \|\| replayActivation\?\.alreadyActivated/);
     expect(booking).toMatch(/await runWizardActivationFollowThrough\(replayParent\.id\);/);
+    // A COMMITTED activation (children exist, draft archived) still heals
+    // its follow-through on retry, and replay reminder registration gates
+    // on activation success — a one-visit annual plan has zero children
+    // but its parent still needs reminder rows (codex #3504 r6 hook).
+    expect(booking).toMatch(/\} else if \(replayParentIsOwn && replayParent\.is_recurring\) \{/);
+    const remGate = booking.indexOf('Gate on ACTIVATION SUCCESS, not on child count');
+    expect(remGate).toBeGreaterThan(0);
   });
 
   test('a stranded activation (worker died between booking commit and activation) is recovered by the strip sweep', () => {
@@ -404,6 +429,11 @@ describe('booking route wiring (source contracts)', () => {
     expect(recovery).toMatch(/freshChild/);
     expect(recovery).toMatch(/freshDraft/);
     expect(recovery).toMatch(/whereNull\('archived_at'\)/);
+    // The admin bell persists ATOMICALLY with the strip: a failed insert
+    // rolls the strip back so the row stays sweepable (codex #3504 r6
+    // hook).
+    expect(recovery).toMatch(/connection: trx,/);
+    expect(recovery).toMatch(/if \(!created\) throw new Error\('recovery bell insert failed/);
     expect(recovery).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
     const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
     expect(indexSrc).toMatch(/sweepStrandedWizardActivations\(\{ limit: 10 \}\)/);
@@ -433,7 +463,7 @@ describe('booking route wiring (source contracts)', () => {
     // replay-seeded series would never enter appointment_reminders.
     expect(booking).toMatch(/const replayActivation = await activateWizardSeries\(replayParent\);/);
     expect(booking).toMatch(/\[replayParent, \.\.\.replaySeeded\]/);
-    expect(booking).toMatch(/replaySeeded\.length[\s\S]{0,1500}sendConfirmation: false,\s*\n\s*\.\.\.\(windowless \? \{ closeReminderWindows: true \} : \{\}\)/);
+    expect(booking).toMatch(/const replaySeeded = replayActivation\?\.seedResult\?\.insertedRows \|\| \[\];[\s\S]{0,1800}sendConfirmation: false,\s*\n\s*\.\.\.\(windowless \? \{ closeReminderWindows: true \} : \{\}\)/);
   });
 
   test('the duplicate-series skip log is cadence-neutral (non-pest plans are not quarterly)', () => {

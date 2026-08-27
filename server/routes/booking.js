@@ -2934,9 +2934,28 @@ async function createSelfBooking(payload = {}) {
           // touch nothing.
           const lockedParent = await trx('scheduled_services')
             .where({ id: seriesParentRow.id })
-            .first('id', 'is_recurring');
+            .first('id', 'is_recurring', 'status', 'payment_method_preference',
+              'estimated_price', 'create_invoice_on_complete', 'source_estimate_id');
           if (lockedParent && lockedParent.is_recurring) {
             return { alreadyActivated: true };
+          }
+          // The locked parent must still BE the billable row this closure
+          // priced (codex #3504 r6 hook P0): the stranded-activation
+          // recovery sweep (or any other writer) can strip/cancel the
+          // parent while a delayed activation waits on the comms lock —
+          // seeding billable children from the stale in-memory row would
+          // then produce a series whose parent never bills the first
+          // application (underbills the quoted annual). Any mismatch =
+          // stale: seed nothing, touch nothing (there is no pricing left
+          // to strip — the mismatch IS the strip or a cancellation).
+          if (!lockedParent
+            || !['pending', 'confirmed'].includes(String(lockedParent.status || ''))
+            || lockedParent.payment_method_preference !== 'pay_at_visit'
+            || lockedParent.create_invoice_on_complete !== true
+            || Number(lockedParent.estimated_price) !== Number(visitPrice)
+            || String(lockedParent.source_estimate_id || '') !== String(pricing_estimate_id)) {
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} no longer matches its priced state under lock (stripped/cancelled concurrently) — activation skipped`);
+            return { stale: true };
           }
           // Re-resolve the plan and price against the LOCKED draft (codex
           // #3504 r1): /calculate refreshes drafts in place, so the
@@ -3366,7 +3385,12 @@ async function createSelfBooking(payload = {}) {
             // (re)sent from a replay.
             try {
               const replaySeeded = replayActivation?.seedResult?.insertedRows || [];
-              if (replaySeeded.length) {
+              // Gate on ACTIVATION SUCCESS, not on child count (codex
+              // #3504 r6 hook): a one-visit annual plan activates with a
+              // successful seedResult and zero children, and its PARENT
+              // still needs the reminder rows a pre-registration crash
+              // lost.
+              if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
                 const AppointmentReminders = require('../services/appointment-reminders');
                 for (const row of [replayParent, ...replaySeeded].filter((r) => r?.id)) {
                   const rowDate = typeof row.scheduled_date === 'string'
@@ -3401,6 +3425,13 @@ async function createSelfBooking(payload = {}) {
             if (replayActivation?.seedResult || replayActivation?.alreadyActivated) {
               await runWizardActivationFollowThrough(replayParent.id);
             }
+          } else if (replayParentIsOwn && replayParent.is_recurring) {
+            // Activation COMMITTED on a prior attempt (children exist,
+            // draft archived — the activation branch above can't run), but
+            // that attempt may have died before its follow-through: heal
+            // the property stamps / tier sync / welcome on the retry —
+            // every step is idempotent (codex #3504 r6 hook).
+            await runWizardActivationFollowThrough(replayParent.id);
           }
         } catch (err) {
           logger.warn(`[booking:confirm] replay series activation skipped for ${txResult.existing.id}: ${err.message}`);
