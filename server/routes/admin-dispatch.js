@@ -10940,6 +10940,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // otherwise pass the anchor — the same exclusions every explicit lane
     // applies, revalidated again under the locked visit row inside
     // verifyExtendedCompletionAnchor.
+    // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
+    // a live estimate_card_holds row means the customer consented to THAT
+    // card at THAT amount — the extended lane must not charge the default
+    // Auto Pay method beside (or instead of) it. Fail closed when the
+    // lookup errors; re-checked under the money locks in the shared
+    // verdict.
+    let extendedHoldExcluded = false;
+    if (extendedAutopayCharge) {
+      try {
+        extendedHoldExcluded = !!(await db('estimate_card_holds')
+          .where({ scheduled_service_id: svc.id })
+          .whereNotIn('status', ['released', 'cancelled', 'failed'])
+          .first('id'));
+      } catch (e) {
+        extendedHoldExcluded = true;
+        logger.warn(`[dispatch] extended-lane hold lookup failed for visit ${svc.id} — lane closed: ${e.message}`);
+      }
+    }
     // An UNRESOLVED appointment-card lane fails the extended lane closed
     // too (pre-push P0): apptCardOneTimeCharge=false because the lookup
     // ERRORED is not "no consent row" — charging the mutable visit price
@@ -10947,7 +10965,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // boundary additionally excludes any consent row under the visit lock
     // (requireNoAppointmentCardLane on the charge below).
     const extendedChargeCandidate = extendedAutopayCharge && visitPerformed
-      && !apptCardLaneUnresolved
+      && !apptCardLaneUnresolved && !extendedHoldExcluded
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
       && !!invoice?.id && !alreadyPaid && !invoice.payer_id && customerAutopayActive;
     let extendedLaneAnchor = null;

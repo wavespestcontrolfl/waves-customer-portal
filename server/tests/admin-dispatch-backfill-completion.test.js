@@ -2421,7 +2421,7 @@ describe('completion route wiring (source contracts)', () => {
     // Round 5-6: entry keys on the FULL candidate (no-cost + unresolved
     // appt-lane exclusions included) and the money boundary excludes any
     // appointment-card consent row under the visit lock.
-    expect(source).toMatch(/&& !apptCardLaneUnresolved\n\s*&& !svc\.is_callback && !isAlwaysFreeServiceType\(svc\.service_type\)/);
+    expect(source).toMatch(/&& !apptCardLaneUnresolved && !extendedHoldExcluded\n\s*&& !svc\.is_callback && !isAlwaysFreeServiceType\(svc\.service_type\)/);
     expect(source).toMatch(/requireNoAppointmentCardLane: extendedAutopayCharge,/);
     expect(laneSource).toMatch(/reason: 'no_cost_visit'/);
   });

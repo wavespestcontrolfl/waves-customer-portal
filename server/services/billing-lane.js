@@ -382,6 +382,28 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   } catch {
     return { ok: false, reason: 'active_payment_plan_unverifiable' };
   }
+  // Out-of-band (cash/Zelle) prepayment on the LOCKED row (GitHub r2 P1):
+  // the route's netting decisions used a pre-lock snapshot — a prepayment
+  // recorded inside the window would be double-collected by a full charge.
+  // Fail closed to office review; legitimate partial-prepay netting
+  // happens at mint time, before this lane admits the invoice.
+  if (String(lockedSvc.prepaid_method || '') !== ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(lockedSvc.prepaid_amount) > 0) {
+    return { ok: false, reason: 'out_of_band_prepayment' };
+  }
+  // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
+  // a live hold re-checked under the money locks — the admission-side
+  // read is an unlocked snapshot a hold insert can outrun. Unreadable
+  // state fails toward refusal.
+  try {
+    const liveHold = await dbConn('estimate_card_holds')
+      .where({ scheduled_service_id: lockedSvc.id })
+      .whereNotIn('status', ['released', 'cancelled', 'failed'])
+      .first('id');
+    if (liveHold) return { ok: false, reason: 'estimate_card_hold' };
+  } catch {
+    return { ok: false, reason: 'estimate_card_hold_unverifiable' };
+  }
   const hasVisitPrice = lockedSvc.estimated_price != null && Number(lockedSvc.estimated_price) > 0;
   let duesCollected = true;
   try { duesCollected = await monthlyDuesCollected(dbConn, lockedSvc.customer_id); } catch { duesCollected = true; }

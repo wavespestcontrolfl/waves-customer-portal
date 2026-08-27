@@ -2744,11 +2744,15 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
   if (billingMode === 'per_application') return true;
   if (require('../config/feature-gates').gates.completionAutopayCharge !== true) return false;
   try {
-    const [dunningRow, consentRow] = await Promise.all([
+    const [dunningRow, consentRow, planRow] = await Promise.all([
       db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first('status'),
       db('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId }).first('id'),
+      // An active payment plan owns the invoice's collection (GitHub r2
+      // P2) — completion refuses the charge, so the sheet must not
+      // promise it.
+      db('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id'),
     ]);
-    return !consentRow && String(dunningRow?.status || '').toLowerCase() !== 'stopped';
+    return !consentRow && !planRow && String(dunningRow?.status || '').toLowerCase() !== 'stopped';
   } catch {
     return false;
   }
@@ -3053,7 +3057,7 @@ router.get('/', async (req, res, next) => {
       if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
         try {
           const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
         } catch { annualCoverageValidated = null; }
       }
       // Present-tense money state for the sheet's billing card: what the
@@ -3582,7 +3586,7 @@ router.get('/week', async (req, res, next) => {
         if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
           try {
             const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
           } catch { annualCoverageValidated = null; }
         }
         // Present-tense money state for the sheet's billing card: what the

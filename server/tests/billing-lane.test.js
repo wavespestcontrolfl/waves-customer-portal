@@ -414,6 +414,7 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
     const chain = {
       where() { return chain; },
       whereIn() { return chain; },
+      whereNotIn() { return chain; },
       whereRaw() { return chain; },
       orWhere() { return chain; },
       andWhereRaw() { return chain; },
@@ -422,7 +423,7 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       // coverage validation; payments = the dues-collected probe.
       first: async () => (table === 'scheduled_services'
         ? { id: 's1', customer_id: 'c1' }
-        : (collected ? { id: 'p1' } : null)),
+        : (table === 'payments' && collected ? { id: 'p1' } : null)),
     };
     return chain;
   };
@@ -487,11 +488,38 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, service_type: 'Pest Control Re-Service' }, lockedInvoice: invoiceAt(90.55),
     })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
   });
+  test('an out-of-band prepayment on the locked visit refuses (out_of_band_prepayment)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member,
+      lockedSvc: { ...visit, prepaid_method: 'cash', prepaid_amount: 50 },
+      lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'out_of_band_prepayment' });
+  });
+  test('a live estimate card hold owns the booking (estimate_card_hold)', async () => {
+    const holdConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereNotIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'estimate_card_holds' ? { id: 'hold1' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: holdConn, lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'estimate_card_hold' });
+  });
   test('an ACTIVE payment plan on the invoice refuses the charge (active_payment_plan)', async () => {
     const planConn = (table) => {
       const chain = {
         where() { return chain; },
         whereIn() { return chain; },
+        whereNotIn() { return chain; },
         whereRaw() { return chain; },
         orWhere() { return chain; },
         andWhereRaw() { return chain; },
