@@ -817,3 +817,117 @@ describe('retired T&S Premium is not a combo axis (estimator audit 2026-07-24)',
     expect([...tsKeys].sort()).toEqual(['enhanced', 'light', 'standard']);
   });
 });
+
+describe('pre-ladder lawn send snapshots recompute instead of fast-pathing (prod 2026-08-27)', () => {
+  const { pricingBundleHasLawnTierLadder, estimateDataIsLawnOnlyRecurring } = require('../routes/estimate-public');
+
+  // Exact stored shape of a lawn-only estimate SENT 2026-05-21 (before the
+  // lawn tier ladder existed) and accepted 2026-08-27: one generic pest-style
+  // entry, no serviceCategory, no visit count; the lawn slice only lives in
+  // recurring.services. The fast path served it, so the customer's only
+  // choice was "Quarterly" and accept stamped accepted_frequency_key =
+  // 'quarterly' + a 3-month billing interval onto a 9-visit plan.
+  function preLadderLawnEstimate() {
+    return {
+      id: `estimate-${Math.random().toString(36).slice(2)}`,
+      status: 'sent',
+      monthly_total: 55,
+      annual_total: 660,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+      estimate_data: {
+        result: {
+          hasRecurring: true,
+          recurring: {
+            tier: 'Bronze', discount: 0, monthlyTotal: 55, annualAfterDiscount: 660,
+            services: [{ name: 'Lawn Care', service: 'lawn_care', mo: 55, monthly: 55, perTreatment: 73.33, visitsPerYear: 9 }],
+          },
+          results: {
+            lawn: [
+              { v: 4, mo: 35, pa: 105, ann: 420, name: '4x', dimmed: true },
+              { v: 6, mo: 45, pa: 90, ann: 540, name: '6x', dimmed: true },
+              { v: 9, mo: 55, pa: 73.33, ann: 660, name: '9x', recommended: true },
+              { v: 12, mo: 66, pa: 66, ann: 792, name: '12x', dimmed: true },
+            ],
+          },
+          oneTime: { items: [], total: 0 },
+        },
+        sendSnapshot: {
+          pricingBundle: {
+            source: 'send_snapshot',
+            frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55 }],
+            services: [{ key: 'lawn_care', label: 'Lawn Care', frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55 }] }],
+            oneTimeBreakdown: { items: [], total: 0 },
+          },
+        },
+      },
+    };
+  }
+
+  test('helper: generic entry + lawn treatment row is NOT a lawn tier ladder', () => {
+    expect(pricingBundleHasLawnTierLadder({
+      frequencies: [{ key: 'quarterly', label: 'Quarterly', monthly: 55, perServiceTreatments: [{ service: 'lawn_care', displayPrice: 73.33, visitsPerYear: 9 }] }],
+    })).toBe(false);
+    expect(pricingBundleHasLawnTierLadder({
+      frequencies: [{ key: 'enhanced', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced', monthly: 55 }],
+    })).toBe(true);
+    expect(pricingBundleHasLawnTierLadder({
+      services: [{ key: 'lawn_care', frequencies: [{ key: 'enhanced', serviceCategory: 'lawn_care' }] }],
+    })).toBe(true);
+    expect(pricingBundleHasLawnTierLadder({
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'enhanced' } }],
+    })).toBe(true);
+  });
+
+  test('helper: lawn-only vs mixed recurring mixes', () => {
+    expect(estimateDataIsLawnOnlyRecurring(preLadderLawnEstimate().estimate_data)).toBe(true);
+    const mixed = preLadderLawnEstimate().estimate_data;
+    mixed.result.recurring.services.push({ name: 'Pest Control', service: 'pest_control', mo: 45, visitsPerYear: 4 });
+    expect(estimateDataIsLawnOnlyRecurring(mixed)).toBe(false);
+  });
+
+  test('a MIXED pest + lawn pre-ladder snapshot keeps the legacy fast path (sent price preserved)', async () => {
+    const estimate = preLadderLawnEstimate();
+    estimate.monthly_total = 100;
+    estimate.annual_total = 1200;
+    estimate.estimate_data.result.recurring.monthlyTotal = 100;
+    estimate.estimate_data.result.recurring.annualAfterDiscount = 1200;
+    estimate.estimate_data.result.recurring.services.push({ name: 'Pest Control', service: 'pest_control', mo: 45, monthly: 45, perTreatment: 135, visitsPerYear: 4 });
+    estimate.estimate_data.sendSnapshot.pricingBundle.frequencies = [{
+      key: 'quarterly', label: 'Quarterly', monthly: 100, annual: 1200,
+      perServiceTreatments: [
+        { service: 'pest_control', displayPrice: 135, visitsPerYear: 4 },
+        { service: 'lawn_care', displayPrice: 73.33, visitsPerYear: 9 },
+      ],
+    }];
+    delete estimate.estimate_data.sendSnapshot.pricingBundle.services;
+    const bundle = await buildPricingBundle(estimate);
+    expect(bundle.snapshotHit).toBe(true);
+  });
+
+  test('the May-21 snapshot recomputes: customer gets the real tier ladder, not one generic Quarterly entry', async () => {
+    const bundle = await buildPricingBundle(preLadderLawnEstimate());
+    expect(bundle.snapshotHit).not.toBe(true);
+    const keys = bundle.frequencies.map((f) => f.key);
+    expect(keys).not.toContain('quarterly');
+    expect(keys).toEqual(expect.arrayContaining(['standard', 'enhanced', 'premium']));
+    const enhanced = bundle.frequencies.find((f) => f.key === 'enhanced');
+    expect(enhanced.serviceCategory).toBe('lawn_care');
+    expect(enhanced.visitsPerYear).toBe(9);
+    expect(enhanced.monthly).toBeCloseTo(55, 2);
+    expect(enhanced.recommended).toBe(true);
+  });
+
+  test('a snapshot that DOES offer the lawn ladder still fast-paths', async () => {
+    const estimate = preLadderLawnEstimate();
+    estimate.estimate_data.sendSnapshot.pricingBundle.frequencies = [
+      { key: 'standard', label: 'Bi-monthly', serviceCategory: 'lawn_care', serviceTierKey: 'standard', monthly: 45, monthlyBase: 45, annual: 540, perTreatment: 90, visitsPerYear: 6, billingFrequencyKey: 'monthly', included: [], addOns: [] },
+      { key: 'enhanced', label: 'Every 6 weeks', serviceCategory: 'lawn_care', serviceTierKey: 'enhanced', monthly: 55, monthlyBase: 55, annual: 660, perTreatment: 73.33, visitsPerYear: 9, billingFrequencyKey: 'monthly', included: [], addOns: [], recommended: true },
+      { key: 'premium', label: 'Monthly', serviceCategory: 'lawn_care', serviceTierKey: 'premium', monthly: 66, monthlyBase: 66, annual: 792, perTreatment: 66, visitsPerYear: 12, billingFrequencyKey: 'monthly', included: [], addOns: [] },
+    ];
+    delete estimate.estimate_data.sendSnapshot.pricingBundle.services;
+    const bundle = await buildPricingBundle(estimate);
+    expect(bundle.snapshotHit).toBe(true);
+    expect(bundle.frequencies.map((f) => f.key)).toEqual(['standard', 'enhanced', 'premium']);
+  });
+});

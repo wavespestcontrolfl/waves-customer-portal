@@ -21336,6 +21336,41 @@ function estimateDataHasRecurringLawn(estData = null) {
 // identifiable, because the policy check cannot attribute those rows to lawn
 // and a below-floor/quarterly snapshot would fast-path unchecked. Such
 // shapes must recompute instead.
+// Is lawn the ONLY recurring service on the estimate? Mixed bundles keep the
+// legacy fast path: their generic entry IS the customer's pest (or other
+// primary) cadence and the lawn slice rides the stored row, so recomputing
+// them would re-price a sent quote (estimate-public-onetime-breakdown
+// "keep legacy bundle" doctrine). Lawn-only is the shape where the generic
+// entry is meaningless and the customer never gets a lawn cadence choice.
+function estimateDataIsLawnOnlyRecurring(estData = null) {
+  if (!estData || typeof estData !== 'object') return false;
+  const { recurringSvcList } = acceptanceServiceLists(estData);
+  const keys = new Set((recurringSvcList || []).map(recurringServiceKey).filter(Boolean));
+  return keys.size === 1 && keys.has('lawn_care');
+}
+
+// Does the bundle OFFER a lawn tier ladder — a lawn-tagged frequency row
+// (top-level or per-section) or a lawn combo axis? Deliberately narrower than
+// pricingBundleHasLawnIdentifiableRow: a lawn perServiceTreatments row proves
+// the snapshot can be policy-checked, but it does NOT prove the customer can
+// pick a cadence. Snapshots frozen before the lawn ladder shipped carry ONE
+// generic pest-style entry (`{ key: 'quarterly', label: 'Quarterly' }`, no
+// serviceCategory, no visit count) with the lawn slice as a treatment row —
+// that shape passed every fast-path guard, so the customer was shown the
+// May-era card and /accept stamped `accepted_frequency_key = 'quarterly'` +
+// a 3-month billing interval on a 9-visit Every-6-Weeks plan (prod
+// 2026-08-27). Such snapshots must recompute through the live ladder.
+function pricingBundleHasLawnTierLadder(bundle = {}) {
+  const frequencyRows = [...(Array.isArray(bundle.frequencies) ? bundle.frequencies : [])];
+  const services = Array.isArray(bundle.services) ? bundle.services : [];
+  for (const s of services) {
+    if (Array.isArray(s?.frequencies)) frequencyRows.push(...s.frequencies);
+  }
+  if (frequencyRows.some((f) => f?.serviceCategory === 'lawn_care')) return true;
+  const combos = Array.isArray(bundle.serviceCadenceCombos) ? bundle.serviceCadenceCombos : [];
+  return combos.some((c) => c?.selection && Object.prototype.hasOwnProperty.call(c.selection, 'lawn_care'));
+}
+
 function pricingBundleHasLawnIdentifiableRow(bundle = {}) {
   const hasLawnTreatmentRow = (rows) => Array.isArray(rows)
     && rows.some((r) => recurringServiceKey(r) === 'lawn_care');
@@ -21883,6 +21918,11 @@ async function buildPricingBundleInner(estimate) {
     // not fast-path just because its lawn slice is unitemized).
     && !pricingBundleViolatesLawnPolicy(snapshotBundle, lawnProgramMinimumMonthlyFor(estData))
     && !(estimateDataHasRecurringLawn(estData) && !pricingBundleHasLawnIdentifiableRow(snapshotBundle))
+    // A LAWN-ONLY snapshot that never OFFERED the lawn tier ladder (one
+    // generic pre-ladder entry) recomputes so the customer picks a real tier
+    // and accept stamps it — see pricingBundleHasLawnTierLadder /
+    // estimateDataIsLawnOnlyRecurring for why mixed bundles are exempt.
+    && !(estimateDataIsLawnOnlyRecurring(estData) && !pricingBundleHasLawnTierLadder(snapshotBundle))
     // Pre-split termite snapshots (no monthly on the flat-monthly row) and
     // pre-fee-rule solo pest/mosquito snapshots (no setup fee the accept
     // path will invoice) recompute instead of fast-pathing.
@@ -23678,6 +23718,8 @@ module.exports.handleEstimateAsk = handleEstimateAsk;
 module.exports.handleEstimateView = handleEstimateView;
 module.exports.verifyEstimateAskToken = verifyEstimateAskToken;
 module.exports.buildPricingBundle = buildPricingBundle;
+module.exports.pricingBundleHasLawnTierLadder = pricingBundleHasLawnTierLadder;
+module.exports.estimateDataIsLawnOnlyRecurring = estimateDataIsLawnOnlyRecurring;
 // The cadence an outstanding estimate is quoted at when the customer has not
 // picked one — the same selector the accept path uses for a body with no
 // selectedFrequency, so the estimate PDF cannot name a different default than
