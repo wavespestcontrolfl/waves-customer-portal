@@ -467,7 +467,9 @@ describe('booking route wiring (source contracts)', () => {
     // Every run walks the WHOLE windowed set oldest-first — a newest-N
     // slice with no completion marker starves older rows (r9 hook).
     expect(recoverySrc).toMatch(/orderBy\('ss\.created_at', 'asc'\)/);
-    expect(recoverySrc).toMatch(/safety cap/);
+    // No row cap (r17 pre-push audit): the cursor is per-invocation, so a
+    // cap would re-walk the same oldest rows every tick.
+    expect(recoverySrc).not.toMatch(/maxRows/);
     // One replica per tick (r10): the heal pass can re-create a welcome
     // enqueue and sms_sequences has no unique constraint.
     expect(indexSrc).toMatch(/runExclusive\('wizard-series-recovery-sweep', async \(\) => \{/);
@@ -766,6 +768,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/cursor = parents\[parents\.length - 1\]/);
     expect(recoverySrc).toMatch(/if \(parents\.length < pageSize\) break;/);
     expect(recoverySrc).not.toMatch(/limit = 200/);
+    expect(recoverySrc).not.toMatch(/safety cap/);
   });
 
   test('a wizard parent carries the QUOTED address itself at activation; the guard never reads a live wizard draft back (r14)', async () => {

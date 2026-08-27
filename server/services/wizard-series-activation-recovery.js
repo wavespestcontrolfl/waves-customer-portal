@@ -313,9 +313,11 @@ async function runActivationFollowThroughForParent(parent, { database = db } = {
 // a KEYSET cursor over (created_at, id) in pages (codex #3504 r14): a
 // single capped page re-selected the same oldest rows every tick once
 // the eligible set outgrew it, and everything past the page aged out
-// unhealed. maxRows is a runaway safety cap only; hitting it logs loud so
-// it never silently truncates.
-async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, pageSize = 200, maxRows = 5000 } = {}) {
+// unhealed. There is deliberately NO row cap (pre-push audit on r17): the
+// cursor is per-invocation, so a cap would re-walk the same oldest rows
+// every tick and starve the tail exactly like the single page did — the
+// 7-day window is the only bound, and the set is walked to exhaustion.
+async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, pageSize = 200 } = {}) {
   let healed = 0;
   let cursor = null;
   for (;;) {
@@ -346,10 +348,6 @@ async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 1
     healed += parents.length;
     cursor = parents[parents.length - 1];
     if (parents.length < pageSize) break;
-    if (healed >= maxRows) {
-      logger.warn(`[wizard-series-recovery] follow-through heal hit its ${maxRows}-row safety cap this tick — remaining rows resume next tick from the cursor's position (raise the cap or shrink the window if this repeats)`);
-      break;
-    }
   }
   return { healed };
 }
