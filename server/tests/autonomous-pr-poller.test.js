@@ -866,6 +866,40 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a new-blog PR touching a NON-content file (.astro/js/config) is withheld; its own hero asset is allowed (hook r8 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/pages/pest-control-venice-fl.astro', status: 'modified' },
+    ]);
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    // The publisher's own hero asset rides fine.
+    jest.clearAllMocks();
+    pagesPoll.liveUrlResponds.mockResolvedValue(true);
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'public/images/blog/blog-test-post/hero.webp', status: 'added' },
+    ]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res2 = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
   test('a new-blog PR DELETING a non-blog content file is withheld too (hook r7 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });

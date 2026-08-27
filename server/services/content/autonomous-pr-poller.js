@@ -888,6 +888,27 @@ async function maybeAutoMerge(run, pr) {
     const contentFiles = prFiles.filter((f) => (
       /^src\/content\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
     const blogFiles = contentFiles.filter((f) => /^src\/content\/blog\//.test(String(f?.filename || '')));
+    // EVERY row on a bound lane must be in the publisher's expected output
+    // set (hook r8 P1): the content markdown judged by the binding +
+    // comparison checks below, or a publisher-owned hero/og asset under
+    // public/images/blog/. Any other row (.astro pages, JS modules, config,
+    // shared assets — modified, deleted, or renamed) is outside the single
+    // brief's authorization and withholds; a green build + Codex-clear
+    // review must not let it ride an unattended merge.
+    if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
+      const unexpected = prFiles.find((f) => {
+        const name = String(f?.filename || '');
+        const prev = String(f?.previous_filename || '');
+        const allowed = (n) => !n
+          || /^src\/content\/.+\.(md|mdx)$/.test(n)
+          || /^public\/images\/blog\//.test(n);
+        return !(allowed(name) && allowed(prev));
+      });
+      if (unexpected) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR touches a file outside the publisher's expected output set (${unexpected.filename}) — PR left open for a human decision`);
+        return { pending: true, reason: 'named_competitor_head_gate_failed' };
+      }
+    }
     // Bind the run's single-brief authorization to its OWN generated file
     // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
     // blog file, and its path must be the one the run's canonical routes to
