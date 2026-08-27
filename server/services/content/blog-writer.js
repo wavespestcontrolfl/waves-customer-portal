@@ -21,6 +21,20 @@ const BLOG_TAGS = [
   'Lawn Disease', 'Lawn Pests', 'Lawn Care', 'Pest Control',
 ];
 
+// Tag → canonical blog category, so the topic-targeting gate judges entity
+// ownership within the same category (its declared semantics). Everything
+// not termite / mosquito / lawn is the pest-control category.
+const TAG_TO_CATEGORY = Object.freeze({
+  Termites: 'termite',
+  Mosquitoes: 'mosquito',
+  'Lawn Disease': 'lawn-care',
+  'Lawn Pests': 'lawn-care',
+  'Lawn Care': 'lawn-care',
+});
+function tagToCategory(tag) {
+  return TAG_TO_CATEGORY[tag] || 'pest-control';
+}
+
 const TAG_ALIASES = new Map([
   ['cockroach', 'Roaches'], ['cockroaches', 'Roaches'], ['roach', 'Roaches'],
   ['palmetto bug', 'Roaches'], ['german roach', 'Roaches'],
@@ -554,7 +568,7 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       // geo, statewide-only framing (an idea IS a title — judged strictly),
       // or an entity a live post already owns is rejected outright.
       const topic = topicGate.evaluate(
-        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug },
+        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, category: tagToCategory(tag) },
         { index: topicIndex }
       );
       if (!topic.ok) { rejected++; continue; }
@@ -612,6 +626,7 @@ blogWriter._internals = {
   FAQ_SECTION_INSTRUCTION,
   NO_FAQ_SECTION_INSTRUCTION,
   normalizeTag,
+  tagToCategory,
   conceptKey,
   slugify,
   SEASONAL_PESTS,

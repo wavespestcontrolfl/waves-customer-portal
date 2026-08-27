@@ -24,6 +24,14 @@ function makeDbMock() {
   return dbMock;
 }
 
+// Termite post that owns "bait" in its category; "bait" is common across
+// pest-control posts, so only a same-category frequency finds the owner.
+const TERMITE_BAIT = { url: '/termite/termite-bait-stations/', body: '---\ntitle: Termite Bait Stations Explained\nslug: /termite/termite-bait-stations/\nprimary_keyword: termite bait stations\ncategory: termite\n---\n## How bait stations work\n## When bait beats liquid\n' };
+const PEST_BAITS = ['ant-bait-basics', 'roach-bait-gel', 'rodent-bait-safety'].map((leaf) => ({
+  url: `/pest-control/${leaf}/`,
+  body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n`,
+}));
+
 function load({ ideas, corpus = [IN_WALL], corpusError = null }) {
   jest.resetModules();
   const dbMock = makeDbMock();
@@ -52,6 +60,22 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
     const accepted = await writer.generateNewIdeas(5);
     expect(accepted.map((a) => a.title)).toEqual(['Ghost Ants in Sarasota Kitchens: Why They Keep Coming Back']);
     expect(dbMock._inserts.map((r) => r.slug)).toEqual(['ghost-ants-sarasota-kitchens']);
+  });
+
+  test('ownership is judged in the category the idea TAG maps to (termite bait idea vs a termite owner, despite pest-control bait posts)', async () => {
+    const { writer } = load({
+      ideas: [{ title: 'Bait Station Costs for Sarasota Homes', keyword: 'bait station cost', tag: 'Termites', slug: 'bait-station-costs-sarasota', city: 'Sarasota' }],
+      corpus: [IN_WALL, TERMITE_BAIT, ...PEST_BAITS],
+    });
+    await expect(writer.generateNewIdeas(1)).resolves.toEqual([]);
+  });
+
+  test('tag → category mapping covers the closed tag set', () => {
+    const { writer } = load({ ideas: [] });
+    const { BLOG_TAGS, tagToCategory } = writer._internals;
+    expect(new Set(BLOG_TAGS.map(tagToCategory))).toEqual(new Set(['termite', 'mosquito', 'lawn-care', 'pest-control']));
+    expect(tagToCategory('Termites')).toBe('termite');
+    expect(tagToCategory('Ants')).toBe('pest-control');
   });
 
   test('fails closed with no LLM spend when the live corpus is unavailable', async () => {
