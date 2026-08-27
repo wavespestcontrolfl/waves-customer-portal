@@ -2,6 +2,12 @@ const db = require('../models/db');
 const { findGbpLocationByUtmContent, isGbpUtmCampaign } = require('../config/locations');
 
 const MAIN_SITE_NAME = 'Main Site (wavespestcontrol.com)';
+// Seeded by migration 20260827000001. Web-form paid-Google leads go here so
+// form vs call conversions stay separable in source ROI. Matched by NAME:
+// source_type='google_ads' is shared by the call-extension number AND the
+// phone-less call-reporting bridge row, so neither source_type nor
+// "phone-less" identifies the web-form row.
+const GOOGLE_ADS_WEB_FORM_NAME = 'Google Ads — Web Form';
 
 const SPOKE_DOMAIN_TO_SOURCE_NAME = {
   'parrishfllawncare.com': 'Spoke Lawn — parrishfllawncare.com',
@@ -114,7 +120,14 @@ async function resolveLeadSource(attribution) {
     if (metaPaid) {
       row = await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first();
     } else if (googlePaid) {
-      row = await db('lead_sources').where({ source_type: 'google_ads' }).first();
+      // Several google_ads rows exist (call-extension number, call-reporting
+      // bridge, web form). This is the web path: the web-form row by name,
+      // and FAIL CLOSED if it is missing — any other google_ads row is a call
+      // row, and a web conversion counted as a call is the exact ROI
+      // contamination this exists to prevent. sourceType below still reports
+      // 'google_ads' with leadSourceId null, and the dashboard's
+      // leads_unattributed_7d alert surfaces the missing row.
+      row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
     } else {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
@@ -142,4 +155,4 @@ async function resolveLeadSource(attribution) {
   };
 }
 
-module.exports = { resolveLeadSource, MAIN_SITE_NAME, SPOKE_DOMAIN_TO_SOURCE_NAME };
+module.exports = { resolveLeadSource, MAIN_SITE_NAME, GOOGLE_ADS_WEB_FORM_NAME, SPOKE_DOMAIN_TO_SOURCE_NAME };

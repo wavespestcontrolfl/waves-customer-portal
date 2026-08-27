@@ -80,6 +80,7 @@ const leadAttribution = require('../services/lead-attribution');
 // (lead-estimate-link.js) classifies with the exact same semantics. This route
 // keeps using — and re-exporting via `_test` — the shared implementation.
 const { determineLeadSource } = require('../services/lead-source-classify');
+const { GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 
 // Adam's personal cell for new-lead alerts — must be a real cell, never one
 // of our own Twilio numbers (same-from/to sends fail with Twilio error 21266).
@@ -313,6 +314,21 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           .where('is_active', true);
         if (leadSource.channel) fbQuery.where('channel', leadSource.channel);
         sourceRecord = await fbQuery.first();
+      }
+      if (!sourceRecord && leadSource.source === 'google_ads') {
+        // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Route to
+        // the "Google Ads — Web Form" row so form vs call conversions stay
+        // separable in source ROI. (Before this branch every gclid form lead
+        // was Unattributed.)
+        // Matched by NAME (source_type google_ads is shared with the
+        // call-extension number and the phone-less call-reporting bridge row)
+        // and FAIL CLOSED if absent — every other google_ads row is a call
+        // row, and counting a web form as a call is the contamination this
+        // branch exists to prevent (NULL surfaces via the dashboard's
+        // leads_unattributed_7d alert instead). Deliberately NOT filtered on
+        // is_active (same rationale as lead-source-resolver): a paused
+        // web-form row is still the true channel.
+        sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
       }
       if (sourceRecord) leadSourceId = sourceRecord.id;
     } catch (e) {

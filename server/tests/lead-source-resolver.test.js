@@ -6,18 +6,18 @@ jest.mock('../config/locations', () => ({
 
 const db = require('../models/db');
 const { isGbpUtmCampaign, findGbpLocationByUtmContent } = require('../config/locations');
-const { resolveLeadSource, MAIN_SITE_NAME } = require('../services/lead-source-resolver');
+const { resolveLeadSource, MAIN_SITE_NAME, GOOGLE_ADS_WEB_FORM_NAME } = require('../services/lead-source-resolver');
 
 // Mock lead_sources lookups: the resolver hits exactly one of
 //   .whereRaw("LOWER(name) LIKE '%facebook%'").first()   (meta)
-//   .where({ source_type: 'google_ads' }).first()        (google paid)
+//   .where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()   (google paid — `google` fixture)
 //   .where({ name }).first()                              (everything else)
 function mockLeadSources({ facebook = null, google = null, byName = {} } = {}) {
   db.mockImplementation(() => ({
     whereRaw: () => ({ first: async () => facebook }),
     where: (clause) => ({
       first: async () => {
-        if (clause && clause.source_type === 'google_ads') return google;
+        if (clause && clause.name === GOOGLE_ADS_WEB_FORM_NAME) return google;
         if (clause && clause.name) return byName[clause.name] || null;
         return null;
       },
@@ -54,6 +54,42 @@ describe('resolveLeadSource', () => {
 
     expect((await resolveLeadSource({ wbraid: 'w1' })).leadSourceId).toBe('ls-google');
     expect((await resolveLeadSource({ gbraid: 'b1' })).leadSourceId).toBe('ls-google');
+  });
+
+  test('google paid lookup matches the web-form row BY NAME even with other phone-less google_ads rows present', async () => {
+    // Three google_ads rows: call-extension (phone), call-reporting bridge
+    // (phone-less), web form (phone-less). Only a name match is unambiguous.
+    const rows = [
+      { id: 'ls-google-call', name: 'Google Ads — Pest (call-extension)', source_type: 'google_ads', twilio_phone_number: '+19410000000' },
+      { id: 'ls-google-bridge', name: 'Google Ads - Call Reporting Bridge', source_type: 'google_ads', twilio_phone_number: null },
+      { id: 'ls-google-form', name: GOOGLE_ADS_WEB_FORM_NAME, source_type: 'google_ads', twilio_phone_number: null },
+    ];
+    db.mockImplementation(() => ({
+      whereRaw: () => ({ first: async () => null }),
+      where: (clause) => ({
+        first: async () => rows.find((r) => Object.entries(clause).every(([k, v]) => r[k] === v)) || null,
+      }),
+    }));
+    const res = await resolveLeadSource({ gclid: 'g1' });
+    expect(res.leadSourceId).toBe('ls-google-form');
+  });
+
+  test('google paid lookup FAILS CLOSED when the web-form row is absent — never a call row, never Main Site', async () => {
+    db.mockImplementation(() => ({
+      whereRaw: () => ({ first: async () => null }),
+      where: (clause) => ({
+        // Only call-oriented google_ads rows exist; Main Site exists too.
+        first: async () => {
+          if (clause.source_type === 'google_ads') return { id: 'ls-google-call', source_type: 'google_ads' };
+          if (clause.name === MAIN_SITE_NAME) return { id: 'ls-main', name: MAIN_SITE_NAME };
+          return null;
+        },
+      }),
+    }));
+    const res = await resolveLeadSource({ gbraid: 'b1' });
+    expect(res.leadSourceId).toBeNull();
+    expect(res.sourceType).toBe('google_ads');
+    expect(res.isPaidClick).toBe(true);
   });
 
   test('classifies utm_source=google&utm_medium=cpc as Google Ads', async () => {
