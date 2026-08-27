@@ -46,11 +46,15 @@ describe('BacklinkMonitor snapshots', () => {
           where: jest.fn(async () => activeBacklinks),
         };
       }
+      if (table === 'seo_backlink_events') {
+        const ev = { where: jest.fn(() => ev), count: jest.fn(() => ev), first: jest.fn(async () => ({ count: '2' })) };
+        return ev;
+      }
       if (table === 'seo_backlink_snapshots') {
         const builder = {
           where: jest.fn(() => builder),
           orderBy: jest.fn(() => builder),
-          first: jest.fn(async () => null),
+          first: jest.fn(async () => (builder.first.mock.calls.length > 1 ? null : { snapshot_date: '2026-06-01', created_at: new Date('2026-06-01T07:30:00Z'), updated_at: new Date('2026-06-01T19:00:00Z') })),
           insert: jest.fn((payload) => {
             snapshotWrites.push(payload);
             return { onConflict: jest.fn(() => ({ merge: jest.fn(async () => {}) })) };
@@ -67,7 +71,12 @@ describe('BacklinkMonitor snapshots', () => {
     // the baseline is the previous DAY's snapshot, never a same-day row about to be merged over
     expect(db.mock.results.map(r => r.value).find(b => b.where && b.orderBy && b.first).where).toHaveBeenCalledWith('snapshot_date', '<', expect.any(String));
     expect(snapshotWrites[0].updated_at).toBeInstanceOf(Date); // merged re-takes advance the next baseline
+    // losses come from the event ledger (a lost-then-recovered link still counts), baselined on the previous row's updated_at
+    const evBuilder = db.mock.results.map(r => r.value).find(b => b.count && b.where);
+    expect(evBuilder.where).toHaveBeenCalledWith('event_type', 'lost');
+    expect(evBuilder.where).toHaveBeenCalledWith('created_at', '>=', new Date('2026-06-01T19:00:00Z'));
     expect(snapshotWrites[0]).toEqual(expect.objectContaining({
+      lost_backlinks_since_last: 2,
       total_backlinks: 3,
       dofollow_count: 1,
       nofollow_count: 1,

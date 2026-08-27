@@ -483,9 +483,12 @@ class BacklinkMonitor {
       total_backlinks: all.length,
       total_referring_domains: domains.size,
       new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen >= (prev.snapshot_date || today)).length : all.length,
+      // Count loss EVENTS, not rows currently lost: a link verified lost and
+      // recovered within the window has its lost_at cleared, but the loss
+      // still happened and belongs in the trend.
       lost_backlinks_since_last: prev
-        ? await db('seo_backlinks').where('status', 'lost')
-            .where('lost_at', '>=', prev.updated_at || prev.created_at || prev.snapshot_date)
+        ? await db('seo_backlink_events').where('event_type', 'lost')
+            .where('created_at', '>=', prev.updated_at || prev.created_at || prev.snapshot_date)
             .count('id as count').first().then(r => parseInt(r?.count) || 0)
         : 0,
       avg_domain_rating: all.length > 0 ? Math.round(all.reduce((s, b) => s + (b.domain_rating || 0), 0) / all.length) : 0,
