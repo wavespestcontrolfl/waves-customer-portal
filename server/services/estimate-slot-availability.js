@@ -473,11 +473,25 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
 
   const rows = [];
   const seen = new Set();
+  const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
   const add = (service, label, engineKey = null) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
+    // One ENGINE identity = one profile service, however many display rows
+    // it was itemized into: a V2 rodent exclusion quote carries a row per
+    // section ("Rodent Exclusion — Wire Mesh Points", "… — Bird Boxes", …)
+    // all keyed rodent_exclusion, and a second profile row would make the
+    // adoption stamp reject the profile as multi-service (codex #3521 r1
+    // P1). Collapse onto the first row and drop its section suffix so the
+    // visit is named for the job, not one of its parts.
+    if (engineKey && seenEngineKeys.has(engineKey)) {
+      const existing = seenEngineKeys.get(engineKey);
+      const sep = existing.label.indexOf(' — ');
+      if (sep > 0) existing.label = existing.label.slice(0, sep).trim();
+      return;
+    }
     seen.add(key);
     // `service` is the CATEGORY (pest specialties all collapse to
     // 'pest_control'), which is right for labelling but destroys the identity
@@ -485,7 +499,9 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // key so slot-reservation's catalogServiceIdForProfile can stamp service_id
     // for specialties like german_roach / stinging_insect — without it, both
     // query engine_key='pest_control' and stay unstamped (codex #3328 r1 P1).
-    rows.push({ service, label: clean, visitsPerYear: null, engineKey: engineKey || null });
+    const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null };
+    rows.push(row);
+    if (engineKey) seenEngineKeys.set(engineKey, row);
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)

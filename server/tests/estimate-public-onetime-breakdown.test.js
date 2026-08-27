@@ -3597,14 +3597,14 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('data-estimate-ask-prompt="How does pre-slab treatment work?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
 
-    // The service note and the warranty assurance each render exactly once —
-    // they used to print as one combined sentence in both the one-time note and
-    // the mini-guarantee, which showed the customer the same text twice.
+    // The one-time hero price card and its guarantee line are retired on
+    // one-time-only pages (owner 2026-08-27 — the itemized card leads), so
+    // neither the service note nor the warranty assurance renders in the hero.
     const noteOccurrences = (html.match(/Includes pre-slab soil treatment for the measured slab area\./g) || []).length;
     const warrantyOccurrences = (html.match(/Warranty terms depend on the selected warranty option\./g) || []).length;
-    expect(noteOccurrences).toBe(1);
-    expect(warrantyOccurrences).toBe(1);
-    expect(html).toContain('No extended warranty selected.');
+    expect(noteOccurrences).toBe(0);
+    expect(warrantyOccurrences).toBe(0);
+    expect(html).not.toContain('class="mini-guarantee"');
   });
 
   test('server-rendered Bora-Care estimate uses Bora-Care copy + AI card + chips, not pest defaults', () => {
@@ -3641,9 +3641,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('choose your pest control option');
     expect(html).not.toContain('to show the details behind your WaveGuard plan.');
 
-    // Description note + treatment-detail label replace the bare "One-time service".
-    expect(html).toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
-    expect(html).toContain('Bora-Care wood treatment');
+    // The hero price card (description note + treatment-detail label) is
+    // retired on one-time-only pages (owner 2026-08-27); the itemized card
+    // names the treatment instead.
+    expect(html).not.toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
+    expect(html).not.toContain('class="choice-treatment-detail"');
+    expect(html).toMatch(/<tr><td>Bora-Care/);
 
     // Ask Waves surfaces a Bora-Care service chip + a Bora-Care-worded safety chip
     // (so clicking it routes to the borate answer); never the bait/pest chips it
@@ -3712,8 +3715,10 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('class="mini-guarantee"');
-    expect(html).toContain('Warranty terms depend on the selected warranty option.');
+    // One-time-only pages render no hero guarantee line at all (owner
+    // 2026-08-27) — the mixed quote must not resurrect it either.
+    expect(html).not.toContain('class="mini-guarantee"');
+    expect(html).not.toContain('Warranty terms depend on the selected warranty option.');
   });
 
   test('Bora-Care-only quote with a member-discount row still renders Bora-Care copy and no pest callback', () => {
@@ -3802,8 +3807,11 @@ describe('public estimate one-time breakdown', () => {
     // Hero treatment name comes from the normalized rows too, so the nested shape
     // shows the Bora-Care name instead of falling back to "WaveGuard Bronze" or the
     // raw "bora_care" service key.
-    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
-    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    // No hero price card on one-time-only pages (owner 2026-08-27): the
+    // friendly name must come through the itemized card row instead.
+    expect(html).not.toContain('class="choice-treatment-name"');
+    expect(html).toContain('Bora-Care Wood Treatment');
+    expect(html).not.toContain('WaveGuard Bronze');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -3827,8 +3835,11 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
-    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    // No hero price card on one-time-only pages (owner 2026-08-27): the
+    // friendly name must come through the itemized card row instead.
+    expect(html).not.toContain('class="choice-treatment-name"');
+    expect(html).toContain('Bora-Care Wood Treatment');
+    expect(html).not.toContain('WaveGuard Bronze');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -4225,7 +4236,8 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).not.toContain('your Bora-Care wood treatment quote.');
-    expect(html).toContain('class="mini-guarantee"');
+    // No hero guarantee line on one-time-only pages (owner 2026-08-27).
+    expect(html).not.toContain('class="mini-guarantee"');
     // The one-time hero detail/note are gated on Bora-Care-only too, so a mixed
     // billable estimate doesn't show the Bora-Care wood-treatment detail line.
     expect(html).not.toContain('class="choice-treatment-detail">Bora-Care wood treatment');
@@ -7907,8 +7919,12 @@ describe('SSR copy parity with the React page (#2969 dedupe; estimator audit 202
       },
     });
     expect(html).toContain('Flea Cleanout');
-    // Empty price cell — the lone row's amount is a pure repeat of the hero.
-    expect(html).toContain('<td style="text-align:right"></td>');
+    // With the hero price card retired (owner 2026-08-27) the lone row is
+    // the ONLY place the price shows, so it keeps its dollars; a single
+    // row still gets no Total row (the row states the price).
+    expect(html).toContain('<td style="text-align:right">$257.00</td>');
+    expect(html).not.toContain('<td style="text-align:right"></td>');
+    expect(html).not.toContain('id="onetime-display"');
     expect(html).not.toMatch(/<strong>Total<\/strong>/);
   });
 

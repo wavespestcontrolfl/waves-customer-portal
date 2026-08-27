@@ -580,3 +580,54 @@ describeOrSkip('seeded engine_keys mapping against the migrated catalog', () => 
     expect(await knex.schema.hasColumn('services', 'engine_keys')).toBe(true);
   });
 });
+
+describe('itemized V2 exclusion collapses to ONE profile service (codex #3521 r1 P1)', () => {
+  const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+
+  test('three rodent_exclusion section rows yield one rodent_exclusion profile row named for the job', () => {
+    const estimate = {
+      id: 'est-excl-v2',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 150 },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Bird Boxes', price: 150 },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Linear Mesh', price: 280 },
+            ],
+            total: 580,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = (profile?.services || []).filter(Boolean);
+    // adoptedAppointmentCatalogStamp requires exactly one profile service.
+    expect(services).toHaveLength(1);
+    expect(services[0].engineKey).toBe('rodent_exclusion');
+    expect(services[0].label).toBe('Rodent Exclusion');
+  });
+
+  test('distinct engine keys still stay distinct', () => {
+    const estimate = {
+      id: 'est-excl-trap',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 150 },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Bird Boxes', price: 150 },
+            ],
+            total: 650,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const keys = (profile?.services || []).filter(Boolean).map((s) => s.engineKey);
+    expect(keys).toEqual(['rodent_trapping', 'rodent_exclusion']);
+  });
+});

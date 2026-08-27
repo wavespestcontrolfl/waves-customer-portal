@@ -552,6 +552,35 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
     }
   }
 
+  // One-time work the engine itemized (result.oneTime rows — rodent
+  // trapping + per-section exclusion, a flea package, …) prints as those
+  // rows, matching the estimate page (owner 2026-08-27), but ONLY when the
+  // rows account for the stored one-time total to the cent: a manual
+  // one-time discount or an engine adjustment lives outside these rows,
+  // and printing rows that don't sum to the total would quote a number
+  // the page never showed. Otherwise the single total line below stands.
+  if (!lineItems.some((item) => item.frequency === 'one_time')) {
+    const oneTimeTotal = num(estimate.onetime_total);
+    const oneTimeBlock = estimateData?.result?.oneTime;
+    const rawRows = Array.isArray(oneTimeBlock?.specItems) && oneTimeBlock.specItems.length > 0
+      ? oneTimeBlock.specItems
+      : (Array.isArray(oneTimeBlock?.items) ? oneTimeBlock.items : []);
+    const rows = rawRows.filter((row) => row && typeof row === 'object'
+      && row.quoteRequired !== true && row.kind !== 'discount' && row.kind !== 'included'
+      && num(row.amount ?? row.price) > 0);
+    const rowsTotal = Math.round(rows.reduce((sum, row) => sum + num(row.amount ?? row.price), 0) * 100) / 100;
+    if (rows.length > 0 && oneTimeTotal > 0 && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
+      for (const row of rows) {
+        lineItems.push(normalizeLineItem({
+          description: row.displayName || row.label || row.name || row.service || 'One-time service',
+          unitPrice: num(row.amount ?? row.price),
+          frequency: 'one_time',
+          taxable: false,
+        }));
+      }
+    }
+  }
+
   // Last-ditch: fill whichever side is still missing from the stored totals
   // so the PDF still shows a number rather than an empty table.
   if (!suppressRecurringPricing && !lineItems.some((item) => item.frequency !== 'one_time')) {

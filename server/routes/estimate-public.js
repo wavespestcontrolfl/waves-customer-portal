@@ -5300,7 +5300,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
-    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
+    ` : (isOneTimeOnly ? '' : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
@@ -5369,16 +5369,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeSingleRowNoDiscount = loneBillableOneTimeAmount != null
     && manualOneTimeDiscount === 0
     && Math.abs(separatelyBilledOneTimeTotal - loneBillableOneTimeAmount) < 0.005;
-  const suppressLoneOneTimeRowAmount = isOneTimeOnly
-    && oneTimeSingleRowNoDiscount
-    && billableOneTimeItems[0].serviceSpecificDiscountApplied !== true
-    && Math.abs(loneBillableOneTimeAmount - onetimeTotal) < 0.005;
+  // One-time-ONLY pages no longer render a hero price card (owner
+  // 2026-08-27, mirrors the React OneTimeBreakdownCard-leads layout), so
+  // the lone row keeps its dollars — it is the only place the price shows.
   const realOneTimeRows = billableOneTimeItems.map((it) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    const priceCell = suppressLoneOneTimeRowAmount ? '' : priceHtml;
+    const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
@@ -6151,7 +6149,6 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly && !hasOnlyBoraCareServices ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>

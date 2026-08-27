@@ -3083,7 +3083,7 @@ export function calculateEstimate(inputs) {
     // Static mirror of the server's standard-only trapping plan (owner
     // 2026-08-26): flat $350, unlimited callbacks, no footprint/lot adjustments.
     const fp = otP(350);
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + unlimited trap checks' });
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Unlimited trap checks for the same active trapping job' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */

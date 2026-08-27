@@ -84,6 +84,22 @@ function configuredCreditAmountForServiceKey(serviceKey) {
 }
 
 /**
+ * Amount to freeze on a closeout offer: the fee actually SOLD on the visit
+ * when there is one, else the configured fee. A customer who accepted a
+ * $125 rodent inspection before the fee dropped to $75 was promised the
+ * full $125 toward treatment; freezing the live config at closeout would
+ * short that promise (codex #3521 r1 P0). Only rodent carries a
+ * quoted-fee promise — other inspections keep the flat configured credit.
+ */
+function closeoutCreditAmountForServiceKey(serviceKey, soldAmount) {
+  if (String(serviceKey || '') === 'rodent_inspection') {
+    const sold = Number(soldAmount);
+    if (Number.isFinite(sold) && sold > 0) return round2(sold);
+  }
+  return configuredCreditAmountForServiceKey(serviceKey);
+}
+
+/**
  * Whether a completion profile describes an inspection visit that earns the
  * credit. The CATEGORY covers generic inspections, but typed family
  * profiles carry their family's category instead — `rodent_inspection` is
@@ -1726,6 +1742,7 @@ module.exports = {
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,
+  closeoutCreditAmountForServiceKey,
   isCreditableInspectionProfile,
   carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,

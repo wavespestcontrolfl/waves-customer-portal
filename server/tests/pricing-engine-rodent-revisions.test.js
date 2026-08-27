@@ -235,3 +235,59 @@ describe('revised rodent pricing rules', () => {
     expect(combo.breakdown.baitExcludedFromBundleDiscount).toBe(true);
   });
 });
+
+describe('service credits span every itemized exclusion section (codex #3521 r1 P1)', () => {
+  test('a free rodent_exclusion credit zeroes ALL section rows, not just the first', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        exclusion: {
+          pricingVersion: 'v2',
+          standardWireMeshPoints: 2,
+          standardBirdBoxes: 1,
+          meshSoftLF: 20,
+          waiveInspection: true,
+        },
+      },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset',
+        presetKey: 'free_rodent_exclusion',
+        catalogName: 'Free Rodent Exclusion',
+        catalogCategory: 'service_specific_credit',
+        discountType: 'free_service',
+        service: 'rodent_exclusion',
+        label: 'Free Rodent Exclusion',
+      }],
+    }));
+    const [credit] = estimate.summary.serviceSpecificDiscounts;
+    // 150 wire + 150 boxes + 280 mesh — the whole service, across three rows.
+    expect(credit.amount).toBe(580);
+    expect(estimate.summary.oneTimeTotal).toBe(0);
+  });
+
+  test('a fixed credit larger than the first section carries into the next rows', () => {
+    const estimate = generateEstimate(baseInput({
+      services: {
+        exclusion: {
+          pricingVersion: 'v2',
+          standardWireMeshPoints: 2,
+          standardBirdBoxes: 1,
+          meshSoftLF: 20,
+          waiveInspection: true,
+        },
+      },
+      serviceSpecificDiscounts: [{
+        source: 'catalog_preset',
+        presetKey: 'rodent_exclusion_credit',
+        catalogName: 'Rodent Exclusion Credit',
+        catalogCategory: 'service_specific_credit',
+        discountType: 'fixed',
+        requestedAmount: 200,
+        service: 'rodent_exclusion',
+        label: 'Rodent Exclusion Credit',
+      }],
+    }));
+    const [credit] = estimate.summary.serviceSpecificDiscounts;
+    expect(credit.amount).toBe(200);
+    expect(estimate.summary.oneTimeTotal).toBe(380);
+  });
+});

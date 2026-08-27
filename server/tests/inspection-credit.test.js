@@ -820,8 +820,12 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).toContain('...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),');
     expect(source).toContain('...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),');
     // And the terms frozen at closeout are themselves service-aware —
-    // rodent freezes its quoted fee, not the flat default (r23 P0).
-    expect(source).toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
+    // rodent freezes the fee it SOLD for (the visit's invoice amount), so
+    // an inspection accepted at $125 before the fee dropped to $75 still
+    // freezes $125 (#3521 r1 P0); the live config only when nothing sold.
+    expect(source).toContain('amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, invoiceAmount),');
+    expect(source).toContain('amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, invoiceAmount),');
+    expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmount(),');
   });
 
@@ -1436,5 +1440,26 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
     expect(migration).toContain('allowed_variables');
     expect(migration).toContain('optional_variables');
     expect(migration).toContain("'service.report_ready'");
+  });
+});
+
+describe('closeoutCreditAmountForServiceKey (codex #3521 r1 P0)', () => {
+  const IC = require('../services/inspection-credit');
+
+  test('rodent freezes the SOLD fee when the visit billed one', () => {
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 125)).toBe(125);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', '75.00')).toBe(75);
+  });
+
+  test('rodent falls back to the configured fee when nothing was sold', () => {
+    const configured = IC.configuredCreditAmountForServiceKey('rodent_inspection');
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 0)).toBe(configured);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', null)).toBe(configured);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 'n/a')).toBe(configured);
+  });
+
+  test('non-rodent inspections keep the flat configured credit regardless of the sold amount', () => {
+    expect(IC.closeoutCreditAmountForServiceKey('termite_inspection', 999))
+      .toBe(IC.configuredCreditAmountForServiceKey('termite_inspection'));
   });
 });

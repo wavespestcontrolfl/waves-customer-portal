@@ -6670,9 +6670,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 inspectionCreditTerms: (() => {
                   const InspectionCredit = require('../services/inspection-credit');
                   return {
-                    // Service-aware: rodent credits its quoted $125 fee,
-                    // not the flat default (owner ruling 2026-08-04).
-                    amount: InspectionCredit.configuredCreditAmountForServiceKey(completionProfile?.serviceKey || null),
+                    // Service-aware: rodent credits the fee it SOLD for
+                    // (owner ruling 2026-08-04) — the visit's invoice
+                    // amount, so an inspection accepted at $125 before the
+                    // fee dropped still freezes $125 (codex #3521 r1 P0);
+                    // the configured fee only when nothing was sold.
+                    amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, invoiceAmount),
                     windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
                     // The RESOLVED key rides the frozen terms (r35 P0) so
                     // recovery classifies standing-promise offers even for
@@ -6762,7 +6765,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
               serviceData.inspectionCreditOptIn = true;
               serviceData.inspectionCreditTerms = {
-                amount: IC.configuredCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, invoiceAmount),
                 windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
                 serviceKey: effectiveCompletionProfile?.serviceKey || null,
               };

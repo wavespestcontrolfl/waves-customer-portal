@@ -231,7 +231,12 @@ function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = 
 
   for (const credit of credits) {
     const warnings = uniqueStrings(credit.warnings || []);
-    const target = lineItems.find((item) => serviceCreditTargetsLine(credit, item));
+    // Every row sharing the target service, not just the first: an
+    // itemized V2 exclusion quote carries one row per section (wire mesh /
+    // bird boxes / linear mesh), and a credit for the SERVICE must cover
+    // the service's whole price, allocated across its rows in order.
+    const targets = lineItems.filter((item) => serviceCreditTargetsLine(credit, item));
+    const target = targets[0];
     const targetService = target?.service || credit.service || credit.serviceKey || credit.service_key || null;
 
     if (!target) {
@@ -297,26 +302,32 @@ function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = 
       continue;
     }
 
-    const currentPrice = serviceCreditLinePrice(target);
+    const currentPrice = roundMoney(targets.reduce((sum, row) => sum + serviceCreditLinePrice(row), 0));
     const requestedAmount = roundMoney(credit.requestedAmount ?? currentPrice);
     const amount = Math.min(requestedAmount, currentPrice);
-    if (target.price !== undefined || target.priceAfterDiscount !== undefined) {
-      target.priceBeforeServiceSpecificDiscount = target.priceBeforeServiceSpecificDiscount ?? (target.priceAfterDiscount ?? target.price ?? 0);
-      target.priceAfterDiscount = roundMoney(currentPrice - amount);
-    } else if (target.total !== undefined || target.totalAfterDiscount !== undefined) {
-      target.totalBeforeServiceSpecificDiscount = target.totalBeforeServiceSpecificDiscount ?? (target.totalAfterDiscount ?? target.total ?? 0);
-      target.totalAfterDiscount = roundMoney(currentPrice - amount);
+    let remaining = amount;
+    for (const row of targets) {
+      const rowPrice = serviceCreditLinePrice(row);
+      const rowAmount = roundMoney(Math.min(remaining, rowPrice));
+      remaining = roundMoney(remaining - rowAmount);
+      if (row.price !== undefined || row.priceAfterDiscount !== undefined) {
+        row.priceBeforeServiceSpecificDiscount = row.priceBeforeServiceSpecificDiscount ?? (row.priceAfterDiscount ?? row.price ?? 0);
+        row.priceAfterDiscount = roundMoney(rowPrice - rowAmount);
+      } else if (row.total !== undefined || row.totalAfterDiscount !== undefined) {
+        row.totalBeforeServiceSpecificDiscount = row.totalBeforeServiceSpecificDiscount ?? (row.totalAfterDiscount ?? row.total ?? 0);
+        row.totalAfterDiscount = roundMoney(rowPrice - rowAmount);
+      }
+      row.serviceSpecificDiscountApplied = true;
+      row.serviceSpecificDiscounts = [
+        ...(row.serviceSpecificDiscounts || []),
+        {
+          presetId: credit.presetId || null,
+          presetKey: credit.presetKey || null,
+          catalogName: credit.catalogName || credit.name || null,
+          amount: rowAmount,
+        },
+      ];
     }
-    target.serviceSpecificDiscountApplied = true;
-    target.serviceSpecificDiscounts = [
-      ...(target.serviceSpecificDiscounts || []),
-      {
-        presetId: credit.presetId || null,
-        presetKey: credit.presetKey || null,
-        catalogName: credit.catalogName || credit.name || null,
-        amount,
-      },
-    ];
 
     appliedByService.add(target.service);
     applied.push({
