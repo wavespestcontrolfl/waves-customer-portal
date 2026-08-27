@@ -562,7 +562,12 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     const service = String(item.service || '').toLowerCase();
     if (NON_SERVICE.includes(service)) continue;
     const amount = Number(item.amount ?? item.price ?? item.total);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
+    // A row a service credit zeroed (kind 'included' / marker) is still
+    // scheduled work and still part of its job's scope — it must reach the
+    // collapse below so the appointment is profiled as the whole job, not
+    // as whichever section happened to stay billable (codex #3521 r19 P1).
+    const creditedScope = item.kind === 'included' || item.serviceSpecificDiscountApplied === true;
+    if (!Number.isFinite(amount) || (amount <= 0 && !creditedScope)) continue;
     const category = typeof serviceCategoryForOneTimeItem === 'function' ? serviceCategoryForOneTimeItem(item) : null;
     // Skip the priced one-time CHOICE row for the chosen category — it's the visit
     // already represented by the synthetic primary. The choice row is the generic

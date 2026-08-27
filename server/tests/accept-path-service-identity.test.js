@@ -679,3 +679,44 @@ describe('distinct paid products sharing an engine key are NOT collapsed (codex 
     expect(services[0].rawLabel).toBeDefined();
   });
 });
+
+describe('credited (Included) sections still shape the appointment profile (codex #3521 r19 P1)', () => {
+  const { resolveEstimateSlotProfile } = require('../services/estimate-slot-availability');
+
+  test('a credit covering two of three exclusion sections keeps ONE job-level row named for the job', () => {
+    const estimate = {
+      id: 'est-excl-credited',
+      service_interest: 'Rodent Services',
+      estimate_data: {
+        result: {
+          oneTime: {
+            specItems: [
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 0, serviceSpecificDiscountApplied: true },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Bird Boxes', price: 0, serviceSpecificDiscountApplied: true },
+              { service: 'rodent_exclusion', name: 'Rodent Exclusion — Linear Mesh', price: 280 },
+            ],
+            total: 280,
+          },
+        },
+      },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    const services = (profile?.services || []).filter(Boolean);
+    expect(services).toHaveLength(1);
+    expect(services[0].engineKey).toBe('rodent_exclusion');
+    // Not "Rodent Exclusion — Linear Mesh": the credited sections are approved scope too.
+    expect(services[0].label).toBe('Rodent Exclusion');
+  });
+
+  test('a fully credited standalone service still enters the profile (it is scheduled work)', () => {
+    const estimate = {
+      id: 'est-free-insp',
+      service_interest: 'Rodent Services',
+      estimate_data: { result: { oneTime: { specItems: [
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 0, serviceSpecificDiscountApplied: true },
+      ], total: 0 } } },
+    };
+    const profile = resolveEstimateSlotProfile(estimate, { serviceMode: 'one_time' });
+    expect((profile?.services || []).some((s) => s?.engineKey === 'rodent_inspection')).toBe(true);
+  });
+});
