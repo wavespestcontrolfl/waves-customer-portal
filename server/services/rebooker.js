@@ -942,6 +942,35 @@ class SmartRebooker {
           }),
       intervalDays: parent.recurring_interval_days,
     };
+    // Weekend shifts can COLLAPSE consecutive occurrences onto one weekday
+    // (a daily series re-anchored Friday maps Sat+Sun+Mon all to Monday; a
+    // 2-day cadence anchored Thursday maps Sat and Mon both to Monday) — a
+    // plan must never write two of its own visits on one date (codex
+    // #3509). Project each occurrence ONCE, memoized, advancing a collided
+    // date day-by-day (still honoring the weekend rule and the season
+    // clamp) — the collision probe and the write loop below read this same
+    // mapping, so what gets probed is exactly what gets written.
+    const projectedByOccurrence = new Map();
+    const projectOccurrenceDate = (occurrenceIndex) => {
+      if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
+      let out = occurrenceIndex === 0
+        ? String(newDate).split('T')[0]
+        : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
+      const used = new Set(projectedByOccurrence.values());
+      for (let guard = 0; guard < 31 && used.has(out); guard++) {
+        let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
+        if (seriesSkipWeekends) {
+          const { dayOfWeek } = etParts(at);
+          if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
+        }
+        out = etDateString(at);
+        if (pattern === SEASONAL_FEB_OCT) {
+          out = clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
+        }
+      }
+      projectedByOccurrence.set(occurrenceIndex, out);
+      return out;
+    };
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
     // (skipped) must NOT be steamrolled back to 'confirmed' by a series
@@ -1059,9 +1088,7 @@ class SmartRebooker {
           const sib = siblings[i];
           if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
           const oi = i - startIdx;
-          projectedDates.push(oi === 0
-            ? String(newDate).split('T')[0]
-            : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, oi, opts)));
+          projectedDates.push(projectOccurrenceDate(oi));
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -1132,9 +1159,11 @@ class SmartRebooker {
 
         const occurrenceIndex = i - startIdx;
         const isAnchor = occurrenceIndex === 0;
+        // Memoized deduped projection — identical to what the collision
+        // probe above locked and probed (codex #3509).
         const date = isAnchor
           ? newDate
-          : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
+          : projectOccurrenceDate(occurrenceIndex);
 
         // Non-live rows rewind only when this row's date actually changes
         // (same-date landings keep a genuine same-day attempt intact).

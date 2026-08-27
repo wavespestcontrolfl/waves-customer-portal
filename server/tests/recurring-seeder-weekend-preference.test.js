@@ -129,19 +129,26 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
 describe('every consumer consults the preference LIVE (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
   test('all eight admin-schedule consult sites present', () => {
-    // import + create route + plan helper (shared by all three branches) +
-    // cadence-rewrite + spawn + reconcile + maintenance + alert action +
-    // annual-prepay weekend gate
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
+    // import + plan-helper fallback + create route + per-edit snapshot +
+    // reconcile fallback + maintenance + annual-prepay weekend gate +
+    // alert action. The update-details write paths consume the per-edit
+    // snapshot (editPrefNoWeekends) instead of resolving again — one
+    // snapshot per edit keeps the plan and the writes on the same value.
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
     expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
-    expect(src).toContain('const prefNoWeekends = await customerPrefersNoWeekends(conn, before.customer_id);');
+    expect(src).toContain('const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);');
+    expect(src).toContain('prefNoWeekends: editPrefNoWeekends,');
+    expect(src).toContain('const skipChild = skipChildStamp || editPrefNoWeekends;');
+    expect(src).toContain('const spawnPrefNoWeekends = editPrefNoWeekends;');
     // Edit paths: the preference ORs over the form's routinely-submitted
     // false — an "explicit" checkbox value must not bypass the ruling.
     expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;');
     expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;');
-    expect((src.match(/\|\| await customerPrefersNoWeekends\(trx, parent\.customer_id\)/g) || []).length).toBe(3);
     expect(src).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id)');
+    // Add-on due-date matching shifts with the same effective rule the
+    // child date used, or sold add-ons drop off shifted visits.
+    expect(src).toContain('const skip = (line.skipWeekends ?? line.skip_weekends) || skipWeekendsOverride;');
   });
   test('stamped flags carry operator intent only — no path persists the preference', () => {
     // Stamps write the raw/Stamp variants, never the preference-ORed value.
