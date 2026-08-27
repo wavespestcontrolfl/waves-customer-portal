@@ -246,10 +246,17 @@ function isCockroachServiceType(serviceType) {
 // cockroach override above so keyed catalog values match too.
 const TERMITE_NO_REENTRY_SERVICE_TYPE_RE =
   /\b(bait|station|monitor\w*|cartridge|installation|inspection|renewal|warranty|bond)\b/i;
+// Any treatment token keeps the line defaults: a mixed identity such as
+// "Termite Liquid Treatment & Inspection" still applies product, so its
+// re-entry guidance must survive (uncapped codex P1 on this lane). The
+// override fires only for an EXCLUSIVELY no-application identity.
+const TERMITE_TREATMENT_SERVICE_TYPE_RE =
+  /\b(liquid|foam|trench\w*|pre\s?treat\w*|pretreat\w*|spot|bora|termidor|drill|treatment|applic\w*)\b/i;
 
 function isTermiteNoReentryServiceType(serviceType) {
   const text = String(serviceType || '').replace(/[_-]+/g, ' ');
-  return TERMITE_NO_REENTRY_SERVICE_TYPE_RE.test(text);
+  return TERMITE_NO_REENTRY_SERVICE_TYPE_RE.test(text)
+    && !TERMITE_TREATMENT_SERVICE_TYPE_RE.test(text);
 }
 
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
