@@ -122,9 +122,11 @@ describe('relatedDocuments on the report payload', () => {
   test('live report lists linked-doc titles and the on-file count', async () => {
     const knex = fixtureKnex({
       ...EMPTY_TABLES,
+      // The stub returns whatever the table holds regardless of predicates;
+      // the linked-only filter now lives in the query itself, so the
+      // fixture models the linked rows that query returns.
       customer_documents: [
         { id: 'd1', title: 'WDO Notice of Inspection', document_type: 'wdo_inspection', linked_service_record_id: 'record-1' },
-        { id: 'd2', title: 'Service Agreement', document_type: 'service_agreement', linked_service_record_id: null },
       ],
     });
     const data = await buildReportV1Data({

@@ -172,14 +172,19 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(none.container.textContent).not.toMatch(claim);
   });
 
-  it('never egresses raw technician notes via the recommendations arrays', () => {
-    // buildProtocolPayload folds raw [next]-tagged technician_notes into both
-    // arrays; AGENTS.md forbids raw notes on any report path.
+  it('never renders protocol.recommendations (raw note lines) but does render the screened data.recommendations', () => {
+    // buildProtocolPayload folds raw [next]-tagged technician_notes into
+    // protocol.recommendations; AGENTS.md forbids raw notes on any report
+    // path. data.recommendations is provenance-safe since 2026-08-27
+    // (form field only + payload-boundary screen, tested server-side in
+    // service-report-related-docs.test.js) and renders like the web report.
     const leak = 'Gate code 4417, bill the office not the tenant';
-    const data = { ...BASE_DATA, recommendations: [leak], protocol: { recommendations: [leak] } };
+    const safe = 'Keep shrubs trimmed back from the exterior walls';
+    const data = { ...BASE_DATA, recommendations: [safe], protocol: { recommendations: [leak] } };
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(container.textContent).not.toContain(leak);
     expect(container.textContent).not.toContain('Gate code');
+    expect(container.textContent).toContain(safe);
   });
 
   it('does not claim treatment areas on a visit with no applications', () => {

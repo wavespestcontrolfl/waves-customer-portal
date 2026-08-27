@@ -15,7 +15,7 @@ async function activeTermiteBondsForCustomer(customerId, knex = null) {
   if (!customerId || !gateEnvValue(TERMITE_BOND_GATE)) return [];
   // Lazy default: report-time callers pass their own knex (tests pass a
   // fixture stub), so the pool module is only loaded when nothing is given.
-  const k = knex || require('../db');
+  const k = knex || require('../models/db');
   const rows = await k('termite_bonds')
     .where({ customer_id: customerId, status: 'active' })
     .orderBy('renews_at', 'desc')

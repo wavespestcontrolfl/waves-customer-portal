@@ -4324,22 +4324,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let relatedDocuments = null;
   if (opts.mode === 'live') {
     try {
-      const docRows = await knex('customer_documents')
-        .where({ customer_id: service.customer_id })
-        .select('id', 'title', 'document_type', 'expiration_date', 'linked_service_record_id')
+      // Only THIS visit's linked rows are read — filtered in the query, not
+      // after a history cap, so an old report's linked document can never
+      // fall outside a newest-first window (codex inline r3).
+      const linked = await knex('customer_documents')
+        .where({ customer_id: service.customer_id, linked_service_record_id: service.id })
+        .select('id', 'title', 'document_type')
         .orderBy('created_at', 'desc')
-        .limit(200)
+        .limit(3)
         .catch(() => []);
-      const linked = docRows.filter(
-        (d) => d.linked_service_record_id && String(d.linked_service_record_id) === String(service.id),
-      );
       // Always present on a live report: the Documents tab synthesizes a
       // row for THIS completed report (and project reports), so the link
       // never dead-ends even with no stored customer_documents. Stored
       // rows only supply the linked titles; no count is ever computed here
       // (it would disagree with the tab's synthesized rows — codex P1 r1/r2).
       relatedDocuments = {
-        linked: linked.slice(0, 3).map((d) => ({
+        linked: (Array.isArray(linked) ? linked : []).map((d) => ({
           title: d.title || d.document_type || 'Document',
           documentType: d.document_type || null,
         })),

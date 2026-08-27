@@ -597,11 +597,14 @@ export default function ServiceReportDocument({ data, token }) {
     // chips restate nextStep in shorthand — only add ones that say something new
     if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
   });
-  // ⛔ data.recommendations / data.protocol.recommendations are NOT rendered.
-  // buildProtocolPayload folds raw `[next]`-tagged technician_notes lines into
-  // both (report-data.js taggedNoteLines), and AGENTS.md is explicit: raw
-  // technician_notes never egress on any report path — parser-approved copy
-  // only. The web report renders neither array; the PDF must not either.
+  // data.recommendations is provenance-safe since 2026-08-27: report-data
+  // builds it ONLY from structured_notes.formRecommendations (the completion
+  // form's field, never [next]-tagged technician_notes lines) plus findings
+  // recommendations, screened with customerCopyViolations at the payload
+  // boundary — so the PDF renders it exactly like the web report's "What we
+  // recommend" section (codex inline on #3516). ⛔ data.protocol.recommendations
+  // stays unrendered: it still folds raw note lines in.
+  (data.recommendations || []).forEach(pushRec);
   // Lawn visits carry their guidance in the assessment + V2 aftercare
   // instead of typedReport — same section, same voice.
   // Legacy assessment recommendations are the LawnAssessmentCard's content,
