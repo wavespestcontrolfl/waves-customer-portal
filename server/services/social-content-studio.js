@@ -1167,10 +1167,14 @@ function milestoneStampKey(threshold) {
   return `social.milestone.celebrated.${threshold}`;
 }
 
-async function stampMilestoneCelebrated(threshold, runId, state = 'published') {
+// Insert-ONLY acquisition (never overwrites another run's stamp):
+//   'acquired' — this run now owns the threshold
+//   'owned'    — this run already owns it (a retry of the same run)
+//   'other'    — another run owns it → caller must block
+async function claimMilestone(threshold, runId) {
   const now = new Date();
-  const value = JSON.stringify({ threshold, runId: runId || null, state, at: now.toISOString() });
-  await db('system_settings')
+  const value = JSON.stringify({ threshold, runId: runId || null, state: 'claimed', at: now.toISOString() });
+  const inserted = await db('system_settings')
     .insert({
       key: milestoneStampKey(threshold),
       value,
@@ -1180,7 +1184,24 @@ async function stampMilestoneCelebrated(threshold, runId, state = 'published') {
       updated_at: now,
     })
     .onConflict('key')
-    .merge({ value, updated_at: now });
+    .ignore()
+    .returning('key');
+  if (inserted.length) return 'acquired';
+  const row = await db('system_settings').where({ key: milestoneStampKey(threshold) }).first('value');
+  const parsed = toJson(row?.value, {});
+  return parsed?.runId && runId && parsed.runId === runId ? 'owned' : 'other';
+}
+
+// Upgrade claimed → published, only by the owning run.
+async function markMilestonePublished(threshold, runId) {
+  const key = milestoneStampKey(threshold);
+  const row = await db('system_settings').where({ key }).first('value');
+  const parsed = toJson(row?.value, {});
+  if (!row || (parsed?.runId && runId && parsed.runId !== runId)) return;
+  const now = new Date();
+  await db('system_settings')
+    .where({ key })
+    .update({ value: JSON.stringify({ ...parsed, state: 'published', publishedAt: now.toISOString() }), updated_at: now });
 }
 
 async function clearMilestoneStamp(threshold, runId) {
@@ -1993,6 +2014,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     if (publishOutcome.blocked) {
       const reason = publishOutcome.driftReason
         ? publishOutcome.driftReason
+        : publishOutcome.claimedElsewhere
+        ? 'milestone already claimed by another run — duplicate celebration blocked'
         : publishOutcome.lockBusy
         ? (isMilestoneRun
           ? 'review stats sync in progress — milestone publish deferred, retry the run'
@@ -2169,32 +2192,44 @@ const NOOP_ABANDON = () => {};
 async function publishWithFleetStatsLease(plan, publishFn, runId) {
   const ids = WAVES_LOCATIONS.map((loc) => loc.id).sort();
   const HELD = Symbol('held');
+  // Dry runs post nothing externally — never write ownership for them.
+  const persistClaim = !SOCIAL_FLAGS.dryRun;
   const acquire = async (i) => {
     if (i >= ids.length) {
       const driftReason = await milestonePublishBlocker(plan);
       if (driftReason) return { [HELD]: true, blocked: true, driftReason };
-      await stampMilestoneCelebrated(plan.milestone, runId, 'claimed');
+      if (persistClaim && (await claimMilestone(plan.milestone, runId)) === 'other') {
+        return { [HELD]: true, blocked: true, claimedElsewhere: true };
+      }
       return { [HELD]: true, claimed: true };
     }
     return runExclusive(`gbp-review-sync:${ids[i]}`, () => acquire(i + 1), { recordHealth: false });
   };
   const gate = await acquire(0);
   if (!gate || !gate[HELD]) return { blocked: true, lockBusy: true };
-  if (gate.blocked) return { blocked: true, driftReason: gate.driftReason };
+  if (gate.blocked) return { blocked: true, driftReason: gate.driftReason, claimedElsewhere: gate.claimedElsewhere };
 
   // Leases released — publish. Same { blocked, result, releaseClaim,
   // abandonClaim } outcome shape the callers already handle.
   // A thrown publish leaves the 'claimed' stamp in place on purpose: provider
   // state is unknown, and a duplicate celebration is worse than a missed one.
   const outcome = await publishWithReviewLivenessLock(null, publishFn);
-  const anySuccess = !!outcome?.result?.success
-    || (Array.isArray(outcome?.result?.platforms) && outcome.result.platforms.some((p) => p?.success));
+  if (!persistClaim) return outcome;
+  const platforms = Array.isArray(outcome?.result?.platforms) ? outcome.result.platforms : [];
+  const anySuccess = !!outcome?.result?.success || platforms.some((p) => p?.success);
+  // publishToAll turns provider exceptions into success:false — a lost
+  // response may still have gone live, so an ATTEMPTED failure retains the
+  // claim. Only a set that was entirely skipped before any external call
+  // (automation paused, channel disabled, judge rejection) releases it.
+  const nothingAttempted = platforms.length > 0 && platforms.every((p) => p?.skipped);
   if (anySuccess) {
-    await stampMilestoneCelebrated(plan.milestone, runId, 'published').catch((err) => {
+    await markMilestonePublished(plan.milestone, runId).catch((err) => {
       logger.error(`[studio] milestone ${plan.milestone} published but stamp upgrade failed (claim retained): ${err.message}`);
     });
-  } else {
+  } else if (nothingAttempted) {
     await clearMilestoneStamp(plan.milestone, runId).catch(() => {});
+  } else {
+    logger.warn(`[studio] milestone ${plan.milestone} publish reported no success after provider attempts — claim retained (owner review)`);
   }
   return outcome;
 }
@@ -2516,6 +2551,8 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         status: 409,
         error: publishOutcome.driftReason
           ? publishOutcome.driftReason
+          : publishOutcome.claimedElsewhere
+          ? 'this milestone was already claimed by another run — reject this draft'
           : publishOutcome.lockBusy
           ? (input.milestone
             ? 'review stats sync is in progress — approve again in a moment'
