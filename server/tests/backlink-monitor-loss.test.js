@@ -118,12 +118,21 @@ describe('BacklinkMonitor verified loss detection', () => {
     await BacklinkMonitor.scan({ exclusive, snapshot: true, crawlFn: jest.fn() });
     expect(order).toEqual(['lock', 'snapshot', 'unlock']);
 
-    // partial scan (API said 1500 but only 1000 came back on a short page) → no snapshot
+    // partial scan (API said 1500 but only 1000 came back on a short page) → no snapshot, and the result says so
     spy.mockClear();
     dataforseo.getBacklinks.mockResolvedValueOnce({ tasks: [{ result: [{ items: [], total_count: 1500 }] }] });
     const r = await BacklinkMonitor.scan({ exclusive, snapshot: true, crawlFn: jest.fn() });
-    expect(r.scanComplete).toBe(false);
+    expect(r).toEqual(expect.objectContaining({ scanComplete: false, snapshotOk: false, snapshotError: expect.stringMatching(/incomplete/) }));
     expect(spy).not.toHaveBeenCalled();
+
+    // snapshot throws → surfaced, not swallowed as success
+    spy.mockImplementation(async () => { throw new Error('snapshots table locked'); });
+    scanWith({ items: [], total: 0, active: [] });
+    const r2 = await BacklinkMonitor.scan({ exclusive, snapshot: true, crawlFn: jest.fn() });
+    expect(r2).toEqual(expect.objectContaining({ scanComplete: true, snapshotOk: false, snapshotError: 'snapshots table locked' }));
+    // without snapshot:true the keys are absent (admin/agent callers that don't ask)
+    scanWith({ items: [], total: 0, active: [] });
+    expect(await BacklinkMonitor.scan({ exclusive, crawlFn: jest.fn() })).not.toHaveProperty('snapshotOk');
     spy.mockRestore();
   });
 

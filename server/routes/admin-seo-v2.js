@@ -595,7 +595,8 @@ router.post('/backlinks/scan', requireAdmin, async (req, res, next) => {
     // Snapshot rides inside the scan's exclusive section and only after a
     // complete scan (a lock-skipped or partial scan must not stamp the day).
     const result = await BacklinkMonitor.scan({ snapshot: true });
-    res.json(result);
+    // A failed/skipped snapshot is not a successful scan-and-snapshot.
+    res.status(result && result.snapshotOk === false ? 500 : 200).json(result);
   } catch (err) { next(err); }
 });
 

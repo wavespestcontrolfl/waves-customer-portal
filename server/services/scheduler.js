@@ -1523,7 +1523,8 @@ function initScheduledJobs() {
       // snapshot:true — the trend/velocity cards read seo_backlink_snapshots;
       // before this the snapshot only advanced on the manual Scan button or a
       // GSC import. Taken inside the scan's exclusive section, complete scans only.
-      await BacklinkMonitor.scan({ snapshot: true });
+      const r = await BacklinkMonitor.scan({ snapshot: true });
+      if (r && r.snapshotOk === false) logger.error(`Backlink scan: snapshot NOT taken — ${r.snapshotError}`);
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 

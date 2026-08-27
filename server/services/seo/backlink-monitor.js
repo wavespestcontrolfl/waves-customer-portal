@@ -296,9 +296,15 @@ class BacklinkMonitor {
 
     // Trend snapshot only after a COMPLETE scan, inside the same exclusive
     // section — never stamp a partial or overlapping scan as the day's numbers.
+    // A requested snapshot that fails is reported, not swallowed: the result
+    // carries snapshotOk=false + the error so the cron log and the admin
+    // Scan button both show it instead of a false "done".
+    let snapshotOk = null, snapshotError = null;
     if (snapshot && scanComplete) {
-      try { await this.takeSnapshot(); }
-      catch (err) { logger.error(`Backlink snapshot failed: ${err.message}`); }
+      try { await this.takeSnapshot(); snapshotOk = true; }
+      catch (err) { snapshotOk = false; snapshotError = err.message; logger.error(`Backlink snapshot failed: ${err.message}`); }
+    } else if (snapshot) {
+      snapshotOk = false; snapshotError = 'scan incomplete — snapshot skipped';
     }
 
     logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
@@ -306,6 +312,7 @@ class BacklinkMonitor {
       scanned, newCritical, scanComplete, missed,
       lostCount: lostLinks.length, verifiedLive, unverified, relChanges, recovered, unresolvedRecoveries,
       lostDomains: lostDomains.length, highValueLost: alertable.length, recoveryQueued,
+      ...(snapshot ? { snapshotOk, snapshotError } : {}),
     };
   }
 
