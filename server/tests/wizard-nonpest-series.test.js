@@ -320,7 +320,12 @@ describe('booking route wiring (source contracts)', () => {
   test('a duplicate confirmation reads a completed activation as success, never as drift', () => {
     // The under-lock is_recurring re-check must run BEFORE the locked-draft
     // drift comparison, or the loser strips the winner's activated parent.
-    expect(booking).toMatch(/lockedParent && lockedParent\.is_recurring[\s\S]{0,80}alreadyActivated: true/);
+    // r18: is_recurring counts as a completed activation ONLY with the
+    // activation-archived draft; a live draft beside a recurring parent is
+    // a staff-made series → stale + office bell, never alreadyActivated.
+    expect(booking).toMatch(/lockedParent && lockedParent\.is_recurring\) \{[\s\S]{0,1200}\.first\('archived_at'\);\s*\n\s*if \(ownedDraft\?\.archived_at\) return \{ alreadyActivated: true \};/);
+    expect(booking).toMatch(/wizard-activation-foreign-recurring:\$\{seriesParentRow\.id\}/);
+    expect(booking).toMatch(/return \{ stale: true, foreignRecurring: true \};/);
     const recheckAt = booking.indexOf('alreadyActivated: true');
     const driftAt = booking.indexOf('freshPlan.pattern !== wizardSeriesPlan.pattern');
     expect(recheckAt).toBeGreaterThan(0);
@@ -804,6 +809,20 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/notifySeriesOfficeBellInTx = async \(trx, \{ dedupeKey, title, body, metadata, failLabel \}\)/);
     // The strip bell is the same shared helper.
     expect(booking).toMatch(/notifySeriesStripInTx = async \(trx, parentId, reason\) => notifySeriesOfficeBellInTx\(trx, \{/);
+  });
+
+  test('the quote-page handoff/link mint and the confirm-time gate share ONE mixed-billing predicate (r18)', () => {
+    const { engineSummaryHasMixedBilling } = require('../services/booking-pay-at-visit');
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, specialtyTotal: 250 })).toBe(true);
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, installationTotal: 400 })).toBe(true);
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900, oneTimeTotal: 150 })).toBe(true);
+    expect(engineSummaryHasMixedBilling({ recurringAnnual: 900 })).toBe(false);
+    expect(engineSummaryHasMixedBilling({ oneTimeTotal: 150, specialtyTotal: 250 })).toBe(false);
+    const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
+    expect(publicQuote).toMatch(/function estimateBlocksBookingHandoff\(estimate\) \{\s*\n\s*const \{ engineSummaryHasMixedBilling \} = require\('\.\.\/services\/booking-pay-at-visit'\);\s*\n\s*return engineSummaryHasMixedBilling\(estimate\?\.summary \|\| \{\}\);/);
+    const { _internals } = require('../routes/public-quote');
+    expect(_internals.estimateBlocksBookingHandoff({ summary: { recurringAnnual: 900, specialtyTotal: 250 } })).toBe(true);
+    expect(_internals.estimateBlocksSelfBookLink({ summary: { recurringAnnual: 900, installationTotal: 400 }, lineItems: [] })).toBe(true);
   });
 
   test('a mixed quote (recurring + specialty/installation add-on) is not self-serve bookable', () => {

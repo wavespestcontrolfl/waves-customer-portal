@@ -305,6 +305,23 @@ const RECURRING_FUNNEL_MAPPABLE_SERVICES = new Set([
   'rodent_bait',
 ]);
 
+// ONE mixed-billing predicate for every self-serve surface (codex #3504
+// r18): the quote page's handoff/link mint and the confirm-time draft
+// gate must agree, or the CTA offers a slot the confirmation then refuses.
+// Specialty-priced add-ons (lawn plugging, top dressing, lawn-pest work)
+// and installation charges ride the engine summary as their OWN totals,
+// not oneTimeTotal (r12) — a recurring line beside any of them is mixed
+// billing: activating the recurring plan alone would archive the draft
+// with the add-on's dollars neither scheduled nor billed nor left for
+// office conversion.
+function engineSummaryHasMixedBilling(summary = {}, data = {}) {
+  const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
+  const oneTimeTotal = Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0);
+  const specialtyTotal = Number(summary.specialtyTotal ?? data.specialtyTotal ?? 0);
+  const installationTotal = Number(summary.installationTotal ?? data.installationTotal ?? 0);
+  return recurringAnnual > 0 && (oneTimeTotal > 0 || specialtyTotal > 0 || installationTotal > 0);
+}
+
 function wizardDraftSelfServeBookable(row) {
   if (!row || row.source !== 'quote_wizard' || row.status !== 'draft') return false;
   // A retired (archived) draft was consumed — by a self-booked series that
@@ -315,16 +332,7 @@ function wizardDraftSelfServeBookable(row) {
   if (data.commercialEstimatedPricing || data.quoteRequired) return false;
   const summary = data.engineResult?.summary || {};
   const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
-  const oneTimeTotal = Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0);
-  // Specialty-priced add-ons (lawn plugging, top dressing, lawn-pest work)
-  // and installation charges ride the engine's summary as their OWN totals,
-  // not oneTimeTotal (codex #3504 r12): a recurring line alongside any of
-  // them is mixed billing too — activating the recurring plan alone would
-  // archive the draft with the add-on's dollars neither scheduled nor
-  // billed nor left for office conversion.
-  const specialtyTotal = Number(summary.specialtyTotal ?? data.specialtyTotal ?? 0);
-  const installationTotal = Number(summary.installationTotal ?? data.installationTotal ?? 0);
-  if (recurringAnnual > 0 && (oneTimeTotal > 0 || specialtyTotal > 0 || installationTotal > 0)) return false;
+  if (engineSummaryHasMixedBilling(summary, data)) return false;
   const lineItems = data.engineResult?.lineItems || [];
   if (lineItems.some((l) => l && l.service === 'bed_bug')) return false;
   // A recurring draft must contain at least one funnel-mappable recurring
@@ -337,4 +345,4 @@ function wizardDraftSelfServeBookable(row) {
   return true;
 }
 
-module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, resolveWizardSeriesPlan, wizardDraftSelfServeBookable, wizardPlanServiceKey };
+module.exports = { derivePerApplicationAmount, resolveBookingVisitPrice, resolveWizardSeriesPlan, wizardDraftSelfServeBookable, wizardPlanServiceKey, engineSummaryHasMixedBilling };

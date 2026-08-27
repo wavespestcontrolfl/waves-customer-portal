@@ -480,10 +480,13 @@ function publicQuoteBedBugInput(bedBug = {}) {
 // series' billing. Mixed recurring + one-time quotes therefore get NO
 // handoff token and NO self-book link; the office schedules them. (A plain
 // recurring pest quote has oneTimeTotal 0 — setup fees are not in it.)
+// The SHARED mixed-billing predicate (codex #3504 r18): this mint-time
+// gate and the confirm-time draft gate (wizardDraftSelfServeBookable) must
+// agree, or the CTA offers a slot that /booking/confirm then refuses.
+// Specialty and installation totals count alongside oneTimeTotal.
 function estimateBlocksBookingHandoff(estimate) {
-  const summary = estimate?.summary || {};
-  const hasRecurring = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? 0) > 0;
-  return hasRecurring && Number(summary.oneTimeTotal || 0) > 0;
+  const { engineSummaryHasMixedBilling } = require('../services/booking-pay-at-visit');
+  return engineSummaryHasMixedBilling(estimate?.summary || {});
 }
 
 // Services with no self-bookable slot shape: bed bug treatment is multi-visit

@@ -3001,7 +3001,29 @@ async function createSelfBooking(payload = {}) {
               'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
               'scheduled_date', 'window_start', 'window_end', 'technician_id');
           if (lockedParent && lockedParent.is_recurring) {
-            return { alreadyActivated: true };
+            // is_recurring alone is NOT activation-owned evidence (codex
+            // #3504 r18): staff can make the committed parent recurring
+            // from the schedule editor before a crash-retry replay, with
+            // the wizard draft still live and no seeded children. The
+            // activation archives its draft in the SAME transaction as
+            // markParentRecurring, so the archived draft is the durable
+            // proof a completed activation owns this row; a live draft
+            // beside a recurring parent means the office took the series
+            // over — seed nothing, archive nothing, and bell the office to
+            // reconcile the still-live quote against their series.
+            const ownedDraft = await trx('estimates')
+              .where({ id: pricing_estimate_id, source: 'quote_wizard' })
+              .first('archived_at');
+            if (ownedDraft?.archived_at) return { alreadyActivated: true };
+            await notifySeriesOfficeBellInTx(trx, {
+              dedupeKey: `wizard-activation-foreign-recurring:${seriesParentRow.id}`,
+              title: 'Self-booked plan: office series pre-empted activation',
+              body: `A self-booked recurring plan for customer ${custId} committed its first visit, but that visit was made recurring by staff before the plan activated and the quote draft is still live. The self-booked plan did NOT seed or archive — reconcile the live quote against the office-scheduled series (price, cadence, setup fee).`,
+              metadata: { scheduled_service_id: seriesParentRow.id, source_estimate_id: pricing_estimate_id },
+              failLabel: 'foreign-recurring',
+            });
+            logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} is recurring but its draft ${pricing_estimate_id} is still live — staff-made series, activation skipped (office belled)`);
+            return { stale: true, foreignRecurring: true };
           }
           // The locked parent must still BE the billable row this closure
           // priced (codex #3504 r6 hook P0): the stranded-activation
