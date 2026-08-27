@@ -43,6 +43,24 @@ describe('publishAstro — topic-targeting gate', () => {
     expect(patch.astro_publish_error).toMatch(/in-wall-pest-control/);
   });
 
+  test('a PR-backed build_failed row is blocked BEFORE cleanupStaleAstroPr — the existing PR/branch markers survive', async () => {
+    const { pub, updates } = load({ post: { ...TAEXX_ROW, astro_status: 'build_failed', astro_pr_number: 41, astro_branch_name: 'content/blog-lakewood-ranch-taexx-abc' } });
+    // The gh mock has no PR-close/branch-delete functions: had cleanup run first it would have thrown a TypeError, not the gate code.
+    await expect(pub.publishAstro('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+    const patch = updates.find((u) => u.table === 'blog_posts')?.patch;
+    expect(patch.astro_status).toBe('publish_failed');
+    expect(patch).not.toHaveProperty('astro_pr_number');
+    expect(patch).not.toHaveProperty('astro_branch_name');
+  });
+
+  test('corpus unavailable on a NEW post → stamped publish_failed with the reason (transient; the scheduler retries), markers untouched', async () => {
+    const { pub, updates } = load({ post: TAEXX_ROW, corpusError: 'github_down' });
+    await expect(pub.publishAstro('post_1')).rejects.toThrow('github_down');
+    const patch = updates.find((u) => u.table === 'blog_posts')?.patch;
+    expect(patch.astro_status).toBe('publish_failed');
+    expect(patch.astro_publish_error).toMatch(/could not run: github_down/);
+  });
+
   test('a statewide-only NEW post is blocked the same way', async () => {
     const { pub } = load({ post: { ...TAEXX_ROW, title: 'New-Construction Pest Control in Florida', keyword: 'new construction pest control', slug: 'new-construction-pest-control-florida' } });
     await expect(pub.publishAstro('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });

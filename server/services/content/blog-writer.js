@@ -163,6 +163,25 @@ function faqFormatInstruction(serviceFields) {
   return isFaqBlockedService(serviceFields) ? NO_FAQ_SECTION_INSTRUCTION : FAQ_SECTION_INSTRUCTION;
 }
 
+// A blog_posts row is writable by the generator only while it is OUTSIDE the
+// publish pipeline. publish_status='publishing' (scheduler) and a live
+// publish_claimed_at (manual /publish-astro) both mean a publisher owns the
+// row while publishAstro runs — the branch/PR markers don't exist yet, but the
+// publisher already captured the row's content; overwriting now would ship a
+// PR whose source differs from the database. Used as the CAS predicate on
+// every generator write (generated content, topic-gate de-queue).
+function whereOutsideAstroPipeline(query) {
+  return query
+    .whereNot('status', 'published')
+    .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
+    .where((q) => q.whereNull('publish_claimed_at')
+      .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
+    .whereNull('astro_pr_number')
+    .whereNull('astro_branch_name')
+    .where((q) => q.whereNull('astro_status')
+      .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']));
+}
+
 class BlogWriter {
   async getVoiceConfig() {
     const config = await db('blog_voice_config').where('active', true).first();
@@ -189,11 +208,20 @@ class BlogWriter {
     const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post) });
     if (!topic.ok) {
       const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
-      await db('blog_posts').where('id', blogPostId).update({
+      // Same CAS as the generated-content write below: the corpus load was
+      // async, and a row that entered the publish pipeline meanwhile must not
+      // be yanked back to idea.
+      const dequeued = await whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)).update({
         status: 'idea',
         astro_publish_error: `BLOG_TOPIC_TARGETING_BLOCKED: ${summary}`.slice(0, 1000),
         updated_at: new Date(),
       });
+      if (!dequeued) {
+        const err = new Error('Post was published or entered the Astro pipeline while the topic gate ran — nothing was changed');
+        err.isOperational = true;
+        err.statusCode = 409;
+        throw err;
+      }
       const e = new Error(`topic-targeting gate blocked "${post.title}": ${summary}`);
       e.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
       e.details = topic.findings;
@@ -299,21 +327,7 @@ Write the full post in the Waves voice. Return ONLY the blog post content (no JS
     // force a live post back to draft — so the overwrite only lands while
     // the row is still outside the pipeline. Callers on the queued lane
     // (scheduler 5am, bulk-generate, content-agent) are unaffected.
-    const updated = await db('blog_posts')
-      .where('id', blogPostId)
-      .whereNot('status', 'published')
-      // publish_status='publishing' (scheduler) and a live publish_claimed_at
-      // (manual /publish-astro) both mean a publisher owns the row while
-      // publishAstro runs — the branch/PR markers don't exist yet, but the
-      // publisher already captured the row's content; overwriting now would
-      // ship a PR whose source differs from the database.
-      .where((q) => q.whereNull('publish_status').orWhereNot('publish_status', 'publishing'))
-      .where((q) => q.whereNull('publish_claimed_at')
-        .orWhere('publish_claimed_at', '<', new Date(Date.now() - 30 * 60 * 1000)))
-      .whereNull('astro_pr_number')
-      .whereNull('astro_branch_name')
-      .where((q) => q.whereNull('astro_status')
-        .orWhereNotIn('astro_status', ['pr_open', 'build_failed', 'merged', 'live', 'unpublish_pending']))
+    const updated = await whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId))
       .update({
         content,
         word_count: wordCount,

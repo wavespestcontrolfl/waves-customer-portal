@@ -942,6 +942,37 @@ async function publishAstro(postId) {
       + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
     );
   }
+  // Topic-targeting gate (owner rulings 2026-08-27) — a NEW post may not be
+  // built around an out-of-footprint geo, statewide-only framing, or an
+  // entity a live post already owns. Runs BEFORE the stale-PR cleanup below
+  // and before any spend or GitHub write, so a block never destroys an
+  // existing review artifact. A post already live on the hub is a refresh
+  // (exempt). Outside the main try on purpose: the row is stamped
+  // publish_failed with the reason and its PR/branch markers are left
+  // exactly as found. A block is deterministic (BLOG_TOPIC_TARGETING_BLOCKED
+  // → the scheduler parks it like the guardrails); an unavailable corpus is
+  // a transient fail-closed the scheduler retries.
+  {
+    const topicGate = require('../content/topic-targeting-gate');
+    const stampTopicFailure = (message) => db('blog_posts').where({ id: postId }).update({
+      astro_status: 'publish_failed',
+      astro_publish_error: String(message).slice(0, 1000),
+    });
+    let topic;
+    try {
+      topic = await topicGate.evaluateBlogPostRow(post, { category: normalizeCategory(post.category, post.tag) || null });
+    } catch (err) {
+      await stampTopicFailure(`topic-targeting gate could not run: ${err.message}`);
+      throw err;
+    }
+    if (!topic.ok) {
+      const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
+      tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+      tErr.details = topic.findings;
+      await stampTopicFailure(tErr.message);
+      throw tErr;
+    }
+  }
   if (
     (post.astro_status === 'build_failed' || post.astro_status === 'publish_failed')
     && (post.astro_pr_number || post.astro_branch_name)
@@ -970,23 +1001,6 @@ async function publishAstro(postId) {
   let prCreateAttempted = false;
 
   try {
-    // 0. Topic-targeting gate (owner rulings 2026-08-27) — a NEW post may not
-    //    be built around an out-of-footprint geo, statewide-only framing, or
-    //    an entity a live post already owns. Runs before any spend or GitHub
-    //    write; a post already live on the hub is a refresh (exempt). A
-    //    block is deterministic (BLOG_TOPIC_TARGETING_BLOCKED → parked like
-    //    the guardrails); an unavailable corpus is a transient fail-closed.
-    {
-      const topicGate = require('../content/topic-targeting-gate');
-      const topic = await topicGate.evaluateBlogPostRow(post, { category: normalizeCategory(post.category, post.tag) || null });
-      if (!topic.ok) {
-        const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
-        tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
-        tErr.details = topic.findings;
-        throw tErr;
-      }
-    }
-
     // 1. Hero image (required by the Astro schema). Fetch before branch
     // creation so validation/fetch failures do not leave orphan branches.
     //

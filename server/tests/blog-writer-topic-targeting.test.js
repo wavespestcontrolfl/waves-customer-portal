@@ -10,15 +10,15 @@ const IN_WALL = {
   body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
 };
 
-function makeDbMock({ post = null } = {}) {
+function makeDbMock({ post = null, updateResult = 1 } = {}) {
   const inserts = [];
   const updates = [];
   const dbMock = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNotNull', 'whereRaw']) chain[m] = jest.fn(() => chain);
+    for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNotNull', 'whereRaw', 'whereNot', 'whereNull', 'orWhere', 'orWhereNot', 'orWhereNotIn']) chain[m] = jest.fn(() => chain);
     chain.first = jest.fn().mockResolvedValue(table === 'blog_posts' ? post : null);
     chain.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
-    chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(1); });
+    chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(updateResult); });
     chain.then = (resolve) => resolve([]);
     return chain;
   });
@@ -35,9 +35,9 @@ const PEST_BAITS = ['ant-bait-basics', 'roach-bait-gel', 'rodent-bait-safety'].m
   body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n`,
 }));
 
-function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null }) {
+function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null, updateResult = 1 }) {
   jest.resetModules();
-  const dbMock = makeDbMock({ post });
+  const dbMock = makeDbMock({ post, updateResult });
   const dispatch = jest.fn().mockResolvedValue({ ok: true, json: ideas });
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -109,6 +109,12 @@ describe('blog-writer generatePost — every persisted row is gated before write
     const patch = dbMock._updates.find((u) => u.table === 'blog_posts')?.patch;
     expect(patch.status).toBe('idea');
     expect(patch.astro_publish_error).toMatch(/^BLOG_TOPIC_TARGETING_BLOCKED: P0 TOPIC_CANNIBALIZES_EXISTING/);
+  });
+
+  test('the de-queue is a CAS: a row that entered the publish pipeline while the corpus loaded is left alone (409)', async () => {
+    const { writer, dispatch } = load({ post: TAEXX_ROW, updateResult: 0 });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/entered the Astro pipeline while the topic gate ran/) });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   test('an owned entity only in the TITLE (generic keyword) is still blocked', async () => {
