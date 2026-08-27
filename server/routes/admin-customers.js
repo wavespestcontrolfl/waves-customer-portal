@@ -980,6 +980,20 @@ async function latestHealthScoreForCustomer(customerId) {
     });
 }
 
+// PUT /:id fields whose change emits a `customer.update_sensitive` audit
+// event (contact identity, address, money/lane, and the payer/occupant
+// classification — contact_role is as operationally significant as the
+// service_contact*_role slots already listed).
+const SENSITIVE_CUSTOMER_FIELDS = Object.freeze([
+  'email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip',
+  'monthly_rate', 'active', 'pipeline_stage',
+  'service_contact_name', 'service_contact_phone', 'service_contact_email',
+  'service_contact2_name', 'service_contact2_phone', 'service_contact2_email',
+  'service_contact3_name', 'service_contact3_phone', 'service_contact3_email',
+  'service_contact_role', 'service_contact2_role', 'service_contact3_role',
+  'payer_id', 'billing_mode', 'contact_role',
+]);
+
 function isValidStage(stage) {
   return !stage || CUSTOMER_STAGE_SET.has(stage);
 }
@@ -3659,7 +3673,7 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
         });
       }
 
-      const sensitiveFields = ['email', 'phone', 'secondary_phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'monthly_rate', 'active', 'pipeline_stage', 'service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact2_name', 'service_contact2_phone', 'service_contact2_email', 'service_contact3_name', 'service_contact3_phone', 'service_contact3_email', 'service_contact_role', 'service_contact2_role', 'service_contact3_role', 'payer_id', 'billing_mode'];
+      const sensitiveFields = SENSITIVE_CUSTOMER_FIELDS;
       const changed = Object.keys(updates).filter(field => before && before[field] !== updates[field]);
       const after = { ...before, ...updates };
       // PRESENCE-triggered, not diff-triggered — matching the IB update path
@@ -5161,6 +5175,7 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 
 router._private = {
   CUSTOMER_STAGES,
+  SENSITIVE_CUSTOMER_FIELDS,
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,

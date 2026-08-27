@@ -4,7 +4,7 @@
  * `contactRole`, clears on ''/null, and 400s on anything unknown.
  */
 const { CONTACT_ROLES, normalizeContactRole } = require('../constants/contact-roles');
-const { mapCustomerListRow } = require('../routes/admin-customers')._private;
+const { mapCustomerListRow, SENSITIVE_CUSTOMER_FIELDS } = require('../routes/admin-customers')._private;
 
 describe('normalizeContactRole', () => {
   test('accepts every known role, case/space-insensitively', () => {
@@ -33,5 +33,15 @@ describe('mapCustomerListRow contactRole', () => {
   test('exposes contact_role as contactRole (null when unset)', () => {
     expect(mapCustomerListRow({ id: 'c1', contact_role: 'property_manager' }).contactRole).toBe('property_manager');
     expect(mapCustomerListRow({ id: 'c2' }).contactRole).toBeNull();
+  });
+});
+
+describe('contact_role audit trail', () => {
+  test('a contact_role change is a sensitive edit (customer.update_sensitive), like the service_contact role slots', () => {
+    expect(SENSITIVE_CUSTOMER_FIELDS).toContain('contact_role');
+    expect(SENSITIVE_CUSTOMER_FIELDS).toContain('service_contact_role');
+    // Same predicate the PUT handler applies to its diff.
+    const changed = ['contact_role', 'crm_notes'];
+    expect(changed.filter((f) => SENSITIVE_CUSTOMER_FIELDS.includes(f))).toEqual(['contact_role']);
   });
 });
