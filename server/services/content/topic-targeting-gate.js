@@ -192,12 +192,25 @@ function geoBlockReason(text, { allowStatewide = false } = {}) {
   return null;
 }
 
-function geoFindings(geo, { allowStatewide = false, where = 'targeting' } = {}) {
-  if (geo.scope === 'out_of_area') {
-    return [{ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: geo.out_of_area, message: `${where} is built around out-of-footprint geo (${geo.out_of_area.join(', ')}). Educational mentions are fine; a post may not target demand Waves cannot serve.` }];
+/**
+ * geoFindingsForParts(parts) — each targeting part is classified ON ITS OWN:
+ * a served city in the keyword must never rescue a statewide title ("Pest
+ * Control in Florida" + "pest control sarasota" is still a statewide title).
+ *   parts: [{ text, where, framing }] — framing parts (title, slug) are
+ *   judged for statewide-only scope; a keyword/query is demand and only ever
+ *   blocks on an out-of-footprint geo (the writer localizes statewide demand).
+ * Returns at most one finding: out-of-area anywhere wins, then statewide.
+ */
+function geoFindingsForParts(parts) {
+  const scoped = parts.filter((p) => p.text).map((p) => ({ ...p, geo: classifyGeoScope(p.text) }));
+  const outOfArea = scoped.filter((p) => p.geo.scope === 'out_of_area');
+  if (outOfArea.length) {
+    const cities = [...new Set(outOfArea.flatMap((p) => p.geo.out_of_area))];
+    return [{ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities, message: `${outOfArea.map((p) => p.where).join(' + ')} built around out-of-footprint geo (${cities.join(', ')}). Educational mentions are fine; a post may not target demand Waves cannot serve.` }];
   }
-  if (geo.scope === 'statewide' && !allowStatewide) {
-    return [{ severity: 'P0', code: CODES.GEO_STATEWIDE, message: `${where} is statewide ("Florida"/"FL") with no served city or Southwest Florida anchor — too broad. Anchor the title/keyword to a served city or SWFL, or drop the geo qualifier.` }];
+  const statewide = scoped.filter((p) => p.framing && p.geo.scope === 'statewide');
+  if (statewide.length) {
+    return [{ severity: 'P0', code: CODES.GEO_STATEWIDE, message: `${statewide.map((p) => p.where).join(' + ')} is statewide ("Florida"/"FL") with no served city or Southwest Florida anchor — too broad. Anchor it to a served city or SWFL, or drop the geo qualifier.` }];
   }
   return [];
 }
@@ -213,9 +226,12 @@ function evaluateDraftFraming(draft = {}) {
   const title = String(fm.title || draft?.title || '').trim();
   const slug = String(fm.slug || draft?.url || '').replace(/^https?:\/\/[^/]+/, '').trim();
   const keyword = String(fm.primary_keyword || '').trim();
-  const text = [title, keyword, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' ');
-  const geo = classifyGeoScope(text);
-  const findings = geoFindings(geo, { where: 'Draft title/slug/keyword framing' });
+  const findings = geoFindingsForParts([
+    { text: title, where: 'Draft title', framing: true },
+    { text: slug.replace(/[-/]+/g, ' '), where: 'Draft slug', framing: true },
+    { text: keyword, where: 'Draft primary_keyword', framing: false },
+  ]);
+  const geo = classifyGeoScope([title, keyword, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
   return { ok: findings.length === 0, findings, geo, checked: { title, slug, primary_keyword: keyword } };
 }
 
@@ -226,34 +242,29 @@ function isApplicable({ actionType = null, pageType = null } = {}) {
 
 // ── corpus parsing (targeting fields only — never the body prose) ──────
 
-function unquote(v) {
-  const s = String(v || '').trim();
-  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) return s.slice(1, -1);
-  return s;
+const { parse: parseFrontmatter } = require('../content-astro/frontmatter');
+
+const TARGETING_SCALARS = ['title', 'slug', 'primary_keyword', 'meta_description', 'category'];
+
+function asStringList(v) {
+  if (Array.isArray(v)) return v.map((x) => String(x ?? '').trim()).filter(Boolean);
+  if (typeof v === 'string') return v.split(',').map((x) => x.trim()).filter(Boolean);
+  return [];
 }
 
-const TARGETING_SCALARS = new Set(['title', 'slug', 'primary_keyword', 'meta_description', 'category']);
-const TARGETING_LISTS = new Set(['secondary_keywords']);
-
+// Frontmatter via the canonical js-yaml parser (content-astro/frontmatter),
+// so inline arrays and folded/multiline scalars count toward ownership.
+// Unparseable frontmatter yields empty targeting fields — such a post could
+// not have built on the live site either.
 function parseTargetingFields(body) {
   const src = String(body || '');
-  const out = { title: '', slug: '', primary_keyword: '', meta_description: '', category: '', secondary_keywords: [], headings: [] };
-  let fm = '';
+  let data = {};
   let rest = src;
-  const m = src.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/);
-  if (m) { fm = m[1]; rest = src.slice(m[0].length); }
-  let listKey = null;
-  for (const rawLine of fm.split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+$/, '');
-    const item = line.match(/^\s+-\s+(.*)$/);
-    if (item && listKey) { out[listKey].push(unquote(item[1])); continue; }
-    const kv = line.match(/^([a-z_]+):\s*(.*)$/);
-    if (!kv) { if (!/^\s/.test(line)) listKey = null; continue; }
-    listKey = null;
-    const [, key, value] = kv;
-    if (TARGETING_SCALARS.has(key)) out[key] = unquote(value);
-    else if (TARGETING_LISTS.has(key)) listKey = value.trim() === '' ? key : null;
-  }
+  try {
+    ({ data, content: rest } = parseFrontmatter(src));
+  } catch { data = {}; rest = ''; }
+  const out = { secondary_keywords: asStringList(data.secondary_keywords), headings: [] };
+  for (const key of TARGETING_SCALARS) out[key] = data[key] == null ? '' : String(data[key]).trim();
   const headingRe = /^#{2,3}\s+(.+?)\s*#*\s*$/gm;
   let h;
   while ((h = headingRe.exec(rest)) !== null) out.headings.push(h[1].replace(/[*_`]/g, ''));
@@ -358,13 +369,15 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   const query = String(candidate.query || '').trim();
   const title = String(candidate.title || '').trim();
   const slug = String(candidate.slug || '').trim();
-  const targeting = [query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' ');
-  const geo = classifyGeoScope(targeting);
-  // Pre-draft, statewide is only judged when the brief PINS framing (an
-  // operator working title or slug). A bare query is demand — the writer
-  // localizes it and evaluateDraftFraming judges the result.
-  const pinnedFraming = Boolean(title || slug);
-  const findings = geoFindings(geo, { allowStatewide: !pinnedFraming, where: pinnedFraming ? 'Pinned title/slug targeting' : 'Targeting' });
+  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
+  // Pre-draft, statewide is judged only on PINNED framing (an operator
+  // working title or slug), each on its own. A bare query is demand — the
+  // writer localizes it and evaluateDraftFraming judges the result.
+  const findings = geoFindingsForParts([
+    { text: query, where: 'Primary keyword', framing: false },
+    { text: title, where: 'Pinned title', framing: true },
+    { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
+  ]);
   if (findings.length) return { ...base, ok: false, findings, geo };
 
   const idx = index || (corpus ? indexCorpus(corpus) : null);

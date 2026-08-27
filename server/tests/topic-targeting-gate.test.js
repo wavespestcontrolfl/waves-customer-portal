@@ -10,7 +10,7 @@ const gate = require('../services/content/topic-targeting-gate');
 const post = (slug, title, extra = '', headings = []) => ({
   path: `src/content/blog${slug.replace(/\/$/, '')}.mdx`,
   url: slug,
-  body: `---\ntitle: '${title}'\nslug: ${slug}\nmeta_description: ${extra}\nprimary_keyword: ${title.toLowerCase()}\nsecondary_keywords:\n  - ${title.toLowerCase()} cost\ncategory: ${slug.split('/')[1]}\n---\n\nIntro prose that mentions taexx tampa florida everywhere but is NOT a targeting field.\n\n${headings.map((h) => `## ${h}`).join('\n\n')}\n`,
+  body: `---\ntitle: ${JSON.stringify(title)}\nslug: ${slug}\nmeta_description: ${JSON.stringify(extra)}\nprimary_keyword: ${JSON.stringify(title.toLowerCase())}\nsecondary_keywords:\n  - ${JSON.stringify(`${title.toLowerCase()} cost`)}\ncategory: ${slug.split('/')[1]}\n---\n\nIntro prose that mentions taexx tampa florida everywhere but is NOT a targeting field.\n\n${headings.map((h) => `## ${h}`).join('\n\n')}\n`,
 });
 
 // A miniature of the live corpus: the in-wall post names Taexx in meta +
@@ -112,8 +112,8 @@ describe('evaluate — geo (the #476 / #491 shapes)', () => {
     expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_OUT_OF_AREA]);
     expect(r.findings[0].severity).toBe('P0');
   });
-  test('#491: statewide-only targeting with a PINNED title/slug is too broad pre-draft', () => {
-    const r = gate.evaluate(blog({ query: 'new construction pest control florida', title: 'New-Construction First-Year Pest & Termite Plan', slug: '/pest-control/new-construction-pest-control-first-year-plan/' }), { corpus: CORPUS });
+  test('#491: a PINNED statewide-only title is too broad pre-draft (the query alone never decides framing)', () => {
+    const r = gate.evaluate(blog({ query: 'new construction pest control florida', title: 'New-Construction Pest Control in Florida: Your First-Year Plan', slug: '/pest-control/new-construction-pest-control-first-year-plan/' }), { corpus: CORPUS });
     expect(r.ok).toBe(false);
     expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_STATEWIDE]);
   });
@@ -249,5 +249,40 @@ describe('entity rarity is judged within the candidate category', () => {
     expect(a).toBe(b);
     expect(a.get('bait')).toBe(1);
     expect(index.df.get('bait')).toBe(4);
+  });
+});
+
+describe('framing parts are judged on their own (hook r3)', () => {
+  test('a served-city keyword does not rescue a statewide title — pre-draft (pinned) and post-draft', () => {
+    const pre = gate.evaluate({ actionType: 'new_supporting_blog', query: 'pest control sarasota', title: 'Pest Control in Florida: What It Costs' }, { requireCorpus: false });
+    expect(pre.ok).toBe(false);
+    expect(pre.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_STATEWIDE]);
+    const post = gate.evaluateDraftFraming({ frontmatter: { title: 'Pest Control in Florida: What It Costs', slug: '/pest-control/pest-control-costs/', primary_keyword: 'pest control sarasota' } });
+    expect(post.ok).toBe(false);
+    expect(post.findings[0].code).toBe(gate.CODES.GEO_STATEWIDE);
+  });
+
+  test('a statewide slug alone is a block; a statewide KEYWORD alone never is', () => {
+    expect(gate.evaluateDraftFraming({ frontmatter: { title: 'Ants in Sarasota Kitchens', slug: '/pest-control/ants-in-florida/', primary_keyword: 'ants sarasota' } }).ok).toBe(false);
+    expect(gate.evaluateDraftFraming({ frontmatter: { title: 'Ants in Sarasota Kitchens', slug: '/pest-control/ants-sarasota/', primary_keyword: 'kinds of ants in florida' } }).ok).toBe(true);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'kinds of ants in florida', title: 'Ants in Sarasota Kitchens' }, { requireCorpus: false }).ok).toBe(true);
+  });
+});
+
+describe('frontmatter is read by the canonical YAML parser', () => {
+  test('inline arrays and folded scalars count toward targeting', () => {
+    const body = '---\ntitle: >-\n  Taexx Systems\n  Explained\nslug: /pest-control/taexx-explained/\nsecondary_keywords: [taexx cost, taexx refill]\nmeta_description: "Taexx, folded: fine"\n---\n## Taexx basics\n';
+    const f = gate._internals.parseTargetingFields(body);
+    expect(f.title).toBe('Taexx Systems Explained');
+    expect(f.secondary_keywords).toEqual(['taexx cost', 'taexx refill']);
+    expect(f.headings).toEqual(['Taexx basics']);
+    const idx = gate.indexCorpus([{ url: '/pest-control/taexx-explained/', body }]);
+    expect(idx.posts[0].counts.get('taexx')).toBe(6);
+  });
+
+  test('unparseable frontmatter yields empty targeting, never a throw', () => {
+    const f = gate._internals.parseTargetingFields('---\ntitle: [unclosed\n---\n## H\n');
+    expect(f.title).toBe('');
+    expect(f.headings).toEqual([]);
   });
 });
