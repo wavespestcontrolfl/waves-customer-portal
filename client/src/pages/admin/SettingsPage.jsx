@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, Navigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
   Building2,
@@ -17,7 +17,6 @@ import {
   ToggleLeft,
   Users,
 } from "lucide-react";
-import MobileSettingsPage from "../../components/admin/MobileSettingsPage";
 import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import IntegrationHealthSection from "../../components/admin/IntegrationHealthSection";
@@ -182,7 +181,7 @@ export default function SettingsPage() {
   const [health, setHealth] = useState(null);
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
-  // ?tab=X deep-links from MobileSettingsPage land on the right tab.
+  // ?tab=X deep-links from the mobile Settings surface land on the right tab.
   const initialTab = VALID_TABS.includes(searchParams.get("tab"))
     ? searchParams.get("tab")
     : "general";
@@ -281,7 +280,11 @@ export default function SettingsPage() {
 
   // On mobile — and when NOT deep-linked into a specific tab — render the
   // Square-style section index instead of the desktop tab panel.
-  if (isMobile && !searchParams.get("tab")) return <MobileSettingsPage />;
+  // Mobile has ONE settings surface: the Settings tab (/admin/more), which
+  // lists these leaves inline. A tab-less /admin/settings on mobile used to
+  // render a second index (the since-removed MobileSettingsPage) — send it there instead.
+  // Deep links with ?tab= still render the leaf below.
+  if (isMobile && !searchParams.get("tab")) return <Navigate to="/admin/more" replace />;
 
   if (loading)
     return (

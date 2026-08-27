@@ -1,7 +1,8 @@
 import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
-  LayoutGrid,
+  Settings,
+  SlidersHorizontal,
   ExternalLink,
   ChevronRight,
 } from "lucide-react";
@@ -9,7 +10,22 @@ import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
-import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
+import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
+import { MOBILE_SETTINGS_SECTIONS } from "../../config/mobileSettingsSections";
+
+// The Settings leaves this page lists inline: every entry of the former
+// mobile Settings index whose destination is NOT already a nav row or tab
+// on this surface (Invoices, Banking, Communications are; the SettingsPage
+// ?tab= leaves and the standalone Early-feature-access route are not).
+// Derived, not hand-picked, so a destination can't silently vanish from
+// mobile (codex P1: the flags route was dropped by a ?tab=-only filter).
+const NAV_PATHS = new Set(
+  [...ADMIN_MOBILE_TABS, ...ADMIN_MOBILE_MORE_SECTIONS.flatMap(({ items }) => items)]
+    .map(({ path }) => path.split("?")[0]),
+);
+const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
+  (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
+);
 
 export default function MorePage() {
   const navigate = useNavigate();
@@ -33,16 +49,16 @@ export default function MorePage() {
     navigate("/admin/login", { replace: true });
   };
 
+  const visibleSettingsLeaves = SETTINGS_LEAVES.filter(
+    (sec) => currentRole === "admin" || !sec.adminOnly,
+  );
+
   return (
     <div className="md:hidden pb-4">
-      {" "}
-      <div className="px-4 pt-4 pb-3">
-        {" "}
-        <AdminCommandHeader title="More" icon={LayoutGrid} sticky={false} className="mb-0" />{" "}
-        <p className="text-13 text-zinc-500 mt-3">
-          Everything beyond the five tabs.
-        </p>{" "}
-      </div>
+      {/* No extra padding wrapper: the shell already pads the page 16px, so
+          a px-4/pt-4 here inset the header card 32px — visibly narrower than
+          the full-bleed lists beneath it. */}
+      <AdminCommandHeader title="Settings" icon={Settings} sticky={false} />
       {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
         const visibleItems = items
           .filter((item) => !item.adminOnly || currentRole === "admin")
@@ -85,6 +101,38 @@ export default function MorePage() {
         </section>
         );
       })}
+      {visibleSettingsLeaves.length > 0 && (
+        <section className="mt-2">
+          {" "}
+          <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
+            Settings
+          </div>{" "}
+          <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
+            {visibleSettingsLeaves.map(({ key, to, label }) => (
+              <li key={key}>
+                {" "}
+                <Link
+                  to={to}
+                  onClick={(e) => {
+                    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+                    markUsageSource("more");
+                  }}
+                  className="flex items-center gap-3 px-4 h-14 active:bg-zinc-50 text-zinc-900 no-underline"
+                >
+                  {" "}
+                  <SlidersHorizontal
+                    size={20}
+                    strokeWidth={1.75}
+                    className="text-zinc-600 shrink-0"
+                  />{" "}
+                  <span className="flex-1 text-14">{label}</span>{" "}
+                  <ChevronRight size={16} className="text-zinc-400" />{" "}
+                </Link>{" "}
+              </li>
+            ))}
+          </ul>{" "}
+        </section>
+      )}
       <section className="mt-6">
         {" "}
         <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">

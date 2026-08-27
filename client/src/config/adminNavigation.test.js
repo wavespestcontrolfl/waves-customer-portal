@@ -83,7 +83,7 @@ describe("admin navigation registry", () => {
         path: "/admin/communications",
         label: "Messages",
       },
-      { id: "more", path: "/admin/more", label: "More" },
+      { id: "more", path: "/admin/more", label: "Settings" },
     ]);
   });
 
@@ -92,7 +92,11 @@ describe("admin navigation registry", () => {
     const mobileIds = [
       ...ADMIN_MOBILE_TABS.filter(({ id }) => id !== "more").map(({ id }) => id),
       ...sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id),
+      // The Settings tab page renders the Settings leaves inline (not as a
+      // nav row) — that IS the mobile route to the `settings` destination.
+      "settings",
     ];
+    expect(sectionItems(ADMIN_MOBILE_MORE_SECTIONS).map(({ id }) => id)).not.toContain("settings");
 
     expect(new Set(mobileIds)).toEqual(new Set(desktopIds));
     expect(mobileIds).toEqual(expect.arrayContaining(["jobs", "contracts", "payers"]));
@@ -181,6 +185,16 @@ describe("isAdminNavItemActive", () => {
         "?tab=schedule",
       ),
     ).toBe(true);
+  });
+
+  it("keeps the Settings tab active on the Settings leaves it lists inline", () => {
+    const more = ADMIN_MOBILE_TABS.find(({ id }) => id === "more");
+    expect(isAdminNavItemActive(more, "/admin/more")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/settings", "?tab=team")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/settings/pest-pressure")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/_design-system/flags")).toBe(true); // standalone inline leaf
+    expect(isAdminNavItemActive(more, "/admin/invoices")).toBe(true); // a nav row
+    expect(isAdminNavItemActive(more, "/admin/customers")).toBe(false); // another tab
   });
 
   it("keeps Schedule active across its dispatch workspace", () => {

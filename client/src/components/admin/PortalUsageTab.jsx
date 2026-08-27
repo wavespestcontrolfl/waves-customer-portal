@@ -32,7 +32,7 @@ const WINDOWS = [
 const SOURCE_LABELS = {
   sidebar: "Sidebar",
   tabbar: "Tab bar",
-  more: "More menu",
+  more: "Settings tab",
   palette: "Palette",
   load: "App open",
   "in-app": "In-app link",
@@ -44,7 +44,7 @@ const SOURCE_LABELS = {
 const EXTRA_LABELS = {
   dispatch: "Dispatch",
   schedule: "Schedule",
-  more: "More",
+  more: "Settings tab",
   leads: "Leads",
   estimates: "Estimates",
 };

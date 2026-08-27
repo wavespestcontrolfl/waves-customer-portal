@@ -16,7 +16,6 @@ import {
   LayoutDashboard,
   Mail,
   Megaphone,
-  Menu,
   MessageSquare,
   Newspaper,
   Package,
@@ -34,6 +33,7 @@ import {
   Wrench,
   Bot,
 } from "lucide-react";
+import { MOBILE_SETTINGS_SECTIONS } from "./mobileSettingsSections";
 
 // Canonical metadata for every destination currently rendered by the admin
 // shell. The desktop sidebar and mobile More page are derived from the same
@@ -285,11 +285,16 @@ export const ADMIN_NAV_ITEMS = {
     label: "Settings",
     icon: Settings,
   },
+  // The fifth mobile tab. Routes to the mobile-only index at /admin/more
+  // (the `more` id / route / usage-source key are stable; only what the
+  // user sees changed): the page is titled "Settings" and folds the former
+  // mobile Settings index into it, so the tab reads "Settings" with the
+  // Settings glyph — not a hamburger labelled "More".
   more: {
     id: "more",
     path: "/admin/more",
-    label: "More",
-    icon: Menu,
+    label: "Settings",
+    icon: Settings,
   },
 };
 
@@ -350,11 +355,22 @@ const MOBILE_TAB_IDS = [
 ];
 
 const MOBILE_TAB_ID_SET = new Set(MOBILE_TAB_IDS);
+const MOBILE_TAB_PATHS = new Set(
+  MOBILE_TAB_IDS.map((id) => ADMIN_NAV_ITEMS[id].path.split("?")[0]),
+);
+
+// Destinations the mobile index page renders ITSELF rather than as a nav
+// row: `settings` — the page is the mobile Settings surface, so it lists the
+// Settings leaves inline (MOBILE_SETTINGS_SECTIONS) instead of a single
+// "Settings" row pointing at a second index page.
+const MOBILE_INDEX_INLINE_IDS = new Set(["settings"]);
 
 const MOBILE_MORE_SECTION_DEFINITIONS = NAV_SECTION_DEFINITIONS.map(
   ({ section, itemIds }) => ({
     section,
-    itemIds: itemIds.filter((itemId) => !MOBILE_TAB_ID_SET.has(itemId)),
+    itemIds: itemIds.filter(
+      (itemId) => !MOBILE_TAB_ID_SET.has(itemId) && !MOBILE_INDEX_INLINE_IDS.has(itemId),
+    ),
   }),
 ).filter(({ itemIds }) => itemIds.length > 0);
 
@@ -464,14 +480,27 @@ export function isAdminNavItemActive(item, pathname, search = "") {
     return true;
   }
   if (item.id === "more") {
-    return ADMIN_MOBILE_MORE_SECTIONS.some(({ items }) =>
-      items.some((moreItem) => {
-        const morePathname = pathnameFor(moreItem.path);
-        return (
-          pathname === morePathname || pathname.startsWith(`${morePathname}/`)
-        );
-      }),
-    );
+    // The Settings tab owns every destination its page lists: the nav rows
+    // AND the routes it renders inline (/admin/settings?tab=… leaves) —
+    // those left the nav rows, so they must be named here explicitly or
+    // the tab goes inactive while one of its own leaves is open.
+    const owned = [
+      ...ADMIN_MOBILE_MORE_SECTIONS.flatMap(({ items }) => items),
+      ...[...MOBILE_INDEX_INLINE_IDS].map((id) => ADMIN_NAV_ITEMS[id]),
+      // every leaf of the inline Settings list, standalone routes included
+      // (e.g. /admin/_design-system/flags) — same data MorePage renders —
+      // except destinations that ARE another primary tab (Communications):
+      // MorePage doesn't render those and that tab owns them.
+      ...MOBILE_SETTINGS_SECTIONS
+        .filter(({ to }) => !MOBILE_TAB_PATHS.has(pathnameFor(to)))
+        .map(({ to }) => ({ path: to })),
+    ];
+    return owned.some((moreItem) => {
+      const morePathname = pathnameFor(moreItem.path);
+      return (
+        pathname === morePathname || pathname.startsWith(`${morePathname}/`)
+      );
+    });
   }
   return pathname.startsWith(`${itemPathname}/`);
 }
