@@ -1414,9 +1414,12 @@ async function productIdentityEvidence(knex, submittedProducts = []) {
   if (!productIds.length) return false;
   let rows = null;
   try {
-    rows = await knex('products_catalog')
+    // Nested transaction = SAVEPOINT on the outer completion trx: a failed
+    // catalog read rolls back to the savepoint instead of leaving the whole
+    // transaction aborted (mirrors productReentryFloor; uncapped codex P1).
+    rows = await knex.transaction(async (sp) => sp('products_catalog')
       .whereIn('id', productIds)
-      .select('id', 'name', 'category', 'product_type', 'epa_reg_number');
+      .select('id', 'name', 'category', 'product_type', 'epa_reg_number'));
   } catch {
     rows = null;
   }
@@ -10033,9 +10036,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 .whereNull('deleted_at')
                 .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
                 .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
-                // The screened tag group is frozen too — a concurrent
-                // reclassification to an excluded group leaves it internal.
+                // EVERY screened field is frozen — tag group, note, and
+                // storage key too — so a concurrent edit that adds an access
+                // code to the note (or swaps the media) after the screen
+                // leaves the row internal (uncapped codex P1 r12).
                 .whereRaw('tag_group IS NOT DISTINCT FROM ?', [m.tag_group ?? null])
+                .whereRaw('note IS NOT DISTINCT FROM ?', [m.note ?? null])
+                .whereRaw('media_storage_key IS NOT DISTINCT FROM ?', [m.media_storage_key ?? null])
                 .update({
                   visibility_status: 'approved_customer',
                   customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
