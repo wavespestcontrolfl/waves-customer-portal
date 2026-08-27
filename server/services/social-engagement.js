@@ -131,13 +131,18 @@ async function fetchEngagement(target, { fetchFn = fetch } = {}) {
       return counts;
     }
     const counts = parseInstagramEngagement(await fetchGraph(`${GRAPH_BASE}/${id}?fields=like_count,comments_count&${auth}`, fetchFn));
-    // Shares live in Media Insights; the metric is not available for every
-    // media type/version, so a miss leaves shares null (retain prior value).
+    // Shares live in Media Insights (needs the instagram_manage_insights
+    // scope on FACEBOOK_ACCESS_TOKEN — see the token procedure in
+    // scripts/seed-knowledge-base.js). The metric is also not available for
+    // every media type/version. A miss leaves shares null (retain prior
+    // value) and is reported on the counts so the sweep can surface it.
     try {
       counts.shares = parseInstagramShares(await fetchGraph(`${GRAPH_BASE}/${id}/insights?metric=shares&${auth}`, fetchFn));
     } catch (err) {
-      logger.warn(`[social-engagement] instagram shares insight unavailable for ${target.platformPostId}: ${err.message}`);
+      const permission = /permission|#10\b|#200\b|OAuthException/i.test(err.message);
+      logger.warn(`[social-engagement] instagram shares insight unavailable for ${target.platformPostId}: ${err.message}${permission ? ' — FACEBOOK_ACCESS_TOKEN lacks instagram_manage_insights; regenerate it with that scope' : ''}`);
       counts.shares = null;
+      counts.sharesUnavailable = permission ? 'permission' : 'unsupported';
     }
     return counts;
   }
@@ -197,7 +202,11 @@ async function upsertEngagement(postId, target, counts, error = null) {
 // succeeded — the manual-sync route uses it to answer 202 only for a sweep
 // that will actually fetch.
 async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchFn = fetch, onStart = null } = {}) {
-  const summary = { posts: 0, targets: 0, synced: 0, failed: 0 };
+  // sharesPermissionDenied: Instagram targets whose likes/comments synced
+  // but whose shares insight was refused for lack of the
+  // instagram_manage_insights scope — the sweep still succeeds, but the
+  // count is logged so a missing scope is never invisible.
+  const summary = { posts: 0, targets: 0, synced: 0, failed: 0, sharesPermissionDenied: 0 };
   if (!(await db.schema.hasTable('social_post_engagement'))) {
     throw new Error('social_post_engagement table missing — run migrations');
   }
@@ -226,6 +235,9 @@ async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchF
     cursor = { ts: last.sort_ts, id: last.id };
   }
   logger.info(`[social-engagement] sweep: ${summary.synced}/${summary.targets} targets across ${summary.posts} posts (${summary.failed} failed)`);
+  if (summary.sharesPermissionDenied > 0) {
+    logger.warn(`[social-engagement] ${summary.sharesPermissionDenied} Instagram target(s) synced WITHOUT shares — FACEBOOK_ACCESS_TOKEN lacks instagram_manage_insights (regenerate per scripts/seed-knowledge-base.js)`);
+  }
   // Per-target failures are soft, but a sweep where EVERY target failed (dead
   // token, provider down) must not read as a healthy run — throw after the
   // sweep so runExclusive's job_health records the failure streak.
@@ -243,6 +255,7 @@ async function sweepBatch(posts, { fetchFn, summary }) {
         const counts = await fetchEngagement(target, { fetchFn });
         await upsertEngagement(post.id, target, counts);
         summary.synced += 1;
+        if (counts.sharesUnavailable === 'permission') summary.sharesPermissionDenied += 1;
       } catch (err) {
         summary.failed += 1;
         await upsertEngagement(post.id, target, null, err.message).catch(() => {});

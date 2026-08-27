@@ -119,7 +119,16 @@ describe('fetchEngagement', () => {
       return { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: noInsight }))
-      .resolves.toEqual({ likes: 1, comments: 0, shares: null });
+      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'unsupported' });
+
+    // A missing instagram_manage_insights scope is reported distinctly so the
+    // sweep can surface it (the token procedure lists the scope).
+    const denied = jest.fn(async (url) => {
+      if (url.includes('/insights')) return { ok: false, status: 403, json: async () => ({ error: { message: '(#10) This endpoint requires the instagram_manage_insights permission', type: 'OAuthException' } }) };
+      return { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) };
+    });
+    await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: denied }))
+      .resolves.toEqual({ likes: 1, comments: 0, shares: null, sharesUnavailable: 'permission' });
   });
 
   test('facebook/instagram without a token fails that target only', async () => {
