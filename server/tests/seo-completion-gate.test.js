@@ -612,6 +612,46 @@ describe('seo-completion-gate', () => {
     });
     expect(requestClause.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // A bare coordinated NOUN PHRASE shares the anchor's request/quote
+    // context — "…Quote and Pool Cleaning" is requesting pool cleaning too.
+    const bareCoordinated = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Quote and Pool Cleaning](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(bareCoordinated.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    // Editorial clauses led by a non-request verb stay exempt.
+    const editorialClause = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Quote and See Our Approach](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(editorialClause.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A non-interpolated JSX template-literal href is a static destination.
+    const templateHref = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href={\`/contact/\`}>Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(templateHref.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    // An INTERPOLATED template is a dynamic destination, not a static one.
+    const interpolatedHref = SeoCompletionGate.evaluate({
+       
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href={\`/co\${x}ntact/\`}>Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(interpolatedHref.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // CTA lead-ins ("Click to …") do not launder inspection-request wording.
+    const leadInInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Click to Schedule a Termite Inspection](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(leadInInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     const spacedDest = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate]( /contact/ ) today.' }),
       brief: baseBrief({ service: 'termite-control' }),
@@ -665,6 +705,24 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(rejectedFenceSpan.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Fence indentation is LIST-RELATIVE: a 4-space fence under "10. item"
+    // is a fence, so a CTA example inside it never reaches the gate.
+    const listRelativeFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n10. item\n    \`\`\`\n    [Schedule Service](/contact/)\n    \`\`\`` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(listRelativeFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Code spans never cross a blank line — a live link between stray
+    // unmatched backticks in different paragraphs stays visible.
+    const strayBackticks = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nStray \` mark.\n\n[Schedule Service](/contact/) and later \` tick.` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(strayBackticks.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),

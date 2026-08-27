@@ -443,9 +443,13 @@ function extractLinks(body) {
     }
   }
   // Quoted OR unquoted href (`<a href=/contact/>` is legal HTML).
-  // Quoted, unquoted, or literal JSX string-expression href (`href={"/contact/"}`).
-  const html = /<a\b[^>]*\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))[^>]*>([\s\S]*?)<\/a>/gi;
-  while ((m = html.exec(s)) !== null) links.push({ anchor: m[5].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4]) });
+  // Quoted, unquoted, or literal JSX string-expression href — quote OR
+  // non-interpolated template literal (`href={"/contact/"}`,
+  // href={`/contact/`}). The backtick arm mirrors the guardrails'
+  // PLAIN_STRING_LITERAL_RE: `$` excluded, so an interpolated template
+  // (a dynamic destination) never reads as a static one.
+  const html = /<a\b[^>]*\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
   return links;
 }
 
@@ -518,9 +522,18 @@ function conversionCtaLinks(body) {
         const requestVerbRe = /^(?:request|schedule|book|get|arrange|order|buy|start|claim)\b/i;
         // A part is a SERVICE-REQUEST clause when it carries the estimate/
         // quote keyword OR opens with a request verb ("Schedule Pool
-        // Cleaning"); such a clause naming no known service is an unknown
-        // service. Editorial clauses ("…and See Our Approach") are neither.
-        const unknownPart = coordinated.some((part) => (keywordRe.test(part) || requestVerbRe.test(part)) && termsIn(part).length === 0 && !filler.test(part));
+        // Cleaning") — such a clause naming no known service is an unknown
+        // service. A bare NOUN PHRASE part ("…Quote and Pool Cleaning")
+        // shares the anchor's request/quote context — the CTA is requesting
+        // that service too — so it is judged the same way. Only editorial
+        // clauses led by a non-request verb ("…and See Our Approach") are
+        // exempt.
+        const editorialLeadRe = /^(?:see|view|learn|read|explore|discover|compare|browse|check|watch|meet|find|download|visit|contact|call|why|how|what)\b/i;
+        const unknownPart = coordinated.some((part) => {
+          if (termsIn(part).length > 0 || filler.test(part)) return false;
+          if (keywordRe.test(part) || requestVerbRe.test(part)) return true;
+          return !editorialLeadRe.test(part);
+        });
         if (unknownPart) named = [...named, 'unknown'];
         for (const part of coordinated) for (const svc of termsIn(part)) if (!named.includes(svc)) named.push(svc);
       }
@@ -605,11 +618,12 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection-REQUEST phrasing only ("Request an Inspection", "Book a Termite
 // Inspection", "Schedule your inspection") — editorial anchors like "Get
 // ready for your termite inspection" are not CTAs and must not be flagged.
-// verb + optional determiner + up to two qualifier words + "inspection":
+// optional CTA lead-in ("Click to", "Tap here to") + verb + optional
+// determiner + up to two qualifier words + "inspection":
 // "Request an Inspection", "Get a Termite Inspection", "Schedule your free
-// inspection", "Arrange an inspection" — but NOT "Get ready for your termite
-// inspection" (four words between verb and noun).
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
+// inspection", "Click to Schedule a Termite Inspection" — but NOT "Get
+// ready for your termite inspection" (four words between verb and noun).
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:[a-z&-]+\s+){0,2}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

@@ -2249,6 +2249,12 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Backslash PARITY before pipes: "\\\\|" escapes the backslash, the pipe
     // is a real separator — three header cells match a three-cell delimiter.
     expect(guardrails.hasRawMarkdownTable('A \\\\| B | C\n- | - | -\n1 | 2 | 3')).toBe(true);
+    // Fence indentation is LIST-RELATIVE: under "10. item" (content column
+    // 4) a 4-space fence is a fence, not indented code — its contents hide.
+    expect(guardrails.hasRawMarkdownTable('10. item\n    ```md\n    | A | B |\n    | --- | --- |\n    ```')).toBe(false);
+    // Code spans never cross a BLANK line (paragraph boundary) — stray
+    // unmatched backticks in different paragraphs stay literal text.
+    expect(guardrails.hasRawMarkdownTable('Tick `code\n\n| A | B |\n| --- | --- |\n\nend` here')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

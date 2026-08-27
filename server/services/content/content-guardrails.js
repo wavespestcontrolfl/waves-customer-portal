@@ -1841,9 +1841,12 @@ function blankNonRenderedMarkdown(text) {
   // fence-opener line (a ≤3-space-indented 3+ run at line start) — that
   // line is left for the fence pass. A REJECTED backtick-fence candidate
   // (info string contains a backtick) is reprocessed by CommonMark as
-  // inline content, so its run CAN open a span. Length-preserving mask.
+  // inline content, so its run CAN open a span. A span never crosses a
+  // BLANK line — inline code resolves within its paragraph, so an
+  // unmatched backtick before a blank line cannot pair with one in a later
+  // block. Length-preserving mask.
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
-  const spanned = afterComments.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
+  const spanned = afterComments.replace(/(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
@@ -1851,6 +1854,10 @@ function blankNonRenderedMarkdown(text) {
       const open = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
       if (!open || !(open[1][0] === '`' && open[2].includes('`'))) return c;
     }
+    // A backtick run inside MDX expression braces (`href={\`/contact/\`}`)
+    // is a JS template literal whose VALUE renders — an expression, not a
+    // markdown code span. Leave it for the link scanners.
+    if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
     return c.replace(/[^\n]/g, ' ');
   });
   // Pass 3 — fenced code, per line, scoped to its blockquote AND list
@@ -1877,8 +1884,9 @@ function blankNonRenderedMarkdown(text) {
       fence = null;
     }
     if (fence) {
-      const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
-      if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+      // A closing fence may sit up to 3 past its list item's content column.
+      const close = stripped.match(/^( *)(`{3,}|~{3,})\s*$/);
+      if (close && close[1].length < fence.listIndent + 4 && close[2][0] === fence.ch && close[2].length >= fence.len) fence = null;
       return '';
     }
     // List tracking (pass-4 posture): a marker sets the item's content
@@ -1887,11 +1895,14 @@ function blankNonRenderedMarkdown(text) {
     if (listItem) fenceListIndent = listItem[1].length;
     else if (!blank && fencePrevBlank && indent < fenceListIndent) fenceListIndent = 0;
     fencePrevBlank = blank;
-    if (/^(?: {4}|\t)/.test(stripped)) return l; // indented lines resolved in pass 4
-    const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
+    // the item's content column, so "10. item" + a 4-space fence is a fence
+    // (relative indent 0), not indented code. Resolved in pass 4.
+    if (/^\t/.test(stripped) || indent >= fenceListIndent + 4) return l;
+    const open = stripped.match(/^ *(`{3,}|~{3,})(.*)$/);
     if (open) {
       const srcStripped = sourceLines[i].slice(prefix ? prefix[0].length : 0);
-      const srcOpen = srcStripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      const srcOpen = srcStripped.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
         if (indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
         fence = { ch: open[1][0], len: open[1].length, depth, listIndent: fenceListIndent };
