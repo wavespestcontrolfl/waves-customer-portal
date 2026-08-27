@@ -257,9 +257,12 @@ async function listPrReviewComments(number) {
 
 // Changed files of a PR (filename/status per row) — used by the autonomous
 // merge path to re-run deterministic content gates against the CURRENT head.
+// maxPages 30 covers GitHub's documented 3,000-file cap for this endpoint;
+// callers must treat a 3,000-row result as potentially TRUNCATED (the
+// endpoint itself lists at most 3,000 files) and fail closed.
 async function listPrFiles(number) {
   const { owner, repo } = env();
-  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/files`);
+  return ghFetchPaginated(`/repos/${owner}/${repo}/pulls/${number}/files`, { maxPages: 30 });
 }
 
 async function mergePr(number, { method = 'squash', title, message, sha } = {}) {

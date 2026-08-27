@@ -103,7 +103,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0 } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0, runFirst } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -149,7 +149,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         if (table === 'content_briefs') {
           return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
         }
-        // newer-sibling lookup in queueRowParkedState
+        // by-id lookup (head gate's human-approval read) — defaults to an
+        // unapproved row; the newer-sibling lookup in queueRowParkedState
+        // filters by opportunity_id instead.
+        if (table === 'autonomous_runs' && q._filters.id !== undefined) {
+          return Promise.resolve(runFirst !== undefined ? runFirst : { trust_build_approved_at: null });
+        }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
       }),
@@ -722,6 +727,53 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     setupDb({ pending: [makeRun()] });
     greenMergePath();
     gh.listPrFiles.mockResolvedValue([{ filename: 'src/pages/about.astro', status: 'modified' }]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a HUMAN-APPROVED named-competitor run (trust_build_approved_at) still auto-merges without autopublish eligibility (PR r1 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    try {
+      setupDb({ pending: [makeRun()], runFirst: { trust_build_approved_at: '2026-08-26T12:00:00Z' } });
+      greenMergePath();
+      gh.mergePr.mockResolvedValue({ merged: true });
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+      const res = await poller.pollPending();
+
+      expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+    } finally { gate.evaluate.mockRestore(); }
+  });
+
+  test('a LEGACY FLAT blog file at the canonical leaf passes the path binding (PR r1 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    // CANONICAL routes to /blog/test-post/ — the flat legacy file keeps the
+    // leaf at the blog root and routes by frontmatter slug.
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a possibly-TRUNCATED PR file inventory (3,000 rows) withholds the merge (PR r1 P2)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue(Array.from({ length: 3000 }, (_, i) => ({ filename: `src/pages/f${i}.astro`, status: 'modified' })));
 
     const res = await poller.pollPending();
 

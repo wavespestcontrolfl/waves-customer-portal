@@ -874,6 +874,12 @@ async function maybeAutoMerge(run, pr) {
   let comparisonBlocked = true;
   try {
     const prFiles = await gh.listPrFiles(pr.number);
+    // A non-array or a result at the endpoint's 3,000-file cap may be
+    // TRUNCATED — an unevaluated blog file could hide in the omitted pages
+    // (PR review P2). Throw → catch → withheld.
+    if (!Array.isArray(prFiles) || prFiles.length >= 3000) {
+      throw new Error('PR file inventory unavailable or possibly truncated');
+    }
     const blogFiles = (Array.isArray(prFiles) ? prFiles : []).filter((f) => (
       /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
     // Bind the run's single-brief authorization to its OWN generated file
@@ -893,7 +899,12 @@ async function maybeAutoMerge(run, pr) {
           const rel = String(blogFiles[0].filename)
             .replace(/^src\/content\/blog/, '')
             .replace(/\.(md|mdx)$/, '');
-          boundOk = `${rel}/` === expectedPath;
+          // The nested category path is canonical, but the publisher also
+          // updates a LEGACY FLAT file in place (src/content/blog/{leaf}.mdx
+          // routing by frontmatter slug) when the existing post lives there —
+          // accept that leaf too (PR review P1).
+          const leaf = expectedPath.replace(/\/$/, '').split('/').pop();
+          boundOk = `${rel}/` === expectedPath || (Boolean(leaf) && `${rel}/` === `/${leaf}/`);
         }
       } catch (_) { boundOk = false; }
       if (!boundOk) {
@@ -948,12 +959,24 @@ async function maybeAutoMerge(run, pr) {
   }
   if (comparisonRequiresReview) {
     let eligible = false;
+    // A HUMAN-APPROVED named-competitor run (approve-autonomous-run.js →
+    // _approveNamedCompetitorLocked) carries trust_build_approved_at and is
+    // parked at astro_pr_pending_merge precisely for this poller to merge —
+    // that approval IS the sign-off, independent of the scoped autopublish
+    // eligibility (PR review P1: non-intercept approvals must keep working).
+    // Fresh read; a failed read just falls through to the scoped check.
     try {
-      const { namedCompetitorAutopublishEligible } = require('./codex-remediation');
-      const runner = require('./autonomous-runner');
-      const brief = await runner._loadReviewedBrief(run);
-      eligible = namedCompetitorAutopublishEligible(brief) === true;
-    } catch (_) { eligible = false; }
+      const freshRun = await db('autonomous_runs').where('id', run.id).first('trust_build_approved_at');
+      if (freshRun && freshRun.trust_build_approved_at) eligible = true;
+    } catch (_) { /* fall through */ }
+    if (!eligible) {
+      try {
+        const { namedCompetitorAutopublishEligible } = require('./codex-remediation');
+        const runner = require('./autonomous-runner');
+        const brief = await runner._loadReviewedBrief(run);
+        eligible = namedCompetitorAutopublishEligible(brief) === true;
+      } catch (_) { eligible = false; }
+    }
     if (!eligible) {
       logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
       return { pending: true, reason: 'named_competitor_autopublish_revoked' };
