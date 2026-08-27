@@ -17,6 +17,8 @@ const {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   lineExcludedFromPercentDiscount,
+  buildPercentExclusionCatalog,
+  appointmentDiscountIdentityChanged,
   isPercentDiscountType,
   computePriceServiceGroupChanges,
   loadStoredDiscountScope,
@@ -256,17 +258,37 @@ describe('admin schedule appointment discount eligibility', () => {
     });
   });
 
-  test('maps term-suffixed catalog keys onto the percent-discount exclusion family', () => {
-    expect(lineExcludedFromPercentDiscount('termite_bond_1yr')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('termite_bond')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('rodent_bait')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('termite_bond_5yr')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('palm_injection_semiannual')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('bed_bug_treatment')).toBe(true);
-    expect(lineExcludedFromPercentDiscount('termite_bait')).toBe(false);
-    expect(lineExcludedFromPercentDiscount('pest_general_quarterly')).toBe(false);
-    expect(lineExcludedFromPercentDiscount(null)).toBe(false);
+  test('resolves percent-discount exclusion by engine identity, then explicit aliases', () => {
+    const catalog = buildPercentExclusionCatalog([
+      { service_key: 'rodent_bait_quarterly', engine_keys: ['rodent_bait'] },
+      { service_key: 'rodent_bait_setup', engine_keys: '["rodent_bait_setup"]' },
+      { service_key: 'bed_bug_treatment', engine_keys: ['bed_bug', 'bed_bug_chemical'] },
+      { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
+      { service_key: 'termite_bond_1yr', engine_keys: null },
+    ]);
+    // engine identity wins — including over a would-be prefix guess
+    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', catalog)).toBe(false);
+    expect(lineExcludedFromPercentDiscount('bed_bug_treatment', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bait', catalog)).toBe(false);
+    // no engine link → pricing map, then the explicit alias table
+    expect(lineExcludedFromPercentDiscount('termite_bond', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond_1yr', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond_5yr', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('palm_injection_semiannual', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(true);
+    // unknown prefixed keys are NOT inferred
+    expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(false);
+    expect(lineExcludedFromPercentDiscount('pest_general_quarterly', catalog)).toBe(false);
+    expect(lineExcludedFromPercentDiscount(null, catalog)).toBe(false);
+  });
+
+  test('a preset replaced by an equivalent custom discount counts as a discount change', () => {
+    const existing = { discount_type: 'percentage', discount_amount: 10, discount_id: 'preset-termite' };
+    expect(appointmentDiscountIdentityChanged(existing, undefined)).toBe(true);
+    expect(appointmentDiscountIdentityChanged(existing, 'preset-other')).toBe(true);
+    expect(appointmentDiscountIdentityChanged(existing, 'preset-termite')).toBe(false);
+    expect(appointmentDiscountIdentityChanged({ discount_id: null }, undefined)).toBe(false);
   });
 
   test('keeps the termite bond out of a percentage appointment discount', () => {

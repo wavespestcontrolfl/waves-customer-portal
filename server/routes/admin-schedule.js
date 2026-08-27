@@ -1380,6 +1380,14 @@ function clearAppointmentDiscountCatalogFields(target, cols) {
   if (cols.discount_service_category_filter) target.discount_service_category_filter = null;
 }
 
+// A posted discountId that differs from the stored one — including "no id"
+// replacing a stored preset (custom discount with the same type/amount) —
+// is a change even when type/amount match: the old preset's service scope
+// and catalog identity must not survive (Codex #3531 r5 P1).
+function appointmentDiscountIdentityChanged(existing, discountId) {
+  return String(discountId || '') !== String(existing?.discount_id || '');
+}
+
 function appointmentDiscountInputChanged(existing, discountType, discountAmount) {
   const existingType = existing?.discount_type || null;
   const existingAmount = existing?.discount_amount == null || existing.discount_amount === ''
@@ -2087,9 +2095,37 @@ function isPercentDiscountType(discountType) {
 // last good set (empty before the first success) and the family fallback in
 // lineExcludedFromPercentDiscount still covers the suffixed keys.
 const PERCENT_EXCLUSION_CATALOG_TTL_MS = 5 * 60 * 1000;
-let percentExcludedCatalogKeys = new Set();
+// Catalog rows that carry NO engine link but are variants of an excluded
+// pricing family. Explicit on purpose — inferring the family from a key
+// prefix mis-filed rodent_bait_setup (engine key rodent_bait_setup, which
+// IS discountable) under rodent_bait (Codex #3531 r5 P1). Add a row here
+// only when the catalog can't express it via engine_keys.
+const PERCENT_EXCLUSION_KEY_ALIASES = Object.freeze({
+  termite_bond_1yr: 'termite_bond',
+  termite_bond_5yr: 'termite_bond',
+  termite_bond_10yr: 'termite_bond',
+  palm_injection_semiannual: 'palm_injection',
+  palm_treatment: 'palm_injection',
+});
+// service_key → boolean verdict for every catalog row that HAS engine keys
+// (built by buildPercentExclusionCatalog). A row present here is judged by
+// its engine identity alone — no alias or map lookup can override it.
+let percentExclusionCatalog = new Map();
 let percentExcludedCatalogLoadedAt = 0;
 let percentExcludedCatalogInflight = null;
+
+function buildPercentExclusionCatalog(rows) {
+  const catalog = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    let keys = row?.engine_keys;
+    if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch { keys = null; } }
+    if (!Array.isArray(keys) || keys.length === 0) continue;
+    const serviceKey = String(row.service_key || '').trim().toLowerCase();
+    if (!serviceKey) continue;
+    catalog.set(serviceKey, keys.some((k) => serviceExcludedFromPercentDiscount(String(k || '').trim().toLowerCase())));
+  }
+  return catalog;
+}
 async function primePercentDiscountExclusions() {
   if (Date.now() - percentExcludedCatalogLoadedAt < PERCENT_EXCLUSION_CATALOG_TTL_MS) return;
   if (percentExcludedCatalogInflight) return percentExcludedCatalogInflight;
@@ -2098,17 +2134,7 @@ async function primePercentDiscountExclusions() {
   percentExcludedCatalogInflight = (async () => {
     try {
       const result = await db.raw('select service_key, engine_keys from services where engine_keys is not null');
-      const rows = Array.isArray(result?.rows) ? result.rows : [];
-      const next = new Set();
-      for (const row of rows) {
-        let keys = row.engine_keys;
-        if (typeof keys === 'string') { try { keys = JSON.parse(keys); } catch { keys = []; } }
-        if (!Array.isArray(keys)) continue;
-        if (keys.some((k) => serviceExcludedFromPercentDiscount(String(k || '').trim().toLowerCase()))) {
-          next.add(String(row.service_key || '').trim().toLowerCase());
-        }
-      }
-      percentExcludedCatalogKeys = next;
+      percentExclusionCatalog = buildPercentExclusionCatalog(Array.isArray(result?.rows) ? result.rows : []);
       percentExcludedCatalogLoadedAt = Date.now();
     } catch (e) {
       logger.warn(`[schedule] percent-discount exclusion catalog prime failed: ${e.message}`);
@@ -2121,20 +2147,14 @@ async function primePercentDiscountExclusions() {
 
 primePercentDiscountExclusions().catch(() => {});
 
-function lineExcludedFromPercentDiscount(serviceKey) {
+function lineExcludedFromPercentDiscount(serviceKey, catalog = percentExclusionCatalog) {
   const key = String(serviceKey || '').trim().toLowerCase();
   if (!key) return false;
+  // Engine identity first: a catalog row with engine keys is judged by them.
+  if (catalog?.has(key)) return catalog.get(key) === true;
   if (serviceExcludedFromPercentDiscount(key)) return true;
-  if (percentExcludedCatalogKeys.has(key)) return true;
-  // Family fallback for catalog keys that carry a variant suffix and no
-  // engine link (termite_bond_1yr, palm_injection_semiannual, bed_bug_*):
-  // drop trailing segments until the pricing family matches.
-  const parts = key.split('_');
-  while (parts.length > 1) {
-    parts.pop();
-    if (serviceExcludedFromPercentDiscount(parts.join('_'))) return true;
-  }
-  return false;
+  const alias = PERCENT_EXCLUSION_KEY_ALIASES[key];
+  return alias ? serviceExcludedFromPercentDiscount(alias) : false;
 }
 
 function calculateVisitFinancialsForAddons(pricing, addonLines) {
@@ -6461,12 +6481,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       appointmentDiscountCols = await db('scheduled_services').columnInfo();
       const existingDiscount = await db('scheduled_services')
         .where({ id: req.params.id })
-        .first('discount_type', 'discount_amount');
+        .first('discount_type', 'discount_amount', ...(appointmentDiscountCols.discount_id ? ['discount_id'] : []));
       appointmentDiscountChanged = appointmentDiscountInputChanged(
         existingDiscount,
         discountType,
         discountAmount
-      );
+      ) || (!!appointmentDiscountCols.discount_id
+        && appointmentDiscountIdentityChanged(existingDiscount, discountId));
     }
     // When the Edit appointment "Services and items" section sends an explicit
     // `addons` array, we treat it as the full desired set of additional service
@@ -15649,6 +15670,8 @@ router._test = {
   bookingCreatesWaveGuardCoverage,
   buildAppointmentPricing,
   lineExcludedFromPercentDiscount,
+  buildPercentExclusionCatalog,
+  appointmentDiscountIdentityChanged,
   isPercentDiscountType,
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
