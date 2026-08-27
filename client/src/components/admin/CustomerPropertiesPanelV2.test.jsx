@@ -233,4 +233,27 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
       window.removeEventListener('keydown', windowEscape);
     }
   });
+
+  it('calls onChanged after a successful add (first address becomes the profile primary) and caps inputs at column widths', async () => {
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'POST') return jsonResponse({ propertyId: 'p1', properties: [PRIMARY] }, 201);
+      return jsonResponse({ properties: [] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const onChanged = vi.fn(() => Promise.resolve());
+    render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit onChanged={onChanged} />);
+    await screen.findByText('No properties on file.');
+    fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
+    expect(screen.getByLabelText('Street address')).toHaveAttribute('maxlength', '200');
+    expect(screen.getByLabelText('Unit / line 2')).toHaveAttribute('maxlength', '100');
+    expect(screen.getByLabelText('City')).toHaveAttribute('maxlength', '50');
+    expect(screen.getByLabelText('ZIP')).toHaveAttribute('maxlength', '10');
+    expect(screen.getByLabelText('Label (optional)')).toHaveAttribute('maxlength', '100');
+    fireEvent.change(screen.getByLabelText('Street address'), { target: { value: '10 Palm Ave' } });
+    fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Naples' } });
+    fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '34102' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+    await screen.findByText(/10 Palm Ave/);
+    await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
+  });
 });

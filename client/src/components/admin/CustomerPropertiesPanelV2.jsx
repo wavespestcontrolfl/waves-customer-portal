@@ -3,8 +3,10 @@ import { Button, Card, CardBody } from "../ui";
 import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
-// customer_properties.label is varchar(100); the server 400s past this too.
-const PROPERTY_LABEL_MAX = 100;
+// customer_properties column widths (server PROPERTY_FIELD_LIMITS mirrors
+// migration 20260629000001); the server 400s past these too.
+const LIMITS = { address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100 };
+const PROPERTY_LABEL_MAX = LIMITS.label;
 
 const EMPTY_FORM = {
   address_line1: "",
@@ -46,6 +48,11 @@ export default function CustomerPropertiesPanelV2({
   // path syncs the primary customer_properties row) — the panel refetches so
   // the primary row never lags the refreshed profile.
   refreshToken = "",
+  // Called after a successful add. Adding the FIRST address to an
+  // address-less profile makes it primary and mirrors it into
+  // customers.address_* server-side — the parent must reload so the
+  // header/map don't keep rendering the stale (empty) profile address.
+  onChanged = null,
 }) {
   const [properties, setProperties] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -115,6 +122,13 @@ export default function CustomerPropertiesPanelV2({
       setProperties(Array.isArray(d.properties) ? d.properties : []);
       setForm(EMPTY_FORM);
       setAdding(false);
+      if (typeof onChanged === "function") {
+        try {
+          await onChanged();
+        } catch {
+          /* the list above is already fresh — a profile reload miss is not a save failure */
+        }
+      }
     } catch (err) {
       setSaveErr(err.message || "Could not add property");
     } finally {
@@ -274,6 +288,7 @@ export default function CustomerPropertiesPanelV2({
               <input
                 id="cp-line1"
                 className={inputCls}
+                maxLength={LIMITS.address_line1}
                 value={form.address_line1}
                 onChange={(e) => setForm((f) => ({ ...f, address_line1: e.target.value }))}
               />
@@ -285,6 +300,7 @@ export default function CustomerPropertiesPanelV2({
               <input
                 id="cp-line2"
                 className={inputCls}
+                maxLength={LIMITS.address_line2}
                 value={form.address_line2}
                 onChange={(e) => setForm((f) => ({ ...f, address_line2: e.target.value }))}
               />
@@ -296,6 +312,7 @@ export default function CustomerPropertiesPanelV2({
               <input
                 id="cp-city"
                 className={inputCls}
+                maxLength={LIMITS.city}
                 value={form.city}
                 onChange={(e) => setForm((f) => ({ ...f, city: e.target.value }))}
               />
@@ -326,6 +343,7 @@ export default function CustomerPropertiesPanelV2({
                 <input
                   id="cp-zip"
                   className={inputCls}
+                  maxLength={LIMITS.zip}
                   value={form.zip}
                   onChange={(e) => setForm((f) => ({ ...f, zip: e.target.value }))}
                 />

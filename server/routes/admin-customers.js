@@ -2368,10 +2368,18 @@ router.get('/:id/cards', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
-// customer_properties.label is varchar(100) (migration 20260629000001).
-const PROPERTY_LABEL_MAX = 100;
-function propertyLabelFits(label) {
-  return label === undefined || label === null || String(label).length <= PROPERTY_LABEL_MAX;
+// customer_properties column widths (migration 20260629000001). Enforced
+// here so an overlong paste is a 400 naming the field, not a PostgreSQL
+// bounce surfaced as a generic save failure.
+const PROPERTY_FIELD_LIMITS = Object.freeze({
+  address_line1: 200, address_line2: 100, city: 50, zip: 10, label: 100,
+});
+function propertyFieldOverLimit(body) {
+  for (const [field, max] of Object.entries(PROPERTY_FIELD_LIMITS)) {
+    const v = body?.[field];
+    if (v !== undefined && v !== null && String(v).length > max) return { field, max };
+  }
+  return null;
 }
 
 // Lazily backfills a primary property for customers created after the migration.
@@ -2409,9 +2417,9 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     if (!/^[A-Z]{2}$/.test(stateCode)) {
       return res.status(400).json({ error: 'state is required as a two-letter code' });
     }
-    // customer_properties.label is varchar(100) — same reasoning as state.
-    if (!propertyLabelFits(label)) {
-      return res.status(400).json({ error: `label must be ${PROPERTY_LABEL_MAX} characters or fewer` });
+    const over = propertyFieldOverLimit({ address_line1, address_line2, city, zip, label });
+    if (over) {
+      return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
     }
     // If this address is the customer's OWN primary that's only PARTIAL on file
     // (same street, missing city/ZIP), complete that primary first — otherwise its
@@ -2452,8 +2460,9 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
       updates.occupancy_type = req.body.occupancy_type;
     }
     if (req.body && req.body.label !== undefined) {
-      if (!propertyLabelFits(req.body.label)) {
-        return res.status(400).json({ error: `label must be ${PROPERTY_LABEL_MAX} characters or fewer` });
+      const over = propertyFieldOverLimit({ label: req.body.label });
+      if (over) {
+        return res.status(400).json({ error: `${over.field} must be ${over.max} characters or fewer` });
       }
       updates.label = req.body.label || null;
     }
@@ -5203,6 +5212,7 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 router._private = {
   CUSTOMER_STAGES,
   SENSITIVE_CUSTOMER_FIELDS,
+  PROPERTY_FIELD_LIMITS,
   SCHEDULED_HISTORY_LIMIT,
   customerScheduledHistoryQuery,
   customerScheduledHistory,

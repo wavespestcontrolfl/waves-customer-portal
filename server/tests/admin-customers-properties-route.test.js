@@ -97,6 +97,23 @@ describe('POST /admin/customers/:id/properties', () => {
     expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
   });
 
+  test('every address column is capped at its varchar width with a field-named 400', async () => {
+    const base = { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103' };
+    const cases = [
+      ['address_line1', 201, 200], ['address_line2', 101, 100], ['city', 51, 50], ['zip', 11, 10],
+    ];
+    await withServer(async (baseUrl) => {
+      for (const [field, len, max] of cases) {
+        const res = await post(baseUrl, { ...base, [field]: 'z'.repeat(len) });
+        expect([field, res.status]).toEqual([field, 400]);
+        await expect(res.json()).resolves.toEqual({ error: `${field} must be ${max} characters or fewer` });
+      }
+      const exact = await post(baseUrl, { ...base, address_line1: 'a'.repeat(200), address_line2: 'b'.repeat(100), city: 'c'.repeat(50), zip: 'd'.repeat(10) });
+      expect(exact.status).toBe(201);
+    });
+    expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
+  });
+
   test('duplicate street surfaces as 409', async () => {
     mockProps.recordCallProperty.mockResolvedValueOnce({ created: false, propertyId: null });
     await withServer(async (baseUrl) => {

@@ -15,6 +15,23 @@ const logger = require('./logger');
 
 const OCCUPANCY_TYPES = ['owner_occupied', 'rental_investment', 'commercial', 'seasonal', 'vacant', 'unknown'];
 
+/**
+ * Occupancy a lazily-backfilled PRIMARY should carry when nothing better is
+ * known, derived from customers.contact_role (constants/contact-roles.js):
+ *  - owner / NULL       → owner_occupied (the residential majority)
+ *  - property_manager   → rental_investment (the default address is one of
+ *                         the managed rentals, never the manager's home)
+ *  - tenant             → unknown (occupies but does not own — asserting
+ *                         owner-occupied would contradict the role)
+ */
+function defaultOccupancyForContactRole(contactRole) {
+  switch (String(contactRole || '').trim().toLowerCase()) {
+    case 'property_manager': return 'rental_investment';
+    case 'tenant': return 'unknown';
+    default: return 'owner_occupied';
+  }
+}
+
 /** Case/space/punctuation-insensitive street key — "12338 Amber Creek" ≠ "12398 Amber Creek". */
 const normStreet = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -156,9 +173,13 @@ async function ensurePrimaryCore(customerOrId, { occupancyType, source } = {}, c
     const [row] = await conn.transaction((sp) => sp('customer_properties').insert({
       customer_id: customer.id,
       label: customer.profile_label || 'Primary',
-      // Default owner-occupied for a plain backfill, but honor a caller-supplied
-      // occupancy so a primary created from a tenant/rental call isn't mislabeled.
-      occupancy_type: occupancyType ? normalizeOccupancy(occupancyType) : 'owner_occupied',
+      // Honor a caller-supplied occupancy (a primary created from a
+      // tenant/rental call); otherwise derive the default from the profile's
+      // contact_role so a tenant / property-manager profile is never
+      // backfilled as owner-occupied.
+      occupancy_type: occupancyType
+        ? normalizeOccupancy(occupancyType)
+        : defaultOccupancyForContactRole(customer.contact_role),
       is_primary: true,
       address_line1: customer.address_line1,
       address_line2: customer.address_line2 || null,
@@ -487,6 +508,7 @@ module.exports = {
   streetKey,
   normalizeZip,
   normalizeOccupancy,
+  defaultOccupancyForContactRole,
   isNewAddress,
   completePrimaryFromCall,
   syncPrimaryAddress,

@@ -5805,6 +5805,12 @@ export default function Customer360ProfileV2({
                 <button
                   type="button"
                   onClick={() => onAddProperty?.(c)}
+                  // Sibling-PROFILE creation (customer_accounts layer, frozen
+                  // for new data by migration 20260629000001) — a separately
+                  // billed profile on this account. A service address for THIS
+                  // profile is added on the Property tab. Retirement of this
+                  // path is an owner ruling (see PR #3539 thread).
+                  title="Creates a separately billed sibling profile on this account. To add a service address to this profile, use the Property tab."
                   className="inline-flex items-center h-8 px-3.5 text-11 uppercase tracking-label font-medium rounded-sm bg-zinc-900 text-white no-underline hover:bg-zinc-800 u-focus-ring border-0"
                 >
                   Add Property
@@ -7282,6 +7288,7 @@ export default function Customer360ProfileV2({
                   // not) re-syncs the primary customer_properties row server-side
                   // — refetch on the reload counter, never on the address tuple.
                   refreshToken={profileVersion}
+                  onChanged={reloadCustomer}
                   canEdit
                 />
               )}
