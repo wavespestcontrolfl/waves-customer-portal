@@ -1173,6 +1173,18 @@ async function generateImage(title) {
   }
 }
 
+// Re-encode any inbound image to a metadata-clean JPEG. .rotate() FIRST bakes
+// the EXIF orientation into pixels (sharp's JPEG output drops the orientation
+// tag, which would otherwise publish portrait phone photos sideways — the GBP
+// watermark path already normalizes this way); the re-encode itself carries
+// over NO metadata blocks, so EXIF (including GPS on tech field photos), XMP,
+// IPTC, and C2PA/AI-provenance APP segments from image providers never reach
+// a published post. Every social image upload funnels through this.
+async function toCleanSocialJpeg(buffer) {
+  const sharp = require('sharp');
+  return sharp(buffer).rotate().jpeg({ quality: 85 }).toBuffer();
+}
+
 // ── S3 Image Upload (for Instagram/GBP — requires public HTTPS URL) ──
 // Uses CloudFront OAC — no public-read ACL on S3.
 async function uploadImageToS3(base64Data, filename) {
@@ -1192,8 +1204,7 @@ async function uploadImageToS3(base64Data, filename) {
 
     // Convert PNG/WebP → JPEG (Instagram requires JPEG)
     try {
-      const sharp = require('sharp');
-      buffer = await sharp(buffer).jpeg({ quality: 85 }).toBuffer();
+      buffer = await toCleanSocialJpeg(buffer);
     } catch (sharpErr) {
       logger.error(`[social] sharp unavailable — cannot convert to JPEG for Instagram: ${sharpErr.message}`);
       return null;
@@ -2671,6 +2682,7 @@ const SocialMediaService = {
   generateContent,
   generateCampaignDrafts,
   generateImage,
+  toCleanSocialJpeg,
 };
 
 // True only when both S3 and the public CDN domain are configured — i.e. an

@@ -66,7 +66,17 @@ describe('createPost article thumbnail (Images API)', () => {
 
   // Default fixture leads with the JPEG magic bytes so the format sniff
   // treats it as an accepted format and skips the sharp conversion.
-  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE', imageBytes = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.from('jpeg-bytes')]) } = {}) {
+  // Default thumbnail bytes must be a REAL decodable JPEG — the upload path
+  // now unconditionally re-encodes through sharp (metadata hygiene), so fake
+  // magic-byte buffers would throw and skip the PUT.
+  let realJpeg;
+  beforeAll(async () => {
+    const sharp = require('sharp');
+    realJpeg = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
+      .jpeg().toBuffer();
+  });
+
+  function mockRoutes({ initFails = false, imageStatus = 'AVAILABLE', imageBytes = realJpeg } = {}) {
     const calls = [];
     global.fetch = jest.fn(async (url, opts = {}) => {
       const u = String(url);
@@ -193,15 +203,25 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
   });
 
-  test('_isLinkedinAcceptedImage sniffs magic bytes: JPEG/PNG/GIF pass, WebP does not', async () => {
+  test('an already-JPEG thumbnail is still re-encoded — EXIF/provenance metadata never reaches the PUT', async () => {
     const sharp = require('sharp');
-    const px = { create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } };
-    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).jpeg().toBuffer())).toBe(true);
-    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).png().toBuffer())).toBe(true);
-    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).gif().toBuffer())).toBe(true);
-    expect(linkedin._isLinkedinAcceptedImage(await sharp(px).webp().toBuffer())).toBe(false);
-    expect(linkedin._isLinkedinAcceptedImage(Buffer.from('nope'))).toBe(false);
-    expect(linkedin._isLinkedinAcceptedImage(Buffer.alloc(0))).toBe(false);
+    const tainted = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
+      .jpeg()
+      .withExif({ IFD0: { Copyright: 'strip-me' } })
+      .toBuffer();
+    expect(tainted.includes('strip-me')).toBe(true); // sanity: input carries EXIF
+    mockRoutes({ imageBytes: tainted });
+
+    const res = await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
+
+    expect(res).toMatchObject({ platform: 'linkedin', success: true });
+    const put = global.fetch.mock.calls.find(([u, o]) => String(u) === 'https://upload.example.com/u1' && o?.method === 'PUT');
+    expect(put).toBeTruthy();
+    const sent = put[1].body;
+    expect(sent[0]).toBe(0xff); // still a JPEG
+    expect(sent[1]).toBe(0xd8);
+    expect(Buffer.from(sent).includes('strip-me')).toBe(false);
+    expect((await sharp(Buffer.from(sent)).metadata()).exif).toBeUndefined();
   });
 
   test('a WebP thumbnail (published .webp blog hero) is converted to JPEG before the PUT — LinkedIn rejects WebP', async () => {
@@ -222,18 +242,6 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(sent[2]).toBe(0xff);
     const postBody = JSON.parse(calls.find((c) => c.url.startsWith('https://api.linkedin.com/rest/posts')).body);
     expect(postBody.content.article.thumbnail).toBe('urn:li:image:abc');
-  });
-
-  test('a JPEG thumbnail uploads byte-for-byte unconverted', async () => {
-    const sharp = require('sharp');
-    const jpeg = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
-      .jpeg().toBuffer();
-    mockRoutes({ imageBytes: jpeg });
-
-    await linkedin.createPost({ text: 'T', link: LINK, title: 'Title', imageUrl: IMG });
-
-    const put = global.fetch.mock.calls.find(([u, o]) => String(u) === 'https://upload.example.com/u1' && o?.method === 'PUT');
-    expect(Buffer.compare(put[1].body, jpeg)).toBe(0);
   });
 
   test('a thumbnail failure never blocks the post — it publishes without an image (best-effort)', async () => {
