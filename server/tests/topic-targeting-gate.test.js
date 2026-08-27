@@ -311,9 +311,20 @@ describe('PR codex r1: ambiguous place names need geo context; postal abbreviati
     expect(gate.classifyGeoScope('boston fern pests').scope).toBe('none');
     expect(gate.classifyGeoScope('phoenix palm scale').scope).toBe('none');
   });
-  test('those names are NOT in the shared prose blocklist', () => {
+  test('the guardrails\' documented exclusions (Brandon, Sunrise, Plantation, Cocoa, Mobile, Stuart) are covered here with context', () => {
+    for (const t of ['pest control in Brandon', 'Brandon, FL exterminator', 'lawn care in sunrise', 'termite treatment plantation fl', 'pest control near cocoa', 'exterminator mobile, al', 'Stuart, Florida termite bond']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['brandon asked about ghost ants', 'treat at sunrise before the heat', 'plantation shutters and wasps', 'cocoa mulch and termites', 'mobile app for scheduling', 'stuart little and the mice']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('common-word names in the context list are NOT in the shared prose blocklist (except the metros the guardrails already carry)', () => {
     const shared = new Set(gate._internals.outOfAreaCityList().map((c) => c.toLowerCase()));
-    for (const n of gate._internals.CONTEXT_PLACE_NAMES) expect(shared.has(n.toLowerCase())).toBe(false);
+    for (const n of gate._internals.CONTEXT_PLACE_NAMES) {
+      if (['orlando', 'lakeland'].includes(n.toLowerCase())) continue;
+      expect(shared.has(n.toLowerCase())).toBe(false);
+    }
   });
   test('"<city> tx" / "fresno, ca" / "Mobile, AL" are out-of-area; "va loan" and "ants in kitchen" are not', () => {
     for (const t of ['termite treatment plano tx', 'pest control fresno, ca', 'Mobile, AL termite control', 'exterminator omaha, ne cost']) {
@@ -334,6 +345,17 @@ describe('evaluateDraftTargeting / evaluateBlogPostRow', () => {
     expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
     expect(r.findings[0].owners).toEqual(['/pest-control/in-wall-pest-control/']);
   });
+  test('an owned entity carried only by the title or slug (generic/empty keyword) is still caught', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const byTitle = gate.evaluate(blog({ query: 'new home pest control', title: 'Your New Lakewood Ranch Home Came With Taexx', slug: '/pest-control/new-home-pest-control-lakewood-ranch/' }), { index });
+    expect(byTitle.ok).toBe(false);
+    expect(byTitle.findings[0].entities).toEqual(['taexx']);
+    const bySlug = gate.evaluate(blog({ query: '', title: 'What Came With Your New Build', slug: '/pest-control/lakewood-ranch-taexx/' }), { index });
+    expect(bySlug.ok).toBe(false);
+    // A word one post merely mentions (heading-only "judgment", 1×) is not owned — an owner is BUILT AROUND the token (≥ 3×).
+    expect(gate.evaluate(blog({ query: 'no judgment pest control', title: 'No Judgment: Pest Control Basics for New Owners' }), { index }).ok).toBe(true);
+  });
+
   test('framing failures report stage=framing before any ownership work', () => {
     const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Ants in Florida', slug: '/pest-control/ants/', primary_keyword: 'taexx' } }, { index: gate.indexCorpus(CORPUS) });
     expect(r.stage).toBe('framing');

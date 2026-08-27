@@ -21,12 +21,13 @@ const BLOG_TAGS = [
   'Lawn Disease', 'Lawn Pests', 'Lawn Care', 'Pest Control',
 ];
 
-// Tag → canonical blog category, so the topic-targeting gate judges entity
-// ownership within the same category. Single source: the publisher's own
-// frontmatter mapping (lazy — the publisher is a heavy module).
-function tagToCategory(tag) {
+// Row → canonical blog category (explicit category first, then tag), so the
+// topic-targeting gate judges entity ownership within the same category the
+// publisher will use. Single source: the publisher's own frontmatter mapping
+// (lazy — the publisher is a heavy module).
+function categoryForRow({ category = null, tag = null } = {}) {
   const { normalizeCategory } = require('../content-astro/astro-publisher');
-  return normalizeCategory(null, tag) || null;
+  return normalizeCategory(category, tag) || null;
 }
 
 const TAG_ALIASES = new Map([
@@ -185,7 +186,7 @@ class BlogWriter {
     // throw (fail closed; the caller logs and the row stays queued). A
     // block de-queues the row (status → idea, reason recorded) so the 5 a.m.
     // picker never wedges on it.
-    const topic = await topicGate.evaluateBlogPostRow(post, { category: tagToCategory(post.tag) });
+    const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post) });
     if (!topic.ok) {
       const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
       await db('blog_posts').where('id', blogPostId).update({
@@ -580,7 +581,7 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       // geo, statewide-only framing (an idea IS a title — judged strictly),
       // or an entity a live post already owns is rejected outright.
       const topic = topicGate.evaluate(
-        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, category: tagToCategory(tag) },
+        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, category: categoryForRow({ tag }) },
         { index: topicIndex }
       );
       if (!topic.ok) { rejected++; continue; }
@@ -638,7 +639,7 @@ blogWriter._internals = {
   FAQ_SECTION_INSTRUCTION,
   NO_FAQ_SECTION_INSTRUCTION,
   normalizeTag,
-  tagToCategory,
+  categoryForRow,
   conceptKey,
   slugify,
   SEASONAL_PESTS,

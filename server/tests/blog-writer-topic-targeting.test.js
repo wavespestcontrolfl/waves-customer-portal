@@ -73,10 +73,11 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
     await expect(writer.generateNewIdeas(1)).resolves.toEqual([]);
   });
 
-  test('tag → category is the publisher\'s own normalizeCategory (single source); an unmapped tag is null = conservative all-corpus ownership', () => {
+  test('row → category is the publisher\'s own normalizeCategory (explicit category wins, then tag); an unmapped tag is null = conservative all-corpus ownership', () => {
     const { writer } = load({ ideas: [] });
-    const { BLOG_TAGS, tagToCategory } = writer._internals;
-    const mapped = Object.fromEntries(BLOG_TAGS.map((t) => [t, tagToCategory(t)]));
+    const { BLOG_TAGS, categoryForRow } = writer._internals;
+    expect(categoryForRow({ category: 'termite', tag: 'Pest Control' })).toBe('termite');
+    const mapped = Object.fromEntries(BLOG_TAGS.map((t) => [t, categoryForRow({ tag: t })]));
     expect(mapped).toEqual({
       Roaches: 'pest-control', Ants: 'pest-control', Rodents: 'pest-control', Termites: 'termite', Mosquitoes: 'mosquito',
       'Fleas & Ticks': 'pest-control', 'Stinging Insects': null, Spiders: 'pest-control', 'Bed Bugs': 'pest-control',
@@ -108,6 +109,20 @@ describe('blog-writer generatePost — every persisted row is gated before write
     const patch = dbMock._updates.find((u) => u.table === 'blog_posts')?.patch;
     expect(patch.status).toBe('idea');
     expect(patch.astro_publish_error).toMatch(/^BLOG_TOPIC_TARGETING_BLOCKED: P0 TOPIC_CANNIBALIZES_EXISTING/);
+  });
+
+  test('an owned entity only in the TITLE (generic keyword) is still blocked', async () => {
+    const { writer, dispatch } = load({ post: { ...TAEXX_ROW, keyword: 'new home pest control', slug: 'new-home-pest-control-lakewood-ranch' } });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  test('the row\'s explicit category outranks its tag when judging ownership', async () => {
+    const { writer } = load({ post: { ...TAEXX_ROW, category: 'termite' } });
+    const gate = require('../services/content/topic-targeting-gate');
+    const spy = jest.spyOn(gate, 'evaluateBlogPostRow');
+    await writer.generatePost('post_1').catch(() => null);
+    expect(spy).toHaveBeenCalledWith(expect.objectContaining({ id: 'post_1' }), { category: 'termite' });
   });
 
   test('corpus unavailable → generation throws (fail closed) and the row is left untouched', async () => {

@@ -106,6 +106,9 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   'Homestead', 'Weston', 'Jupiter', 'Wellington', 'Hollywood', 'Kendall', 'Davie',
   'Largo', 'Destin', 'Navarre', 'Inverness', 'Clermont', 'Austin', 'Phoenix',
   'Savannah', 'Boston', 'Houston', 'Dallas', 'Cleveland', 'Richmond', 'Charleston',
+  // The guardrails' own documented exclusions (person names / common nouns).
+  'Brandon', 'Sunrise', 'Plantation', 'Cocoa', 'Mobile', 'Stuart', 'Sebastian',
+  'Orlando', 'Lakeland',
 ]);
 // Washington and Virginia are common person names (Virginia runs the Waves
 // office), so they count only with state context: "in/near Washington",
@@ -484,9 +487,12 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   const owners = new Map();
   const pool = compatiblePosts(idx, category);
   const df = dfForCategory(idx, category);
-  // Entities come from the PRIMARY keyword only — titles carry framing words
-  // ("actual", "fail", "explained") that are not what the post targets.
-  const tokens = entityTokens(query);
+  // Entities come from every targeting field (keyword + title + slug): an
+  // idea may carry a generic or empty keyword with the owned entity only in
+  // its title ("Your New Home Came With Taexx"). Framing words in titles
+  // ("actual", "explained") never trip it — an owner must be BUILT AROUND
+  // the token (≥ OWNER_MIN_OCCURRENCES across its own targeting fields).
+  const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
   for (const tok of tokens) {
     const n = df.get(tok) || 0;
     if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;

@@ -2951,6 +2951,39 @@ class AutonomousRunner {
       throw e;
     }
 
+    // Topic targeting on the stored draft too (owner rulings 2026-08-27): a
+    // remediated/edited pending draft can introduce statewide or out-of-area
+    // framing, or an owned entity, after the pre-park check. Fresh live
+    // corpus; module or corpus unavailable → fail closed (operator retries).
+    const topicGateMod = getTopicTargetingGate();
+    const topicApplies = topicGateMod
+      ? topicGateMod.isApplicable({ actionType: run.action_type, pageType: brief.page_type })
+      : run.action_type === 'new_supporting_blog';
+    if (topicApplies) {
+      if (!topicGateMod) {
+        const e = new Error('Topic-targeting gate unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+        e.statusCode = 409;
+        throw e;
+      }
+      let topicRecheck;
+      try {
+        const corpus = await this._loadBlogCorpus({ required: true });
+        if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), service: brief.service || opp.service || null });
+      } catch (err) {
+        const e = new Error(`Topic-targeting gate could not re-validate the stored draft (${err.message}) — retry once the live blog corpus is reachable`);
+        e.statusCode = 409;
+        throw e;
+      }
+      if (!topicRecheck.ok) {
+        const codes = topicRecheck.findings.map((f) => `${f.severity} ${f.code}`).join('; ');
+        const e = new Error(`Topic targeting no longer passes on the stored draft (${topicRecheck.stage}): ${codes}`);
+        e.statusCode = 409;
+        e.details = topicRecheck.findings;
+        throw e;
+      }
+    }
+
     // Same canary / publish-cap guards as the autonomous lane (now serialized
     // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};

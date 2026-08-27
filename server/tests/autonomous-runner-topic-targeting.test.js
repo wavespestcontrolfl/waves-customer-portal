@@ -283,3 +283,62 @@ describe('post-draft topic framing', () => {
     expect(result.topic_targeting_result.framing.ok).toBe(true);
   });
 });
+
+describe('approval path — the stored draft is re-validated for topic targeting before publishing', () => {
+  const TAEXX_DRAFT = {
+    url: '/pest-control/lakewood-ranch-taexx/',
+    title: 'Your New Lakewood Ranch Home Came With Taexx',
+    frontmatter: { title: 'Your New Lakewood Ranch Home Came With Taexx', slug: '/pest-control/lakewood-ranch-taexx/', primary_keyword: 'taexx system lakewood ranch', meta_description: 'What the in-wall tubes do.' },
+    body: '## Body\n\nprose',
+  };
+  function approvalDb({ draft }) {
+    const rows = {
+      autonomous_runs: { id: 'run_x', opportunity_id: 'opp_x', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', shadow_mode: false, action_type: 'new_supporting_blog', draft_payload: JSON.stringify(draft), seo_completion_gate_result: '{}' },
+      opportunity_queue: { id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', status: 'pending_review' },
+    };
+    const dbMock = jest.fn((table) => {
+      const chain = {};
+      for (const m of ['where', 'orderBy', 'whereIn', 'limit', 'select']) chain[m] = jest.fn(() => chain);
+      chain.first = jest.fn().mockResolvedValue(rows[table] || null);
+      chain.update = jest.fn().mockResolvedValue(1);
+      chain.insert = jest.fn(() => ({ returning: jest.fn().mockResolvedValue([{ id: 'run_1' }]) }));
+      chain.then = (resolve) => resolve([]);
+      return chain;
+    });
+    dbMock.raw = jest.fn((sql) => ({ __raw: sql }));
+    return dbMock;
+  }
+  function loadApproval({ draft = TAEXX_DRAFT, corpusError = null } = {}) {
+    const queue = makeQueue({ id: 'opp_x', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }), dbMock: approvalDb({ draft }), corpusError });
+    jest.doMock('../services/content/comparison-table-gate', () => ({ evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) }));
+    runner._loadReviewedBrief = jest.fn().mockResolvedValue({ page_type: 'supporting-blog', service: 'pest', target_keyword: 'new home pest control lakewood ranch', voice_constraints: {} });
+    runner._deriveGuardrailOptions = jest.fn().mockResolvedValue({});
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: true });
+    return runner;
+  }
+
+  test('an owned-entity draft (edited after parking) is refused with a 409 before any claim/publish', async () => {
+    const runner = loadApproval();
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/Topic targeting no longer passes on the stored draft \(ownership\): P0 TOPIC_CANNIBALIZES_EXISTING/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a statewide-framed draft is refused at the framing stage', async () => {
+    const runner = loadApproval({ draft: { ...TAEXX_DRAFT, frontmatter: { ...TAEXX_DRAFT.frontmatter, title: 'New-Construction Pest Control in Florida', primary_keyword: 'new construction pest control' } } });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/\(framing\): P0 TOPIC_GEO_STATEWIDE/) });
+  });
+
+  test('live corpus unreachable → 409 fail closed (operator retries), never a publish', async () => {
+    const runner = loadApproval({ corpusError: 'github_down' });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/could not re-validate the stored draft \(github_down\)/) });
+    expect(runner._evaluatePublishingGuards).not.toHaveBeenCalled();
+  });
+
+  test('a clean draft passes the recheck and reaches the publishing guards', async () => {
+    const runner = loadApproval({ draft: { ...TAEXX_DRAFT, url: '/pest-control/new-home-pest-control-lakewood-ranch/', frontmatter: { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch', meta_description: 'x' } } });
+    runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: false, reason: 'stop_here' });
+    await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ message: expect.stringMatching(/Publishing guard blocked: stop_here/) });
+    expect(runner._evaluatePublishingGuards).toHaveBeenCalled();
+  });
+});
