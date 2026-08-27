@@ -22,27 +22,53 @@ const { compressToWebp } = _internals;
 
 const MARKERS = ['Exif', 'exif', 'x:xmpmeta', 'XMP', 'c2pa', 'C2PA', 'jumb', 'jumd', 'urn:uuid'];
 
+// Splice a raw APP1 segment into a JPEG right after SOI. This is how BOTH
+// metadata classes this test locks actually ship: XMP rides an APP1 with
+// the Adobe namespace header, and C2PA/JUMBF provenance rides APPn
+// segments the same way — sharp's decode/re-encode drops any it doesn't
+// re-emit. Building the segment by hand keeps the fixture independent of
+// which metadata kinds this sharp version's .withMetadata() can author.
+function spliceApp1(jpeg, payload) {
+  const marker = Buffer.from([0xff, 0xe1]);
+  const length = Buffer.alloc(2);
+  length.writeUInt16BE(payload.length + 2);
+  // SOI (2 bytes) | APP1 marker | length | payload | rest of the JPEG.
+  return Buffer.concat([jpeg.subarray(0, 2), marker, length, payload, jpeg.subarray(2)]);
+}
+
+const XMP_PACKET = Buffer.from(
+  'http://ns.adobe.com/xap/1.0/\0<?xpacket begin=""?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
+  + '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description c2pa:manifest="urn:uuid:strip-me"/></rdf:RDF>'
+  + '</x:xmpmeta><?xpacket end="w"?>',
+  'latin1',
+);
+
 async function buildTaggedJpeg() {
-  // 32x32 red JPEG carrying EXIF (via withMetadata) + an XMP packet.
+  // 32x32 red JPEG carrying EXIF (via withMetadata) + a hand-spliced XMP
+  // APP1 packet that also embeds a c2pa manifest marker.
   const base = await sharp({
     create: { width: 32, height: 32, channels: 3, background: { r: 200, g: 30, b: 30 } },
   }).jpeg().toBuffer();
-  // EXIF is the embeddable fixture in this sharp version; the OUTPUT
-  // assertions still cover XMP/C2PA markers (sharp drops every metadata
-  // block on re-encode unless .withMetadata() is added to the pipeline —
-  // which is exactly the regression this test exists to catch).
-  return sharp(base)
+  const withExif = await sharp(base)
     .withMetadata({
       exif: { IFD0: { Copyright: 'strip-me', Software: 'gpt-image-test' } },
     })
     .jpeg()
     .toBuffer();
+  return spliceApp1(withExif, XMP_PACKET);
 }
 
 describe('compressToWebp provenance strip', () => {
-  test('input fixture really carries EXIF (guards the test itself)', async () => {
+  test('input fixture really carries EXIF + XMP + a c2pa marker (guards the test itself)', async () => {
     const tagged = await buildTaggedJpeg();
-    expect(tagged.toString('latin1')).toContain('Exif');
+    const s = tagged.toString('latin1');
+    expect(s).toContain('Exif');
+    expect(s).toContain('x:xmpmeta');
+    expect(s).toContain('c2pa');
+    expect(s).toContain('urn:uuid');
+    // And it is still a decodable JPEG despite the hand-spliced segment.
+    const meta = await sharp(tagged).metadata();
+    expect(meta.format).toBe('jpeg');
   });
 
   test('output webp carries no EXIF/XMP/C2PA markers', async () => {

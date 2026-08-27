@@ -1813,6 +1813,38 @@ function tenureClaimFinding(text) {
   return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/company-history claim ("${m[0].trim()}") — Waves was founded in 2024; any earlier tenure or founding figure is fabricated (owner hard rule).`);
 }
 
+// Raw markdown pipe table detector — single source of truth for the
+// owner rule 2026-08-27 (tabular data renders via <ComparisonTable>, never
+// a raw GFM table: unstyled prose + bypasses the comparison gate's honesty
+// regime). Consumed by content-quality-gate's no_raw_markdown_tables hard
+// check AND enforced here so the manual /blog/:id/publish-astro lane
+// (which runs guardrails but not the quality gate) can't ship one.
+// Signature: a delimiter row (only pipes/dashes/colons/spaces, 2+ dashes,
+// at least one pipe) directly under a pipe header row; blockquote prefixes
+// are stripped first so quoted tables still count. Prose pipes and plain
+// --- dividers never form the pair.
+function hasRawMarkdownTable(text) {
+  const lines = String(text || '').split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
+  for (let i = 1; i < lines.length; i += 1) {
+    const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
+    const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
+    if (delimiter && headerAbove) return true;
+  }
+  return false;
+}
+
+// Blog bodies only (service/city page bodies are component-driven and the
+// autonomous lanes get the same rule from the quality gate's common hard
+// check). Refresh drafts GRANDFATHER a table the live prior body already
+// carried — parking every refresh of a legacy table post forever would
+// gate text the refresh merely preserves; writer ADDITIONS are still hard.
+function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  if (!targetIsBlog) return null;
+  if (!hasRawMarkdownTable(body)) return null;
+  if (isRefresh && hasRawMarkdownTable(priorBody)) return null;
+  return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
+}
+
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
 // the service area itself and safely exempt a whole clause ("Naples is
 // outside our service area"). Bare negated verbs ("don't include") are NOT
@@ -3894,6 +3926,10 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Fabricated tenure is a brand hard rule (founded 2024) — deterministic
     // backstop to the writer prompt's BRAND FACTS ban, body AND meta.
     tenureClaimFinding(publishableText),
+    // Raw markdown tables in blog bodies — <ComparisonTable> only (owner
+    // rule 2026-08-27). Body-only (a pipe table can't ship in a meta), with
+    // the standard refresh grandfather.
+    rawMarkdownTableFinding(body, { targetIsBlog, isRefresh, priorBody }),
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
@@ -3943,6 +3979,10 @@ module.exports = {
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
+  // single source of truth for the raw-markdown-table policy — consumed by
+  // content-quality-gate's no_raw_markdown_tables hard check so the two
+  // enforcement points can never drift.
+  hasRawMarkdownTable,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,

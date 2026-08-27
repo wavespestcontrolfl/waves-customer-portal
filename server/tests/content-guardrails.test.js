@@ -2146,6 +2146,39 @@ describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
   });
 });
 
+describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
+  const TABLE_BODY = 'Intro.\n\n| Method | Cost |\n| --- | --- |\n| DIY | $10 |\n';
+
+  test('blog body with a raw pipe table P1s', () => {
+    const r = guardrails.evaluate({ body: TABLE_BODY, frontmatter: {} }, { targetIsBlog: true });
+    expect(r.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('non-blog bodies and table-free blog bodies pass', () => {
+    expect(guardrails.evaluate({ body: TABLE_BODY, frontmatter: {} }, {}).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+    expect(guardrails.evaluate({ body: 'No tables here.', frontmatter: {} }, { targetIsBlog: true }).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+  });
+
+  test('refresh grandfathers a table the prior body already carried — but not a new one', () => {
+    const grandfathered = guardrails.evaluate(
+      { body: TABLE_BODY, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(grandfathered.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+    const added = guardrails.evaluate(
+      { body: TABLE_BODY, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: 'old table-free body' },
+    );
+    expect(added.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+  });
+
+  test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
+    expect(guardrails.hasRawMarkdownTable(TABLE_BODY)).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('either|or prose\n\n---\n\nnext')).toBe(false);
+  });
+});
+
 describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () => {
   const base = { body: 'Refreshed blog body.', frontmatter: {} };
   const opts = { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true };

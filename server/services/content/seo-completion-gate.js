@@ -122,7 +122,13 @@ function evaluate(input = {}) {
     findings.push(finding('P1', 'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC', 'City-focused blog draft is missing a city page link in the body.', 'Add the matching local service page link.'));
   }
   if (!hasLinkReason(contract, 'conversion') || !hasConversionCta(body)) {
-    findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA linking to contact, quote, inspection, or estimate paths.'));
+    findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA with estimate/quote wording linking to contact, quote, or estimate paths.'));
+  }
+  {
+    const badAnchor = forbiddenCtaAnchor(body);
+    if (badAnchor) {
+      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badAnchor}" uses inspection-request wording — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording, e.g. "Get My Free Termite Estimate".'));
+    }
   }
   if (faqRequired(brief) && !contract.faq.length) {
     findings.push(finding('P1', 'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ', 'Brief requires a visible FAQ section, but none was found.', 'Add a Frequently Asked Questions section with question-style H3 headings.'));
@@ -246,8 +252,20 @@ function hasIncludedLinkReason(contract, reason) {
 }
 
 function hasConversionCta(body) {
-  return /\b(request a quote|schedule|contact waves|call waves|free inspection|estimate|book|inspection)\b/i.test(String(body || ''))
+  // Owner rule 2026-08-27: conversion CTAs use estimate/quote wording —
+  // "inspection" wording no longer satisfies the check (a termite post may
+  // still discuss inspections; its CTA must offer a quote/estimate/booking).
+  return /\b(request a quote|schedule|contact waves|call waves|estimate|book)\b/i.test(String(body || ''))
     && /\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/i.test(String(body || ''));
+}
+
+// Deterministic backstop to the writer prompt's CTA-wording rule (owner
+// 2026-08-27): a markdown link whose ANCHOR TEXT is inspection-request
+// wording is the forbidden CTA shape, wherever it points.
+const FORBIDDEN_CTA_ANCHOR_RE = /\[((?:request|book|schedule|get)[^\]]{0,40}?inspection[^\]]{0,20})\]\(/i;
+function forbiddenCtaAnchor(body) {
+  const m = String(body || '').match(FORBIDDEN_CTA_ANCHOR_RE);
+  return m ? m[1] : null;
 }
 
 function faqRequired(brief = {}) {

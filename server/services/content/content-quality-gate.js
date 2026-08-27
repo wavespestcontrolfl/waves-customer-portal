@@ -1017,25 +1017,14 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
-// Raw markdown pipe table detector — the delimiter row (|---|, :---:,
-// "--- | ---") is the signature: a line of only pipes/dashes/colons/spaces
-// with 2+ dashes AND at least one pipe. GFM permits tables WITHOUT outer
-// pipes ("Method | Cost" over "--- | ---"), so the header check is
-// "contains a pipe plus word content", not leading/trailing pipes. Prose
-// pipes and <ComparisonTable> JSX never form the header+delimiter pair
-// (a plain `---` divider carries no pipe), so neither false-positives.
+// Raw markdown pipe table detector — delegates to the single-source
+// predicate in content-guardrails (hasRawMarkdownTable), which also
+// enforces the rule on the manual publishAstro lane, so the two
+// enforcement points can never drift.
 function checkNoRawMarkdownTables(draft) {
-  const body = String(draft.body || '');
-  // Markdown containers (blockquotes, nested blockquotes) prefix each line
-  // with "> " — a table inside one is still a table, so strip the prefixes
-  // before matching.
-  const lines = body.split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
-  for (let i = 1; i < lines.length; i += 1) {
-    const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
-    const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
-    if (delimiter && headerAbove) {
-      return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
-    }
+  const { hasRawMarkdownTable } = require('./content-guardrails');
+  if (hasRawMarkdownTable(draft.body)) {
+    return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
   }
   return { ok: true };
 }

@@ -155,6 +155,30 @@ describe('seo-completion-gate', () => {
     ]));
   });
 
+  test('flags inspection-request CTA anchors (owner rule 2026-08-27: estimate/quote wording)', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\nReady to act? [Request an Inspection](/contact/) today.`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+
+    expect(result.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ severity: 'P1', code: 'P1_FORBIDDEN_CTA_WORDING' }),
+    ]));
+
+    // Estimate/quote wording passes; merely DISCUSSING inspections is fine.
+    const clean = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\nAn annual termite inspection catches problems early. [Get My Free Termite Estimate](/pest-control-quote/) today.`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(clean.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('blocks customer PII and unapproved hardcoded prices', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
