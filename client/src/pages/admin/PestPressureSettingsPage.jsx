@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import {
   AlertTriangle,
@@ -300,6 +302,7 @@ function labelsCoverageError(labels) {
 }
 
 export default function PestPressureSettingsPage() {
+  const isMobile = useIsMobile();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState(null);
@@ -1041,17 +1044,17 @@ export default function PestPressureSettingsPage() {
       </div>
 
       {/* Override modal */}
-      {overrideTarget ? (
+      {overrideTarget ? createPortal(
         <div
           role="dialog"
           aria-modal="true"
           onClick={(e) => { if (e.target === e.currentTarget) closeOverrideModal(); }}
           style={{
             position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
-            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50, padding: 16,
+            display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 16,
           }}
         >
-          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(24px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } : {}) }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Override Pest Pressure score</h2>
               <button type="button" onClick={closeOverrideModal} aria-label="Close" style={{ background: "none", border: 0, cursor: "pointer", color: D.muted }}>
@@ -1112,7 +1115,8 @@ export default function PestPressureSettingsPage() {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       ) : null}
     </div>
   );

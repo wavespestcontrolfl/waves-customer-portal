@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 import { etDateString } from "../../lib/timezone";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -49,6 +51,7 @@ function calendarDateKey(value) {
 }
 
 export default function ContentCalendar() {
+  const isMobile = useIsMobile();
   const [month, setMonth] = useState(() => {
     const d = new Date();
     return { year: d.getFullYear(), month: d.getMonth() };
@@ -522,7 +525,8 @@ export default function ContentCalendar() {
           )}
         </div>
       )}
-      {showSchedule && (
+      {showSchedule &&
+        createPortal(
         <div
           style={{
             position: "fixed",
@@ -532,7 +536,7 @@ export default function ContentCalendar() {
             alignItems: "center",
             justifyContent: "center",
             zIndex: 250,
-            padding: 16,
+            padding: isMobile ? 0 : 16,
           }}
         >
           {" "}
@@ -545,6 +549,19 @@ export default function ContentCalendar() {
               borderRadius: 10,
               padding: 18,
               boxShadow: "0 18px 50px rgba(0,0,0,.22)",
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(18px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(18px + env(safe-area-inset-bottom, 0px))",
+                  }
+                : {}),
             }}
           >
             {" "}
@@ -776,8 +793,9 @@ export default function ContentCalendar() {
               </button>{" "}
             </div>{" "}
           </div>{" "}
-        </div>
-      )}
+        </div>,
+        document.body,
+        )}
       {/* Toast */}
       <div
         style={{

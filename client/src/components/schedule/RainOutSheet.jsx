@@ -16,6 +16,7 @@
 
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import useIsMobile from '../../hooks/useIsMobile';
 import psl from 'psl';
 import { TIMEZONE } from '../../lib/timezone';
 import { useBestTimes } from './useBestTimes';
@@ -313,6 +314,7 @@ function authHeaders() {
 }
 
 export default function RainOutSheet({ service, onClose, onDone }) {
+  const isMobile = useIsMobile();
   const [options, setOptions] = useState(null);
   const [error, setError] = useState('');
   const [reason, setReason] = useState('weather_rain');
@@ -648,6 +650,14 @@ export default function RainOutSheet({ service, onClose, onDone }) {
           background: '#FFFFFF', borderRadius: '16px 16px 0 0', width: '100%',
           maxWidth: 560, maxHeight: '88vh', overflowY: 'auto', padding: 20,
           border: '1px solid #E4E4E7', borderBottom: 'none',
+          ...(isMobile
+            ? {
+                width: '100%', maxWidth: 'none', height: '100%', maxHeight: 'none',
+                borderRadius: 0, boxSizing: 'border-box', overflowY: 'auto',
+                paddingTop: 'calc(20px + env(safe-area-inset-top, 0px))',
+                paddingBottom: 'calc(20px + env(safe-area-inset-bottom, 0px))',
+              }
+            : {}),
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>

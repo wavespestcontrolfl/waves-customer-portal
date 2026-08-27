@@ -4167,7 +4167,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            padding: 20,
+            padding: isMobile ? 0 : 20,
           }}
         >
           {" "}
@@ -4180,6 +4180,19 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
               maxWidth: 460,
               width: "100%",
               border: `1px solid ${D.inputBorder}`,
+              ...(isMobile
+                ? {
+                    width: "100%",
+                    maxWidth: "none",
+                    height: "100%",
+                    maxHeight: "none",
+                    borderRadius: 0,
+                    boxSizing: "border-box",
+                    overflowY: "auto",
+                    paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                    paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                  }
+                : {}),
             }}
           >
             {" "}
@@ -4479,7 +4492,7 @@ export function ProtocolPanel({ service, onClose }) {
     dormant: "#A1A1AA",
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -4495,6 +4508,13 @@ export function ProtocolPanel({ service, onClose }) {
         display: "flex",
         flexDirection: "column",
         boxShadow: "-8px 0 32px rgba(0,0,0,0.3)",
+        ...(isMobile
+          ? {
+              height: "100dvh",
+              boxSizing: "border-box",
+              paddingBottom: "env(safe-area-inset-bottom, 0px)",
+            }
+          : {}),
       }}
     >
       {/* Header */}
@@ -5817,7 +5837,8 @@ export function ProtocolPanel({ service, onClose }) {
           </>
         )}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -6058,7 +6079,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
     boxSizing: "border-box",
   };
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -6069,7 +6090,7 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 20,
+        padding: isMobile ? 0 : 20,
       }}
     >
       {" "}
@@ -6084,6 +6105,19 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           border: `1px solid ${D.border}`,
           maxHeight: "80vh",
           overflowY: "auto",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -6373,7 +6407,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
           Cancel
         </button>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

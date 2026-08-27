@@ -38,6 +38,8 @@ import {
 } from "../../lib/discountCatalog";
 import { humanizeQuoteReason, quoteRequiredReasonNote } from "../../lib/quoteDisplay";
 import { palmPrefillAllowed } from "../../lib/lookupPrefill";
+import { createPortal } from "react-dom";
+import useIsMobile from "../../hooks/useIsMobile";
 
 const COMMERCIAL_WARNING_TEXT =
   "Commercial property detected. Residential lawn and pest pricing is not valid. Manual quote required unless small-commercial pilot pricing is enabled.";
@@ -6242,6 +6244,7 @@ const DECLINE_REASONS = [
 
 /* ── Follow-Up Modal ──────────────────────────────────────── */
 function FollowUpModal({ estimate, onClose, onSent }) {
+  const isMobile = useIsMobile();
   const firstName = estimate.customerName?.split(" ")[0] || "there";
   const addrShort = estimate.address?.split(",")[0] || "your property";
   const [message, setMessage] = useState(
@@ -6263,7 +6266,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
     setSending(false);
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -6273,7 +6276,7 @@ function FollowUpModal({ estimate, onClose, onSent }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 16,
+        padding: isMobile ? 0 : 16,
       }}
       onClick={onClose}
     >
@@ -6286,6 +6289,19 @@ function FollowUpModal({ estimate, onClose, onSent }) {
           padding: 24,
           maxWidth: 480,
           width: "100%",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+              }
+            : {}),
         }}
         onClick={(ev) => ev.stopPropagation()}
       >
@@ -6363,12 +6379,14 @@ function FollowUpModal({ estimate, onClose, onSent }) {
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
 /* ── Decline Reason Modal ─────────────────────────────────── */
 function DeclineModal({ estimate, onClose, onSaved }) {
+  const isMobile = useIsMobile();
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -6387,7 +6405,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
     setSaving(false);
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -6397,7 +6415,7 @@ function DeclineModal({ estimate, onClose, onSaved }) {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 16,
+        padding: isMobile ? 0 : 16,
       }}
       onClick={onClose}
     >
@@ -6410,6 +6428,19 @@ function DeclineModal({ estimate, onClose, onSaved }) {
           padding: 24,
           maxWidth: 400,
           width: "100%",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+              }
+            : {}),
         }}
         onClick={(ev) => ev.stopPropagation()}
       >
@@ -6513,7 +6544,8 @@ function DeclineModal({ estimate, onClose, onSaved }) {
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

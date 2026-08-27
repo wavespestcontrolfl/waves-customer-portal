@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useOutletContext, useSearchParams } from "react-router-dom";
 import { BarChart3, Beaker, Calculator, ClipboardCheck, Plus, Wrench } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -695,7 +696,7 @@ function EquipmentEditModal({
     </label>
   );
 
-  return (
+  return createPortal(
     <div
       onClick={onClose}
       style={{
@@ -705,7 +706,7 @@ function EquipmentEditModal({
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: 20,
+        padding: isMobile ? 0 : 20,
         zIndex: 400,
       }}
     >
@@ -721,6 +722,19 @@ function EquipmentEditModal({
           maxHeight: "90vh",
           overflowY: "auto",
           boxShadow: "0 20px 60px rgba(0,0,0,0.3)",
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+              }
+            : {}),
         }}
       >
         {" "}
@@ -786,7 +800,8 @@ function EquipmentEditModal({
           </button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

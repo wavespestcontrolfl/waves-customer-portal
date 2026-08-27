@@ -45,23 +45,39 @@ export function Dialog({
 
   if (!open) return null;
 
-  const sizeClass =
-    size === 'sm' ? 'max-w-md' : size === 'lg' ? 'max-w-3xl' : 'max-w-xl';
+  // `sm` dialogs are short confirmation prompts and stay a centered card at
+  // every width. `md`/`lg` carry real content, so below the `sm` breakpoint
+  // they fill the phone viewport (the same treatment the completion sheet
+  // gets) and only become a centered card from 640px up. Safe-area insets
+  // live on the overlay padding for the card layouts and on the panel for
+  // the full-screen one, so the header/footer clear the notch either way.
+  const isCompact = size === 'sm';
+  const sizeClass = isCompact
+    ? 'max-w-md rounded-md'
+    : cn(
+        'h-full sm:h-auto max-w-none rounded-none sm:rounded-md box-border',
+        'pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:pt-0 sm:pb-0',
+        size === 'lg' ? 'sm:max-w-3xl' : 'sm:max-w-xl',
+      );
+  const safeAreaPadding = {
+    paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
+    paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
+    paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
+    paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
+  };
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className={cn(
+        // z-[100] clears the admin shell's fixed mobile header (90) and tab bar (95).
+        'fixed inset-0 z-[100] flex items-center justify-center',
+        isCompact ? 'p-4' : 'p-0 sm:p-4',
+      )}
       role="dialog"
       aria-modal="true"
       aria-label={ariaLabel}
       aria-labelledby={!ariaLabel && hasTitle ? titleId : undefined}
-      style={{
-        paddingTop: 'max(16px, env(safe-area-inset-top, 0px))',
-        paddingRight: 'max(16px, env(safe-area-inset-right, 0px))',
-        paddingBottom: 'max(16px, env(safe-area-inset-bottom, 0px))',
-        paddingLeft: 'max(16px, env(safe-area-inset-left, 0px))',
-        ...style,
-      }}
+      style={isCompact ? { ...safeAreaPadding, ...style } : style}
     >
       <div
         className="absolute inset-0 bg-zinc-900/30"
@@ -71,7 +87,7 @@ export function Dialog({
         ref={panelRef}
         tabIndex={-1}
         className={cn(
-          'relative w-full bg-white rounded-md border-hairline border-zinc-200',
+          'relative w-full bg-white border-hairline border-zinc-200',
           'outline-none max-h-full flex flex-col',
           sizeClass,
           className

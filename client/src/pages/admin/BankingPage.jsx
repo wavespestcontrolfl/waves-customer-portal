@@ -21,6 +21,7 @@ import {
 import { etDateString, formatETDate, formatETDateOnly } from "../../lib/timezone";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
+import { createPortal } from "react-dom";
 import { reportError } from "../../lib/reportError";
 
 const API = import.meta.env.VITE_API_URL || "/api";
@@ -1392,6 +1393,7 @@ function PayoutModal({
   onClose,
   onSuccess,
 }) {
+  const isMobile = useIsMobile(640);
   const [method, setMethod] = useState(initialMethod);
   const [amount, setAmount] = useState(() =>
     payoutAmountInput(
@@ -1460,7 +1462,7 @@ function PayoutModal({
     setSubmitting(false);
   };
 
-  return (
+  return createPortal(
     <div
       style={{
         position: "fixed",
@@ -1482,6 +1484,19 @@ function PayoutModal({
           padding: 28,
           width: "100%",
           maxWidth: 400,
+          ...(isMobile
+            ? {
+                width: "100%",
+                maxWidth: "none",
+                height: "100%",
+                maxHeight: "none",
+                borderRadius: 0,
+                boxSizing: "border-box",
+                overflowY: "auto",
+                paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
+                paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+              }
+            : {}),
         }}
       >
         <div
