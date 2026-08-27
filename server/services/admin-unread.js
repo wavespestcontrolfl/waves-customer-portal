@@ -182,23 +182,26 @@ async function computeUnreadCount({ adminUserId, role } = {}) {
 const BADGE_LOCK_NS = 'waves-badge:';
 
 // In-process serialization FIRST, before any pool connection is reserved:
-// at most ONE badge transaction per admin exists per process, so
-// advisory-lock waiters cannot pile up pool connections while the lock
-// holder needs a second connection for the unread queries — under a
-// burst that pile-up could exhaust the pool and stall unrelated DB work
-// (codex #3541 round 7). The advisory lock inside remains the
-// cross-replica authority. Map stays tiny: one entry per staff user.
-const badgeSections = new Map();
-function serializePerAdmin(key, task) {
-  const tail = badgeSections.get(key) || Promise.resolve();
-  const run = tail.then(task, task);
-  badgeSections.set(key, run.then(() => {}, () => {}));
+// at most ONE badge transaction exists per process — GLOBAL, not
+// per-admin, because the trigger fans out recipients with Promise.all
+// and a per-admin queue still opened one transaction per distinct admin
+// concurrently (codex #3541 rounds 7–8). One process-wide section means
+// badge work can never hold more than one pool connection while its
+// compute queries borrow another, so the pool cannot be exhausted by
+// badges regardless of recipient count; the per-admin advisory lock
+// inside remains the cross-replica ordering authority. Sequential badge
+// computes for multiple staff are acceptable: the badge is garnish and
+// each caller's 1.5s race simply omits it when the queue is slow.
+let badgeSectionTail = Promise.resolve();
+function serializeBadgeSection(task) {
+  const run = badgeSectionTail.then(task, task);
+  badgeSectionTail = run.then(() => {}, () => {});
   return run;
 }
 
 async function withBadgeOrderingStamp(adminUserId, fn) {
   const key = String(adminUserId ?? '');
-  return serializePerAdmin(key, async () => {
+  return serializeBadgeSection(async () => {
     try {
       if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
       return await db.transaction(async (trx) => {
