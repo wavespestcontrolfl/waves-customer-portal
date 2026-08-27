@@ -199,10 +199,12 @@ beforeEach(() => {
   // exercise the awaiting_production_deploy gate.
   pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
   pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
-  // Default: the PR's head carries one competitor-free blog file, so the
-  // pre-merge named-competitor head gate (which runs the REAL comparison
-  // gate against these contents) passes for the unrelated merge tests.
-  gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/pest-control/test-post.mdx', status: 'added' }]);
+  // Default: the PR's head carries one competitor-free blog file at the
+  // path the run's CANONICAL routes to (the head gate binds the file to the
+  // run's expected draft path), so the pre-merge named-competitor head gate
+  // (which runs the REAL comparison gate against these contents) passes for
+  // the unrelated merge tests.
+  gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.mdx', status: 'added' }]);
   gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
 });
 
@@ -727,6 +729,33 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a SECOND blog file on the head withholds the merge — one brief authorizes one file (hook r10 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/content/blog/pest-control/smuggled-extra.mdx', status: 'added' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a blog file at a path the run canonical does not route to withholds the merge (hook r10 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/pest-control/other-post.mdx', status: 'added' }]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('head gate fails CLOSED when the PR files cannot be listed (no merge)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
@@ -778,7 +807,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
       expect(gh.mergePr).toHaveBeenCalledTimes(1);
       // The gate judged the CURRENT head's file, fetched at pr.head.sha.
-      expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', 'headsha1');
+      expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/blog/test-post.mdx', 'headsha1');
       expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
     } finally {
       fg.isEnabled.mockRestore();

@@ -876,6 +876,31 @@ async function maybeAutoMerge(run, pr) {
     const prFiles = await gh.listPrFiles(pr.number);
     const blogFiles = (Array.isArray(prFiles) ? prFiles : []).filter((f) => (
       /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
+    // Bind the run's single-brief authorization to its OWN generated file
+    // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
+    // blog file, and its path must be the one the run's canonical routes to
+    // (src/content/blog{pathname}.mdx|.md) — otherwise an extra blog file
+    // smuggled onto an eligible intercept PR would ride that brief's
+    // competitor authorization. Unparseable payload/canonical fails closed.
+    if (run.action_type === 'new_supporting_blog') {
+      let boundOk = false;
+      try {
+        if (blogFiles.length === 1) {
+          let dp = run.draft_payload;
+          if (typeof dp === 'string') dp = JSON.parse(dp);
+          const canon = dp?.frontmatter?.canonical;
+          const expectedPath = new URL(String(canon)).pathname.replace(/\/?$/, '/');
+          const rel = String(blogFiles[0].filename)
+            .replace(/^src\/content\/blog/, '')
+            .replace(/\.(md|mdx)$/, '');
+          boundOk = `${rel}/` === expectedPath;
+        }
+      } catch (_) { boundOk = false; }
+      if (!boundOk) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR blog files do not match the run's single expected draft path — PR left open for a human decision`);
+        return { pending: true, reason: 'named_competitor_head_gate_failed' };
+      }
+    }
     if (blogFiles.length) {
       const fmMod = require('../content-astro/frontmatter');
       const comparisonMod = require('./comparison-table-gate');
