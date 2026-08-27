@@ -191,4 +191,41 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     const post = fetchMock.mock.calls.find(([, o]) => o && o.method === 'POST');
     expect(JSON.parse(post[1].body).state).toBe('FL');
   });
+
+  it('an in-flight add locks row edits too (one write lock), and Escape on a label edit does not bubble to the drawer', async () => {
+    let resolvePost;
+    const fetchMock = vi.fn((url, opts = {}) => {
+      if (opts.method === 'POST') return new Promise((res) => { resolvePost = () => res(new Response(JSON.stringify({ propertyId: 'p2', properties: [PRIMARY, SECOND] }), { status: 201, headers: { 'Content-Type': 'application/json' } })); });
+      return jsonResponse({ properties: [PRIMARY] });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const windowEscape = vi.fn();
+    window.addEventListener('keydown', windowEscape);
+    try {
+      render(<CustomerPropertiesPanelV2 customerId="c1" contactRole="owner" canEdit />);
+      await screen.findByText(/10 Palm Ave/);
+
+      // Escape while editing a label: editor closes, window listener never sees it.
+      fireEvent.click(screen.getByRole('button', { name: 'Edit label for 10 Palm Ave' }));
+      fireEvent.keyDown(screen.getByLabelText('Label for 10 Palm Ave'), { key: 'Escape' });
+      expect(screen.queryByLabelText('Label for 10 Palm Ave')).not.toBeInTheDocument();
+      expect(windowEscape).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Add service address' }));
+      fireEvent.change(screen.getByLabelText('Street address'), { target: { value: '20 Oak St' } });
+      fireEvent.change(screen.getByLabelText('City'), { target: { value: 'Naples' } });
+      fireEvent.change(screen.getByLabelText('ZIP'), { target: { value: '34103' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save address' }));
+      const occ = screen.getByLabelText('Occupancy for 10 Palm Ave');
+      await waitFor(() => expect(occ).toBeDisabled());
+      expect(screen.getByRole('button', { name: 'Edit label for 10 Palm Ave' })).toBeDisabled();
+      fireEvent.change(occ, { target: { value: 'seasonal' } });
+      expect(fetchMock.mock.calls.some(([, o]) => o && o.method === 'PATCH')).toBe(false);
+      resolvePost();
+      await screen.findByText(/20 Oak St/);
+      await waitFor(() => expect(screen.getByLabelText('Occupancy for 10 Palm Ave')).not.toBeDisabled());
+    } finally {
+      window.removeEventListener('keydown', windowEscape);
+    }
+  });
 });

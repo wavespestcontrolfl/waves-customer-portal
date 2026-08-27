@@ -30,8 +30,9 @@ function formatPropertyAddress(p) {
  * via PATCH — the same admin-only endpoints the call pipeline's manual lane
  * uses, so the dedupe / primary-fence rules are the server's, not ours.
  *
- * Row edits (occupancy / label) are serialized — one PATCH in flight, every
- * row control disabled meanwhile — because each response replaces the list.
+ * Writes (add, occupancy, label) share ONE lock — a single request in flight,
+ * every write control disabled meanwhile — because each response replaces
+ * the list.
  *
  * The PRIMARY row is the customer's default service address (it mirrors
  * customers.address_*). For a property manager that is NOT a residence —
@@ -57,6 +58,10 @@ export default function CustomerPropertiesPanelV2({
   const [rowErr, setRowErr] = useState("");
   // Inline label editing: { id, value } while a row's label input is open.
   const [labelEdit, setLabelEdit] = useState(null);
+  // ONE write lock for additions and row edits: every response replaces the
+  // whole list, so an overlapping POST and PATCH could let an older snapshot
+  // land last and hide the new row / revert the edit.
+  const writeBusy = saving || !!rowBusy;
 
   useEffect(() => {
     if (!customerId) return undefined;
@@ -90,6 +95,7 @@ export default function CustomerPropertiesPanelV2({
       setSaveErr("State must be a two-letter code (e.g. FL).");
       return;
     }
+    if (writeBusy) return;
     setSaving(true);
     try {
       const d = await adminFetch(`/admin/customers/${customerId}/properties`, {
@@ -118,7 +124,7 @@ export default function CustomerPropertiesPanelV2({
   // in-flight edits could let an older snapshot overwrite the newer one.
   // All row controls are disabled while rowBusy is set (see below).
   const patchRow = async (propertyId, patch) => {
-    if (rowBusy) return;
+    if (writeBusy) return;
     setRowBusy(propertyId);
     setRowErr("");
     try {
@@ -207,6 +213,11 @@ export default function CustomerPropertiesPanelV2({
                           e.preventDefault();
                           commitLabel();
                         } else if (e.key === "Escape") {
+                          // The 360 drawer closes on a window-level Escape —
+                          // cancelling a label edit must not close the profile.
+                          e.preventDefault();
+                          e.stopPropagation();
+                          e.nativeEvent?.stopImmediatePropagation?.();
                           setLabelEdit(null);
                         }
                       }}
@@ -216,7 +227,7 @@ export default function CustomerPropertiesPanelV2({
                     <button
                       type="button"
                       aria-label={`Edit label for ${p.address_line1}`}
-                      disabled={!!rowBusy}
+                      disabled={writeBusy}
                       onClick={() => setLabelEdit({ id: p.id, value: p.label || "" })}
                       className="block p-0 border-0 bg-transparent text-12 text-ink-secondary hover:text-zinc-900 hover:underline u-focus-ring text-left disabled:opacity-50"
                     >
@@ -231,7 +242,7 @@ export default function CustomerPropertiesPanelV2({
                 <select
                   aria-label={`Occupancy for ${p.address_line1}`}
                   value={p.occupancy_type || "unknown"}
-                  disabled={!canEdit || !!rowBusy}
+                  disabled={!canEdit || writeBusy}
                   onChange={(e) => patchRow(p.id, { occupancy_type: e.target.value })}
                   className="text-12 text-zinc-900 border border-hairline border-zinc-300 rounded-xs px-2 py-1 bg-white"
                 >
@@ -366,7 +377,7 @@ export default function CustomerPropertiesPanelV2({
               >
                 Cancel
               </Button>
-              <Button type="submit" size="sm" disabled={saving}>
+              <Button type="submit" size="sm" disabled={writeBusy}>
                 {saving ? "Saving…" : "Save address"}
               </Button>
             </div>
