@@ -127,10 +127,18 @@ async function soldInspectionAmountForVisit(db, svc) {
           ? estData.result
           : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : {});
         const oneTime = result?.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+        // Every persisted one-time container: the page's normalized
+        // items/specItems, the nested results bucket, AND the raw engine
+        // lineItems that agent/IB estimates persist verbatim under
+        // engineResult (uncapped audit P0 on #3521 — an in-flight $125
+        // inspection lives only there).
         const rawRows = [
           ...(Array.isArray(oneTime.items) ? oneTime.items : []),
           ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
           ...(Array.isArray(result?.results?.oneTime?.items) ? result.results.oneTime.items : []),
+          ...(Array.isArray(result?.results?.oneTime?.specItems) ? result.results.oneTime.specItems : []),
+          ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+          ...(Array.isArray(estData?.lineItems) ? estData.lineItems : []),
         ];
         // Gross line price — before any service-specific credit netted it.
         const row = rawRows.find((r) => r && String(r.service || '') === 'rodent_inspection' && r.quoteRequired !== true);

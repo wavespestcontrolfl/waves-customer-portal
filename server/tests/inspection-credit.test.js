@@ -1495,6 +1495,13 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
       { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125, priceAfterDiscount: 0, serviceSpecificDiscountApplied: true },
     ] } } }) };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: comped }), { ...svc, source_estimate_id: 'est-2' })).toBe(125);
+    // Agent/IB estimates persist the RAW engine lineItems under engineResult
+    // (no oneTime.items at all) — the in-flight $125 must be found there.
+    const agent = { id: 'est-3', estimate_data: { engineResult: { lineItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 },
+      { service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 300 },
+    ], oneTime: { total: 425 } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: agent }), { ...svc, source_estimate_id: 'est-3' })).toBe(125);
   });
 
   test('a legacy grouped row with no primary line credits the parent price minus its add-ons — unless the group was discounted', async () => {

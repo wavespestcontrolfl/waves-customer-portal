@@ -52,10 +52,12 @@ exports.up = async function (knex) {
   const loaded = await loadInspectionRow(knex);
   if (!loaded) return;
   const { data } = loaded;
-  if (Number(data.fee) === NEW_FEE) return;
-
-  const newData = { ...data, fee: NEW_FEE };
-  await saveInspectionRow(knex, data, newData, UP_REASON);
+  // Each config row is judged on its own: a primary row an admin already
+  // set to $75 must not stop the legacy mirror (or the changelog) from
+  // being brought in line (uncapped audit P1 on #3521).
+  if (Number(data.fee) !== NEW_FEE) {
+    await saveInspectionRow(knex, data, { ...data, fee: NEW_FEE }, UP_REASON);
+  }
 
   // The legacy exclusion config row mirrors the fee for the admin panel
   // (SPECIALTY.exclusion.inspectionFee — a fallback the live path never
