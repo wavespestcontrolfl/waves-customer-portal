@@ -55,6 +55,11 @@ describe('20260826000002 rodent inspection fee $75', () => {
     expect(dataOf(db, 'onetime_exclusion').inspection).toBe(75);
     // No primary audit row (nothing changed there); the mirror has its own.
     expect(db.pricing_config_audit.map((a) => a.config_key)).toEqual(['onetime_exclusion']);
+    // Rollback of a mirror-only up() restores the mirror and drops the changelog.
+    await migration.down(fakeKnex(db));
+    expect(dataOf(db, 'rodent_inspection').fee).toBe(75);
+    expect(dataOf(db, 'onetime_exclusion').inspection).toBe(125);
+    expect(db.pricing_changelog).toHaveLength(0);
   });
 
   test('fully current rows are a no-op apart from the changelog identity', async () => {

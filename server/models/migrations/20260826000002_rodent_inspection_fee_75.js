@@ -103,10 +103,11 @@ exports.down = async function (knex) {
     .where({ config_key: 'rodent_inspection', changed_by: MIGRATION_TAG, reason: UP_REASON })
     .orderBy('id', 'desc')
     .first();
-  if (!ownUp) return;
-
-  const loaded = await loadInspectionRow(knex);
-  if (loaded) {
+  // Each audit rolls back on its own: a mirror-only up() (primary already
+  // $75) has no primary audit, and must still restore the mirror and drop
+  // the changelog (uncapped audit P1 on #3521).
+  const loaded = ownUp ? await loadInspectionRow(knex) : null;
+  if (ownUp && loaded) {
     const oldValue = typeof ownUp.old_value === 'string' ? JSON.parse(ownUp.old_value) : ownUp.old_value;
     if (oldValue && oldValue.fee != null && Number(loaded.data.fee) === NEW_FEE) {
       await saveInspectionRow(
