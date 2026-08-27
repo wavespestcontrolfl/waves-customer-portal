@@ -102,16 +102,18 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       });
   };
 
-  // Poll unread count every 30 seconds
+  // Poll unread count every 30 seconds. Component-scoped so mark-read can
+  // re-sync the icon badge from the AUTHORITATIVE count (see markRead).
+  const fetchCount = () => {
+    requestJson(`${basePath}/unread-count`)
+      .then(d => {
+        setUnreadCount(d.count || 0);
+        if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(d.count || 0, d.at);
+      })
+      .catch(() => {});
+  };
+
   useEffect(() => {
-    const fetchCount = () => {
-      requestJson(`${basePath}/unread-count`)
-        .then(d => {
-          setUnreadCount(d.count || 0);
-          if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(d.count || 0, d.at);
-        })
-        .catch(() => {});
-    };
     fetchCount();
     const iv = setInterval(fetchCount, 30000);
     return () => clearInterval(iv);
@@ -254,17 +256,16 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   const markRead = async (id) => {
     // Only reflect the read state the server actually accepted — a rejected
     // write (expired token the refresh couldn't save) must not clear badges.
-    let readRes;
     try {
-      readRes = await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
+      await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
-    setUnreadCount(prev => {
-      const next = Math.max(0, prev - 1);
-      // Idempotent, so a double-invoked updater (StrictMode) is harmless.
-      if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(next, readRes?.at);
-      return next;
-    });
+    // Optimistic list counter only — the ICON badge is re-synced from the
+    // authoritative count below: a push landing between polls isn't in
+    // local state, and a stale local decrement carries a fresh ordering
+    // stamp that would beat the correct badge (codex round 14).
+    setUnreadCount(prev => Math.max(0, prev - 1));
+    if (type === 'admin') fetchCount();
   };
 
   const markAllRead = async () => {

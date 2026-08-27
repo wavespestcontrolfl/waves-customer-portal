@@ -270,17 +270,29 @@ const BADGE_SECTION_TIMEOUT_MS = 5000;
 async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandoned } = {}) {
   const key = String(adminUserId ?? '');
   const attempt = async () => {
+    if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
+    return runBadgeSection(key, fn);
+  };
+  if (!queued) {
     try {
-      if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
-      return await runBadgeSection(key, fn);
+      return await attempt();
     } catch (err) {
       if (err && err.badgeComputeError) throw err;
-      // Same µs unit as the locked path so a fallback stamp still competes.
-      logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
-      return { ...(await fn(null)), at: Date.now() * 1000 };
+      // Lock/transaction unavailable on the ROUTE path: the bell still
+      // needs the COUNT, but no ordering token is published — an
+      // unlocked snapshot has no total order with a concurrently running
+      // locked one (codex round 14), so at:null makes the client apply
+      // the number and skip the seq write. Query bounds match the
+      // pre-badge route on main (pg defaults, no held transaction).
+      logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unstamped count`);
+      return { ...(await fn(null)), at: null };
     }
-  };
-  if (!queued) return attempt();
+  }
+  // QUEUED (push) path: no fallback at all — lock failure or missing
+  // transaction support propagates, the caller logs and the push goes
+  // out without a badge. An unlocked snapshot must not be published,
+  // and its unbounded queries could outlive the queue's cap (codex
+  // round 14).
   return serializeBadgeSection(async () => {
     // The trigger's own 1.5s race may have given up while this task sat
     // in the queue — drop it before spending a transaction on a badge
