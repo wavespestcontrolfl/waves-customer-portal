@@ -414,9 +414,9 @@ async function changePassword(req, res, next) {
 
 router.post('/change-password', adminAuthenticate, changePasswordLimiter, changePassword);
 
-router.post('/register', adminAuthenticate, requireAdmin, async (req, res, next) => {
+async function register(req, res, next) {
   try {
-    const { name, email, password, role } = req.body || {};
+    const { name, email, password, role, fl_applicator_license, license_expiry } = req.body || {};
     if (typeof name !== 'string' || !name.trim() || !email || !password) {
       return res.status(400).json({ error: 'Name, email, password required' });
     }
@@ -430,6 +430,26 @@ router.post('/register', adminAuthenticate, requireAdmin, async (req, res, next)
     const policyError = validateStaffPassword(password);
     if (policyError) return res.status(400).json({ error: policyError });
 
+    // Licensing is captured AT provisioning (both optional) so the daily
+    // license-expiry watch sees the hire from day one — nothing else in the
+    // product populates these fields for a new account.
+    let applicatorLicense = null;
+    if (fl_applicator_license !== undefined && fl_applicator_license !== null && fl_applicator_license !== '') {
+      if (typeof fl_applicator_license !== 'string' || !fl_applicator_license.trim() || fl_applicator_license.trim().length > 50) {
+        return res.status(400).json({ error: 'fl_applicator_license must be a string of at most 50 characters' });
+      }
+      applicatorLicense = fl_applicator_license.trim();
+    }
+    let licenseExpiry = null;
+    if (license_expiry !== undefined && license_expiry !== null && license_expiry !== '') {
+      const wellFormed = typeof license_expiry === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(license_expiry);
+      const parsed = wellFormed ? new Date(`${license_expiry}T00:00:00Z`) : null;
+      if (!parsed || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== license_expiry) {
+        return res.status(400).json({ error: 'license_expiry must be a valid YYYY-MM-DD date' });
+      }
+      licenseExpiry = license_expiry;
+    }
+
     const hash = await bcrypt.hash(password, 12);
     const outcome = await db.transaction(async (trx) => {
       await lockStaffAccountMutations(trx);
@@ -442,18 +462,34 @@ router.post('/register', adminAuthenticate, requireAdmin, async (req, res, next)
         role: staffRole,
         active: true,
         password_changed_at: trx.fn.now(),
+        // The register password is chosen by the owner and handed over
+        // out-of-band — force the hire to set their own at first login
+        // (middleware 403s everything else until they do).
+        must_change_password: true,
+        fl_applicator_license: applicatorLicense,
+        license_expiry: licenseExpiry,
       }).returning('*');
       return { tech };
     });
     if (outcome.conflict) return res.status(409).json({ error: 'Email already in use' });
     const { tech } = outcome;
 
-    res.status(201).json({ id: tech.id, name: tech.name, email: tech.email, role: tech.role });
+    res.status(201).json({
+      id: tech.id,
+      name: tech.name,
+      email: tech.email,
+      role: tech.role,
+      mustChangePassword: Boolean(tech.must_change_password),
+      flApplicatorLicense: tech.fl_applicator_license || null,
+      licenseExpiry: tech.license_expiry || null,
+    });
   } catch (err) {
     if (err.code === '23505') return res.status(409).json({ error: 'Email already in use' });
     return next(err);
   }
-});
+}
+
+router.post('/register', adminAuthenticate, requireAdmin, register);
 
 router.get('/me', adminAuthenticate, (req, res) => {
   const t = req.technician;
@@ -471,5 +507,6 @@ module.exports._handlers = {
   issuePasswordReset,
   lockStaffAccountMutations,
   login,
+  register,
   resetPassword,
 };
