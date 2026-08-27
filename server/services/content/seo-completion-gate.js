@@ -435,6 +435,16 @@ function conversionCtaLinks(body) {
   return out;
 }
 
+// "Pest" is an umbrella word ("Get a Termite Pest Control Quote"): when the
+// anchor ALSO positively names the brief's own service (or family), the
+// umbrella term is dropped from the named set. A pest-only anchor on a
+// non-pest-family brief still does not qualify.
+function effectiveNamed(named, allowed) {
+  if (!allowed || !named.includes('pest')) return named;
+  const own = named.some((svc) => svc !== 'pest' && allowed.has(svc));
+  return own ? named.filter((svc) => svc !== 'pest') : named;
+}
+
 function hasConversionCta(body, brief = {}) {
   // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
   // not loose body wording — at least one link to a conversion path whose
@@ -450,9 +460,12 @@ function hasConversionCta(body, brief = {}) {
   // (or its family) — a generic "Request a Quote" or an unrecognized phrase
   // can ride along as an extra CTA but does not satisfy "tied to the
   // post's service" on its own.
-  return conversionCtaLinks(body).some((link) =>
-    link.hasEstimateWording
-    && (!allowed || (link.named.length > 0 && link.named.every((svc) => allowed.has(svc)))));
+  return conversionCtaLinks(body).some((link) => {
+    if (!link.hasEstimateWording) return false;
+    if (!allowed) return true;
+    const named = effectiveNamed(link.named, allowed);
+    return named.length > 0 && named.every((svc) => allowed.has(svc));
+  });
 }
 
 // EVERY conversion CTA anchor must comply — violations are flagged even
@@ -469,7 +482,9 @@ function badCtaAnchor(body, brief = {}) {
     if (link.hasEstimateWording) {
       // With a known brief service, EVERY estimate/quote anchor must name it
       // (or its family) — a generic "Request a Quote" is not tied to the post.
-      return allowed && (link.named.length === 0 || !link.named.every((svc) => allowed.has(svc)));
+      if (!allowed) return false;
+      const named = effectiveNamed(link.named, allowed);
+      return named.length === 0 || !named.every((svc) => allowed.has(svc));
     }
     return !isProseReferenceAnchor(link.anchor);
   });

@@ -397,6 +397,23 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('"pest" is an umbrella word beside the post\'s own service, but not a substitute for it', () => {
+    const umbrella = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Pest Control Quote](/pest-control-quote/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(umbrella.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(umbrella.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    const pestOnly = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Pest Control Quote](/pest-control-quote/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(pestOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+  });
+
   test('shortcut reference CTAs are classified', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service]\n\n[Schedule Service]: /contact/` }),
