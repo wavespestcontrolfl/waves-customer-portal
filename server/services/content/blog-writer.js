@@ -22,17 +22,11 @@ const BLOG_TAGS = [
 ];
 
 // Tag → canonical blog category, so the topic-targeting gate judges entity
-// ownership within the same category (its declared semantics). Everything
-// not termite / mosquito / lawn is the pest-control category.
-const TAG_TO_CATEGORY = Object.freeze({
-  Termites: 'termite',
-  Mosquitoes: 'mosquito',
-  'Lawn Disease': 'lawn-care',
-  'Lawn Pests': 'lawn-care',
-  'Lawn Care': 'lawn-care',
-});
+// ownership within the same category. Single source: the publisher's own
+// frontmatter mapping (lazy — the publisher is a heavy module).
 function tagToCategory(tag) {
-  return TAG_TO_CATEGORY[tag] || 'pest-control';
+  const { normalizeCategory } = require('../content-astro/astro-publisher');
+  return normalizeCategory(null, tag) || null;
 }
 
 const TAG_ALIASES = new Map([
@@ -184,6 +178,26 @@ class BlogWriter {
   async generatePost(blogPostId) {
     const post = await db('blog_posts').where('id', blogPostId).first();
     if (!post) throw new Error('Post not found');
+
+    // Owner rulings 2026-08-27 — every persisted row (idea lane, admin
+    // generator, operator-edited, the 5 a.m. queue) passes the topic-
+    // targeting gate BEFORE any writer spend. No verifiable live corpus →
+    // throw (fail closed; the caller logs and the row stays queued). A
+    // block de-queues the row (status → idea, reason recorded) so the 5 a.m.
+    // picker never wedges on it.
+    const topic = topicGate.evaluateBlogPostRow(post, { index: await topicGate.loadLiveIndex(), category: tagToCategory(post.tag) });
+    if (!topic.ok) {
+      const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
+      await db('blog_posts').where('id', blogPostId).update({
+        status: 'idea',
+        astro_publish_error: `BLOG_TOPIC_TARGETING_BLOCKED: ${summary}`.slice(0, 1000),
+        updated_at: new Date(),
+      });
+      const e = new Error(`topic-targeting gate blocked "${post.title}": ${summary}`);
+      e.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+      e.details = topic.findings;
+      throw e;
+    }
 
     const voice = await this.getVoiceConfig();
 
@@ -446,9 +460,7 @@ Return JSON: {
     // and fail-closed — no verifiable corpus, no ideas this run.
     let topicIndex;
     try {
-      const corpus = await require('./internal-link-planner').loadAstroCorpusFromGitHub({ collections: ['blog'] });
-      if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-      topicIndex = topicGate.indexCorpus(corpus);
+      topicIndex = await topicGate.loadLiveIndex();
     } catch (err) {
       logger.warn(`Blog idea generation held: live blog corpus unavailable for the topic-targeting gate (${err.message})`);
       return [];

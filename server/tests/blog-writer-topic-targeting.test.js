@@ -10,17 +10,20 @@ const IN_WALL = {
   body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
 };
 
-function makeDbMock() {
+function makeDbMock({ post = null } = {}) {
   const inserts = [];
-  const dbMock = jest.fn(() => {
+  const updates = [];
+  const dbMock = jest.fn((table) => {
     const chain = {};
-    for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNotNull']) chain[m] = jest.fn(() => chain);
-    chain.first = jest.fn().mockResolvedValue(null);
+    for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNotNull', 'whereRaw']) chain[m] = jest.fn(() => chain);
+    chain.first = jest.fn().mockResolvedValue(table === 'blog_posts' ? post : null);
     chain.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
+    chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(1); });
     chain.then = (resolve) => resolve([]);
     return chain;
   });
   dbMock._inserts = inserts;
+  dbMock._updates = updates;
   return dbMock;
 }
 
@@ -32,9 +35,9 @@ const PEST_BAITS = ['ant-bait-basics', 'roach-bait-gel', 'rodent-bait-safety'].m
   body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n`,
 }));
 
-function load({ ideas, corpus = [IN_WALL], corpusError = null }) {
+function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null }) {
   jest.resetModules();
-  const dbMock = makeDbMock();
+  const dbMock = makeDbMock({ post });
   const dispatch = jest.fn().mockResolvedValue({ ok: true, json: ideas });
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -70,12 +73,15 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
     await expect(writer.generateNewIdeas(1)).resolves.toEqual([]);
   });
 
-  test('tag → category mapping covers the closed tag set', () => {
+  test('tag → category is the publisher\'s own normalizeCategory (single source); an unmapped tag is null = conservative all-corpus ownership', () => {
     const { writer } = load({ ideas: [] });
     const { BLOG_TAGS, tagToCategory } = writer._internals;
-    expect(new Set(BLOG_TAGS.map(tagToCategory))).toEqual(new Set(['termite', 'mosquito', 'lawn-care', 'pest-control']));
-    expect(tagToCategory('Termites')).toBe('termite');
-    expect(tagToCategory('Ants')).toBe('pest-control');
+    const mapped = Object.fromEntries(BLOG_TAGS.map((t) => [t, tagToCategory(t)]));
+    expect(mapped).toEqual({
+      Roaches: 'pest-control', Ants: 'pest-control', Rodents: 'pest-control', Termites: 'termite', Mosquitoes: 'mosquito',
+      'Fleas & Ticks': 'pest-control', 'Stinging Insects': null, Spiders: 'pest-control', 'Bed Bugs': 'pest-control',
+      'Lawn Disease': 'lawn-care', 'Lawn Pests': 'lawn-care', 'Lawn Care': 'lawn-care', 'Pest Control': 'pest-control',
+    });
   });
 
   test('fails closed with no LLM spend when the live corpus is unavailable', async () => {
@@ -89,5 +95,32 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
     const { writer, dispatch } = load({ ideas: IDEAS, corpus: [] });
     await expect(writer.generateNewIdeas(5)).resolves.toEqual([]);
     expect(dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe('blog-writer generatePost — every persisted row is gated before writer spend', () => {
+  const TAEXX_ROW = { id: 'post_1', title: 'Your New Lakewood Ranch Home Came With Taexx', keyword: 'taexx system lakewood ranch', tag: 'Pest Control', slug: 'lakewood-ranch-taexx', status: 'queued', content: null };
+
+  test('a queued owned-entity row is de-queued (status → idea, reason recorded) and generation throws BLOG_TOPIC_TARGETING_BLOCKED with no LLM spend', async () => {
+    const { writer, dbMock, dispatch } = load({ post: TAEXX_ROW });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+    expect(dispatch).not.toHaveBeenCalled();
+    const patch = dbMock._updates.find((u) => u.table === 'blog_posts')?.patch;
+    expect(patch.status).toBe('idea');
+    expect(patch.astro_publish_error).toMatch(/^BLOG_TOPIC_TARGETING_BLOCKED: P0 TOPIC_CANNIBALIZES_EXISTING/);
+  });
+
+  test('corpus unavailable → generation throws (fail closed) and the row is left untouched', async () => {
+    const { writer, dbMock, dispatch } = load({ post: TAEXX_ROW, corpusError: 'github_down' });
+    await expect(writer.generatePost('post_1')).rejects.toThrow('github_down');
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(dbMock._updates).toEqual([]);
+  });
+
+  test('a row already live on the hub is a refresh — exempt, proceeds to the writer', async () => {
+    const { writer, dispatch } = load({ post: { ...TAEXX_ROW, astro_status: 'live' }, ideas: null });
+    dispatch.mockResolvedValue({ ok: false, error: 'stop_here' });
+    await writer.generatePost('post_1').catch(() => null);
+    expect(dispatch).toHaveBeenCalled();
   });
 });

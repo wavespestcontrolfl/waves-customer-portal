@@ -45,6 +45,10 @@
 
 const { CITIES } = require('./scoring-config');
 
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Own tokenizer (not uniqueness-gate._internals — that module is mocked in
 // runner tests and a failed load here would hold every new blog for review).
 const STOP_WORDS = new Set([
@@ -88,10 +92,32 @@ const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
 // Any other US state (or territory) named in targeting text is
 // out-of-footprint by construction. "Virginia" and "Washington" are left
 // out — both are common person names (Virginia runs the Waves office).
+// Postal abbreviations. "Safe" ones are not English words and count after
+// any word ("plano tx", "fresno, ca"); ambiguous ones (in, or, me, ok, va —
+// "wdo inspection va loan" is a real termite topic) count only after a comma.
+const STATE_ABBR_SAFE = 'ak|az|ca|ct|dc|ga|ia|il|ks|ky|mn|nc|nd|nh|nj|nm|nv|ny|ri|sc|sd|tn|tx|ut|vt|wa|wi|wv|wy';
+const STATE_ABBR_AMBIGUOUS = 'al|ar|co|de|hi|id|in|la|ma|md|me|mi|mo|ms|ne|oh|ok|or|pa|va';
+const STATE_ABBR_RE = new RegExp(`\\b[a-z]+,?\\s+(${STATE_ABBR_SAFE})\\b(?![a-z])|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS})\\b(?![a-z])`, 'i');
+// Place names that are also ordinary words or person names. Deliberately
+// NOT in the shared content-guardrails blocklist (which scans body prose);
+// here they count only with geographic context — "in/near <Name>" or
+// "<Name>, <state>" — where they can only mean the place.
+const CONTEXT_PLACE_NAMES = Object.freeze([
+  'Homestead', 'Weston', 'Jupiter', 'Wellington', 'Hollywood', 'Kendall', 'Davie',
+  'Largo', 'Destin', 'Navarre', 'Inverness', 'Clermont', 'Austin', 'Phoenix',
+  'Savannah', 'Boston', 'Houston', 'Dallas', 'Cleveland', 'Richmond', 'Charleston',
+]);
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
 // entity-ownership scan regardless of document frequency.
+const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)" → alternatives
+const CONTEXT_PLACE_RE = new RegExp(
+  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})\\b`
+  + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
+  'i'
+);
+
 const GEO_TOKENS = new Set(['florida', 'swfl', 'southwest', 'county', 'gulf', 'coast', 'suncoast']);
 
 // Structural/intent words that are never a topic entity even in a tiny
@@ -111,9 +137,6 @@ const GENERIC_TOKENS = new Set([
   'programs', 'program', 'dates', 'season', 'seasons', 'work', 'works',
 ]);
 
-function escapeRe(s) {
-  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // "St. Petersburg" must match "St Petersburg" / "St. Petersburg"; word
 // boundaries on both ends so "Tampa" never matches inside another word.
@@ -158,7 +181,7 @@ function findAll(re, text) {
   const out = new Set();
   const g = new RegExp(re.source, 'gi');
   let m;
-  while ((m = g.exec(text)) !== null) out.add(m[1] || m[0]);
+  while ((m = g.exec(text)) !== null) out.add(m.slice(1).find(Boolean) || m[0]);
   return [...out];
 }
 
@@ -172,7 +195,12 @@ function findAll(re, text) {
  */
 function classifyGeoScope(text) {
   const t = String(text || '');
-  const out_of_area = [...findAll(cityRe(outOfAreaCityList()), t), ...findAll(OUT_OF_STATE_RE, t)];
+  const out_of_area = [
+    ...findAll(cityRe(outOfAreaCityList()), t),
+    ...findAll(OUT_OF_STATE_RE, t),
+    ...findAll(CONTEXT_PLACE_RE, t),
+    ...findAll(STATE_ABBR_RE, t).map((s) => s.toUpperCase()),
+  ];
   const footprint = findAll(cityRe(footprintCities()), t);
   const regional = findAll(REGIONAL_RE, t);
   const statewide = STATEWIDE_RE.test(t);
@@ -241,6 +269,52 @@ function evaluateDraftFraming(draft = {}) {
   ]);
   const geo = classifyGeoScope([title, keyword, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
   return { ok: findings.length === 0, findings, geo, checked: { title, slug, primary_keyword: keyword } };
+}
+
+/**
+ * evaluateDraftTargeting(draft, { index, category, service }) — the full
+ * post-draft check: framing on the writer's own title/slug, THEN entity
+ * ownership on the writer's own primary_keyword (emit_draft does not require
+ * it to equal the brief keyword, so a clean brief can still emit an owned
+ * entity). `stage` tells the caller which check failed.
+ */
+function evaluateDraftTargeting(draft = {}, { index, category = null, service = null } = {}) {
+  const framing = evaluateDraftFraming(draft);
+  if (!framing.ok) return { ...framing, stage: 'framing' };
+  const fm = draft?.frontmatter || {};
+  const own = evaluate(
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category, service },
+    { index, requireCorpus: true }
+  );
+  return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
+}
+
+/**
+ * loadLiveIndex() — the live hub blog corpus (GitHub), indexed. Throws when
+ * the corpus is unavailable or empty; every caller treats that as fail
+ * closed (no draft, no idea, no publish) rather than skipping the check.
+ */
+async function loadLiveIndex() {
+  const planner = require('./internal-link-planner');
+  const corpus = await planner.loadAstroCorpusFromGitHub({ collections: ['blog'] });
+  if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+  return indexCorpus(corpus);
+}
+
+/**
+ * evaluateBlogPostRow(post, { index }) — a legacy `blog_posts` row (idea
+ * lane, 5 a.m. generator, admin generator, calendar publish). A row already
+ * live on the hub is a refresh and is exempt.
+ */
+function evaluateBlogPostRow(post = {}, { index, category = null } = {}) {
+  if (post.astro_status === 'live' || post.astro_status === 'merged' || post.astro_live_url) {
+    return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
+  }
+  const slug = String(post.slug || '').trim();
+  return evaluate(
+    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', category },
+    { index, requireCorpus: true }
+  );
 }
 
 function isApplicable({ actionType = null, pageType = null } = {}) {
@@ -433,6 +507,9 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
 module.exports = {
   evaluate,
   evaluateDraftFraming,
+  evaluateDraftTargeting,
+  evaluateBlogPostRow,
+  loadLiveIndex,
   isApplicable,
   classifyGeoScope,
   geoBlockReason,
@@ -441,4 +518,4 @@ module.exports = {
   RARE_ENTITY_DF_MAX,
   OWNER_MIN_OCCURRENCES,
 };
-module.exports._internals = { parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { CONTEXT_PLACE_NAMES, parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

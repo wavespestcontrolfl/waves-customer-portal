@@ -60,12 +60,19 @@ this skill.
   owns — one entity, one post; grow it as a REFRESH of the owner, never a
   sibling (the in-wall post owns "Taexx"). Enforced deterministically by
   `topic-targeting-gate.js`: runner step 2d pre-draft (silent skip
-  `topic_targeting:<CODE>`, corpus-unavailable → review), post-draft framing
-  check on the writer's own title/slug (one redraft, then skip), GSC miner
-  (out-of-area demand → `do_not_publish`), idea lane. Ownership = a token from
-  the primary keyword that ≤3 live posts carry in their targeting fields and
-  the owner carries ≥3×, same category. Persisted per run in
-  `autonomous_runs.topic_targeting_result`.
+  `topic_targeting:<CODE>`, corpus-unavailable → review), post-draft check on
+  the writer's own title/slug framing AND emitted primary_keyword ownership
+  (one redraft, then skip), GSC miner (out-of-area demand →
+  `do_not_publish`), and every legacy `blog_posts` producer — idea lane,
+  `generatePost` (block de-queues the row: status → idea, reason in
+  `astro_publish_error`), `publishAstro` (`BLOG_TOPIC_TARGETING_BLOCKED`,
+  parked as deterministic). Already-live rows are refreshes → exempt.
+  Ownership = a token from the primary keyword that ≤3 live posts carry in
+  their targeting fields and the owner carries ≥3×, same category. Geo
+  coverage = the canonical content-guardrails blocklist + any other US
+  state/postal abbreviation; common-word place names (Homestead, Boston…)
+  count only with geo context and stay OUT of the prose blocklist. Persisted
+  per run in `autonomous_runs.topic_targeting_result`.
 - **No fumigation, insulation, or wildlife-trapping content** (rodent stays
   core).
 - **No bulk FAQ frontmatter expansion** on the remaining service spoke pages.

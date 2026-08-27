@@ -970,6 +970,26 @@ async function publishAstro(postId) {
   let prCreateAttempted = false;
 
   try {
+    // 0. Topic-targeting gate (owner rulings 2026-08-27) — a NEW post may not
+    //    be built around an out-of-footprint geo, statewide-only framing, or
+    //    an entity a live post already owns. Runs before any spend or GitHub
+    //    write; a post already live on the hub is a refresh (exempt). A
+    //    block is deterministic (BLOG_TOPIC_TARGETING_BLOCKED → parked like
+    //    the guardrails); an unavailable corpus is a transient fail-closed.
+    {
+      const topicGate = require('../content/topic-targeting-gate');
+      const topic = topicGate.evaluateBlogPostRow(post, {
+        index: await topicGate.loadLiveIndex(),
+        category: normalizeCategory(post.category, post.tag) || null,
+      });
+      if (!topic.ok) {
+        const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
+        tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+        tErr.details = topic.findings;
+        throw tErr;
+      }
+    }
+
     // 1. Hero image (required by the Astro schema). Fetch before branch
     // creation so validation/fetch failures do not leave orphan branches.
     //
@@ -3191,6 +3211,7 @@ function isCodexAuthor(login) {
 
 module.exports = {
   publishAstro,
+  normalizeCategory,
   publishOrUpdatePage,
   publishMetadataRewrite,
   publishRefresh,

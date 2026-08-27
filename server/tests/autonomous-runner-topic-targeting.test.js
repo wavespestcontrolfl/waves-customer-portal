@@ -247,6 +247,31 @@ describe('post-draft topic framing', () => {
     expect(queue.pendingReview).not.toHaveBeenCalled();
   });
 
+  test('a clean brief whose writer emits an OWNED primary_keyword is caught post-draft (topic_ownership_failed, one redraft)', async () => {
+    const queue = makeQueue({ id: 'opp_own', action_type: 'new_supporting_blog', query: 'new home pest control lakewood ranch', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: {
+          url: '/pest-control/lakewood-ranch-in-wall-system/',
+          title: 'Your New Lakewood Ranch Home Came With an In-Wall System',
+          frontmatter: { title: 'Your New Lakewood Ranch Home Came With an In-Wall System', slug: '/pest-control/lakewood-ranch-in-wall-system/', primary_keyword: 'taexx in wall system', meta_description: 'What the in-wall tubes in a new Lakewood Ranch build actually do, and what they miss.' },
+          body: 'Benign copy about new-construction pest control in Lakewood Ranch.',
+        },
+      }),
+    };
+    const { runner } = loadRunner({ queue, dispatcher, briefBuilder: blogBrief({ query: 'new home pest control lakewood ranch' }) });
+
+    const result = await runner.runNext();
+
+    expect(dispatcher.runWithBrief).toHaveBeenCalled();
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('topic_ownership_failed');
+    expect(result.topic_targeting_result.framing.stage).toBe('ownership');
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_CANNIBALIZES_EXISTING');
+    expect(queue.pendingReview).not.toHaveBeenCalled();
+  });
+
   test('a localized title clears the framing check', async () => {
     const queue = makeQueue({ id: 'opp_frame_ok', action_type: 'new_supporting_blog', query: 'kinds of ants in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
     const dispatcher = draftWith('Kinds of Ants in Sarasota Homes: A Field Guide');

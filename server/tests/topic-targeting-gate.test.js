@@ -301,3 +301,49 @@ describe('out-of-footprint coverage beyond the original 48-name list (hook r4)',
     expect(gate.classifyGeoScope('brandon asked about ghost ants').scope).toBe('none');
   });
 });
+
+describe('PR codex r1: ambiguous place names need geo context; postal abbreviations', () => {
+  test('common-word places count only as "in/near <Name>" or "<Name>, <state>"', () => {
+    expect(gate.classifyGeoScope('pest control in homestead').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('homestead fl pest control').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('Boston, MA termite season').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('protects your homestead from year-round pressure').scope).toBe('none');
+    expect(gate.classifyGeoScope('boston fern pests').scope).toBe('none');
+    expect(gate.classifyGeoScope('phoenix palm scale').scope).toBe('none');
+  });
+  test('those names are NOT in the shared prose blocklist', () => {
+    const shared = new Set(gate._internals.outOfAreaCityList().map((c) => c.toLowerCase()));
+    for (const n of gate._internals.CONTEXT_PLACE_NAMES) expect(shared.has(n.toLowerCase())).toBe(false);
+  });
+  test('"<city> tx" / "fresno, ca" / "Mobile, AL" are out-of-area; "va loan" and "ants in kitchen" are not', () => {
+    for (const t of ['termite treatment plano tx', 'pest control fresno, ca', 'Mobile, AL termite control', 'exterminator omaha, ne cost']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['wdo inspection va loan', 'ants in kitchen', 'is pest control ok for pets', 'contact me about termites', 'pest control or exterminator']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+});
+
+describe('evaluateDraftTargeting / evaluateBlogPostRow', () => {
+  test('a clean brief whose writer emits an owned primary_keyword is caught at the ownership stage', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Your New Lakewood Ranch Home Came With an In-Wall System', slug: '/pest-control/lakewood-ranch-in-wall-system/', primary_keyword: 'taexx in wall system' } }, { index, service: 'pest' });
+    expect(r.ok).toBe(false);
+    expect(r.stage).toBe('ownership');
+    expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
+    expect(r.findings[0].owners).toEqual(['/pest-control/in-wall-pest-control/']);
+  });
+  test('framing failures report stage=framing before any ownership work', () => {
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'Ants in Florida', slug: '/pest-control/ants/', primary_keyword: 'taexx' } }, { index: gate.indexCorpus(CORPUS) });
+    expect(r.stage).toBe('framing');
+    expect(r.findings[0].code).toBe(gate.CODES.GEO_STATEWIDE);
+  });
+  test('a blog_posts row already live on the hub is exempt; a new row is judged', () => {
+    const index = gate.indexCorpus(CORPUS);
+    expect(gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill', astro_status: 'live' }, { index }).skipped).toBe('already_live');
+    const r = gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill' }, { index, category: 'pest-control' });
+    expect(r.ok).toBe(false);
+    expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
+  });
+});

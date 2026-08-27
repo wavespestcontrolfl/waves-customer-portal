@@ -400,6 +400,7 @@ class AutonomousRunner {
     const topicApplicable = topicGate
       ? topicGate.isApplicable({ actionType: run.action_type, pageType: brief.page_type })
       : run.action_type === 'new_supporting_blog';
+    let topicIndex = null;
     if (topicApplicable) {
       const ob = brief?.voice_constraints?.operator_brief || null;
       const candidate = {
@@ -419,7 +420,8 @@ class AutonomousRunner {
           if (topicResult.ok && topicResult.skipped === 'no_corpus') {
             const corpus = await this._loadBlogCorpus({ required: true });
             if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-            topicResult = topicGate.evaluate(candidate, { corpus, requireCorpus: true });
+            topicIndex = topicGate.indexCorpus(corpus);
+            topicResult = topicGate.evaluate(candidate, { index: topicIndex, requireCorpus: true });
           }
         } catch (err) {
           topicResult = { ok: false, error: `topic_targeting_gate:${err.message}` };
@@ -749,19 +751,27 @@ class AutonomousRunner {
       }
     }
 
-    // 3c'. Topic framing (owner ruling 2026-08-27, "… in Florida is too
-    //      broad"): the writer's OWN title/slug/primary_keyword may not frame
-    //      a new blog statewide-only or around an out-of-footprint metro,
-    //      even when the brief's demand was fine (step 2d passes bare
-    //      statewide queries on purpose). Same one-redraft-then-skip loop as
-    //      the guardrails; the finding tells the writer how to re-anchor.
+    // 3c'. Topic targeting on the EMITTED draft (owner rulings 2026-08-27):
+    //      the writer's OWN title/slug may not frame a new blog statewide-only
+    //      or around an out-of-footprint metro (step 2d passes bare statewide
+    //      queries on purpose), and the writer's OWN primary_keyword is
+    //      re-checked for entity ownership — emit_draft does not require it to
+    //      equal the brief keyword, so a clean brief can still emit the owned
+    //      sibling. Same one-redraft-then-skip loop as the guardrails; the
+    //      finding tells the writer how to re-anchor. Corpus index is reused
+    //      from 2d; loaded here only when 2d never needed it.
     if (draft && topicApplicable) {
       let framing;
       if (!topicGate) {
         framing = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_UNAVAILABLE', message: 'topic-targeting gate failed to load' }] };
       } else {
         try {
-          framing = topicGate.evaluateDraftFraming(draft);
+          if (!topicIndex) {
+            const corpus = await this._loadBlogCorpus({ required: true });
+            if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+            topicIndex = topicGate.indexCorpus(corpus);
+          }
+          framing = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null });
         } catch (err) {
           framing = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
         }
@@ -769,9 +779,10 @@ class AutonomousRunner {
       run.topic_targeting_result = { ...(run.topic_targeting_result || {}), framing };
       if (!framing.ok) {
         const blocking = framing.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
-        const notes = `Topic framing failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const skipReason = framing.stage === 'ownership' ? 'topic_ownership_failed' : 'topic_framing_failed';
+        const notes = `Topic targeting failed on the draft (${framing.stage || 'framing'}): ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
-          claimToken, skipReason: 'topic_framing_failed', notes, blocking,
+          claimToken, skipReason, notes, blocking,
         });
       }
     }

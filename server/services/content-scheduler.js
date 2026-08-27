@@ -575,6 +575,10 @@ const ContentScheduler = {
           // offers a service Waves does not provide, and re-running the same
           // draft through the same gate every 15 minutes cannot change that.
           'BLOG_COMPLIANCE_FAILED',
+          // Topic-targeting block (out-of-footprint geo / statewide-only
+          // framing / owned entity): the same row fails the same way every
+          // attempt — edit-required, owner rulings 2026-08-27.
+          'BLOG_TOPIC_TARGETING_BLOCKED',
           'BLOG_MDX_TOKEN_LEAK',
           // Curated hero URL that 404s / isn't an image — fails identically
           // every attempt (AI hero GENERATION failures stay untagged/transient).
