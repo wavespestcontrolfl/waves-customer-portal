@@ -2261,7 +2261,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // plus the customer's document count, linking the portal
             // Documents tab. Live-view-only payload field.
             const docs = data.relatedDocuments;
-            if (!docs?.totalCount) return null;
+            if (!docs?.hasDocuments) return null;
             const linkedTitles = (docs.linked || []).map((d) => d.title).filter(Boolean);
             return (
               <div className="sr-cell">
@@ -2269,7 +2269,7 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
                 <div className="sr-cell-value">
                   {linkedTitles.length
                     ? linkedTitles.join(' · ')
-                    : `${docs.totalCount} document${docs.totalCount === 1 ? '' : 's'} on file`}
+                    : 'Available in your portal'}
                 </div>
                 <div className="sr-cell-note">
                   <a href="/?tab=documents">View documents in the portal</a>

@@ -246,12 +246,7 @@ function technicianReportCustomerCopy(notes) {
   const screenText = TIMING_CONFIRM_RE.test(body)
     ? body.replace(SAFE_IDIOM_RE, 'once dry')
     : body;
-  const violations = [
-    ...findBannedCustomerCopy(screenText),
-    ...EXTRA_FORBIDDEN.map((rx) => screenText.match(rx)?.[0] || null).filter(Boolean),
-    ...(containsReportAccessCode(screenText) ? ['access_code'] : []),
-  ];
-  if (!violations.length && !validateCustomerCopy(screenText)) violations.push('forbidden_language');
+  const violations = customerCopyViolations(screenText);
   return {
     whatWeDid,
     whatWeFound,
@@ -314,9 +309,28 @@ function summaryCopySignature(service = {}) {
   return `-tr${crypto.createHash('sha256').update(parsed.body).digest('hex').slice(0, 8)}`;
 }
 
+// The full customer-copy screen the notes parser applies — shared banned
+// list, the summary slot's extra forbidden vocabulary ("safe", bare
+// "infestation", …), access-code shapes, and premium-experience's
+// validateCustomerCopy. Exported so other verbatim customer surfaces
+// (report recommendations, auto-published visual-moment captions) screen
+// with exactly the same rules instead of a subset (codex P1 2026-08-27).
+// Returns the matched violations; an empty array means the text may render.
+function customerCopyViolations(text) {
+  const value = String(text || '');
+  const violations = [
+    ...findBannedCustomerCopy(value),
+    ...EXTRA_FORBIDDEN.map((rx) => value.match(rx)?.[0] || null).filter(Boolean),
+    ...(containsReportAccessCode(value) ? ['access_code'] : []),
+  ];
+  if (!violations.length && !validateCustomerCopy(value)) violations.push('forbidden_language');
+  return violations;
+}
+
 module.exports = {
   technicianReportCustomerCopy,
   containsReportAccessCode,
+  customerCopyViolations,
   summaryCopySignature,
   MAX_REPORT_CHARS,
 };

@@ -132,7 +132,10 @@ describe('relatedDocuments on the report payload', () => {
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
     }, 'token-docs', knex, { mode: 'live' });
-    expect(data.relatedDocuments).toMatchObject({ totalCount: 2 });
+    expect(data.relatedDocuments).toMatchObject({ hasDocuments: true });
+    // Presence only — never a count (the Documents tab also synthesizes
+    // report rows, so any number computed here would disagree with it).
+    expect(data.relatedDocuments.totalCount).toBeUndefined();
     expect(data.relatedDocuments.linked).toEqual([
       { title: 'WDO Notice of Inspection', documentType: 'wdo_inspection' },
     ]);
@@ -161,6 +164,27 @@ describe('relatedDocuments on the report payload', () => {
       service_type: 'Quarterly Pest Control Service',
     }, 'token-docs', knex, { mode: 'pdf' });
     expect(data.relatedDocuments).toBeNull();
+  });
+});
+
+describe('recommendations are screened at the payload boundary', () => {
+  test('banned wording and access codes drop; clean lines still render', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      structured_notes: JSON.stringify({
+        recommendations: [
+          'Keep shrubs trimmed back from the exterior walls',
+          'The side gate code is 4417 for our next visit',
+          'Treated areas are completely safe for pets right away',
+        ],
+      }),
+    }, 'token-recs', knex, { mode: 'live' });
+    expect(data.recommendations).toEqual([
+      'Keep shrubs trimmed back from the exterior walls',
+    ]);
   });
 });
 

@@ -9900,6 +9900,49 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    // Auto-publish tech-captured visual moments to the customer report
+    // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
+    // Runs BEFORE the PDF enqueue below so the rendered artifact carries
+    // the promoted moments, and independent of the email branch (codex P1
+    // ×2 on this branch). Each moment is screened INDIVIDUALLY: the caption
+    // that will render (customer_caption, falling back to ai_caption) must
+    // be non-empty and pass the same banned-copy + access-code guards as
+    // every other customer copy path — violators stay internal_only for
+    // the existing admin review flow. Fail-soft: errors never block the
+    // completion. Also invalidates the visual-moment PDF cache, matching
+    // the admin visibility endpoint's contract.
+    if (!isInternalOnlyCompletion && !isIncompleteVisit) {
+      try {
+        const { gateEnvValue } = require('../config/feature-gates');
+        if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {
+          const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+          const candidates = await db('visual_service_moments')
+            .where({ job_id: svc.id, visibility_status: 'internal_only' })
+            .whereNull('deleted_at')
+            .select('id', 'customer_caption', 'ai_caption');
+          const publishable = candidates.filter((m) => {
+            const caption = String(m.customer_caption || m.ai_caption || '').trim();
+            return caption && customerCopyViolations(caption).length === 0;
+          });
+          if (publishable.length) {
+            await db('visual_service_moments')
+              .whereIn('id', publishable.map((m) => m.id))
+              .update({
+                visibility_status: 'approved_customer',
+                customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
+                updated_at: db.fn.now(),
+              });
+            const { invalidateVisualMomentReportPdfCache } = require('../services/visual-service-notes');
+            await invalidateVisualMomentReportPdfCache(svc.id).catch(() => {});
+            logger.info(`[dispatch] auto-published ${publishable.length}/${candidates.length} visual moment(s) for ${svc.id}`);
+          } else if (candidates.length) {
+            logger.info(`[dispatch] visual moments held internal_only for ${svc.id}: ${candidates.length} failed the caption screen`);
+          }
+        }
+      } catch (vmErr) {
+        logger.warn(`[dispatch] visual-moment auto-publish failed (non-blocking): ${vmErr.message}`);
+      }
+    }
     // Only auto_send completions queue a PDF render. 'disabled' is the typed
     // kill switch; 'internal_only' (Phase-1b shadow) can't render either —
     // the headless renderer opens /report/:token?mode=pdf without a staff
@@ -12537,32 +12580,6 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
-      // Auto-publish tech-captured visual moments to the customer report
-      // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
-      // Moments insert as internal_only and nothing promoted them, so the
-      // report's Service Highlights never rendered. Promotion runs BEFORE
-      // the email enqueue so the attached PDF carries them; post-commit and
-      // fail-soft — a promotion error never blocks the completion.
-      if (!isInternalOnlyCompletion) {
-        try {
-          const { gateEnvValue } = require('../config/feature-gates');
-          if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {
-            const promoted = await db('visual_service_moments')
-              .where({ job_id: svc.id, visibility_status: 'internal_only' })
-              .whereNull('deleted_at')
-              .update({
-                visibility_status: 'approved_customer',
-                // The customer caption falls back to the AI caption so a
-                // promoted moment never renders captionless.
-                customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
-                updated_at: db.fn.now(),
-              });
-            if (promoted) logger.info(`[dispatch] auto-published ${promoted} visual moment(s) for ${svc.id}`);
-          }
-        } catch (vmErr) {
-          logger.warn(`[dispatch] visual-moment auto-publish failed (non-blocking): ${vmErr.message}`);
-        }
-      }
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
         try {

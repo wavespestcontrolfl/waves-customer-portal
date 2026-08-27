@@ -3607,10 +3607,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   });
   const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
   const treatedZoneIds = new Set(applications.flatMap((app) => app.zone_ids || []));
+  // Screened at the PAYLOAD boundary, not just at completion intake: this
+  // list also carries legacy structured_notes values and raw [Next] note
+  // lines from records that predate the completion-time validators, and it
+  // now renders verbatim on the customer report (codex P1 on this branch).
+  // A line with banned wording or an access code is dropped, never
+  // rewritten — the rest of the list still renders.
+  const recommendationScreen = (() => {
+    try {
+      const { customerCopyViolations } = require('./technician-report-copy');
+      return (line) => customerCopyViolations(line).length === 0;
+    } catch { return () => false; }
+  })();
   const recommendations = uniqueStrings([
     ...protocol.recommendations,
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
-  ]);
+  ]).filter(recommendationScreen);
   // The turf-height gauge image is the on-site lawn-length documentation photo.
   // Surface it in the Mowing Height report module (next to the reading it
   // documents) instead of the generic gallery, so it appears exactly once. We
@@ -4316,9 +4328,12 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const linked = docRows.filter(
         (d) => d.linked_service_record_id && String(d.linked_service_record_id) === String(service.id),
       );
+      // Presence only, no count: /api/documents also synthesizes rows
+      // (completed-service reports, project reports), so any number
+      // computed here would disagree with the Documents tab (codex P1).
       if (docRows.length) {
         relatedDocuments = {
-          totalCount: docRows.length,
+          hasDocuments: true,
           linked: linked.slice(0, 3).map((d) => ({
             title: d.title || d.document_type || 'Document',
             documentType: d.document_type || null,
