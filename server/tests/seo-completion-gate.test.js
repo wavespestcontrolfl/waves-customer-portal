@@ -1495,6 +1495,36 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(questionCta.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // A FULL-REFERENCE label obeys paragraph boundaries — a blank line
+    // inside "[cta\n\nlabel]" renders no link; a soft-wrapped label works.
+    const splitRefLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'See [Get a Termite Estimate][cta\n\nlabel] now.\n\n[cta label]: /contact/' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(splitRefLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const wrappedRefLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'See [Get a Termite Estimate][cta\nlabel] now.\n\n[cta label]: /contact/' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(wrappedRefLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // An HTML anchor inside a QUOTED attribute is tooltip text — it cannot
+    // satisfy presence; a real anchor still does.
+    const attrAnchor = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<span title=\'<a href="/contact/">Get a Termite Estimate</a>\'>Info</span> text.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(attrAnchor.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const realAnchor = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<a href="/contact/">Get a Termite Estimate</a> text.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(realAnchor.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

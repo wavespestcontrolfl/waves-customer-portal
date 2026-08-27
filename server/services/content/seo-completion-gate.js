@@ -509,14 +509,24 @@ function extractLinks(body) {
   // feeds the definition parse and the Markdown walk. The HTML-anchor and
   // autolink passes keep the original: href values live in quotes.
   let sMd = s;
+  // Absolute intervals of quoted attribute VALUES — the HTML-anchor and
+  // autolink passes (which must keep the original text for real hrefs)
+  // skip matches STARTING inside one: `<span title='<a href=…>…</a>'>` is
+  // tooltip text, not a clickable anchor.
+  const attrValueRanges = [];
   {
     const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
+    const quoted = /"[^"]*"|'[^']*'/g;
     let tm;
     while ((tm = tagScan.exec(s)) !== null) {
+      let qm;
+      quoted.lastIndex = 0;
+      while ((qm = quoted.exec(tm[0])) !== null) attrValueRanges.push([tm.index + qm.index + 1, tm.index + qm.index + qm[0].length - 1]);
       const local = tm[0].replace(/"[^"]*"|'[^']*'/g, (q) => q[0] + q.slice(1, -1).replace(/[^\n]/g, ' ') + q[q.length - 1]);
       if (local !== tm[0]) sMd = sMd.slice(0, tm.index) + local + sMd.slice(tm.index + tm[0].length);
     }
   }
+  const inAttrValue = (pos) => attrValueRanges.some(([a, b]) => pos >= a && pos < b);
   // Regions the Markdown passes CONSUME (definition lines, whole inline
   // links) — the autolink pass must not re-read an angle-bracketed
   // destination inside them as a separate bare-URL link.
@@ -714,6 +724,17 @@ function extractLinks(body) {
     if (rest[0] === '(' || rest[0] === ':') { i = end; continue; }
     const full = rest.match(refLabel);
     if (full) {
+      // The reference LABEL half obeys the same paragraph boundaries as the
+      // visible label — a blank line inside "[cta\n\nlabel]" ends the
+      // paragraph and the reference renders as text.
+      let labelSplit = false;
+      for (let k = 0; k < full[0].length; k += 1) {
+        if (full[0][k] !== '\n') continue;
+        const abs = end + 1 + k + 1;
+        const le = sMd.indexOf('\n', abs);
+        if (labelBoundaryLine(sMd.slice(abs, le === -1 ? undefined : le), openQuoteDepth, depthAtPos(abs))) { labelSplit = true; break; }
+      }
+      if (labelSplit) { i = end; continue; }
       // Full reference `[text][label]` (an empty label collapses to text).
       const href = defs.get(label(full[1] || text));
       if (href) links.push({ anchor: text, href });
@@ -740,7 +761,10 @@ function extractLinks(body) {
   const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?(?<![\w-])href\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a\s*>/gi;
   // Nested-tag stripping is quote-aware too — an inner tag's quoted
   // attribute may contain ">" (`<span title="1 > 0">`).
-  while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
+  while ((m = html.exec(s)) !== null) {
+    if (inAttrValue(m.index)) continue;
+    links.push({ anchor: m[6].replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
+  }
   // CommonMark AUTOLINKS (`<https://…>`) render as live links whose anchor
   // is the bare URL — first-party ones canonicalize through dest(). A
   // bracketed URL already CONSUMED as an inline-link destination or a
@@ -748,7 +772,7 @@ function extractLinks(body) {
   const auto = /<(https?:\/\/[^<>\s]+)>/gi;
   while ((m = auto.exec(s)) !== null) {
     const at = m.index;
-    if (consumed.some(([a, b]) => at >= a && at < b)) continue;
+    if (consumed.some(([a, b]) => at >= a && at < b) || inAttrValue(at)) continue;
     links.push({ anchor: m[1], href: dest(m[1]) });
   }
   return links;
