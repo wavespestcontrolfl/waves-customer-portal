@@ -1147,11 +1147,41 @@ async function reviewMilestoneStats() {
   }
 }
 
-// A threshold is claimed by any non-skipped run that carried it — including
-// in-flight 'started' rows and approval-queue drafts — so a crash or a pending
-// draft can't let the next tick mint a duplicate celebration.
+// Durable "this milestone is live somewhere" stamp, written at the FIRST
+// provider success (publishToAll's onFirstPlatformSuccess) — independent of
+// the run row, so an audit-update crash that leaves the run 'failed' after
+// an external post exists can never let the next tick celebrate it again.
+function milestoneStampKey(threshold) {
+  return `social.milestone.celebrated.${threshold}`;
+}
+
+async function stampMilestoneCelebrated(threshold, runId) {
+  const now = new Date();
+  const value = JSON.stringify({ threshold, runId: runId || null, at: now.toISOString() });
+  await db('system_settings')
+    .insert({
+      key: milestoneStampKey(threshold),
+      value,
+      category: 'social',
+      description: `Google review milestone ${threshold} celebrated on social`,
+      created_at: now,
+      updated_at: now,
+    })
+    .onConflict('key')
+    .merge({ value, updated_at: now });
+}
+
+// A threshold is claimed by the durable stamp above, or by any non-skipped
+// run that carried it — including in-flight 'started' rows and
+// approval-queue drafts — so a crash or a pending draft can't let the next
+// tick mint a duplicate celebration.
 async function milestoneAlreadyClaimed(threshold) {
   if (!(await hasTable('social_content_studio_runs'))) return true;
+  const stamped = await db('system_settings')
+    .where({ key: milestoneStampKey(threshold) })
+    .first('key')
+    .catch(() => null);
+  if (stamped) return true;
   const row = await db('social_content_studio_runs')
     .where({ run_type: 'autonomous', angle: MILESTONE_ANGLE })
     .whereIn('status', ['started', 'published', 'draft_created'])
@@ -1920,9 +1950,11 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         // later provider call can no longer outlive the claim TTL with the
         // testimonial live externally but unrecorded. First-win: the
         // post-publish stamp below becomes a no-op backstop.
-        onFirstPlatformSuccess: isReviewRun && !SOCIAL_FLAGS.dryRun
-          ? () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)
-          : null,
+        onFirstPlatformSuccess: SOCIAL_FLAGS.dryRun
+          ? null
+          : (isReviewRun && (() => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)))
+            || (isMilestoneRun && (() => stampMilestoneCelebrated(plan.milestone, run?.id)))
+            || null,
       }),
       { rejectConsumed: true },
     );
@@ -2382,9 +2414,11 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         postId: run.social_media_post_id || null,
         // Durable stamp at the FIRST provider success — mirrors the
         // autonomous path; the post-publish stamp below is the no-op backstop.
-        onFirstPlatformSuccess: input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun
-          ? () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)
-          : null,
+        onFirstPlatformSuccess: SOCIAL_FLAGS.dryRun
+          ? null
+          : (input.reviewGraphic?.googleReviewId && (() => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)))
+            || (input.milestone && (() => stampMilestoneCelebrated(input.milestone, run.id)))
+            || null,
       // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
       // owner of the testimonial — only this run's retry may publish the
       // remaining channels past its own stamp; every other run is consumed.
