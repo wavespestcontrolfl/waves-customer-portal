@@ -918,6 +918,20 @@ async function maybeAutoMerge(run, pr) {
     // Strict mode (refresh): every key compares, absent-vs-present is drift.
     // Non-strict (new blog): keys the stamped draft omits are skipped.
     let boundTargetingStrict = false;
+    // Raw base content of the refresh target (main), so the loop can tell
+    // whether the head actually changed the body (the publisher bumps
+    // modified/updated only alongside a real body/meta change — PR r10 P1).
+    let boundTargetingBaseContent = null;
+    // Canonical value comparison: key-sorted object stringify, so a
+    // remediation-re-emitted mapping with different YAML key order is NOT
+    // drift (PR r10 P2 — same semantics as frontmatterFixViolation's
+    // canonValue).
+    const canonVal = (v) => {
+      const sort = (x) => (x && typeof x === 'object' && !Array.isArray(x)
+        ? Object.keys(x).sort().reduce((o, k) => { o[k] = sort(x[k]); return o; }, {})
+        : (Array.isArray(x) ? x.map(sort) : x));
+      return JSON.stringify(sort(v ?? null));
+    };
     if (run.action_type === 'new_supporting_blog') {
       let boundOk = false;
       try {
@@ -951,7 +965,24 @@ async function maybeAutoMerge(run, pr) {
             ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
             ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
           ].filter((name) => /^src\/content\/.+\.(md|mdx)$/.test(String(name || '')));
-          const departingOk = departing.every((name) => /^src\/content\/blog\//.test(String(name || '')) && routeMatches(name));
+          let departingOk = true;
+          for (const name of departing) {
+            if (!/^src\/content\/blog\//.test(String(name || '')) || !routeMatches(name)) { departingOk = false; break; }
+            // A FLAT-leaf departure routes by its FRONTMATTER slug, not its
+            // filename — verify the deleted file's BASE (main) copy actually
+            // routed to the expected path, or a same-leaf file from another
+            // category would be deleted under this PR's authorization
+            // (PR r10 P1). Nested departures are path==slug by the astro
+            // guardrail. Unreadable base fails closed.
+            if (fileRoute(name) !== expectedPath) {
+              const fmModB = require('../content-astro/frontmatter');
+              const baseGone = await gh.getFile(name);
+              if (!baseGone || typeof baseGone.content !== 'string' || !baseGone.content.trim()) { departingOk = false; break; }
+              const goneSlug = String(((fmModB.parse(baseGone.content) || {}).data || {}).slug || '');
+              const goneSlugPath = `/${goneSlug.replace(/^\/+|\/+$/g, '')}/`;
+              if (!goneSlug.trim() || goneSlugPath !== expectedPath) { departingOk = false; break; }
+            }
+          }
           if (departingOk && routeMatches(blogFiles[0].filename)) {
             boundOk = true;
             boundExpectedPath = expectedPath;
@@ -1022,6 +1053,20 @@ async function maybeAutoMerge(run, pr) {
               boundOk = false;
             } else {
               boundTargetingWant = (fmMod.parse(baseFile.content) || {}).data || {};
+              boundTargetingBaseContent = baseFile.content;
+              // A legacy BLOG target gets the publisher's own deterministic
+              // backfill (post_type mapped from page_type, page_type
+              // consumed, service_areas_tag) — normalize the BASE
+              // expectation the same way so those publisher-generated
+              // changes never read as frozen-field drift (PR r10 P1).
+              // Backfill failure leaves the raw base (stricter: withholds).
+              if (/^src\/content\/blog\//.test(expected)) {
+                try {
+                  const normalized = JSON.parse(JSON.stringify(boundTargetingWant));
+                  publisher._internals.backfillLegacyBlogRequiredFields(normalized, brief || {});
+                  boundTargetingWant = normalized;
+                } catch (_) { /* keep raw base */ }
+              }
               boundTargetingStrict = true;
             }
           }
@@ -1099,16 +1144,40 @@ async function maybeAutoMerge(run, pr) {
           const headFm = (parsed && parsed.data) || {};
           let drift = false;
           if (boundTargetingStrict) {
-            const EDITABLE = new Set(['title', 'metaTitle', 'meta_description', 'metaDescription', 'modified', 'updated']);
+            // Mirror publishRefresh's EXACT contract (PR r10 P1): the four
+            // REFRESH_EDITABLE_META_FIELDS may change ONLY when the live
+            // page already carries them; metaTitle stays FROZEN on non-blog
+            // targets (protected service metaTitles); modified/updated may
+            // move only alongside a real body/permitted-meta change; every
+            // other key must equal the (backfill-normalized) base.
+            const EDITABLE_META = ['title', 'metaTitle', 'meta_description', 'metaDescription'];
+            const isBlogFile = /^src\/content\/blog\//.test(String(f.filename || ''));
+            const baseParsed = fmMod.parse(String(boundTargetingBaseContent || ''));
+            const bodyChanged = String(parsed?.content || '').trim() !== String(baseParsed?.content || '').trim();
+            let metaChanged = false;
             const keys = new Set([...Object.keys(boundTargetingWant), ...Object.keys(headFm)]);
             for (const k of keys) {
-              if (EDITABLE.has(k)) continue;
-              if (JSON.stringify(boundTargetingWant[k] ?? null) !== JSON.stringify(headFm[k] ?? null)) { drift = true; break; }
+              if (EDITABLE_META.includes(k)) {
+                const frozen = (k === 'metaTitle' && !isBlogFile) || boundTargetingWant[k] === undefined;
+                if (frozen) {
+                  if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
+                } else if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) {
+                  metaChanged = true;
+                }
+                continue;
+              }
+              if (k === 'modified' || k === 'updated') continue; // re-checked below
+              if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
+            }
+            if (!drift && !bodyChanged && !metaChanged) {
+              for (const k of ['modified', 'updated']) {
+                if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
+              }
             }
           } else {
             for (const k of boundTargetingKeys) {
               if (boundTargetingWant[k] === undefined) continue;
-              if (JSON.stringify(boundTargetingWant[k] ?? null) !== JSON.stringify(headFm[k] ?? null)) { drift = true; break; }
+              if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
             }
           }
           if (drift) { comparisonBlocked = true; break; }

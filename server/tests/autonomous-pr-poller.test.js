@@ -849,6 +849,86 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a refresh head rewriting a SERVICES-page metaTitle is withheld — frozen on non-blog targets (PR r10 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\nmetaTitle: Rewritten Near-Me Title\n---\n\nBody.' }
+      : { content: '---\nmetaTitle: Original Protected Long Title\n---\n\nBody.' }));
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a refresh head bumping modified with NO body/meta change is withheld (PR r10 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-08-27"\n---\n\nSame body.' }
+      : { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-05-01"\n---\n\nSame body.' }));
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test("a legacy BLOG refresh whose head carries the publisher's OWN backfill (page_type→post_type) merges (PR r10 P1)", async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-r1' })],
+      briefs: [{ id: 'brief-r1', action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/blog/test-post/' }],
+    });
+    greenMergePath();
+    publisher.resolveExistingAstroFileForTarget.mockResolvedValue({ path: 'src/content/blog/blog/test-post.md' });
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.md', status: 'modified' }]);
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Test Post\nslug: /blog/test-post/\npost_type: seasonal\nservice_areas_tag:\n  - Venice\n---\n\nRefreshed body text.' }
+      : { content: '---\ntitle: Test Post\nslug: /blog/test-post/\npage_type: seasonal\nservice_areas_tag:\n  - Venice\n---\n\nOld body text.' }));
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('a FLAT departed file whose base slug routes elsewhere is withheld; a same-route one passes (PR r10 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/test-post.md' },
+    ]);
+    // Base copy of the departed flat file routes to a DIFFERENT category.
+    gh.getFile.mockImplementation(async (path, ref) => (path === 'src/content/blog/test-post.md'
+      ? { content: '---\ntitle: Other Post\nslug: /lawn-care/test-post/\n---\n\nUnrelated lawn post.' }
+      : { content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' }));
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    // Same-route flat departure (its base slug routes here) passes.
+    jest.clearAllMocks();
+    pagesPoll.liveUrlResponds.mockResolvedValue(true);
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/test-post.md' },
+    ]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res2 = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
   test('a refresh head that rewrites the frozen target slug/canonical is withheld (PR r7 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     refreshSetup();
