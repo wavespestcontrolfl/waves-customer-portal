@@ -398,12 +398,12 @@ const PROJECT_TYPES = {
         'Kitchen area', 'Laundry', 'Interior living areas', 'Crawlspace', 'Other',
       ] },
       { key: 'activity_found', label: 'Activity found', type: 'select', section: 'Findings', options: ['Yes', 'No'] },
-      { key: 'evidence_observed', detail: true, label: 'Evidence type', type: 'chips', section: 'Findings', options: [
+      { key: 'evidence_observed', detail: true, requiredUnless: { field: 'activity_found', value: 'No' }, label: 'Evidence type', type: 'chips', section: 'Findings', options: [
         'Droppings', 'Urine staining', 'Gnaw marks', 'Rub marks / grease trails',
         'Nesting material', 'Noises reported by customer', 'Odor', 'Burrows / runways',
         'Damaged insulation / wiring / stored items',
       ] },
-      { key: 'species', detail: true, label: 'Suspected rodent type', type: 'select', section: 'Findings', options: ['Rat', 'Mouse', 'Unknown'] },
+      { key: 'species', detail: true, requiredUnless: { field: 'activity_found', value: 'No' }, label: 'Suspected rodent type', type: 'select', section: 'Findings', options: ['Rat', 'Mouse', 'Unknown'] },
       { key: 'entry_points_found', detail: true, label: 'Entry points found', type: 'text', section: 'Findings', placeholder: 'AC line gap right side, garage door corner…' },
       { key: 'conducive_conditions', detail: true, label: 'Conducive conditions', type: 'chips', section: 'Findings', options: [
         'Gaps under doors', 'Garage door seal gaps', 'A/C line penetrations', 'Roof returns',
