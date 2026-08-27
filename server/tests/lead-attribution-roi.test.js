@@ -298,6 +298,29 @@ describe('allocatePooledChannelCost — Google Ads spend is one budget across it
     expect(d.pooledCostAllocation).toBeUndefined();
   });
 
+  test('allocates integer cents — rows always sum to the pool, remainder goes to the largest fraction', () => {
+    // $0.01 split equally: naive per-row rounding reports $0.01 + $0.01.
+    const a = row('Google Ads — Pest (call-extension)', 0, 0, 0, 0.01);
+    const b = row('Google Ads — Web Form', 0, 0, 0, 0);
+    allocatePooledChannelCost([a, b]);
+    expect(a.totalCost + b.totalCost).toBe(0.01);
+    expect([a.totalCost, b.totalCost]).toEqual([0.01, 0]); // tie → input order
+
+    // $1.00 over 3 leads (1/1/1): 33/33/34 cents, not 33.33 ×3.
+    const rows = [
+      row('Google Ads — Pest (call-extension)', 1, 0, 0, 1),
+      row('Google Ads - Call Reporting Bridge', 1, 0, 0, 0),
+      row('Google Ads — Web Form', 1, 1, 10, 0),
+    ];
+    allocatePooledChannelCost(rows);
+    const cents = rows.map((r) => Math.round(r.totalCost * 100));
+    expect(cents.reduce((x, y) => x + y, 0)).toBe(100);
+    expect(cents.sort()).toEqual([33, 33, 34]);
+    // ROI derives from the allocated cost, not an unrounded share.
+    const form = rows.find((r) => r.source.name === 'Google Ads — Web Form');
+    expect(form.roi).toBe(Math.round(((10 - form.totalCost) / form.totalCost) * 1000) / 10);
+  });
+
   test('a single google_ads row is left exactly as computed', () => {
     const only = row('Google Ads — Web Form', 4, 1, 700, 200);
     const before = { ...only };

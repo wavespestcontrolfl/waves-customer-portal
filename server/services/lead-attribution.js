@@ -535,23 +535,39 @@ function allocatePooledChannelCost(results) {
   }
   for (const rows of groups.values()) {
     if (rows.length < 2) continue;
-    const pooledCost = rows.reduce((sum, r) => sum + (r.totalCost || 0), 0);
-    if (pooledCost <= 0) continue;
+    // Work in integer cents so the allocated rows sum EXACTLY to the pool:
+    // floor each row's share, then hand the leftover cents one at a time to
+    // the rows with the largest fractional remainder (ties → input order).
+    // CPL / CPA / ROI derive from the allocated cents, so displayed cost and
+    // ratio never disagree.
+    const pooledCents = rows.reduce((sum, r) => sum + Math.round((r.totalCost || 0) * 100), 0);
+    if (pooledCents <= 0) continue;
     const pooledLeads = rows.reduce((sum, r) => sum + (r.totalLeads || 0), 0);
-    for (const r of rows) {
-      const share = pooledLeads > 0 ? (r.totalLeads || 0) / pooledLeads : 1 / rows.length;
-      const totalCost = pooledCost * share;
+    const shares = rows.map((r) => (pooledLeads > 0 ? (r.totalLeads || 0) / pooledLeads : 1 / rows.length));
+    const exact = shares.map((share) => pooledCents * share);
+    const cents = exact.map((c) => Math.floor(c));
+    let leftover = pooledCents - cents.reduce((a, b) => a + b, 0);
+    const byRemainder = exact
+      .map((c, i) => ({ i, frac: c - Math.floor(c) }))
+      .sort((a, b) => b.frac - a.frac || a.i - b.i);
+    for (const { i } of byRemainder) {
+      if (leftover <= 0) break;
+      cents[i] += 1;
+      leftover -= 1;
+    }
+    rows.forEach((r, i) => {
+      const totalCost = cents[i] / 100;
       const costPerLead = r.totalLeads > 0 ? totalCost / r.totalLeads : 0;
       const costPerAcquisition = r.conversions > 0 ? totalCost / r.conversions : 0;
       const roi = totalCost > 0
         ? ((r.totalRevenue - totalCost) / totalCost) * 100
         : (r.totalRevenue > 0 ? Infinity : 0);
-      r.totalCost = Math.round(totalCost * 100) / 100;
+      r.totalCost = totalCost;
       r.costPerLead = Math.round(costPerLead * 100) / 100;
       r.costPerAcquisition = Math.round(costPerAcquisition * 100) / 100;
       r.roi = roi === Infinity ? 9999 : Math.round(roi * 10) / 10;
-      r.pooledCostAllocation = { pooledCost: Math.round(pooledCost * 100) / 100, share: Math.round(share * 10000) / 10000 };
-    }
+      r.pooledCostAllocation = { pooledCost: pooledCents / 100, share: Math.round(shares[i] * 10000) / 10000 };
+    });
   }
   return results;
 }
