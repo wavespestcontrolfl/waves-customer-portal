@@ -2194,6 +2194,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
 
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
     expect(guardrails.hasRawMarkdownTable(TABLE_BODY)).toBe(true);
+    // Icon-only headers are still table headers.
+    expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('either|or prose\n\n---\n\nnext')).toBe(false);
   });

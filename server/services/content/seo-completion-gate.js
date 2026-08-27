@@ -313,11 +313,13 @@ function allowedAnchorServices(briefService) {
   return allowed;
 }
 
-// Imperative CTA-shaped anchors ("Schedule Service", "Click here",
-// "Book now") on conversion links must carry estimate/quote wording —
-// prose reference anchors ("our contact page") are not CTAs and stay out
-// of scope (P2_GENERIC_ANCHOR_TEXT already nudges those).
-const IMPERATIVE_CTA_ANCHOR_RE = /^(?:request|schedule|book|get|start|claim|call|click)\b/i;
+// A conversion-path link is an actionable CTA unless its anchor is
+// POSITIVELY prose-shaped — an article/possessive lead-in ("our contact
+// page", "the pest control calculator") or a page/tool reference. Every
+// actionable CTA ("Contact Waves", "Talk to Us", "View Options", "Schedule
+// Service", "Click here") must carry estimate/quote wording; prose
+// references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
+const PROSE_REFERENCE_ANCHOR_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b|\b(?:page|calculator|tool)\b/i;
 
 // Canonicalize a brief's service for CTA-anchor validation. Specialty
 // topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
@@ -355,12 +357,16 @@ function conversionCtaLinks(body) {
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.
     const anchor = m[1].replace(/[*_~`]/g, '').trim();
+    let named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+      .filter(([, re]) => re.test(anchor))
+      .map(([svc]) => svc);
+    // "Lawn pest control" is ONE service (lawn-pest-control → lawn), not
+    // lawn + pest — don't let the compound phrase read as a wrong-service mix.
+    if (/\blawn[- ]pest/i.test(anchor)) named = named.filter((svc) => svc !== 'pest');
     out.push({
       anchor,
       hasEstimateWording: /(estimat|quot)/i.test(anchor),
-      named: Object.entries(CTA_ANCHOR_SERVICE_TERMS)
-        .filter(([, re]) => re.test(anchor))
-        .map(([svc]) => svc),
+      named,
     });
   }
   return out;
@@ -396,7 +402,7 @@ function badCtaAnchor(body, brief = {}) {
     if (link.hasEstimateWording) {
       return allowed && link.named.length > 0 && !link.named.every((svc) => allowed.has(svc));
     }
-    return IMPERATIVE_CTA_ANCHOR_RE.test(link.anchor.trim());
+    return !PROSE_REFERENCE_ANCHOR_RE.test(link.anchor);
   });
   return bad ? bad.anchor : null;
 }

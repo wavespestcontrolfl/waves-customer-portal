@@ -1828,7 +1828,9 @@ function extractRawMarkdownTables(text) {
   const tables = [];
   for (let i = 1; i < lines.length; i += 1) {
     const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
-    const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
+    // Header = a pipe row with at least one non-empty cell — icon-only
+    // headings ("| ✅ | ❌ |") are still headings.
+    const headerAbove = lines[i - 1].includes('|') && /[^\s|]/.test(lines[i - 1]);
     if (!delimiter || !headerAbove) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
     // whitespace-normalized, so refresh grandfathering can compare table

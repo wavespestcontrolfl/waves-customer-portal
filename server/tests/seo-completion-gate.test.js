@@ -59,7 +59,7 @@ function baseDraft(overrides = {}) {
       '',
       '[Lakewood Ranch pest control](/pest-control-lakewood-ranch-fl/) and [pest control services](/pest-control-services/) can help homeowners compare options.',
       '',
-      'Ready to stop recurring ants? [Contact Waves](/contact/) for an inspection.',
+      'Ready to stop recurring ants? Details are on [our contact page](/contact/).',
     ].join('\n'),
     seo_contract: {
       breadcrumbs: [
@@ -278,6 +278,31 @@ describe('seo-completion-gate', () => {
     });
     expect(rodent.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(rodent.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
+  test('actionable conversion anchors without estimate/quote wording are flagged even beside a valid CTA', () => {
+    for (const anchor of ['Contact Waves', 'Talk to Us', 'View Options']) {
+      const result = SeoCompletionGate.evaluate({
+        draft: baseDraft({
+          body: `Act. [Get My Free Pest Control Estimate](/pest-control-quote/) or [${anchor}](/contact/).`,
+        }),
+        brief: baseBrief(),
+        shadowMode: true,
+      });
+      expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    }
+  });
+
+  test('lawn-pest compound wording reads as the lawn service, not lawn + pest', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Chinch bugs chew turf. [Request a Lawn Pest Control Quote](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'lawn-pest-control' }),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
   test('markdown decoration cannot hide a forbidden CTA anchor', () => {
