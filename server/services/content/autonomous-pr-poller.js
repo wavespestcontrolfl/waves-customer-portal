@@ -857,6 +857,107 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
+  // 3.5 Publisher-head pin — the named-competitor merge gate (owner
+  //    directive 2026-08-26; PR #3508 r12 redesign). Instead of re-deriving
+  //    the publisher's entire output function against the current head
+  //    (file sets, routes, frontmatter, freshness — an approach that could
+  //    never provably equal the publisher), the gate enforces ONE
+  //    invariant: an unattended merge on a named-competitor-governed run is
+  //    allowed only when pr.head.sha IS a commit the publisher produced —
+  //    the original publish commit (draft_payload.autopublish_head_sha,
+  //    stamped from the publisher's own commit response) or the head a
+  //    HUMAN approved (trust_build_approved_head_sha). Codex remediation
+  //    re-pins to its fix commit after its own gate pipeline vets it. Every
+  //    pinned head therefore already passed the runner's or remediation's
+  //    full gates (comparison gate + scoped eligibility included) on
+  //    EXACTLY this content; any foreign push — human or agent — waits for
+  //    a human merge. The kill switch stays live: for intercept-class runs
+  //    the scoped eligibility (raw persisted brief marker + BOTH
+  //    named-competitor gates) is re-checked at this last instant, so
+  //    unsetting GATE_NAMED_COMPETITOR_AUTOPUBLISH (or
+  //    GATE_NAMED_COMPETITOR_COMPARISON) stops an already-open PR.
+  //    Ordinary (non-competitor, non-intercept, non-approved) runs keep the
+  //    pre-existing green-build + Codex-clear auto-merge unchanged.
+  if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
+    let verdictFlagged = true; // fail closed until a valid verdict is read
+    let approvedShaOk = false;
+    let pinnedShaOk = false;
+    let approvedAt = null;
+    let briefId = null;
+    try {
+      const fresh = await db('autonomous_runs').where('id', run.id)
+        .first('comparison_table_result', 'draft_payload', 'trust_build_approved_at', 'brief_id');
+      if (fresh) {
+        let ctr = fresh.comparison_table_result;
+        if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
+        // A stored NULL verdict is a valid competitor-free read; missing
+        // row/unparseable stays flagged (fail closed).
+        if (ctr !== undefined) verdictFlagged = Boolean(ctr && ctr.requiresHumanReview === true);
+        let dp = fresh.draft_payload;
+        if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        const headSha = String(pr.head?.sha || '').toLowerCase();
+        const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
+        pinnedShaOk = Boolean(pinned && headSha && pinned === headSha);
+        approvedAt = fresh.trust_build_approved_at || null;
+        const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+        approvedShaOk = Boolean(approvedAt && approvedSha && headSha && approvedSha === headSha);
+        briefId = fresh.brief_id || null;
+      }
+    } catch (_) {
+      verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
+    }
+    // The SHA pin is UNIVERSAL on these lanes (PR r14 P1): even a
+    // competitor-free run's head could gain named-competitor content
+    // through a later direct push, so EVERY unattended merge requires a
+    // publisher-produced (or human-approved) commit — a foreign push always
+    // waits for a human. In-flight pre-deploy runs without a stamp withhold
+    // once and get a manual merge. The named-competitor ELIGIBILITY
+    // recheck, by contrast, keys only on the persisted competitor verdict /
+    // approval of THIS run — never intercept provenance alone (PR r13 P1: a
+    // competitor-free intercept refresh publishes through the ordinary
+    // trust-build path, and eligibility rightly rejects the refresh
+    // action).
+    if (!pinnedShaOk && !approvedShaOk) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: head ${pr.head?.sha || 'unknown'} is not a publisher-pinned or human-approved commit — PR left open for a human decision`);
+      return { pending: true, reason: 'publisher_head_pin_failed' };
+    }
+    if (verdictFlagged && !approvedShaOk) {
+        // Kill-switch recheck for runs that actually carried
+        // named-competitor content: scoped eligibility from the brief row's
+        // RAW persisted marker only (PR r11 + r13 P1s — no
+        // _loadReviewedBrief: its latest-for-opportunity fallback and
+        // signal_metadata backfill could each let a later intercept payload
+        // authorize this PR).
+        let eligible = false;
+        try {
+          let rawBrief = null;
+          if (briefId) {
+            const row = await db('content_briefs').where('id', briefId).first('gsc_signal', 'action_type');
+            if (row) {
+              let gs = row.gsc_signal;
+              if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
+              rawBrief = { action_type: row.action_type, gsc_signal: gs };
+            }
+          }
+          const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
+          eligible = namedCompetitorAutopublishEligible(rawBrief) === true;
+        } catch (_) { eligible = false; }
+        if (!eligible) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
+          return { pending: true, reason: 'named_competitor_autopublish_revoked' };
+      }
+    }
+  }
+
+  // 3.6 Repeat the queue-state re-check: step 3.5 added async work (run +
+  //    brief reads), so an operator requeue/dismiss landing during it must
+  //    still block the merge — only the PR SHA is pinned by the merge call
+  //    itself, not the queue decision.
+  if (!(await queueRowStillParked(run))) {
+    logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during head-gate checks (operator action)`);
+    return { pending: true, reason: 'queue_row_moved_during_gating' };
+  }
+
   // 4. The merge itself is pinned to the head commit the gates above were
   //    checked against: GitHub rejects with 409 if the branch received
   //    another push while the merge call was in flight, so an unbuilt/

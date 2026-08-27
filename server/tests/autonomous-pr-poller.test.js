@@ -20,6 +20,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/content-astro/github-client', () => ({
   getPr: jest.fn(),
   mergePr: jest.fn(),
+  listPrFiles: jest.fn(),
+  getFile: jest.fn(),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -33,6 +35,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
   planInternalLinksForTarget: jest.fn(),
+  resolveExistingAstroFileForTarget: jest.fn(),
   internalLinkPlanningDisabled: jest.fn(() => false),
   // REAL routing helpers: deriveBlogRouteUrl must stay bound to the exact
   // slug/category composition the publisher stamps, so the fallback tests
@@ -101,7 +104,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0 } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0, runFirst } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -145,9 +148,27 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
           return Promise.resolve(queueRows.find((r) => r.id === q._filters.id) || null);
         }
         if (table === 'content_briefs') {
-          return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
+          if (q._filters.id !== undefined) return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
+          // latest-for-opportunity fallback lookup in _loadReviewedBrief
+          if (q._filters.opportunity_id !== undefined) return Promise.resolve(briefs.find((r) => r.opportunity_id === q._filters.opportunity_id) || null);
+          return Promise.resolve(null);
         }
-        // newer-sibling lookup in queueRowParkedState
+        // by-id lookup (the publisher-head-pin gate's fresh read) —
+        // defaults to an UNGOVERNED row (competitor-free verdict, no pin,
+        // no approval, no brief) so unrelated merge tests keep the
+        // pre-existing auto-merge behavior; the newer-sibling lookup in
+        // queueRowParkedState filters by opportunity_id instead.
+        if (table === 'autonomous_runs' && q._filters.id !== undefined) {
+          // Default: an ungoverned run whose head IS the publisher-pinned
+          // commit (the pin is UNIVERSAL on these lanes — PR r14), so the
+          // pre-existing merge tests keep merging.
+          return Promise.resolve(runFirst !== undefined ? runFirst : {
+            comparison_table_result: null,
+            draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }),
+            trust_build_approved_at: null,
+            brief_id: null,
+          });
+        }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
       }),
@@ -668,6 +689,225 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  // Owner directive 2026-08-26: the pre-merge named-competitor gate runs the
+  // deterministic comparison gate against the CURRENT HEAD's blog files (not
+  // a stored verdict — a remediation/human push moves the head), and a head
+  // that names competitors merges only while the scoped autopublish
+  // eligibility (TRUE-intercept marker + both gates) holds RIGHT NOW.
+  function greenMergePath() {
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+  }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  // Publisher-head pin (owner directive 2026-08-26, PR #3508 r12 redesign):
+  // a named-competitor-governed run auto-merges ONLY when pr.head.sha is a
+  // commit the publisher produced (draft_payload.autopublish_head_sha) or a
+  // human approved (trust_build_approved_head_sha) — any foreign push waits
+  // for a human. Intercept-class runs additionally re-check the scoped
+  // eligibility (raw brief marker + both gates) at the last instant.
+  function governedRun({ pin = 'HEADSHA1', approvedAt = null, approvedSha = null, verdict = { pass: true, findings: [], requiresHumanReview: true }, briefId = 'brief-1' } = {}) {
+    return {
+      comparison_table_result: verdict,
+      draft_payload: JSON.stringify({
+        ...(pin ? { autopublish_head_sha: pin } : {}),
+        ...(approvedSha ? { trust_build_approved_head_sha: approvedSha } : {}),
+      }),
+      trust_build_approved_at: approvedAt,
+      brief_id: briefId,
+    };
+  }
+  const INTERCEPT_BRIEFS = [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept: true } }];
+
+  function withGatesOn(fn) {
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    return fn().finally(() => fg.isEnabled.mockRestore());
+  }
+
+  test('governed run: publisher-pinned head + eligibility → auto-merges', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
+      greenMergePath();
+      gh.mergePr.mockResolvedValue({ merged: true });
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+      const res = await poller.pollPending();
+
+      expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+    });
+  });
+
+  test('governed run: a FOREIGN head (pin mismatch) is withheld even with eligibility (PR r12)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ pin: 'publishersha' }) });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    });
+  });
+
+  test('governed run with NO pin at all is withheld (legacy/unstamped rows never auto-merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    await withGatesOn(async () => {
+      setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun({ pin: null }) });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    });
+  });
+
+  test('governed run: pinned head but a kill switch is OFF → withheld (revoke works on open PRs)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun({ brief_id: 'brief-1' })], briefs: INTERCEPT_BRIEFS, runFirst: governedRun() });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('HUMAN-APPROVED head merges without eligibility while it matches; a later push is withheld (PR r1+r7)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: null, briefId: null, approvedAt: '2026-08-27T04:00:00Z', approvedSha: 'HEADSHA1' }),
+    });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+
+    // Same approval, moved head → withheld.
+    jest.clearAllMocks();
+    pagesPoll.liveUrlResponds.mockResolvedValue(true);
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+    setupDb({
+      pending: [makeRun()],
+      runFirst: governedRun({ pin: null, briefId: null, approvedAt: '2026-08-27T04:00:00Z', approvedSha: 'olderapprovedsha' }),
+    });
+    greenMergePath();
+
+    const res2 = await poller.pollPending();
+    expect(res2.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a COMPETITOR-FREE intercept run (ordinary trust-build path, pinned head) keeps the ordinary auto-merge — no eligibility demanded (PR r13 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
+      briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
+    });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('a competitor-free run whose head is NOT the pinned commit is withheld — the pin is universal on these lanes (PR r14 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun()],
+      runFirst: { comparison_table_result: null, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
+    });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an UNGOVERNED run (competitor-free verdict, no intercept brief, no approval) with a pinned head keeps the ordinary auto-merge', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('an UNREADABLE run row on a governed lane fails closed (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()], runFirst: null });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('flag on + green head build but Codex NOT clear: no merge', async () => {

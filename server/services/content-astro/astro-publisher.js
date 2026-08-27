@@ -131,6 +131,14 @@ function syncDraftPublishTarget(draft, frontmatter) {
   if (draft && draft.frontmatter && typeof draft.frontmatter === 'object' && !Array.isArray(draft.frontmatter)) {
     if (frontmatter.canonical) draft.frontmatter.canonical = frontmatter.canonical;
     if (Array.isArray(frontmatter.domains)) draft.frontmatter.domains = [...frontmatter.domains];
+    // tracking is publisher-normalized too (stampBlogDomains rewrites
+    // tracking.domains): the poller's merge gate compares the head's
+    // targeting fields against this persisted draft, so an unsynced
+    // tracking would flag the publisher's OWN normalized head as drift and
+    // deadlock a green PR (PR #3508 r8 P1).
+    if (frontmatter.tracking && typeof frontmatter.tracking === 'object' && !Array.isArray(frontmatter.tracking)) {
+      draft.frontmatter.tracking = { ...frontmatter.tracking };
+    }
   }
   return draft;
 }
@@ -1195,6 +1203,9 @@ async function publishAstro(postId) {
       // auto-merge when true, so competitor-naming posts always get a
       // human merge. Explicit false otherwise — a republish of a post
       // whose competitor mentions were edited out clears an old stamp.
+      // (GATE_NAMED_COMPETITOR_AUTOPUBLISH deliberately does NOT reach this
+      // lane: publishAstro serves manual/calendar posts with no
+      // operator-intercept provenance, so the human merge stays.)
       astro_requires_human_merge: comparison.requiresHumanReview === true,
       updated_at: new Date(),
     });

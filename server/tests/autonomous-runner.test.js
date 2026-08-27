@@ -1615,6 +1615,15 @@ function loadRunnerWith({
   });
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  // The runner fires the owner email-approval notification via setImmediate
+  // after a pending-review park — the REAL module's require inside that
+  // callback lands after Jest teardown ("import after the Jest environment
+  // has been torn down", hook r12 P1). A resolved no-op keeps the drain
+  // clean; suites asserting notification behavior have their own harness.
+  jest.doMock('../services/content/email-approvals', () => ({
+    notifyParkedRun: jest.fn().mockResolvedValue(undefined),
+    _internals: { draftPreview: jest.fn().mockReturnValue('') },
+  }));
   jest.doMock('../services/content/opportunity-queue', () => queue);
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
@@ -2957,6 +2966,231 @@ describe('runNext post-publish bookkeeping', () => {
       if (previousThreshold === undefined) delete process.env.TRUST_BUILD_THRESHOLD;
       else process.env.TRUST_BUILD_THRESHOLD = previousThreshold;
     }
+  });
+});
+
+// Named-competitor autopublish (owner directive 2026-08-26): a draft whose
+// comparison gate PASSES but names operator-authorized/curated competitors
+// (requiresHumanReview) parks at named_competitor_review by default; with
+// GATE_NAMED_COMPETITOR_AUTOPUBLISH=true it continues down the normal
+// publish path (astro PR → Codex-gated auto-merge) instead. Comparison-gate
+// FAILURES are unaffected either way.
+describe('named-competitor autopublish gate', () => {
+  const SLUG = '/pest-control/taexx-system-comparison/';
+
+  function namedCompetitorScenario({ publisher, comparisonGate, intercept = true }) {
+    const claimedAt = new Date('2026-08-26T05:30:00Z');
+    const queue = {
+      claimNext: jest.fn().mockResolvedValue({
+        id: 'opp_named_1',
+        action_type: 'new_supporting_blog',
+        bucket: 'operator_intercept',
+        claimed_at: claimedAt,
+      }),
+      complete: jest.fn().mockResolvedValue(true),
+      pendingReview: jest.fn().mockResolvedValue(true),
+      release: jest.fn().mockResolvedValue(true),
+      skip: jest.fn().mockResolvedValue(true),
+    };
+    const briefBuilder = {
+      compose: jest.fn().mockResolvedValue({
+        id: 'brief_named_1',
+        action_type: 'new_supporting_blog',
+        page_type: 'supporting-blog',
+        human_review_required: false,
+        // Category/spoke seeds share the bucket and operator_brief payload —
+        // only gsc_signal.intercept marks a TRUE competitor intercept, and
+        // that marker is the autopublish provenance predicate. No slug pin:
+        // the pin path has its own coverage above.
+        gsc_signal: { bucket: 'operator_intercept', intercept },
+        voice_constraints: {
+          operator_brief: {
+            working_title: 'In-Wall Systems Compared for SWFL Homes',
+            primary_kw: 'taexx system review',
+            thesis: 'Compare in-wall systems for SWFL homes.',
+          },
+        },
+      }),
+    };
+    const dispatcher = {
+      runWithBrief: jest.fn().mockResolvedValue({
+        ok: true,
+        draft: {
+          type: 'draft',
+          url: SLUG,
+          title: 'In-Wall Systems Compared for SWFL Homes',
+          frontmatter: {
+            slug: SLUG,
+            canonical: `https://www.wavespestcontrol.com${SLUG}`,
+            title: 'In-Wall Systems Compared for SWFL Homes',
+          },
+          body: 'A sourced comparison of in-wall pest systems for Southwest Florida homes.',
+        },
+      }),
+    };
+    const qualityGate = {
+      evaluate: jest.fn().mockReturnValue({
+        ok: true, hard_failures: [], soft_failures: [], total_score: 100, min_total_score: 80,
+      }),
+    };
+    const runner = loadRunnerWith({
+      queue,
+      briefBuilder,
+      dispatcher,
+      qualityGate,
+      publisher,
+      indexNow: { submit: jest.fn() },
+      linkPlanner: {},
+      contentGuardrails: { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) },
+      // Default: the gate PASSES but flags the named-competitor human-review
+      // signal — the exact shape a validated curated-competitor table
+      // produces. Tests may override with a failing gate. The REAL shared
+      // eligibility predicate rides along — the runner reads it from this
+      // same module (comparison-table-gate owns it).
+      comparisonTableGate: {
+        namedCompetitorAutopublishEligible: jest.requireActual('../services/content/comparison-table-gate').namedCompetitorAutopublishEligible,
+        ...(comparisonGate
+          || { evaluate: jest.fn().mockReturnValue({ pass: true, findings: [], requiresHumanReview: true }) }),
+      },
+    });
+    return { runner, queue, claimedAt };
+  }
+
+  const ENV_KEYS = ['SHADOW_MODE_NEW_SUPPORTING_BLOG', 'TRUST_BUILD_THRESHOLD', 'GATE_NAMED_COMPETITOR_AUTOPUBLISH', 'AUTONOMOUS_CONTENT_BLOG_UNIQUENESS'];
+  let previousEnv;
+  beforeEach(() => {
+    previousEnv = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
+    process.env.SHADOW_MODE_NEW_SUPPORTING_BLOG = 'false';
+    process.env.TRUST_BUILD_THRESHOLD = '0';
+    // Blog-dedup corpus isn't loadable under this harness's db mock; the
+    // uniqueness lane has its own coverage above.
+    process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
+  });
+  afterEach(async () => {
+    // Drain the runner's setImmediate-scheduled notification before Jest
+    // tears the environment down (hook r12 P1).
+    await new Promise((resolve) => { setImmediate(resolve); });
+    for (const k of ENV_KEYS) {
+      if (previousEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = previousEnv[k];
+    }
+  });
+
+  test('gate OFF (default): a clean named-competitor draft still parks at named_competitor_review before the publisher', async () => {
+    delete process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH;
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('gate ON: the same clean draft publishes through the normal astro-PR path', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    const publisher = {
+      publishOrUpdatePage: jest.fn().mockResolvedValue({
+        url: `https://www.wavespestcontrol.com${SLUG}`,
+        status: 'pr_open',
+        live: false,
+        pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/901',
+      }),
+    };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).not.toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+    // PR-open publish → the usual pending-merge park (Codex-gated
+    // auto-merge downstream), NOT a human-review park.
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('astro_pr_pending_merge');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'astro_pr_pending_merge', { claimToken: claimedAt });
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('gate ON also satisfies the trust-build ramp — a clean eligible draft publishes with a NONZERO threshold and no AUTO_PUBLISH env (hook r9 P1)', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    process.env.TRUST_BUILD_THRESHOLD = '5';
+    delete process.env.AUTO_PUBLISH_NEW_SUPPORTING_BLOG;
+    const publisher = {
+      publishOrUpdatePage: jest.fn().mockResolvedValue({
+        url: `https://www.wavespestcontrol.com${SLUG}`,
+        status: 'pr_open',
+        live: false,
+        pr_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/902',
+      }),
+    };
+    const { runner, queue } = namedCompetitorScenario({ publisher });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).not.toMatch(/^trust_build_/);
+    expect(result.skip_reason).not.toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).toHaveBeenCalledTimes(1);
+    expect(result.skip_reason).toBe('astro_pr_pending_merge');
+    expect(queue.release).not.toHaveBeenCalled();
+  });
+
+  test('autopublish is scoped to the TRUE-intercept marker — a category/spoke seed (shared bucket + operator_brief, intercept:false) still parks (hook r3 P1)', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher, intercept: false });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
+  });
+
+  test('autopublish requires namedCompetitorComparison too — comparison flag OFF keeps the review park (hook P1)', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner, queue, claimedAt } = namedCompetitorScenario({ publisher });
+    // Non-prod feature-gates pins namedCompetitorComparison true, so flip it
+    // at the isEnabled seam (same fresh module instance the runner reads).
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      g === 'namedCompetitorComparison' ? false : realIsEnabled(g)));
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('completed_pending_review');
+    expect(result.skip_reason).toBe('named_competitor_review');
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_named_1', 'named_competitor_review', { claimToken: claimedAt });
+    fg.isEnabled.mockRestore();
+  });
+
+  test('gate ON never rescues a comparison-gate FAILURE', async () => {
+    process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH = 'true';
+    const publisher = { publishOrUpdatePage: jest.fn() };
+    const { runner } = namedCompetitorScenario({
+      publisher,
+      // Autopublish only lifts the review park on a PASSING draft — a P0
+      // finding must still keep the draft away from the publisher.
+      comparisonGate: {
+        evaluate: jest.fn().mockReturnValue({
+          pass: false,
+          findings: [{ severity: 'P0', code: 'COMPARISON_DISPARAGEMENT', message: 'disparagement' }],
+          requiresHumanReview: false,
+        }),
+      },
+    });
+
+    const result = await runner.runNext();
+
+    expect(publisher.publishOrUpdatePage).not.toHaveBeenCalled();
+    expect(result.outcome).not.toBe('completed_published');
+    expect(result.skip_reason).not.toBe('astro_pr_pending_merge');
   });
 });
 

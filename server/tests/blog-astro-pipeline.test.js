@@ -1885,6 +1885,29 @@ describe('publishAstro stamps astro_requires_human_merge (audit lane 4b)', () =>
       astro_requires_human_merge: true,
     }));
   });
+
+  test('namedCompetitorAutopublish never reaches this lane — the stamp stays TRUE even with the flag on (manual/calendar posts keep their human merge)', async () => {
+    // Owner directive 2026-08-26 scopes autopublish to operator-intercept
+    // runs; publishAstro serves manual/calendar posts with no such
+    // provenance, so the human-merge stamp is unconditional here.
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    const featureGates = require('../config/feature-gates');
+    const realIsEnabled = featureGates.isEnabled;
+    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => (
+      g === 'namedCompetitorAutopublish' ? true : realIsEnabled(g)));
+    const read = chain({ first: jest.fn().mockResolvedValue(plainPost()) });
+    const update = chain();
+    const queries = [read, update];
+    db.mockImplementation(() => queries.shift() || chain());
+
+    await AstroPublisher.publishAstro('post-1');
+
+    expect(update.update).toHaveBeenCalledWith(expect.objectContaining({
+      astro_status: 'pr_open',
+      astro_requires_human_merge: true,
+    }));
+  });
 });
 
 describe('Astro publisher idempotency guard', () => {
@@ -2461,6 +2484,24 @@ describe('compressToWebp (hero LCP optimization)', () => {
     const meta = await sharp(webp).metadata();
     expect(meta.format).toBe('webp');
     expect(meta.width).toBeLessThanOrEqual(1600);
+  });
+});
+
+describe('syncDraftPublishTarget mirrors publisher-normalized targeting', () => {
+  test('canonical, domains AND tracking are written back to the persisted draft (PR #3508 r8 P1)', () => {
+    const draft = { frontmatter: { canonical: 'https://hub/old/', tracking: { domains: ['stale.example'] } } };
+    const resolved = {
+      canonical: 'https://www.wavespestcontrol.com/blog/x/',
+      domains: ['wavespestcontrol.com'],
+      tracking: { domains: ['wavespestcontrol.com'] },
+    };
+    AstroPublisher._internals.syncDraftPublishTarget(draft, resolved);
+    // The poller's merge gate compares the head against this persisted
+    // draft — an unsynced tracking would flag the publisher's own
+    // normalized head as drift and deadlock a green PR.
+    expect(draft.frontmatter.canonical).toBe(resolved.canonical);
+    expect(draft.frontmatter.domains).toEqual(['wavespestcontrol.com']);
+    expect(draft.frontmatter.tracking).toEqual({ domains: ['wavespestcontrol.com'] });
   });
 });
 

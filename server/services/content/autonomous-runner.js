@@ -959,12 +959,46 @@ class AutonomousRunner {
     // publishing guards + daily/weekly caps downstream still apply.
     const autoPublish = autoPublishEnabled(run.action_type);
     const trustBuildCount = await this._getTrustBuildCount(run.action_type).catch(() => 0);
-    // A named-competitor comparison is never auto-publish-eligible: even with
-    // trust built / AUTO_PUBLISH on, it must clear human review first (legal/
-    // brand surface). It still uses the approvable trust-build review path.
-    const forceNamedCompetitorReview = run.comparison_requires_review === true;
+    // A named-competitor comparison routes to human review (legal/brand
+    // surface) UNLESS namedCompetitorAutopublish is on AND the run carries
+    // OPERATOR-INTERCEPT provenance (owner directive 2026-08-26: the
+    // intercept lane is fully autonomous — a CLEAN draft publishes; gate
+    // failures still block/park exactly as before). Provenance uses the
+    // canonical TRUE-intercept marker gsc_signal.intercept (stamped by the
+    // brief builder from opportunity.signal_metadata.intercept_brief) — NOT
+    // the operator_intercept bucket or operator_brief payload, which
+    // category/spoke seeds share (hook r3 P1). The owner's per-competitor
+    // authorization recorded in that intercept brief IS the human sign-off
+    // the review park would collect, given in advance; a PASSING draft can
+    // only name competitors that are curated-allowlisted (machine-validated
+    // per cell) or operator-authorized by that brief's own text — anything
+    // else P0-blocks in the comparison gate — and sourcing is still
+    // enforced by the fact-check gate and Codex on the PR. A
+    // named-competitor draft WITHOUT the marker keeps the review path
+    // regardless of the flag. Autopublish also requires
+    // namedCompetitorComparison — the autopublish flag alone never lifts a
+    // park. Gate reads fail CLOSED: an unreadable flag keeps the review
+    // park. With autopublish off (or out of scope) the run still uses the
+    // approvable trust-build review path.
+    // The predicate is the SHARED one in comparison-table-gate — the
+    // remediation parks and the poller's merge gate make the identical
+    // decision from the same function (PR #3508 r4 P1).
+    let namedCompetitorAutopublish = false;
+    try {
+      namedCompetitorAutopublish = require('./comparison-table-gate')
+        .namedCompetitorAutopublishEligible(brief) === true;
+    } catch (_) { namedCompetitorAutopublish = false; }
+    const forceNamedCompetitorReview = run.comparison_requires_review === true
+      && !namedCompetitorAutopublish;
+    // A named-competitor run the scoped eligibility cleared also satisfies
+    // the general trust-build ramp (hook r9 P1): the owner directive is a
+    // no-human-queue lane, and eligibility only applies when the comparison
+    // gate flagged the run (comparison_requires_review) — plain drafts keep
+    // the ordinary autoPublish/trust-count ramp.
     const trustBuildSatisfied = !forceNamedCompetitorReview
-      && (autoPublish || trustBuildCount >= TRUST_BUILD_THRESHOLD);
+      && (autoPublish
+        || (namedCompetitorAutopublish && run.comparison_requires_review === true)
+        || trustBuildCount >= TRUST_BUILD_THRESHOLD);
     run.trust_build_count_after = trustBuildCount + (gatesPass ? 1 : 0);
 
     // 7. Decide outcome.
@@ -2868,6 +2902,17 @@ class AutonomousRunner {
     }
 
     const published = !!patch.published_url;
+    // Bind the approval to the exact COMMIT the approved publish created
+    // (PR #3508 r7 + r12 P1s): the poller's merge gate honors
+    // trust_build_approved_at ONLY when the PR head still equals this SHA —
+    // a later push (even comparison-gate-clean copy) needs a fresh
+    // sign-off. Stamped from the publisher's own commit response, never a
+    // later mutable-head read (a push landing between createPr and a head
+    // lookup could otherwise be blessed). Absent SHA fails CLOSED at the
+    // poller (the PR waits for a human merge).
+    if (!published && patch.commit_sha && draft) {
+      draft.trust_build_approved_head_sha = patch.commit_sha;
+    }
     // _publishAndDistribute mutates draft.frontmatter with the published
     // canonical/domains; persist the mutated draft so the PR poller can resolve
     // the merge target from draft_payload.frontmatter.canonical (A5). Stamp
@@ -2893,9 +2938,17 @@ class AutonomousRunner {
       await db('autonomous_runs').where('id', run.id).update(runUpdate);
     } catch (err) {
       logger.error(`[autonomous-runner] named-competitor run persist failed (run ${run.id}); writing reconcilable fallback: ${err.message}`);
+      // The approval marker MUST survive the fallback: the PR poller's
+      // named-competitor merge gate reads trust_build_approved_at, and a
+      // fallback row without it would strand this human-approved PR at
+      // named_competitor_autopublish_revoked forever (PR #3508 r2 P2).
+      const approvalStamp = {
+        trust_build_approved_at: baseUpdate.trust_build_approved_at,
+        trust_build_approved_by: baseUpdate.trust_build_approved_by,
+      };
       const fallback = published
-        ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() }
-        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() };
+        ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
+        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
       await db('autonomous_runs').where('id', run.id).update(fallback)
         .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
     }
@@ -3205,6 +3258,15 @@ class AutonomousRunner {
       out.pending_url = isLive ? null : (r?.url || draft.url || null);
       out.publish_status = r?.status || (isLive ? 'live' : (r?.pr_url ? 'pr_open' : null));
       out.astro_pr_url = r?.pr_url || null;
+      out.commit_sha = r?.commit_sha || null;
+      // Pin the PR poller's unattended merge to the EXACT commit this
+      // publish created (PR #3508 r12): the persisted draft_payload carries
+      // it, and the named-competitor merge gate refuses any head the
+      // publisher (or its remediation) did not produce. Stamped from the
+      // publisher's own commit response — never a later mutable-head read.
+      if (r?.commit_sha && draft && typeof draft === 'object') {
+        draft.autopublish_head_sha = r.commit_sha;
+      }
     } else {
       throw new Error('astro-publisher draft/brief adapter unavailable');
     }

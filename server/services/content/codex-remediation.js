@@ -66,6 +66,27 @@ const MAX_ROUNDS = Math.max(1, parseInt(process.env.CODEX_REMEDIATION_MAX_ROUNDS
 const ASTRO_BLOG_DIR = 'src/content/blog';
 const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connector[bot]']);
 
+// Owner directive 2026-08-26: the SINGLE scoped named-competitor autopublish
+// eligibility predicate lives in comparison-table-gate (PR #3508 r4 P1) —
+// every call site (runner, both remediation parks, the PR poller's merge
+// gate) imports it from there.
+const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
+
+// RAW eligibility load (PR #3508 r11 + r13 P1s): only the brief row's own
+// PERSISTED gsc_signal marker counts for the autopublish decision —
+// _loadReviewedBrief's latest-for-opportunity fallback AND its
+// synthesize-from-current-signal_metadata backfill could each let a later
+// intercept payload authorize a run it never produced. Marker-less legacy
+// briefs are simply ineligible (fail closed).
+async function rawEligibilityBrief(db, briefId) {
+  if (!briefId) return null;
+  const row = await db('content_briefs').where({ id: briefId }).first('gsc_signal', 'action_type');
+  if (!row) return null;
+  let gs = row.gsc_signal;
+  if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
+  return { action_type: row.action_type, gsc_signal: gs };
+}
+
 function remediationEnabled() {
   const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
@@ -693,7 +714,16 @@ async function validateFixedBlogFile(markdown, opts = {}, deps = {}) {
 
   let namedCompetitorEnabled = false;
   try { namedCompetitorEnabled = require('../../config/feature-gates').isEnabled('namedCompetitorComparison') === true; } catch (_) { namedCompetitorEnabled = false; }
-  const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, { namedCompetitorEnabled });
+  // Operator authorization rides guardContext from the autonomous lane
+  // (hook r9 P1): without it a competitor the intercept brief itself
+  // authorizes — but which is absent from the curated allowlist — P0s as
+  // COMPARISON_UNKNOWN_COMPETITOR here, before the run-context revalidation
+  // that knows the authorization ever runs. Scheduler lane passes none →
+  // unchanged (stricter) behavior.
+  const comparison = comparisonTableGate.evaluate({ body, frontmatter: data }, {
+    namedCompetitorEnabled,
+    operatorBriefText: (typeof runContext.operatorBriefText === 'string' && runContext.operatorBriefText) || null,
+  });
   if (!comparison.pass) {
     const blocking = (comparison.findings || []).filter((f) =>
       (f.severity === 'P0' || f.severity === 'P1') && f.code !== 'COMPARISON_UNCLASSIFIED_OPTION');
@@ -1162,8 +1192,17 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       const codes = (((comparisonResult && comparisonResult.findings) || []).filter((f) => f.severity === 'P0' || f.severity === 'P1')).map((f) => f.code);
       return { ok: false, reason: `run-context comparison gate: ${codes.join(',') || 'no result'}` };
     }
+    // Owner directive 2026-08-26: an opted-in TRUE-intercept run continues —
+    // the same scoped eligibility the runner applies at its review-park
+    // decision (fail-closed: no marker / gates off → park as before).
+    // Eligibility binds to the run's EXACT brief via the RAW persisted
+    // marker (PR r11 + r13 P1s — see rawEligibilityBrief).
     if (comparisonResult.requiresHumanReview === true) {
-      return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+      let strictBrief = null;
+      try { strictBrief = await rawEligibilityBrief(db, run.brief_id); } catch (_) { strictBrief = null; }
+      if (!namedCompetitorAutopublishEligible(strictBrief)) {
+        return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+      }
     }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless
@@ -1228,7 +1267,11 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       return { ok: false, reason: `pre-publish visibility: ${(visResult && (visResult.error || JSON.stringify((visResult.findings || []).map((f) => f.code)).slice(0, 200))) || 'no result'}` };
     }
 
-    return { ok: true };
+    // comparisonResult rides along so the autonomous caller can persist THIS
+    // fix's verdict atomically with the head re-pin (PR r13 P1): merge
+    // governance reads the run's comparison_table_result, and a fix that
+    // INTRODUCES a named competitor must flip the run to governed.
+    return { ok: true, comparisonResult };
   } catch (err) {
     return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };
   }
@@ -1468,6 +1511,17 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const {
     prNumber, branch, slug = null, service = null, factContext = null,
     operatorFaqException = false, guardContext = null,
+    // Owner directive 2026-08-26: TRUE only when the caller verified
+    // operator-intercept provenance AND both named-competitor gates
+    // (namedCompetitorAutopublish + namedCompetitorComparison) — lets a fix
+    // on an opted-in intercept PR continue past the named-competitor park
+    // below. Fail-closed default: no caller opt-in → park as before.
+    namedCompetitorAutopublish = false,
+    // When set (autonomous pinned lanes), the freshly fetched PR head must
+    // still equal this SHA before any fix is built — a push landing after
+    // the caller's parent check must not have its unrelated changes blessed
+    // by the post-fix re-pin (PR r16 P1).
+    expectedParentSha = null,
     onPark = null, revalidateFix = null, onRemediated = null, prePushCheck = null,
   } = ctx;
   if (!prNumber || !branch) return { skipped: true, reason: 'missing PR/branch' };
@@ -1477,6 +1531,9 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const pr = await gh.getPr(prNumber);
   if (!pr || pr.state !== 'open') return { skipped: true, reason: `PR ${pr && pr.state ? pr.state : 'missing'}` };
   const headSha = pr.head && pr.head.sha ? pr.head.sha : null;
+  if (expectedParentSha && String(headSha || '').toLowerCase() !== String(expectedParentSha).toLowerCase()) {
+    return { skipped: true, reason: 'pr head moved off the pinned parent during remediation — foreign parent needs a human decision' };
+  }
 
   if (state.status === 'closed') {
     // A 'closed' tombstone can go stale: PRs can be REOPENED, and this code
@@ -1741,10 +1798,16 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   try { originalMetaDescription = ((fm.parse(file.content) || {}).data || {}).meta_description; } catch (_) { originalMetaDescription = undefined; }
   const gate = await validate(fixed, { service, factContext, operatorFaqException, guardContext, originalMetaDescription }, deps);
   if (!gate || !gate.ok) return park(db, prNumber, `fix failed content gates: ${gate && gate.reason}`, onPark, headSha, PARK_PRE_PUSH);
-  // A passing fix that INTRODUCES a named-competitor comparison still needs a
-  // human: the merge stamps enforcing that sign-off (astro_requires_human_merge
-  // / named_competitor_review) predate the fix and are never restamped here.
-  if (gate.requiresHumanReview === true) {
+  // A passing fix that carries named-competitor content still needs a human:
+  // the merge stamps enforcing that sign-off (astro_requires_human_merge /
+  // named_competitor_review) predate the fix and are never restamped here.
+  // Exception (owner directive 2026-08-26): an operator-intercept run under
+  // GATE_NAMED_COMPETITOR_AUTOPUBLISH continues — the same scoped eligibility
+  // the runner applies at its review-park decision, threaded in by the
+  // autonomous caller (fail-closed: absent flag parks). Without it, every
+  // remediation round on an opted-in intercept PR would re-enter the human
+  // queue the lane no longer has.
+  if (gate.requiresHumanReview === true && namedCompetitorAutopublish !== true) {
     return park(db, prNumber, 'fix introduces named-competitor content (requires human sign-off)', onPark, headSha, PARK_PRE_PUSH);
   }
 
@@ -1784,6 +1847,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // blog_posts.content still pre-fix, and a later republish resurrects it.
   // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
   // non-empty value, so the hold is live from here on.
+  // Last-instant parent recheck (PR r17 P1): the LLM + gate passes above
+  // take real time, and a foreign push touching ANOTHER file advances the
+  // branch without invalidating the target file's blob SHA — the Contents
+  // API would then create this fix on the foreign tip and onRemediated
+  // would pin it. Re-read the live branch head right before the hold/push;
+  // an unreadable or moved head skips (fail closed).
+  if (expectedParentSha) {
+    let liveHead = null;
+    try { liveHead = await gh.getBranchSha(branch); } catch (_) { liveHead = null; }
+    if (String(liveHead || '').toLowerCase() !== String(expectedParentSha).toLowerCase()) {
+      return { skipped: true, reason: 'branch advanced off the pinned parent during remediation — foreign parent needs a human decision' };
+    }
+  }
   const armed = await armPushHold(db, prNumber, branch, headSha);
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 
@@ -1815,6 +1891,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   const newHead = (commit && commit.commit && commit.commit.sha)
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
+
+  // Parent CAS (PR r18 P1): putFile only CAS-checks the target FILE's blob,
+  // so a foreign push touching another file in the tip-read→putFile window
+  // still becomes this commit's parent. The Contents API returns the created
+  // commit's parents — on the pinned lanes the fix commit's parent MUST be
+  // the pinned parent, or the re-pin would bless every foreign change.
+  // Missing parent info fails closed. The commit already exists on the
+  // branch, so this parks post-push for a human instead of skipping.
+  if (expectedParentSha) {
+    const newParent = String(commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
+    if (newParent !== String(expectedParentSha).toLowerCase()) {
+      return park(db, prNumber, `fix commit ${shortSha(newHead)} landed on a foreign parent (${newParent ? shortSha(newParent) : 'unknown'} != pinned ${shortSha(expectedParentSha)}) — human reconciliation required`, onPark, newHead || headSha, PARK_POST_PUSH);
+    }
+  }
 
   // Record the round the INSTANT the push lands, before any post-push
   // revalidation that can park. Previously this lived at the end of the
@@ -2120,6 +2210,30 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   if (!remediationEnabled()) return { skipped: true, reason: 'disabled' };
   const revalidate = deps.validateAutonomousRunGates || validateAutonomousRunGates;
   const db = deps.db || dbDefault;
+  // Foreign-parent guard (PR #3508 r15 P1): remediation fixes ONE file and
+  // re-pins the resulting commit as trusted — so it may only build on a
+  // head that is ALREADY publisher-pinned or human-approved. Remediating on
+  // top of a foreign push would bless every unrelated change that push
+  // carried (JS, config, assets, other content). Missing/unparseable
+  // payload or a mismatched head skips remediation (fail closed: the PR
+  // waits for a human; the universal merge pin withholds it anyway).
+  let expectedParentSha = null;
+  if (run && run.id && (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page')) {
+    let parentOk = false;
+    try {
+      const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+      let dp = fresh ? fresh.draft_payload : undefined;
+      if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+      const headSha = String(pr?.head?.sha || '').toLowerCase();
+      const pinned = String(dp?.autopublish_head_sha || '').toLowerCase();
+      const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+      if (headSha && pinned && pinned === headSha) { parentOk = true; expectedParentSha = pinned; }
+      else if (headSha && fresh?.trust_build_approved_at && approvedSha && approvedSha === headSha) { parentOk = true; expectedParentSha = approvedSha; }
+    } catch (_) { parentOk = false; }
+    if (!parentOk) {
+      return { skipped: true, reason: 'pr head is not a publisher-pinned or human-approved commit — remediation withheld (foreign parent needs a human decision)' };
+    }
+  }
   // Derive the publish path's narrow operator-FAQ exception from the run's
   // opportunity + brief via the SAME runner derivation the run-context gate
   // uses — an intercept post on a FAQ-blocked service carries its FAQ by
@@ -2130,6 +2244,12 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   // missing row or lookup failure stays false, which only parks (stricter),
   // never merges.
   let operatorFaqException = false;
+  // Owner directive 2026-08-26: scoped named-competitor autopublish
+  // eligibility for the park in runRemediationForPr — see
+  // namedCompetitorAutopublishEligible (TRUE-intercept marker + both
+  // gates). Fail-closed: any lookup/derivation failure leaves it false and
+  // the park stands.
+  let namedCompetitorAutopublish = false;
   // Full run-context for the preflight gate: the static frontmatter-derived
   // evaluate would P0 brief-mandated links, checked-existing routes, and
   // refresh-grandfathered content the run-context gate allows — the preflight
@@ -2151,13 +2271,31 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
         guardContext = {
           ...guardOptions,
           checkedExistingRoutes: Array.isArray(dp?.checked_existing_routes) ? dp.checked_existing_routes : [],
+          // Operator competitor authorization for the preflight comparison
+          // gate — same derivation the run-context revalidation uses.
+          operatorBriefText: (runner._internals && typeof runner._internals.operatorBriefTextForComparisonGate === 'function')
+            ? runner._internals.operatorBriefTextForComparisonGate(opp, brief)
+            : null,
         };
+        // Eligibility binds to the run's EXACT brief via the RAW persisted
+        // marker (PR r11 + r13 P1s — see rawEligibilityBrief).
+        try {
+          namedCompetitorAutopublish = namedCompetitorAutopublishEligible(await rawEligibilityBrief(db, fullRun.brief_id));
+        } catch (_) { namedCompetitorAutopublish = false; }
       }
     }
   } catch (e) {
     logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
   }
+  // The comparison verdict of the LAST successful gate re-run, captured so
+  // onRemediated can persist it atomically with the head pin (PR r13 P1).
+  let lastComparisonVerdict = null;
   return runRemediationForPr({
+    // TOCTOU guard (PR r16 P1): runRemediationForPr re-fetches the PR — its
+    // freshly read head must still equal the pinned parent verified above,
+    // or a push landing in between would have its unrelated changes blessed
+    // by the re-pin.
+    expectedParentSha,
     guardContext,
     prNumber: pr && pr.number,
     branch: pr && pr.head && pr.head.ref,
@@ -2170,6 +2308,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // this keeps the invariant local instead of relying on that gate.)
     restampPublished: (run && run.action_type) === 'new_supporting_blog',
     operatorFaqException,
+    namedCompetitorAutopublish,
     // Surface the park on the run itself: the run stays parked at
     // completed_pending_review (status='parked' stops re-remediation until a
     // new head re-arms), and without this note the ONLY record of why lived
@@ -2192,13 +2331,65 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
+    // Re-pin the run to THIS fix commit (PR r12): the poller's merge gate
+    // only auto-merges publisher-produced heads
+    // (draft_payload.autopublish_head_sha), and the remediation push is the
+    // new publisher output — its own gate pipeline (validateFixedBlogFile +
+    // validateAutonomousRunGates, eligibility included) just vetted it. A
+    // throw here post-push-parks the PR (fail closed: an unpinned fix head
+    // must wait for a human, never merge unverified).
     onRemediated: run && run.id
-      ? ({ frontmatterChanges }) => mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges)
+      ? async ({ frontmatterChanges, newHead }) => {
+        // Re-pin + verdict persist, ATOMICALLY (PR r13 P1): merge governance
+        // reads comparison_table_result, so a fix that INTRODUCES a named
+        // competitor must land its flagged verdict in the same update as
+        // the head pin — a stale competitor-free verdict would leave the
+        // run ungoverned and skip the kill-switch recheck entirely.
+        // EVERY re-pin failure THROWS (PR r16 P1) — the merge pin is
+        // universal on these lanes, so an unpinned head (flagged or clean)
+        // would strand the PR at publisher_head_pin_failed while this
+        // return reported success; the throw post-push-parks it instead
+        // (retryable: a new head re-arms remediation).
+        if (newHead) {
+          try {
+            const fresh = await db('autonomous_runs').where({ id: run.id }).first();
+            if (!fresh) throw new Error('run row missing');
+            let dp = fresh.draft_payload;
+            if (typeof dp === 'string') dp = JSON.parse(dp);
+            const next = (dp && typeof dp === 'object') ? dp : {};
+            next.autopublish_head_sha = newHead;
+            const update = { draft_payload: JSON.stringify(next), updated_at: new Date() };
+            if (lastComparisonVerdict) {
+              // The competitor-bypass marker is STICKY (PR r15 P1): a run
+              // that ever carried named-competitor content stays governed —
+              // a fix that removes the mentions must not erase the flag,
+              // or the run would skip the kill-switch recheck despite never
+              // having satisfied the ordinary trust ramp.
+              let prior = fresh.comparison_table_result;
+              if (typeof prior === 'string') { try { prior = JSON.parse(prior); } catch (_) { prior = null; } }
+              const priorFlagged = Boolean(prior && prior.requiresHumanReview === true);
+              update.comparison_table_result = JSON.stringify({
+                ...lastComparisonVerdict,
+                requiresHumanReview: priorFlagged || lastComparisonVerdict.requiresHumanReview === true,
+              });
+            }
+            const stamped = await db('autonomous_runs').where({ id: run.id }).update(update);
+            if (!stamped) throw new Error('update matched no row');
+          } catch (e) {
+            throw new Error(`autopublish re-pin/verdict persist failed after the fix commit: ${e.message}`);
+          }
+        }
+        return mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges);
+      }
       : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
-    revalidateFix: (fixedMarkdown) => revalidate(fixedMarkdown, run, deps),
+    revalidateFix: async (fixedMarkdown) => {
+      const r = await revalidate(fixedMarkdown, run, deps);
+      lastComparisonVerdict = (r && r.ok === true && r.comparisonResult) ? r.comparisonResult : null;
+      return r;
+    },
     // Last-instant queue re-check before the branch push (the poller's check
     // runs BEFORE the LLM round; this one closes the window during it).
     prePushCheck: deps.prePushCheck || null,

@@ -148,8 +148,13 @@ function makeGh(over = {}) {
     async listIssueComments() { return over.issueComments || []; },
     async listPrReviews() { return over.reviews || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
-    async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa' } }; },
-    async getBranchSha() { return 'newcommit999aaa'; },
+    // The created commit's PARENT is the pre-push tip — the r18 parent CAS
+    // requires it to equal the pinned parent on pinned lanes.
+    async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa', parents: [{ sha: over.pushParent || HEAD }] } }; },
+    // Post-push flows read the pushed commit; tests on the PINNED lanes
+    // pass over.preHead so the r17 pre-push parent recheck sees the pinned
+    // parent before the push.
+    async getBranchSha() { return calls.putFile.length ? 'newcommit999aaa' : (over.preHead || 'newcommit999aaa'); },
     async createIssueComment(n, body) { calls.comments.push({ n, body }); if (over.commentThrows) throw new Error('gh 502'); return {}; },
   };
   Object.assign(gh, over.gh || {});
@@ -507,8 +512,10 @@ describe('lane entry points', () => {
 
   test('autonomous lane remediates from the PR object (.mdx) once the run gates re-pass', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb();
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    // onRemediated re-pins draft_payload.autopublish_head_sha (r12) — the
+    // run row must exist for the post-push stamp.
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };
     // getPr returns the same open PR
@@ -526,7 +533,7 @@ describe('lane entry points', () => {
 
   test('autonomous lane with a failing gate re-run -> park, nothing committed', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb();
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
@@ -541,7 +548,7 @@ describe('lane entry points', () => {
 
   test('autonomous lane park annotates the run reviewer_notes with the reason', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note' }] });
+    const db = makeDb({ autonomous_runs: [{ id: 'run-1', reviewer_notes: 'prior note', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
     const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
@@ -666,6 +673,119 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
     expect(r.parked).toBe(true);
     expect(r.reason).toMatch(/named-competitor/);
     expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  // Owner directive 2026-08-26: the autonomous caller may thread a scoped
+  // namedCompetitorAutopublish eligibility (TRUE-intercept marker + both
+  // gates) — the named-competitor park then does not fire and the fix
+  // pushes. Absent/false keeps the park (test above).
+  test('namedCompetitorAutopublish eligibility threaded by the caller lets an intercept fix continue past the named-competitor park', async () => {
+    const gh = makeGh();
+    const r = await runRemediationForPr({ ...CTX, namedCompetitorAutopublish: true }, {
+      db: makeDb(), gh, callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+    });
+    expect(r.parked).toBeUndefined();
+    expect(gh._calls.putFile).toHaveLength(1);
+  });
+
+  test('maybeRemediateAutonomousPr derives that eligibility from the brief TRUE-intercept marker (integration, hook r3 P1)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      const HEAD_SHA = 'abc1234def5678';
+      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) };
+      const harness = (intercept) => {
+        const db = makeDb({
+          autonomous_runs: [runRow],
+          opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
+          // Eligibility reads the brief row's RAW persisted marker (r13).
+          content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept } }],
+        });
+        const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+        const pr = { number: 7, state: 'open', head: { sha: HEAD_SHA, ref: 'content/autonomous-x' } };
+        gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+        const call = maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+          db, gh, callAnthropic: makeCall('FIXED'),
+          // Named-competitor content in the fix: only the threaded
+          // eligibility lets it continue past the park.
+          validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+          validateAutonomousRunGates: async () => ({ ok: true }),
+          autonomousRunner: {
+            _loadReviewedBrief: async () => ({
+              action_type: 'new_supporting_blog',
+              gsc_signal: { bucket: 'operator_intercept', intercept },
+              voice_constraints: { operator_brief: { working_title: 'X' } },
+            }),
+            _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null }),
+          },
+        });
+        return call.then((result) => ({ result, db }));
+      };
+
+      const { result: eligible, db: eligibleDb } = await harness(true);
+      expect(eligible.remediated).toBe(true);
+      // No verdict persistence (PR r3 P2): the poller's merge gate
+      // re-evaluates the current head itself.
+      const stamped = eligibleDb._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      expect(stamped.comparison_table_result).toBeUndefined();
+
+      // Category/spoke seed shape (shared bucket + operator_brief, no
+      // TRUE-intercept marker) still parks.
+      const { result: seed } = await harness(false);
+      expect(seed.parked).toBe(true);
+      expect(seed.reason).toMatch(/named-competitor/);
+    } finally {
+      fg.isEnabled.mockRestore();
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
+  });
+
+  test('a fix that INTRODUCES a named competitor persists its flagged verdict atomically with the head pin (PR r13 P1)', async () => {
+    const prevGate = process.env.AUTONOMOUS_CODEX_REMEDIATION;
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      // Competitor-FREE original verdict on the run; the FIX's fresh gate
+      // run flags requiresHumanReview.
+      const db = makeDb({
+        autonomous_runs: [{
+          id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1',
+          comparison_table_result: JSON.stringify({ pass: true, findings: [], requiresHumanReview: false }),
+          draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }),
+        }],
+        opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
+        content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
+      });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+      const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+      gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+      const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+        db, gh, callAnthropic: makeCall('FIXED'),
+        validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
+        validateAutonomousRunGates: async () => ({ ok: true, comparisonResult: { pass: true, findings: [], requiresHumanReview: true } }),
+        autonomousRunner: {
+          _loadReviewedBrief: async () => ({ action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }),
+          _deriveGuardrailOptions: async () => ({ service: 'pest', domains: null }),
+        },
+      });
+      expect(r.remediated).toBe(true);
+      const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      // The flagged verdict and the new head pin landed in ONE update —
+      // merge governance now treats the run as governed.
+      expect(JSON.parse(row.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+      expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('newcommit999aaa');
+    } finally {
+      fg.isEnabled.mockRestore();
+      process.env.AUTONOMOUS_CODEX_REMEDIATION = prevGate;
+    }
   });
 
   // P2: frontmatter outside the whitelist is immutable — not just slug/canonical/domains.
@@ -888,12 +1008,15 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
 
   test('autonomous lane passes deps.prePushCheck through to the push guard', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let checked = false;
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
-      db: makeDb(), gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      db: makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] }),
+      gh,
+      callAnthropic: makeCall('FIXED'),
+      validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
       prePushCheck: async () => { checked = true; return false; },
     });
@@ -1004,6 +1127,20 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     expect(seenBody.indexOf(TERMITE_FM.meta_description)).toBeGreaterThan(seenBody.indexOf(META_SECTION_MARKER));
   });
 
+  test('validateFixedBlogFile forwards guardContext.operatorBriefText to the preflight comparison gate (hook r9 P1)', async () => {
+    const gateMod = require('../services/content/comparison-table-gate');
+    const spy = jest.spyOn(gateMod, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: false });
+    try {
+      const deps = { factCheckEvaluate: async () => ({ pass: true }), complianceEvaluate: async () => ({ pass: true }) };
+      const opText = 'Authorized competitor: HomeTeam Taexx (https://pestdefense.com/taexx/)';
+      const r = await rem.validateFixedBlogFile(FAQ_MD, { operatorFaqException: true, guardContext: { operatorBriefText: opText } }, deps);
+      expect(r.ok).toBe(true);
+      expect(spy).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ operatorBriefText: opText }));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('runRemediationForPr threads ctx.operatorFaqException into the content-gate re-run', async () => {
     let optsSeen = null;
     const spy = (md, opts) => { optsSeen = opts; return { ok: true }; };
@@ -1020,10 +1157,10 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     try {
       const db = makeDb({
-        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
-      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
@@ -1048,10 +1185,10 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     try {
       const db = makeDb({
-        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' }],
+        autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
-      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
@@ -1078,6 +1215,7 @@ describe('validateAutonomousRunGates', () => {
     id: 'run-1',
     action_type: 'new_supporting_blog',
     opportunity_id: 'opp-1',
+    brief_id: 'brief-1',
     draft_payload: JSON.stringify({ body: 'original body', url: 'https://hub/blog/x/', title: 'T' }),
   };
   // Callers pass whatever their poll SELECT included — the validator must
@@ -1163,6 +1301,33 @@ describe('validateAutonomousRunGates', () => {
     const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
     expect(r.ok).toBe(false);
     expect(r.reason).toMatch(/named-competitor/);
+  });
+
+  test('run-context comparison requiresHumanReview passes for an opted-in TRUE-intercept run (owner directive 2026-08-26)', async () => {
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      const deps = goodDeps();
+      // The canonical TRUE-intercept marker — bucket/operator_brief alone
+      // must NOT qualify (category/spoke seeds share those). Eligibility
+      // reads the brief row's RAW persisted gsc_signal (r13), so the db
+      // carries the marker brief.
+      deps.db._tables.content_briefs = [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }];
+      deps.autonomousRunner._loadReviewedBrief = async () => ({
+        page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
+      });
+      deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
+      const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
+      expect(r.ok).toBe(true);
+      // No verdict persistence anywhere in this validator (PR r3 P2: the
+      // poller's merge gate re-evaluates the current head itself).
+      const row = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+      expect(row.comparison_table_result).toBeUndefined();
+    } finally {
+      fg.isEnabled.mockRestore();
+    }
   });
 
   test('missing opportunity row -> fail closed (no guardrail context)', async () => {
@@ -1472,9 +1637,9 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
     const db = makeDb({
-      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678', type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
     });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
@@ -1487,24 +1652,122 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(payload.frontmatter.canonical).toBe('https://x/a/');
   });
 
-  test('autonomous lane draft_payload mirror failure is fail-SOFT — the pushed fix still counts', async () => {
+  test('an UNPARSEABLE draft_payload withholds remediation entirely — the parent pin cannot be verified (PR r15 P1)', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const orig = '---\ntitle: T\nmeta_description: Truncated ending with and\n---\nBODY';
     const fixedMd = orig.replace('Truncated ending with and', VALID_META);
-    // Unparseable payload → JSON.parse throws inside the mirror → warn only.
     const db = makeDb({
       autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: 'not json {' }],
     });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
       db, gh, callAnthropic: makeCall(fixedMd), validateFixedBlogFile: PASS,
       validateAutonomousRunGates: async () => ({ ok: true }),
     });
-    expect(r.remediated).toBe(true);
-    expect(gh._calls.putFile).toHaveLength(1);
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
     expect(db._tables.autonomous_runs[0].draft_payload).toBe('not json {'); // untouched
+  });
+
+  test('a FOREIGN parent head (pin mismatch) withholds remediation — a one-file fix must not bless unrelated changes (PR r15 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'publisherpin111' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a head that MOVES between the parent check and the refetch is withheld (TOCTOU, PR r16 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    // Caller's snapshot matches the pin, but the refetched PR shows a NEWER
+    // foreign head.
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: 'foreignpush999' } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/moved off the pinned parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test('a BRANCH tip that advances during the LLM/gate passes is caught right before the push (PR r17 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    // The refetched PR still shows the pinned head, but by push time the
+    // live branch has a foreign tip.
+    gh.getBranchSha = async () => 'foreigntip42';
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/advanced off the pinned parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test("a fix commit whose PARENT is not the pinned SHA parks post-push — parent CAS (PR r18 P1)", async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ preHead: 'abc1234def5678', pushParent: 'foreignparent7', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    // The head was NOT re-pinned — a governed merge of it waits for a human.
+    const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+    expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('abc1234def5678');
+  });
+
+  test('a competitor-REMOVING fix keeps the bypass marker STICKY — the persisted verdict stays flagged (PR r15 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{
+        id: 'run-1', action_type: 'new_supporting_blog',
+        comparison_table_result: JSON.stringify({ pass: true, findings: [], requiresHumanReview: true }),
+        draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }),
+      }],
+    });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      // The fix REMOVES every competitor mention — fresh verdict is clean.
+      validateAutonomousRunGates: async () => ({ ok: true, comparisonResult: { pass: true, findings: [], requiresHumanReview: false } }),
+    });
+    expect(r.remediated).toBe(true);
+    const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+    // Sticky: the run stays governed even though the fix is competitor-free.
+    expect(JSON.parse(row.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+    expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('newcommit999aaa');
   });
 
   test('an out-of-bound meta_description rewrite still parks end-to-end', async () => {

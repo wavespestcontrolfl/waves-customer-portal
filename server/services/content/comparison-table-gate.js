@@ -2418,9 +2418,35 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
   return { pass, findings, requiresHumanReview };
 }
 
+// Owner directive 2026-08-26: THE single scoped named-competitor autopublish
+// eligibility predicate — used identically by the runner's review-park
+// decision, both codex-remediation parks, and the PR poller's merge gate
+// (PR #3508 r4 P1: one mechanism, never per-site copies). TRUE only for a
+// brief carrying the canonical TRUE-intercept marker gsc_signal.intercept
+// (category/spoke seeds share the operator_intercept bucket and
+// operator_brief payload, so neither is sufficient) with BOTH
+// named-competitor gates on. Fail-closed: any read failure returns false and
+// the named-competitor review parks stand.
+function namedCompetitorAutopublishEligible(brief) {
+  try {
+    if (brief?.gsc_signal?.intercept !== true) return false;
+    // Only the fully-automatable blog action qualifies (PR #3508 r6 P1):
+    // an intercept refresh_existing_page brief can carry deliberate MANUAL
+    // work — publishRefresh freezes schema, so a requested Article/FAQPage
+    // schema change rides to a human as refresh_schema_note — and merging
+    // it unreviewed would silently drop that work. Refresh (and any other
+    // action) keeps the named-competitor review path.
+    if (brief?.action_type !== 'new_supporting_blog') return false;
+    const fg = require('../../config/feature-gates');
+    return fg.isEnabled('namedCompetitorAutopublish') === true
+      && fg.isEnabled('namedCompetitorComparison') === true;
+  } catch (_) { return false; }
+}
+
 module.exports = {
   evaluate,
   evaluateProse,
+  namedCompetitorAutopublishEligible,
   extractComparisonBlocks,
   extractCaption,
   extractColumns,

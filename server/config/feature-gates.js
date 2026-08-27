@@ -1146,6 +1146,20 @@ const gates = {
   // GATE_NAMED_COMPETITOR_COMPARISON=true. Category comparisons are unaffected.
   namedCompetitorComparison: isProd ? process.env.GATE_NAMED_COMPETITOR_COMPARISON === 'true' : true,
 
+  // Named-competitor drafts that PASS every comparison/quality gate publish
+  // autonomously instead of parking at named_competitor_review (owner
+  // directive 2026-08-26: the intercept lane runs with no human review queue,
+  // matching the brief set's standing "fully autonomous — no UAT hold"
+  // override of 2026-06-11). Gate failures (disparagement, unsourced facts,
+  // unknown competitor, …) still block exactly as before — this flag only
+  // removes the review park on CLEAN drafts. Consumers require
+  // namedCompetitorComparison to ALSO be on (enforced at both read sites —
+  // this flag alone never lifts a park). OFF in EVERY environment
+  // unless set to exactly 'true' (same posture as GATE_COMPLIANCE — a
+  // policy flag, not a dev feature, so dev/test keep the review-park
+  // default); kill switch = unset GATE_NAMED_COMPETITOR_AUTOPUBLISH.
+  namedCompetitorAutopublish: process.env.GATE_NAMED_COMPETITOR_AUTOPUBLISH === 'true',
+
   // aeo_gap opportunity mining — feeds answer-engine (LLM) visibility gaps into
   // the content engine's opportunity_queue. Default OFF in prod: ships dormant
   // so it can be enabled (GATE_AEO_GAP_MINING=true) only after the
