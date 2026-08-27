@@ -272,8 +272,21 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     // (the wizard activation passes its parent + just-seeded children)
     // pin every visit update to those ids; accept-path callers, whose
     // estimates are never reused, pass nothing and keep today's behavior.
+    // Unscoped calls on a REUSABLE wizard draft (codex #3504 r19): the
+    // accept path passes no ids, and a staff accept of a refreshed draft
+    // would otherwise stamp EVERY non-terminal row sharing the draft id —
+    // including an earlier self-booked visit whose activation was stripped
+    // and which stays (unstamped) at the address it was actually booked
+    // for — with the newly quoted property. Self-booked rows are owned by
+    // the wizard activation (stamped in-transaction with explicit ids), so
+    // an unscoped wizard-sourced linkage excludes them by that immutable
+    // marker; accept-path estimates (never reused) keep today's behavior.
+    const sourceRow = await database('estimates').where({ id: estimateId }).first('source');
+    const excludeSelfBooked = sourceRow?.source === 'quote_wizard'
+      && !(Array.isArray(onlyServiceIds) && onlyServiceIds.length);
     const scopeToActivation = (qb) => {
       if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
+      else if (excludeSelfBooked) qb.whereNull('self_booking_id');
     };
     if (!customerPropertiesGateOn()) {
       // Gate OFF: no customer_properties writes — but a GROUPED accept still

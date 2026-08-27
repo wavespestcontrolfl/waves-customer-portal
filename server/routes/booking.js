@@ -3111,8 +3111,18 @@ async function createSelfBooking(payload = {}) {
           // THAT property — otherwise the activation would seed, scope,
           // and stamp a series for a property the customer did not book.
           // Uncertain parses read as a different property (fail closed).
+          // FOR UPDATE (codex #3504 r19): this read doubles as the CUSTOMER
+          // ROW LOCK, taken here — BEFORE the recurring-series advisory
+          // guard below — to keep the estimate-converter's customer→series
+          // lock order (it locks customers FOR UPDATE first, then takes the
+          // same advisory). The activation used to acquire the advisory
+          // first and the customer row only later (the setup-fee stamp), so
+          // a concurrent accept for the same family could deadlock; with
+          // the converter's guard savepoint as the victim its fail-open
+          // guard would proceed and BOTH would seed billable series.
           const bookedCustomerRow = await trx('customers')
             .where({ id: custId })
+            .forUpdate()
             .first('address_line1', 'address_line2', 'city', 'state', 'zip');
           const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
           const quotedPropertyIsBooked = !!lockedDraft

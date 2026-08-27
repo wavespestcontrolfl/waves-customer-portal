@@ -160,13 +160,24 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         if (!freshDraft) return false;
         const who = `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)})`;
         const byDisposition = {
+          // Both completed dispositions RETIRE the public handoff (codex
+          // #3504 r19): the completed parent is non-recurring, so the
+          // duplicate guard cannot see it, and the still-live draft's
+          // 14-day handoff token would let the customer pick another
+          // slot and activate the FULL program on top of the performed
+          // first application. Archiving the draft kills the wizard gate
+          // and the handoff verdict; the office unarchives + converts for
+          // the REMAINING program (a partial-program quote is theirs to
+          // author — the original full-program shape must not self-book).
           completed_billed: {
-            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; office converts the live quote for the remaining program'),
-            bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. The quote draft is still live — convert it to schedule and bill the REMAINING program.`,
+            retireHandoff: true,
+            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
+            bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program.`,
           },
           completed_unbilled: {
-            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed but carries NO invoice — office bills it at the quoted first-application price and converts the live quote for the remaining program'),
-            bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit), then convert the still-live quote draft to schedule and bill the REMAINING program.`,
+            retireHandoff: true,
+            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed but carries NO invoice — office bills it at the quoted first-application price; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
+            bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit). The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program.`,
           },
           terminal_unbilled: {
             patch: STRIP_PATCH(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, pricing stripped; office converts the live quote for the FULL program`),
@@ -180,6 +191,12 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         await trx('scheduled_services')
           .where({ id: parent.id })
           .update(byDisposition.patch);
+        if (byDisposition.retireHandoff) {
+          await trx('estimates')
+            .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
+            .whereNull('archived_at')
+            .update({ archived_at: trx.fn.now(), updated_at: trx.fn.now() });
+        }
         // Bell ATOMIC with the strip (codex #3504 r6 hook): the strip
         // removes the row from every future sweep, so a bell sent
         // best-effort afterwards could silently vanish and the office
@@ -328,6 +345,15 @@ async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 1
       .whereNull('ss.recurring_parent_id')
       .whereNotIn('ss.status', ['cancelled'])
       .where('e.source', 'quote_wizard')
+      // Activation-OWNED evidence, not is_recurring alone (codex #3504
+      // r19): staff can make a committed parent recurring from the
+      // schedule editor before the plan activates, leaving the draft
+      // live and nothing seeded — the request path classifies that as a
+      // staff-owned series (r18) and this healer must not welcome/convert
+      // it as if the wizard plan had activated. The activation archives
+      // its draft in the same transaction as markParentRecurring, so the
+      // archived draft is the marker (same rule as the request path).
+      .whereNotNull('e.archived_at')
       .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
       .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
       .modify((qb) => {

@@ -738,6 +738,29 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r19: lock order, healer evidence, retired handoff, accept-path linkage scope', () => {
+    // #1 customer row FOR UPDATE precedes the recurring-series advisory
+    // (converter order: customers → series advisory).
+    expect(booking).toMatch(/const bookedCustomerRow = await trx\('customers'\)\s*\n\s*\.where\(\{ id: custId \}\)\s*\n\s*\.forUpdate\(\)/);
+    expect(booking.indexOf("const bookedCustomerRow = await trx('customers')")).toBeLessThan(booking.indexOf('RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {'));
+    // #2 the healer requires the activation-archived draft, never
+    // is_recurring alone (same rule as the request path, r18).
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    const healerBody = recoverySrc.slice(recoverySrc.indexOf('async function healActivatedFollowThroughs'), recoverySrc.indexOf('module.exports'));
+    expect(healerBody).toMatch(/\.where\('e\.source', 'quote_wizard'\)[\s\S]{0,900}\.whereNotNull\('e\.archived_at'\)/);
+    // #3 completed dispositions retire the public handoff (archive the
+    // draft) in the same transaction; unbilled/in-flight keep it live.
+    expect(recoverySrc).toMatch(/completed_billed: \{\s*\n\s*retireHandoff: true,/);
+    expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*retireHandoff: true,/);
+    expect(recoverySrc).not.toMatch(/terminal_unbilled: \{\s*\n\s*retireHandoff: true,/);
+    expect(recoverySrc).toMatch(/if \(byDisposition\.retireHandoff\) \{\s*\n\s*await trx\('estimates'\)\s*\n\s*\.where\(\{ id: parent\.source_estimate_id, source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)\s*\n\s*\.update\(\{ archived_at: trx\.fn\.now\(\)/);
+    // #4 an unscoped linkage on a wizard-sourced estimate never touches
+    // self-booked rows (activation-owned, stamped with explicit ids).
+    const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
+    expect(linkageSrc).toMatch(/const excludeSelfBooked = sourceRow\?\.source === 'quote_wizard'\s*\n\s*&& !\(Array\.isArray\(onlyServiceIds\) && onlyServiceIds\.length\);/);
+    expect(linkageSrc).toMatch(/else if \(excludeSelfBooked\) qb\.whereNull\('self_booking_id'\);/);
+  });
+
   test('skipped / no-show stranded first visits are UNBILLED: strip + convert the FULL program (r14)', async () => {
     // codex #3504 r14: those statuses skip the completion-invoice path (a
     // no-show charges at most its flat fee), so "already billed at the
@@ -763,7 +786,7 @@ describe('booking route wiring (source contracts)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: STRIP_PATCH\(/);
     expect(recoverySrc).toMatch(/bill the FULL plan/);
-    expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*patch: KEEP_PRICE_PATCH\(/);
+    expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*retireHandoff: true,\s*\n\s*patch: KEEP_PRICE_PATCH\(/);
   });
 
   test('the follow-through healer walks the whole eligible set by keyset cursor, never one re-selected page (r14)', () => {
