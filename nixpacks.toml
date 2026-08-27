@@ -1,0 +1,7 @@
+# Railway build (railway.toml: builder = "nixpacks"). Extends the auto-detected
+# Node setup phase — "..." keeps nixpacks' defaults — with ffmpeg on PATH:
+# the Reel MP4 metadata strip (uploadVideoToS3 → stripVideoMetadata) and the
+# recap transcoder both spawn `ffmpeg` and fail closed without it, which left
+# every social video variant off in production.
+[phases.setup]
+nixPkgs = ["...", "ffmpeg"]
