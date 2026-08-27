@@ -40,6 +40,15 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// Mirror the bell count onto the home-screen app icon (Badging API —
+// iOS 16.4+ installed PWAs; no-op elsewhere). Reading/marking-read clears
+// the icon badge through the same loadCount path that clears the bell.
+function syncAppBadge(count) {
+  if (!("setAppBadge" in navigator)) return;
+  const p = count > 0 ? navigator.setAppBadge(count) : navigator.clearAppBadge();
+  if (p && typeof p.catch === "function") p.catch(() => {});
+}
+
 function timeAgo(date) {
   const s = Math.floor((Date.now() - new Date(date).getTime()) / 1000);
   if (s < 60) return `${s}s`;
@@ -66,6 +75,7 @@ export default function NotificationBell() {
     try {
       const r = await adminFetch("/admin/notifications/unread-count");
       setUnread(r.count || 0);
+      syncAppBadge(r.count || 0);
     } catch {
       /* silent */
     }

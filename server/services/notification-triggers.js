@@ -724,7 +724,7 @@ async function triggerNotification(triggerKey, payload = {}) {
       // explicit documentation on owner-only triggers; techVisible is the
       // operative flag for both push recipients and bell visibility.
       if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
-      activeAdmins = await recipientQuery.select('id');
+      activeAdmins = await recipientQuery.select('id', 'role');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
     }
@@ -786,10 +786,29 @@ async function triggerNotification(triggerKey, payload = {}) {
           })
         );
 
+        // App-icon badge (installed-PWA Badging API / APNs aps.badge): mirror
+        // the bell's unread count, computed AFTER the bell write above so the
+        // triggering notification is included. The feed is role-scoped, not
+        // per-user, so one count per role covers every recipient; a failed
+        // count omits the badge (icon left untouched) rather than sending a
+        // wrong number.
+        const badgeByRole = new Map();
+        for (const user of activeAdmins) {
+          if (!enabledUserIds.includes(user.id) || badgeByRole.has(user.role)) continue;
+          try {
+            badgeByRole.set(user.role, await NotificationService.getAdminUnreadCount({ role: user.role }));
+          } catch (e) {
+            badgeByRole.set(user.role, null);
+            logger.warn(`[notification-triggers] badge count failed for role '${user.role}': ${e.message}`);
+          }
+        }
+        const roleByUser = new Map(activeAdmins.map((u) => [u.id, u.role]));
+
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
+            const badgeCount = badgeByRole.get(roleByUser.get(adminUserId));
             return {
               title: built.title,
               body: built.body,
@@ -799,6 +818,7 @@ async function triggerNotification(triggerKey, payload = {}) {
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
               renotify: triggerKey === 'sms_reply',
+              ...(Number.isInteger(badgeCount) ? { badge: badgeCount } : {}),
             };
           }
         );

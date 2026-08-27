@@ -144,6 +144,17 @@ self.addEventListener('fetch', event => {
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
   const requireInteraction = data.priority === 'urgent';
+  // Home-screen icon badge (Badging API — iOS 16.4+ installed PWAs):
+  // data.badge is the server-computed unread count. 0 clears the badge;
+  // absent (customer pushes, older payloads) leaves the icon untouched.
+  if (Number.isInteger(data.badge) && 'setAppBadge' in self.navigator) {
+    event.waitUntil(
+      (data.badge > 0
+        ? self.navigator.setAppBadge(data.badge)
+        : self.navigator.clearAppBadge()
+      ).catch(() => {})
+    );
+  }
   let destination = '/';
   try {
     const candidate = new URL(data.url || '/', self.location.origin);

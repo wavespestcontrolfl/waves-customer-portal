@@ -26,4 +26,10 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain('candidate.origin === self.location.origin');
     expect(source).toContain('data: { url: destination }');
   });
+
+  it('mirrors the pushed unread count onto the app icon badge, gated on a numeric payload', () => {
+    expect(source).toContain("Number.isInteger(data.badge) && 'setAppBadge' in self.navigator");
+    expect(source).toContain('self.navigator.setAppBadge(data.badge)');
+    expect(source).toContain('self.navigator.clearAppBadge()');
+  });
 });
