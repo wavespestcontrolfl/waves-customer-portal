@@ -1502,6 +1502,12 @@ describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, n
       { service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 300 },
     ], oneTime: { total: 425 } } } };
     expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: agent }), { ...svc, source_estimate_id: 'est-3' })).toBe(125);
+    // A WaveGuard member's stored price is the discounted $106.25; the face
+    // the mapper persists as priceBeforeDiscount is the $125 promise.
+    const member = { id: 'est-4', estimate_data: { result: { oneTime: { total: 106.25, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, priceBeforeDiscount: 125 },
+    ] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: member }), { ...svc, source_estimate_id: 'est-4' })).toBe(125);
   });
 
   test('a legacy grouped row with no primary line credits the parent price minus its add-ons — unless the group was discounted', async () => {

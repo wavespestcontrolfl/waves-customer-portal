@@ -953,6 +953,11 @@ function mapV1ToLegacyShape(v1Result) {
       // `price` above stays GROSS, so consumers showing what the customer
       // accepted need this alongside it. Zero is a real accepted value.
       if (Number.isFinite(Number(li.manualFinalOneTime))) item.manualFinalOneTime = Number(li.manualFinalOneTime);
+      // FACE value before the recurring-customer (WaveGuard) one-time perk:
+      // `price` is the discounted effective price, and the inspection-credit
+      // promise is the quoted face, not what a member paid (codex #3521 r5
+      // P0). Persisted so closeout can read it off the stored row.
+      if (Number.isFinite(Number(li.priceBeforeDiscount))) item.priceBeforeDiscount = Number(li.priceBeforeDiscount);
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
@@ -964,6 +969,10 @@ function mapV1ToLegacyShape(v1Result) {
         // branch. Zero is a real accepted value.
         ...(Number.isFinite(Number(li.manualFinalOneTime))
           ? { manualFinalOneTime: Number(li.manualFinalOneTime) } : {}),
+        // Face value before the WaveGuard one-time perk (see the ONE_TIME_
+        // SERVICES branch) — rodent_inspection lands here.
+        ...(Number.isFinite(Number(li.priceBeforeDiscount))
+          ? { priceBeforeDiscount: Number(li.priceBeforeDiscount) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,

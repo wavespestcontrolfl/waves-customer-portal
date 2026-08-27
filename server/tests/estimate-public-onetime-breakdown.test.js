@@ -8079,3 +8079,30 @@ describe('legacy one-time estimates with no billable rows keep a visible price (
     expect(html).toContain('<td style="text-align:right">$257.00</td>');
   });
 });
+
+describe('engine-backed (engineResult-only) one-time estimates itemize on the SSR page (codex #3521 r5 P2)', () => {
+  test('rows persisted under engineResult.lineItems lead with the itemized card, not the fallback hero', () => {
+    const html = renderPage('engine-backed-onetime-token', {
+      id: 'estimate-engine-backed',
+      status: 'sent',
+      customerName: 'Agent Customer',
+      address: '11 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 650,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [
+          { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+          { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+        ],
+        oneTime: { total: 650 },
+      },
+    });
+    expect(html).toContain('Rodent Trapping');
+    expect(html).toContain('Rodent Exclusion — Wire Mesh Points');
+    expect(html).toContain('<td style="text-align:right">$350.00</td>');
+    expect(html).not.toContain('id="onetime-display"');
+  });
+});

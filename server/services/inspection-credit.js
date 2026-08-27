@@ -140,10 +140,22 @@ async function soldInspectionAmountForVisit(db, svc) {
           ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
           ...(Array.isArray(estData?.lineItems) ? estData.lineItems : []),
         ];
-        // Gross line price — before any service-specific credit netted it.
+        // FACE = the largest gross the row carries: before the WaveGuard
+        // one-time perk (priceBeforeDiscount / subtotalBefore…), before a
+        // service-specific credit, or the plain price. A member's stored
+        // price is the discounted $106.25; the promise was $125 (codex
+        // #3521 r5 P0).
         const row = rawRows.find((r) => r && String(r.service || '') === 'rodent_inspection' && r.quoteRequired !== true);
-        const face = row ? Number(row.priceBeforeServiceSpecificDiscount ?? row.price ?? row.amount) : NaN;
-        if (Number.isFinite(face) && face > 0) return round2(face);
+        const face = row
+          ? Math.max(...[
+            row.priceBeforeDiscount,
+            row.subtotalBeforeRecurringCustomerDiscount,
+            row.priceBeforeServiceSpecificDiscount,
+            row.price,
+            row.amount,
+          ].map(Number).filter((n) => Number.isFinite(n) && n > 0), 0)
+          : 0;
+        if (face > 0) return round2(face);
       }
     }
     // Legacy grouped row with no primary line recorded: the parent price

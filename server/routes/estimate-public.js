@@ -4436,7 +4436,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     Number.isFinite(savedEstimateTierDiscount) ? savedEstimateTierDiscount : null,
   );
   const recurring = recurringServicesWithSupplements(estResult);
-  const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  const oneTimeItems = oneTimeItemsForRender(estResult, estData);
   // Bora-Care detection reads the normalized one-time rows — the same set the
   // Waves AI card uses — so it stays consistent with the AI card and also covers
   // nested-result / engine-backed estimates that don't populate
@@ -12564,7 +12564,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
 
     const estResult = parsedData.result || parsedData || {};
     const recurring = recurringServicesWithSupplements(estResult);
-    const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+    const oneTimeItems = oneTimeItemsForRender(estResult, parsedData);
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
@@ -13594,6 +13594,30 @@ function oneTimeItemSearchText(item = {}) {
     item.displayName,
     item.name,
   ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+}
+
+// The raw one-time rows for the SSR page, falling back to the normalized
+// breakdown when the result carries none: agent/IB estimates persist their
+// priced work under engineResult.lineItems, and reading only
+// result.oneTime left the itemized card empty and re-showed the fallback
+// hero for an engine-backed exclusion quote (codex #3521 r5 P2). The
+// normalized rows are re-shaped to the raw item contract the helpers read.
+function oneTimeItemsForRender(estResult, estData) {
+  const raw = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  if (raw.length > 0) return raw;
+  let normalized = [];
+  try { normalized = normalizeOneTimeBreakdown(estData).items || []; } catch { normalized = []; }
+  return normalized.map((row) => ({
+    service: row.service || null,
+    name: row.label,
+    label: row.label,
+    price: row.quoteRequired ? null : row.amount,
+    detail: row.detail || null,
+    quoteRequired: row.quoteRequired === true,
+    reason: row.reason || null,
+    customQuoteReason: row.customQuoteReason || null,
+    ...(row.kind === 'included' ? { serviceSpecificDiscountApplied: true } : {}),
+  }));
 }
 
 function oneTimeItemAmount(item = {}) {
