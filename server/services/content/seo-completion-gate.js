@@ -122,7 +122,10 @@ function evaluate(input = {}) {
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
     findings.push(finding('P1', 'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC', 'City-focused blog draft is missing a city page link in the body.', 'Add the matching local service page link.'));
   }
-  if (!hasLinkReason(contract, 'conversion') || !hasConversionCta(body, brief)) {
+  // Judged on the RENDERED link set (inline + reference-style + HTML anchors)
+  // — the contract's inline-only parser must not park a compliant
+  // reference-style CTA.
+  if (!hasConversionCta(body, brief)) {
     findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA with estimate/quote wording linking to contact, quote, or estimate paths.'));
   }
   {
@@ -374,7 +377,8 @@ function renderedText(body) {
 function extractLinks(body) {
   const s = renderedText(body);
   const links = [];
-  const md = /\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
+  // `(?<!!)` — a Markdown image `![alt](src)` is not a link.
+  const md = /(?<!!)\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets before classifying.
@@ -385,7 +389,7 @@ function extractLinks(body) {
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
   while ((m = def.exec(s)) !== null) defs.set(m[1].toLowerCase(), dest(m[2]));
   if (defs.size) {
-    const ref = /\[([^\]]+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!!)\[([^\]]+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get((m[2] || m[1]).toLowerCase());
       if (href) links.push({ anchor: m[1], href });
@@ -404,12 +408,17 @@ function conversionCtaLinks(body) {
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.
     const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
+    // Service names count only in the estimate/quote SUBJECT — the words up
+    // to and including the estimate/quote keyword. Trailing context ("…for
+    // Your Lawn", "…on your property") is not a service declaration.
+    const kw = anchor.match(/(estimat|quot)\w*/i);
+    const subject = kw ? anchor.slice(0, kw.index + kw[0].length) : anchor;
     let named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
-      .filter(([, re]) => re.test(anchor))
+      .filter(([, re]) => re.test(subject))
       .map(([svc]) => svc);
     // "Lawn pest control" is ONE service (lawn-pest-control → lawn), not
     // lawn + pest — don't let the compound phrase read as a wrong-service mix.
-    if (/\blawn[- ]pest/i.test(anchor)) named = named.filter((svc) => svc !== 'pest');
+    if (/\blawn[- ]pest/i.test(subject)) named = named.filter((svc) => svc !== 'pest');
     out.push({
       anchor,
       hasEstimateWording: /(estimat|quot)/i.test(anchor),

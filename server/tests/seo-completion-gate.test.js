@@ -424,6 +424,30 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('a reference-style compliant CTA satisfies presence; images are not links; context nouns are not services', () => {
+    const refOnly = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate][cta] today.\n\n[cta]: /contact/' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(refOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    const imageOnly = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. ![Get My Free Pest Control Estimate](/contact/)' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(imageOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    const context = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),
+      brief: baseBrief({ service: 'mosquito-control' }),
+      shadowMode: true,
+    });
+    expect(context.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(context.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('links inside comments and fenced code are not rendered CTAs', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
