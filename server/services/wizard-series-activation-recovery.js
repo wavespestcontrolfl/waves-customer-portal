@@ -55,12 +55,21 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // live draft. Disposition below is by status class; nothing drops out
     // of recovery silently.
     .whereNotIn('ss.status', ['cancelled', 'canceled'])
-    // PEST is IN scope (owner ruling 2026-08-27, Option A): the pest
-    // funnel's deliberate duplicate-kept one-off now stamps
-    // wizard_recovery_reconciled_at at kept-time (booking.js), so it leaves
-    // the claim by the same durable marker as every reconciled row and a
-    // genuinely stranded pest activation (worker died between the booking
-    // commit and the seeding) is recovered like any other family.
+    // PEST is IN scope from an owner-set EPOCH (owner ruling 2026-08-27,
+    // Option A; codex r2 P1): the pest funnel's deliberate duplicate-kept
+    // one-off stamps wizard_recovery_reconciled_at at kept-time — but only
+    // marker-capable code does, and Railway keeps the previous version
+    // serving while migrations run and new instances roll, so a kept visit
+    // booked by OLD code in that overlap is unmarked and would read as
+    // stranded. GATE_PEST_STRANDED_RECOVERY carries an ISO timestamp the
+    // owner sets AFTER the rollout completes; pest parents created before
+    // it (or with the gate unset) stay excluded exactly as before. Other
+    // families are unaffected by the gate.
+    .where((qb) => {
+      qb.whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'");
+      const epoch = pestRecoveryEpoch();
+      if (epoch) qb.orWhere('ss.created_at', '>=', epoch);
+    })
     // The stranded claim is PARENT-scoped (codex #3504 r21): the wizard
     // draft row is shared and reusable, so its archive state belongs to
     // whichever booking last consumed it — a customer who re-runs the
@@ -82,7 +91,7 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     })
     .orderBy('ss.created_at', 'asc')
     .limit(limit)
-    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status');
+    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status', 'ss.created_at');
 }
 
 // Terminal states, classified by what they mean for the MONEY (codex
@@ -105,6 +114,15 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
 //    original, so the office must NOT re-bill the application inside that
 //    window — the price stays for the record, the handoff retires (work
 //    was performed), and the bell parks the billing decision on a human.
+// ISO timestamp (or null) from GATE_PEST_STRANDED_RECOVERY — see the
+// findStrandedParents predicate. Invalid values read as unset (fail closed).
+function pestRecoveryEpoch() {
+  const raw = String(process.env.GATE_PEST_STRANDED_RECOVERY || '').trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 const COMPLETED_STATES = new Set(['completed']);
 const UNBILLED_TERMINAL_STATES = new Set(['skipped', 'no_show']);
 // Collected nothing and nothing can restore them (a canceled PaymentIntent
@@ -164,6 +182,12 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
   let stripped = 0;
   for (const parent of stranded) {
+    // Belt-and-braces for the SQL epoch predicate (labels the regex misses).
+    const familyKey = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: parent.service_type });
+    if (familyKey === 'pest_control') {
+      const epoch = pestRecoveryEpoch();
+      if (!epoch || !parent.created_at || new Date(parent.created_at) < epoch) continue;
+    }
     try {
       const didStrip = await database.transaction(async (trx) => {
         // Re-validate the ENTIRE stranded predicate under the comms lock
@@ -514,4 +538,5 @@ module.exports = {
   runActivationFollowThroughForParent,
   healActivatedFollowThroughs,
   classifyStrandedDisposition,
+  pestRecoveryEpoch,
 };

@@ -984,8 +984,25 @@ describe('booking route wiring (source contracts)', () => {
 
   test('the recovery sweep covers the PEST funnel; a duplicate-kept pest one-off is marked reconciled at kept-time (owner ruling 2026-08-27)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).not.toMatch(/ypest/);
-    expect(recoverySrc).not.toMatch(/familyKey === 'pest_control'/);
+    // Pest is admitted only from the owner-set epoch (GATE_PEST_STRANDED_RECOVERY,
+    // ISO timestamp set AFTER the rollout completes — codex r2 P1: old
+    // instances can book an unmarked kept visit during the Railway overlap).
+    const { pestRecoveryEpoch } = require('../services/wizard-series-activation-recovery');
+    const saved = process.env.GATE_PEST_STRANDED_RECOVERY;
+    try {
+      delete process.env.GATE_PEST_STRANDED_RECOVERY;
+      expect(pestRecoveryEpoch()).toBeNull();
+      process.env.GATE_PEST_STRANDED_RECOVERY = 'not-a-date';
+      expect(pestRecoveryEpoch()).toBeNull();
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T12:00:00Z';
+      expect(pestRecoveryEpoch().toISOString()).toBe('2026-08-28T12:00:00.000Z');
+    } finally {
+      if (saved === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = saved;
+    }
+    expect(recoverySrc).toMatch(/qb\.whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\);\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(epoch\) qb\.orWhere\('ss\.created_at', '>=', epoch\);/);
+    expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control'\) \{\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(!epoch \|\| !parent\.created_at \|\| new Date\(parent\.created_at\) < epoch\) continue;/);
+    const backfillSrc0 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
+    expect((backfillSrc0.match(/primary_line_price IS NULL OR p\.primary_line_price <= 0/g) || []).length).toBe(2);
     // The locked re-validation re-reads the marker and refuses a stamped row.
     expect(recoverySrc).toMatch(/'source_estimate_generation', 'wizard_recovery_reconciled_at'\);/);
     expect(recoverySrc).toMatch(/\|\| fresh\.wizard_recovery_reconciled_at\s*\n\s*\|\| \['cancelled', 'canceled'\]/);
