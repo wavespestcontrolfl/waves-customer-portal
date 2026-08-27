@@ -75,15 +75,22 @@ describe('resolveLeadSource', () => {
     expect(res.leadSourceId).toBe('ls-google-form');
   });
 
-  test('google paid lookup falls back to any google_ads row when the web-form row is absent (never NULL / Main Site)', async () => {
+  test('google paid lookup FAILS CLOSED when the web-form row is absent — never a call row, never Main Site', async () => {
     db.mockImplementation(() => ({
       whereRaw: () => ({ first: async () => null }),
       where: (clause) => ({
-        first: async () => (clause.source_type === 'google_ads' ? { id: 'ls-google-call', source_type: 'google_ads' } : null),
+        // Only call-oriented google_ads rows exist; Main Site exists too.
+        first: async () => {
+          if (clause.source_type === 'google_ads') return { id: 'ls-google-call', source_type: 'google_ads' };
+          if (clause.name === MAIN_SITE_NAME) return { id: 'ls-main', name: MAIN_SITE_NAME };
+          return null;
+        },
       }),
     }));
     const res = await resolveLeadSource({ gbraid: 'b1' });
-    expect(res.leadSourceId).toBe('ls-google-call');
+    expect(res.leadSourceId).toBeNull();
+    expect(res.sourceType).toBe('google_ads');
+    expect(res.isPaidClick).toBe(true);
   });
 
   test('classifies utm_source=google&utm_medium=cpc as Google Ads', async () => {

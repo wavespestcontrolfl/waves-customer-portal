@@ -28,14 +28,22 @@
 //      precedence rule as 20260626000008_backfill_gbp_web_leads_per_city:
 //      a customer's stale first touch must never override a lead that
 //      recorded a different source.
-// Scope: first_contact_channel = 'form' ONLY. ad_service_attribution
-// .lead_source='google_ads' is also written for paid CALLS
-// (recordCallPpcAttribution) and a customer's UTM first touch is not
-// form-specific — a NULL-source call lead must never be relabeled as a web
-// form (calls attribute by tracking number to the call-extension row).
-// Idempotent: the row is looked up by name; the backfill only touches
-// NULL-source, non-deleted form leads.
+// Scope: WEB channels only — 'form' (lead-webhook), 'website_quote'
+// (public-quote / public-property-lookup) and 'web' (lead-estimate-link),
+// i.e. exactly the paths that run the two resolvers patched alongside this
+// migration. ad_service_attribution.lead_source='google_ads' is also written
+// for paid CALLS (recordCallPpcAttribution) and a customer's UTM first touch
+// is not form-specific — a call lead must never be relabeled as a web form
+// (calls attribute by tracking number to the call-extension row).
+//
+// Candidates are web leads with NO source (the webhook gap) AND web leads
+// already sitting on a DIFFERENT google_ads row: before this change
+// resolveLeadSource picked an arbitrary source_type='google_ads' row
+// (call-extension or call-reporting bridge), so those web conversions are
+// currently counted as calls. Both sets move to the web-form row.
+// Idempotent: the row is looked up by name; re-running matches nothing.
 const WEB_FORM_NAME = 'Google Ads — Web Form';
+const WEB_CHANNELS = ['form', 'website_quote', 'web'];
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('lead_sources'))) {
@@ -63,10 +71,12 @@ exports.up = async function up(knex) {
   const hasCustomerUtm = (await knex.schema.hasTable('customers'))
     && (await knex.schema.hasColumn('customers', 'utm_data'));
 
+  const otherGoogleAdsRows = knex('lead_sources').select('id')
+    .where({ source_type: 'google_ads' }).whereNot({ id: row.id });
   const updated = await knex('leads')
-    .whereNull('lead_source_id')
     .whereNull('deleted_at')
-    .where('first_contact_channel', 'form')
+    .whereIn('first_contact_channel', WEB_CHANNELS)
+    .where((qb) => qb.whereNull('lead_source_id').orWhereIn('lead_source_id', otherGoogleAdsRows))
     .where((qb) => {
       qb.whereNotNull('gclid').orWhereNotNull('wbraid').orWhereNotNull('gbraid')
         .orWhereRaw("extracted_data->'attribution'->'leadSource'->>'source' = 'google_ads'");

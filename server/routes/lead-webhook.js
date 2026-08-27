@@ -321,14 +321,14 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // separable in source ROI. (Before this branch every gclid form lead
         // was Unattributed.)
         // Matched by NAME (source_type google_ads is shared with the
-        // call-extension number and the phone-less call-reporting bridge row).
-        // Deliberately NOT filtered on is_active (same rationale as
-        // lead-source-resolver): a paused web-form row is still the true
-        // channel — filtering it out would route form leads onto a call row
-        // and contaminate call ROI. Any google_ads row is the last-resort
-        // fallback so a paid click never drops to NULL.
-        sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()
-          || await db('lead_sources').where({ source_type: 'google_ads' }).first();
+        // call-extension number and the phone-less call-reporting bridge row)
+        // and FAIL CLOSED if absent — every other google_ads row is a call
+        // row, and counting a web form as a call is the contamination this
+        // branch exists to prevent (NULL surfaces via the dashboard's
+        // leads_unattributed_7d alert instead). Deliberately NOT filtered on
+        // is_active (same rationale as lead-source-resolver): a paused
+        // web-form row is still the true channel.
+        sourceRecord = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
       }
       if (sourceRecord) leadSourceId = sourceRecord.id;
     } catch (e) {

@@ -121,11 +121,13 @@ async function resolveLeadSource(attribution) {
       row = await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first();
     } else if (googlePaid) {
       // Several google_ads rows exist (call-extension number, call-reporting
-      // bridge, web form). This is the web path: the web-form row by name;
-      // any google_ads row only as a fallback so a paid click never drops to
-      // NULL (and never lands on Main Site).
-      row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first()
-        || await db('lead_sources').where({ source_type: 'google_ads' }).first();
+      // bridge, web form). This is the web path: the web-form row by name,
+      // and FAIL CLOSED if it is missing — any other google_ads row is a call
+      // row, and a web conversion counted as a call is the exact ROI
+      // contamination this exists to prevent. sourceType below still reports
+      // 'google_ads' with leadSourceId null, and the dashboard's
+      // leads_unattributed_7d alert surfaces the missing row.
+      row = await db('lead_sources').where({ name: GOOGLE_ADS_WEB_FORM_NAME }).first();
     } else {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
