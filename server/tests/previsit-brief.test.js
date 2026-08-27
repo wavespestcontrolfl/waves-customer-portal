@@ -4344,3 +4344,102 @@ describe('codex #3428 r1 — disclaimer strip is whole-string only', () => {
     }
   });
 });
+
+describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails in one day)', () => {
+  const validatorMiss = () => ({
+    ok: false,
+    reason: 'all_providers_failed',
+    failures: [
+      { provider: 'anthropic', model: 'a', reason: 'ungrounded_novel_term:one-time' },
+      { provider: 'openai', model: 'o', reason: 'ungrounded_novel_term:one-time' },
+    ],
+  });
+  const rerunWith = (stored, extra = {}) => useDb(baseResponses({
+    scheduled_services: [{
+      ...SVC,
+      pre_service_brief: stored.pre_service_brief,
+      pre_service_brief_type: stored.pre_service_brief_type,
+      ...extra,
+    }],
+  }));
+
+  test('validator-rejected legs are counted and capped at 2 attempts per grounding hash', async () => {
+    global.__dispatch = jest.fn(async () => validatorMiss());
+    const state1 = useDb(baseResponses());
+    const first = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(first.via).toBe('template');
+    const b1 = storedBrief(state1).brief;
+    expect(b1.llm_miss_kind).toBe('validator');
+    expect(b1.llm_attempts).toBe(1);
+
+    const state2 = rerunWith(storedBrief(state1).patch);
+    global.__dispatch.mockClear();
+    const second = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(second.generated).toBe(true);
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state2).brief.llm_attempts).toBe(2);
+
+    const state3 = rerunWith(storedBrief(state2).patch);
+    global.__dispatch.mockClear();
+    const third = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(third.skipped).toBe(true);
+    expect(third.reason).toBe('validator_capped');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+    expect(state3.updates.scheduled_services).toBeUndefined();
+  });
+
+  test('a changed grounding resets the cap and retries the LLM', async () => {
+    global.__dispatch = jest.fn(async () => validatorMiss());
+    const state1 = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const capped = { ...storedBrief(state1).patch };
+    const parsed = JSON.parse(capped.pre_service_brief);
+    parsed.llm_attempts = 5;
+    capped.pre_service_brief = JSON.stringify(parsed);
+
+    const state2 = useDb(baseResponses({
+      property_preferences: [{ ...PREFS, property_gate_code: '1111' }],
+      scheduled_services: [{ ...SVC, pre_service_brief: capped.pre_service_brief, pre_service_brief_type: capped.pre_service_brief_type }],
+    }));
+    global.__dispatch.mockClear();
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.generated).toBe(true);
+    expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    expect(storedBrief(state2).brief.llm_attempts).toBe(1);
+  });
+
+  test('provider outages and truncated legs stay transient and keep retrying', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: false,
+      reason: 'all_providers_failed',
+      failures: [
+        { provider: 'anthropic', model: 'a', reason: 'anthropic_529' },
+        { provider: 'openai', model: 'o', reason: 'ungrounded_novel_term:one-time (response truncated at max_tokens=2000)' },
+      ],
+    }));
+    let state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_miss_kind).toBe('transient');
+    for (let i = 0; i < 3; i += 1) {
+      state = rerunWith(storedBrief(state).patch);
+      global.__dispatch.mockClear();
+      const out = await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(out.generated).toBe(true);
+      expect(global.__dispatch).toHaveBeenCalledTimes(1);
+    }
+    expect(storedBrief(state).brief.llm_attempts).toBe(4);
+  });
+
+  test('defense-in-depth rejection of an accepted response counts as a validator miss', async () => {
+    // Dispatcher returns ok with JSON that the in-process validator rejects
+    // (mocked/injected dispatch paths skip the validate hook).
+    global.__dispatch = jest.fn(async () => ({
+      ok: true,
+      json: { priorities: ['Treat for zebra mussels'], watch_items: [], mentioned_terms: ['zebra mussel'] },
+    }));
+    const state = useDb(baseResponses());
+    const out = await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(out.via).toBe('template');
+    expect(storedBrief(state).brief.llm_miss_kind).toBe('validator');
+  });
+});
