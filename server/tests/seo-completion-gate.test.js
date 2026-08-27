@@ -1440,6 +1440,61 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(crlfBlank.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Compound canonical tags keep EVERY service — tick and flea-and-tick
+    // wording both pass on a "Fleas & Ticks" brief; a lawn quote is still
+    // wrong-service.
+    for (const anchor of ['Request a Tick Quote', 'Request a Flea and Tick Quote']) {
+      const fleasTicks = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `F. [${anchor}](/contact/) now.` }),
+        brief: baseBrief({ service: 'Fleas & Ticks' }),
+        shadowMode: true,
+      });
+      expect(fleasTicks.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+      expect(fleasTicks.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    }
+    const fleasTicksWrong = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'F. [Get a Lawn Care Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'Fleas & Ticks' }),
+      shadowMode: true,
+    });
+    expect(fleasTicksWrong.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A SETEXT underline turns the line above into a heading — a label
+    // split across it renders no link.
+    const setextSplit = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite\n===\nEstimate](/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(setextSplit.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A NONDEFAULT port is a different origin — the link is not the
+    // site-relative conversion path, so it cannot satisfy presence.
+    const oddPort = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get a Termite Estimate](https://www.wavespestcontrol.com:444/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(oddPort.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A REAL comment following a span-protected "<!--" is still stripped —
+    // its hidden link cannot satisfy presence.
+    const protectedThenReal = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Use `<!--` here. <!-- [Get a Termite Estimate](/contact/) -->' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(protectedThenReal.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Question/invitation-shaped estimate CTAs are actionable — presence
+    // is satisfied; bare noun phrases stay rejected.
+    const questionCta = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Ready for Your Free Termite Estimate?](/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(questionCta.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

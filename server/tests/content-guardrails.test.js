@@ -2208,6 +2208,15 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // ADDITIONS are still flagged.
     expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old [Schedule Service](/contact/) text.' })).toBe(false);
     expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+    // Refresh grandfather compares RAW cell content — editing a code-span
+    // cell is a modified table, not a preserved legacy one; a truly
+    // unchanged table still grandfathers.
+    const codeCellTable = 'Intro.\n\n| `foo` | x |\n| --- | --- |\n| 1 | 2 |';
+    const editedCellTable = 'Intro.\n\n| `bar` | x |\n| --- | --- |\n| 1 | 2 |';
+    expect(guardrails.evaluate({ body: editedCellTable, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: codeCellTable })
+      .findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    expect(guardrails.evaluate({ body: codeCellTable, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: codeCellTable })
+      .findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
     // SERVICE-TYING half arms when the lane knows the post's service: a
     // wrong-service estimate anchor parks a refresh (the completion gate
     // never sees refreshes), a right-service one stays clean, and the
@@ -2399,6 +2408,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Lazy continuation may drop only SOME quote markers — a depth-1
     // delimiter still continues a depth-2 header's paragraph.
     expect(guardrails.hasRawMarkdownTable('> > A | B\n> - | -')).toBe(true);
+    // A REAL comment after a span-protected opener is still stripped —
+    // the protected match must not consume the later opener.
+    expect(guardrails.hasRawMarkdownTable('Use `<!--` here. <!--\n| A | B |\n| - | - |\n-->')).toBe(false);
     // A fence opened on a QUOTED list continuation line ("> - item" then
     // ">   ~~~") scopes to the item's quote-relative column — content at
     // that column stays fenced…

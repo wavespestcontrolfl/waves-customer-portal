@@ -1974,10 +1974,26 @@ function blankNonRenderedMarkdownWithDepths(text) {
   const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b)
     || fenceIntervals.some(([a, b]) => pos >= a && pos < b)
     || attrIntervals.some(([a, b]) => pos >= a && pos < b);
-  const afterComments = raw
-    // An UNTERMINATED "<!--" comments out everything through EOF
-    // (CommonMark HTML block type 2 ends only at "-->").
-    .replace(/<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
+  // An UNTERMINATED "<!--" comments out everything through EOF (CommonMark
+  // HTML block type 2 ends only at "-->"). A PROTECTED opener (inside a
+  // span, fence, or quoted attribute) must not CONSUME what follows it —
+  // scanning resumes right after the protected opener token so a later
+  // REAL comment in the same stretch is still stripped.
+  let afterComments = '';
+  {
+    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
+    let last = 0;
+    let cm;
+    while ((cm = commentRe.exec(raw)) !== null) {
+      if (inSpan(cm.index)) {
+        commentRe.lastIndex = cm.index + (raw.startsWith('{/*', cm.index) ? 3 : 4);
+        continue;
+      }
+      afterComments += raw.slice(last, cm.index) + cm[0].replace(/[^\n]/g, '');
+      last = cm.index + cm[0].length;
+    }
+    afterComments += raw.slice(last);
+  }
   // Pass 2 — inline code spans (any backtick-run length, possibly across
   // lines), masked BEFORE fences so a span opened after prose can close at a
   // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
@@ -2199,6 +2215,11 @@ function isDelimiterRow(line) {
 function extractRawMarkdownTables(text) {
   const { text: blanked, depths } = blankNonRenderedMarkdownWithDepths(text);
   const lines = blanked.split('\n');
+  // Captured blocks use the RAW source lines (every pass preserves
+  // newlines, so line indices align): the blanked form masks code-span
+  // cell content to sentinels, which would make an edited cell compare
+  // EQUAL to its legacy value in the refresh grandfather.
+  const rawLines = String(text || '').split('\n');
   const tables = [];
   // Raw HTML tables are the other non-component table representation —
   // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
@@ -2239,7 +2260,7 @@ function extractRawMarkdownTables(text) {
     let end = i + 1;
     while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== ''
       && depths[end] <= depths[i - 1]) end += 1;
-    tables.push(lines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
+    tables.push(rawLines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
     i = end;
   }
   return tables;

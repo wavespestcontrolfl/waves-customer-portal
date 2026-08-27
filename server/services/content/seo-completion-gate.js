@@ -355,6 +355,9 @@ const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|wa
 // ("…page to reserve service"); a subordinate verb with its own subject
 // ("…customers get after an inspection") is still prose.
 const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)`;
+// Invitation-shaped conversion anchors ("Ready for Your Free Estimate?")
+// carry no leading verb yet are plainly CTAs — accepted for PRESENCE only.
+const INVITATION_CTA_RE = /^(?:are\s+you\s+)?(?:get\s+)?ready\s+for\b/i;
 const ACTION_VERB_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?${ACTION_VERB_SET}\\b|\\bto\\s+${ACTION_VERB_SET}\\b`, 'i');
 function isProseReferenceAnchor(anchor) {
   return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
@@ -381,6 +384,16 @@ const CANONICAL_TAG_SERVICES = {
   'lawn pests': ['lawn'],
   'lawn pest': ['lawn'],
 };
+
+// A service value may resolve to SEVERAL vocabulary keys (the compound
+// canonical tags: "Fleas & Ticks" → flea + tick) — the brief-aware paths
+// union every entry's vocabulary rather than collapsing to the first.
+function ctaBriefServices(rawService) {
+  const one = ctaBriefService(rawService);
+  if (!one) return [];
+  const canonical = CANONICAL_TAG_SERVICES[String(rawService).toLowerCase().trim()];
+  return canonical || [one];
+}
 
 function ctaBriefService(rawService) {
   if (!rawService) return null;
@@ -473,7 +486,9 @@ function extractLinks(body) {
     if (/^https?:\/\//i.test(raw)) {
       let parsed = null;
       try { parsed = new URL(raw); } catch (err) { parsed = null; }
-      if (parsed && firstParty.has(parsed.hostname.toLowerCase())) raw = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+      // A NONDEFAULT port is a different origin — only the canonical
+      // (default-port) first-party origin reads as a site-relative path.
+      if (parsed && parsed.port === '' && firstParty.has(parsed.hostname.toLowerCase())) raw = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
     }
     // Site-relative paths resolve dot segments through WHATWG URL — the
     // same normalization the internal-route scanner uses — so ENCODED
@@ -568,7 +583,9 @@ function extractLinks(body) {
   const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
     if (lineQuoteDepth > openQuoteDepth) return true;
     if (!line.trim()) return true;
-    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
+    // A setext UNDERLINE ("===", "---") turns the line above into a
+    // heading — the paragraph ends there too.
+    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
   };
   const balancedLabelEnd = (str, open, openQuoteDepth, depthAt) => {
     let depth = 0;
@@ -863,19 +880,22 @@ function hasConversionCta(body, brief = {}) {
   // a termite post may talk about inspections all it wants;
   // `[Schedule Service](/contact/)`, "Get an estimate. [Click here](/contact/)",
   // and a lawn-care quote anchor on a termite post all fail to qualify.
-  const briefService = ctaBriefService(brief.service);
-  const allowed = briefService ? allowedAnchorServices(briefService) : null;
+  const briefServices = ctaBriefServices(brief.service);
+  const allowed = briefServices.length
+    ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
+    : null;
   // With a known brief service the qualifying CTA must POSITIVELY name it
   // (or its family) — a generic "Request a Quote" or an unrecognized phrase
   // can ride along as an extra CTA but does not satisfy "tied to the
   // post's service" on its own.
   return conversionCtaLinks(body).some((link) => {
     if (!link.hasEstimateWording) return false;
-    // Presence requires an ACTIONABLE anchor — a request verb leading it or
-    // an infinitive invitation. A prose reference ("our termite estimate
-    // process") AND a bare noun phrase ("Termite Estimate Process") are
-    // descriptions, not CTAs — neither can satisfy presence.
-    if (!ACTION_VERB_RE.test(link.anchor)) return false;
+    // Presence requires an ACTIONABLE anchor — a request verb leading it,
+    // an infinitive invitation, or an established invitation shape
+    // ("Ready for Your Free Termite Estimate?"). A prose reference ("our
+    // termite estimate process") AND a bare noun phrase ("Termite Estimate
+    // Process") are descriptions, not CTAs — neither can satisfy presence.
+    if (!ACTION_VERB_RE.test(link.anchor) && !INVITATION_CTA_RE.test(link.anchor)) return false;
     if (!allowed) return true;
     const named = effectiveNamed(link, allowed);
     return named.length > 0 && named.every((svc) => allowed.has(svc));
@@ -890,8 +910,10 @@ function hasConversionCta(body, brief = {}) {
 //   - an imperative CTA-shaped anchor with no estimate/quote wording at
 //     all ("Schedule Service", "Click here").
 function badCtaAnchor(body, brief = {}) {
-  const briefService = ctaBriefService(brief.service);
-  const allowed = briefService ? allowedAnchorServices(briefService) : null;
+  const briefServices = ctaBriefServices(brief.service);
+  const allowed = briefServices.length
+    ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
+    : null;
   const bad = conversionCtaLinks(body).find((link) => {
     if (link.hasEstimateWording) {
       // With a known brief service, EVERY estimate/quote anchor must name it
@@ -968,14 +990,14 @@ function collectForbiddenCtaAnchors(body, { service = null } = {}) {
     resolvedCandidates.push({ resolved, rank: CTA_SERVICE_FAMILY[resolved] ? 2 : (resolved === 'pest' ? 0 : 1) });
   };
   for (const candidate of [].concat(service ?? []).filter(Boolean)) {
-    const canonical = CANONICAL_TAG_SERVICES[String(candidate).toLowerCase().trim()];
-    if (canonical) { canonical.forEach(addResolved); continue; }
-    let resolved = null;
-    try { resolved = ctaBriefService(candidate); } catch (err) { resolved = null; }
-    // Unresolvable candidates (a non-service category like "seasonal")
-    // carry no CTA vocabulary — they contribute nothing.
-    if (!resolved || !(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
-    addResolved(resolved);
+    let resolvedList = [];
+    try { resolvedList = ctaBriefServices(candidate); } catch (err) { resolvedList = []; }
+    for (const resolved of resolvedList) {
+      // Unresolvable candidates (a non-service category like "seasonal")
+      // carry no CTA vocabulary — they contribute nothing.
+      if (!(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
+      addResolved(resolved);
+    }
   }
   if (resolvedCandidates.length) {
     const top = Math.max(...resolvedCandidates.map((c) => c.rank));
