@@ -544,7 +544,7 @@ function inferLinkReason(url) {
 function extractMarkdownLinkItems(markdown = '') {
   const out = [];
   const seen = new Set();
-  const re = /(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\]\(\s*(\/[^)\s#?]+\/?)(?:[#?][^)]*)?\)/g;
+  const re = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(\s*(\/[^)\s#?]+\/?)(?:[#?][^)]*)?\)/g;
   let match;
   while ((match = re.exec(String(markdown || ''))) !== null) {
     const url = normalizeUrl(match[2]);

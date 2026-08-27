@@ -1835,11 +1835,29 @@ function blankNonRenderedMarkdown(text) {
   // Pass 1 — comments and <pre> (whole-text, newline-preserving).
   const afterComments = String(text || '')
     .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''));
-  // Pass 2 — fenced code, per line (a backtick fence's info string may not
-  // contain a backtick, so this runs BEFORE code-span masking).
-  let fence = null; // { ch, len }
-  const fenced = afterComments.split('\n').map((l) => {
-    const stripped = l.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/, '');
+  // Pass 2 — inline code spans (any backtick-run length, possibly across
+  // lines), masked BEFORE fences so a span opened after prose can close at a
+  // line-start run ("See ```\n…\n``` here"). A span never OPENS on a
+  // fence-candidate line (a ≤3-space-indented 3+ run at line start) — that
+  // line is left for the fence pass, which also keeps the "info string may
+  // not contain a backtick" rule intact. Length-preserving mask.
+  const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
+  const spanned = afterComments.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
+    const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
+    const lineEnd = whole.indexOf('\n', offset);
+    const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+    if (fenceLineRe.test(line)) return c;
+    return c.replace(/[^\n]/g, ' ');
+  });
+  // Pass 3 — fenced code, per line, scoped to its blockquote container.
+  let fence = null; // { ch, len, depth }
+  const fenced = spanned.split('\n').map((l) => {
+    const prefix = l.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/);
+    const depth = prefix ? (prefix[0].match(/>/g) || []).length : 0;
+    const stripped = prefix ? l.slice(prefix[0].length) : l;
+    // A fence opened inside a blockquote ends with its container: a
+    // non-blank line at a shallower quote depth is outside the block.
+    if (fence && depth < fence.depth && stripped.trim() !== '') fence = null;
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
@@ -1847,17 +1865,14 @@ function blankNonRenderedMarkdown(text) {
     }
     if (/^(?: {4}|\t)/.test(stripped)) return l; // indented lines resolved in pass 4
     const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (open && !(open[1][0] === '`' && open[2].includes('`'))) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
+    if (open && !(open[1][0] === '`' && open[2].includes('`'))) { fence = { ch: open[1][0], len: open[1].length, depth }; return ''; }
     return l;
   }).join('\n');
-  // Pass 3 — code spans, which may cross line endings (1–2 backticks;
-  // 3+ were fence candidates above). Length-preserving mask.
-  const spanned = fenced.replace(/(?<!`)(`{1,2})(?!`)(?:[^`]|`(?!\1))*?\1(?!`)/g, (c) => c.replace(/[^\n]/g, ' '));
   // Pass 4 — blockquote prefixes, indented code (list-aware), per line.
   let listContext = false;
   let listContentIndent = 0;
   let prevBlank = true;
-  return spanned.split('\n').map((l) => {
+  return fenced.split('\n').map((l) => {
     // Nested markers may carry up to three spaces before the inner ">"
     // ("> " + "  > "); the LAST marker keeps only one optional space so
     // remaining indentation stays content.
@@ -1879,14 +1894,18 @@ function blankNonRenderedMarkdown(text) {
 
 // GFM: a table is recognized only when header and delimiter rows have the
 // same number of cells.
+// Escaped pipes ("\\|") are cell CONTENT, not separators.
+function splitCells(line) {
+  return line.trim().replace(/\\\|/g, '\u0000').replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.replace(/\u0000/g, '\\|'));
+}
 function cellCount(line) {
-  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').length;
+  return splitCells(line).length;
 }
 
 // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
 // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
 function isDelimiterRow(line) {
-  const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  const cells = splitCells(line).map((c) => c.trim());
   return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
 }
 

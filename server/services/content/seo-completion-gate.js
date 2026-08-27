@@ -398,7 +398,8 @@ function extractLinks(body) {
   // Escape parity: "!" preceded by an EVEN run of backslashes (incl. zero)
   // is a live image marker; an odd run escapes it. Whitespace is allowed
   // inside the parentheses ("( /contact/ )").
-  const md = /(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
+  // Link text may contain ONE level of balanced brackets ("[Get a [Termite] Estimate]").
+  const md = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -421,7 +422,7 @@ function extractLinks(body) {
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
   while ((m = def.exec(s)) !== null) defs.set(label(m[1]), dest(m[2]));
   if (defs.size) {
-    const ref = /(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });

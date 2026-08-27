@@ -2234,6 +2234,10 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('A | B | C\n- | -\n1 | 2')).toBe(false);
     // Multiline code spans render as code.
     expect(guardrails.hasRawMarkdownTable('``\n| A | B |\n| --- | --- |\n``')).toBe(false);
+    // Escaped pipes are cell content — counts still match, table detected.
+    expect(guardrails.hasRawMarkdownTable('A \\| B | C\n- | -\n1 | 2')).toBe(true);
+    // Inline code spans of 3+ backticks after prose are code.
+    expect(guardrails.hasRawMarkdownTable('See ```\nA | B\n--- | ---\n``` here')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
