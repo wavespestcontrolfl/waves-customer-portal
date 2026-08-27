@@ -1918,8 +1918,8 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
 
     // Milestone counterpart of the liveness gate: the count/average were read
-    // at selection, before render/upload — re-check so the post never claims
-    // a milestone reality no longer supports.
+    // at selection, before render/upload — cheap re-check here; the lease
+    // below re-checks again with the stats sync excluded.
     if (isMilestoneRun) {
       const reason = await milestonePublishBlocker(plan);
       if (reason) {
@@ -1929,11 +1929,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     }
 
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
-    // The snapshot gate above rejects cheaply; the lock closes its TOCTOU —
-    // the reconcile cannot stamp the source row between here and the post.
-    const publishOutcome = await publishWithReviewLivenessLock(
-      isReviewRun ? plan.reviewGraphic.googleReviewId : null,
-      () => SocialMediaService.publishToAll({
+    // The snapshot gates above reject cheaply; the locks close their TOCTOU —
+    // the reconcile cannot stamp the source row (review runs) and the stats
+    // sync cannot move the fleet count (milestone runs) between here and the post.
+    const publishFn = () => SocialMediaService.publishToAll({
         title: plan.topic,
         description: plan.service,
         link: finalPreview.suggestedLink,
@@ -1955,12 +1954,21 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
           : (isReviewRun && (() => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)))
             || (isMilestoneRun && (() => stampMilestoneCelebrated(plan.milestone, run?.id)))
             || null,
-      }),
-      { rejectConsumed: true },
-    );
+      });
+    const publishOutcome = isMilestoneRun
+      ? await publishWithFleetStatsLease(plan, publishFn)
+      : await publishWithReviewLivenessLock(
+        isReviewRun ? plan.reviewGraphic.googleReviewId : null,
+        publishFn,
+        { rejectConsumed: true },
+      );
     if (publishOutcome.blocked) {
-      const reason = publishOutcome.lockBusy
-        ? 'review sync in progress for this location — testimonial publish deferred, retry the run'
+      const reason = publishOutcome.driftReason
+        ? publishOutcome.driftReason
+        : publishOutcome.lockBusy
+        ? (isMilestoneRun
+          ? 'review stats sync in progress — milestone publish deferred, retry the run'
+          : 'review sync in progress for this location — testimonial publish deferred, retry the run')
         : publishOutcome.consumed
           ? 'source Google review was already published as a testimonial — candidate consumed'
           : publishOutcome.missing
@@ -2116,6 +2124,32 @@ const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
 
 const NOOP_RELEASE = async () => {};
 const NOOP_ABANDON = () => {};
+
+// Milestone counterpart of publishWithReviewLivenessLock. The fleet snapshot
+// is written by the Places stats sync, which runs under runExclusive
+// `gbp-review-sync:<location>`; holding EVERY configured location's lease
+// (non-blocking try-locks, fixed order → no deadlock) across the final drift
+// re-check AND the external post means no sync can move a count/rating in
+// between. Any contention → { blocked, lockBusy } and the caller retries
+// later (the hourly sync's tick is short; the milestone is not urgent).
+async function publishWithFleetStatsLease(plan, publishFn) {
+  const ids = WAVES_LOCATIONS.map((loc) => loc.id).sort();
+  const HELD = Symbol('held');
+  const acquire = async (i) => {
+    if (i >= ids.length) {
+      const driftReason = await milestonePublishBlocker(plan);
+      if (driftReason) return { [HELD]: true, blocked: true, driftReason };
+      // Same { blocked, result, releaseClaim, abandonClaim } outcome shape
+      // the callers already handle (non-review pass-through).
+      return { [HELD]: true, outcome: await publishWithReviewLivenessLock(null, publishFn) };
+    }
+    return runExclusive(`gbp-review-sync:${ids[i]}`, () => acquire(i + 1), { recordHealth: false });
+  };
+  const result = await acquire(0);
+  if (!result || !result[HELD]) return { blocked: true, lockBusy: true };
+  if (result.blocked) return { blocked: true, driftReason: result.driftReason };
+  return result.outcome;
+}
 
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false, allowConsumedByRunId = null } = {}) {
   if (!sourceReviewId) {
@@ -2390,8 +2424,17 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // fully-posted run normally finalizes on the attempt that completed it).
     // The liveness gate above is a snapshot; the lock closes its TOCTOU
     // against the reconcile stamping the source review mid-approval.
+    // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
+    // owner of the testimonial — only this run's retry may publish the
+    // remaining channels past its own stamp; every other run is consumed.
+    // Milestone drafts take the fleet-stats lease instead (see
+    // publishWithFleetStatsLease) — the drift re-check and the post happen
+    // with the stats sync excluded.
+    const withPublishLock = (fn) => (input.milestone
+      ? publishWithFleetStatsLease(input, fn)
+      : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
     const publishOutcome = remainingChannels.length
-      ? await publishWithReviewLivenessLock(sourceReviewId, () => SocialMediaService.publishToAll({
+      ? await withPublishLock(() => SocialMediaService.publishToAll({
         title: run.topic || preview.inputs?.topic || 'Waves update',
         description: run.service || preview.inputs?.service || '',
         link: preview.suggestedLink,
@@ -2419,17 +2462,18 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
           : (input.reviewGraphic?.googleReviewId && (() => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)))
             || (input.milestone && (() => stampMilestoneCelebrated(input.milestone, run.id)))
             || null,
-      // allowConsumedByRunId: a PARTIAL prior attempt stamps this run as the
-      // owner of the testimonial — only this run's retry may publish the
-      // remaining channels past its own stamp; every other run is consumed.
-      }), { rejectConsumed: true, allowConsumedByRunId: run.id })
+      }))
       : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {}, abandonClaim: () => {} };
     if (publishOutcome.blocked) {
       return {
         ok: false,
         status: 409,
-        error: publishOutcome.lockBusy
-          ? 'review sync is in progress for this location — approve again in a moment'
+        error: publishOutcome.driftReason
+          ? publishOutcome.driftReason
+          : publishOutcome.lockBusy
+          ? (input.milestone
+            ? 'review stats sync is in progress — approve again in a moment'
+            : 'review sync is in progress for this location — approve again in a moment')
           : publishOutcome.consumed
             ? 'this review was already published as a testimonial by another run'
             : publishOutcome.missing
