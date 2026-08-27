@@ -159,8 +159,14 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         // pre-existing auto-merge behavior; the newer-sibling lookup in
         // queueRowParkedState filters by opportunity_id instead.
         if (table === 'autonomous_runs' && q._filters.id !== undefined) {
+          // Default: an ungoverned run whose head IS the publisher-pinned
+          // commit (the pin is UNIVERSAL on these lanes — PR r14), so the
+          // pre-existing merge tests keep merging.
           return Promise.resolve(runFirst !== undefined ? runFirst : {
-            comparison_table_result: null, draft_payload: null, trust_build_approved_at: null, brief_id: null,
+            comparison_table_result: null,
+            draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }),
+            trust_build_approved_at: null,
+            brief_id: null,
           });
         }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
@@ -848,12 +854,12 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
-  test('a COMPETITOR-FREE intercept run (ordinary trust-build path) keeps the ordinary auto-merge — provenance alone never governs (PR r13 P1)', async () => {
+  test('a COMPETITOR-FREE intercept run (ordinary trust-build path, pinned head) keeps the ordinary auto-merge — no eligibility demanded (PR r13 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({
       pending: [makeRun({ action_type: 'refresh_existing_page', brief_id: 'brief-1' })],
       briefs: [{ id: 'brief-1', action_type: 'refresh_existing_page', gsc_signal: { intercept: true } }],
-      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: null, trust_build_approved_at: null, brief_id: 'brief-1' },
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: false }, draft_payload: JSON.stringify({ autopublish_head_sha: 'headsha1' }), trust_build_approved_at: null, brief_id: 'brief-1' },
     });
     greenMergePath();
     gh.mergePr.mockResolvedValue({ merged: true });
@@ -865,7 +871,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
-  test('an UNGOVERNED run (competitor-free verdict, no intercept brief, no approval) keeps the ordinary auto-merge', async () => {
+  test('a competitor-free run whose head is NOT the pinned commit is withheld — the pin is universal on these lanes (PR r14 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun()],
+      runFirst: { comparison_table_result: null, draft_payload: JSON.stringify({ autopublish_head_sha: 'someoldsha' }), trust_build_approved_at: null, brief_id: null },
+    });
+    greenMergePath();
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'publisher_head_pin_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('an UNGOVERNED run (competitor-free verdict, no intercept brief, no approval) with a pinned head keeps the ordinary auto-merge', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
     greenMergePath();

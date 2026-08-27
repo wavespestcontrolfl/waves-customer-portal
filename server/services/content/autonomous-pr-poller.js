@@ -906,19 +906,22 @@ async function maybeAutoMerge(run, pr) {
     } catch (_) {
       verdictFlagged = true; pinnedShaOk = false; approvedShaOk = false;
     }
-    // Governance keys on the PERSISTED competitor-review/approval state of
-    // THIS run — never on intercept provenance alone (PR r13 P1: a
+    // The SHA pin is UNIVERSAL on these lanes (PR r14 P1): even a
+    // competitor-free run's head could gain named-competitor content
+    // through a later direct push, so EVERY unattended merge requires a
+    // publisher-produced (or human-approved) commit — a foreign push always
+    // waits for a human. In-flight pre-deploy runs without a stamp withhold
+    // once and get a manual merge. The named-competitor ELIGIBILITY
+    // recheck, by contrast, keys only on the persisted competitor verdict /
+    // approval of THIS run — never intercept provenance alone (PR r13 P1: a
     // competitor-free intercept refresh publishes through the ordinary
-    // trust-build path and must keep the ordinary auto-merge; requiring
-    // named-competitor eligibility there withheld every such PR forever,
-    // since eligibility rightly rejects the refresh action).
-    const governed = verdictFlagged || Boolean(approvedAt);
-    if (governed) {
-      if (!pinnedShaOk && !approvedShaOk) {
-        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: head ${pr.head?.sha || 'unknown'} is not a publisher-pinned or human-approved commit — PR left open for a human decision`);
-        return { pending: true, reason: 'publisher_head_pin_failed' };
-      }
-      if (verdictFlagged && !approvedShaOk) {
+    // trust-build path, and eligibility rightly rejects the refresh
+    // action).
+    if (!pinnedShaOk && !approvedShaOk) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: head ${pr.head?.sha || 'unknown'} is not a publisher-pinned or human-approved commit — PR left open for a human decision`);
+      return { pending: true, reason: 'publisher_head_pin_failed' };
+    }
+    if (verdictFlagged && !approvedShaOk) {
         // Kill-switch recheck for runs that actually carried
         // named-competitor content: scoped eligibility from the brief row's
         // RAW persisted marker only (PR r11 + r13 P1s — no
@@ -942,11 +945,9 @@ async function maybeAutoMerge(run, pr) {
         if (!eligible) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
           return { pending: true, reason: 'named_competitor_autopublish_revoked' };
-        }
       }
     }
   }
-
 
   // 3.6 Repeat the queue-state re-check: step 3.5 added async work (run +
   //    brief reads), so an operator requeue/dismiss landing during it must
