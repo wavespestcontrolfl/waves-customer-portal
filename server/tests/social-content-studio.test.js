@@ -536,9 +536,12 @@ describe('autonomous review-milestone lane', () => {
     const locs = [{ id: 'sarasota' }, { id: 'venice' }];
     const row = (location_id, payload, synced_at = fresh) => ({ location_id, review_text: JSON.stringify(payload), synced_at });
 
-    // Complete + fresh: sum of totals, simple mean of location ratings (dashboard parity).
+    // Complete + fresh: sum of totals, rating WEIGHTED by review count.
     expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7, totalReviews: 112 })], locs, now))
       .toEqual({ count: 312, average: 4.8 });
+    // A tiny 5.0 location cannot lift a large 4.0 one (unweighted would say 4.5).
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.0, totalReviews: 300 }), row('venice', { rating: 5.0, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 310, average: 4.0 });
     // Missing location → null (never a partial total).
     expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 })], locs, now)).toBeNull();
     // Stale row → null.

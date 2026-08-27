@@ -1106,7 +1106,9 @@ function milestoneThresholdFor(count) {
 // row synced inside 24h with a finite totalReviews, else the snapshot is
 // partial and this returns null — a public milestone claim never falls back
 // to counting synced rows (incomplete, duplicable, may include retired
-// locations). Rating = simple mean of the location ratings (dashboard parity).
+// locations). Rating = location ratings WEIGHTED by their review counts —
+// stricter than the dashboard's simple mean, because this number is
+// published: a 10-review 5.0 location must not lift a 300-review 4.6.
 const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
 
 function fleetReviewStats(statsRows, locations = WAVES_LOCATIONS, now = Date.now()) {
@@ -1121,15 +1123,15 @@ function fleetReviewStats(statsRows, locations = WAVES_LOCATIONS, now = Date.now
   }
   if (!locations.length || !locations.every((loc) => fresh[loc.id])) return null;
   let count = 0;
-  let ratingSum = 0;
-  let ratingCount = 0;
+  let weightedSum = 0;
+  let weight = 0;
   for (const loc of locations) {
     const p = fresh[loc.id];
     count += p.totalReviews;
-    if (p.rating) { ratingSum += p.rating; ratingCount += 1; }
+    if (p.rating && p.totalReviews > 0) { weightedSum += p.rating * p.totalReviews; weight += p.totalReviews; }
   }
   if (count <= 0) return null;
-  return { count, average: ratingCount ? Math.round((ratingSum / ratingCount) * 10) / 10 : null };
+  return { count, average: weight ? Math.round((weightedSum / weight) * 10) / 10 : null };
 }
 
 async function reviewMilestoneStats() {
@@ -1158,14 +1160,17 @@ async function milestoneAlreadyClaimed(threshold) {
   return !!row;
 }
 
+// Copy states only what the snapshot proves: a count and a rating. No
+// claims about who wrote the reviews (residents/homeowners/customers) and
+// no recency ("just passed") — the window bounds the count, not the date.
 function buildMilestoneDrafts({ threshold, average }) {
   const n = threshold.toLocaleString('en-US');
   const avgLine = average ? `Average rating: ${average.toFixed(1)} stars. ` : '';
   return {
-    facebook: `${n} Google reviews. Thank you, Southwest Florida.\n\nEvery one came from a real home we service, written by the people who live there. ${avgLine}We read all of them, and they shape how we work.\n\nTo everyone who took a minute to leave one: thank you.`,
-    instagram: `${n} Google reviews. Thank you, Southwest Florida.\n\nEvery one came from a real home we service, written by the people who live there. ${avgLine}We read all of them, and they shape how we work.\n\n#wavespestcontrol #swfl #googlereviews #thankyou`,
-    linkedin: `Waves Pest Control just passed ${n} Google reviews. ${avgLine}A small local team, one visit and one review at a time. Thank you to the Southwest Florida homeowners who took the time to write them.`,
-    gbp: `${n} Google reviews and counting. Thank you to every Southwest Florida homeowner who took a minute to share their experience. ${avgLine}We read every one.`,
+    facebook: `${n} Google reviews. Thank you, Southwest Florida.\n\n${avgLine}We read every one, and they shape how we work.\n\nTo everyone who took a minute to share their experience: thank you.`,
+    instagram: `${n} Google reviews. Thank you, Southwest Florida.\n\n${avgLine}We read every one, and they shape how we work.\n\n#wavespestcontrol #swfl #googlereviews #thankyou`,
+    linkedin: `Waves Pest Control has reached ${n} Google reviews. ${avgLine}A small local team, one visit at a time. Thank you to everyone who took the time to share their experience.`,
+    gbp: `${n} Google reviews and counting. Thank you to everyone in Southwest Florida who took a minute to share their experience. ${avgLine}We read every one.`,
   };
 }
 
