@@ -1125,13 +1125,22 @@ function fleetReviewStats(statsRows, locations = WAVES_LOCATIONS, now = Date.now
   let count = 0;
   let weightedSum = 0;
   let weight = 0;
+  let ratingComplete = true;
   for (const loc of locations) {
     const p = fresh[loc.id];
     count += p.totalReviews;
-    if (p.rating && p.totalReviews > 0) { weightedSum += p.rating * p.totalReviews; weight += p.totalReviews; }
+    if (p.totalReviews <= 0) continue; // zero-review location: no rating needed
+    if (Number.isFinite(p.rating) && p.rating > 0) {
+      weightedSum += p.rating * p.totalReviews;
+      weight += p.totalReviews;
+    } else {
+      // Reviews exist but Google gave no rating: the fleet average would
+      // describe only the other locations — publish no average at all.
+      ratingComplete = false;
+    }
   }
   if (count <= 0) return null;
-  return { count, average: weight ? Math.round((weightedSum / weight) * 10) / 10 : null };
+  return { count, average: ratingComplete && weight ? Math.round((weightedSum / weight) * 10) / 10 : null };
 }
 
 async function reviewMilestoneStats() {
@@ -1193,10 +1202,12 @@ const MILESTONE_INFLIGHT_MS = 2 * 60 * 60 * 1000;
 
 async function milestoneAlreadyClaimed(threshold) {
   if (!(await hasTable('social_content_studio_runs'))) return true;
+  // Fail CLOSED: if the stamp can't be read, treat the threshold as claimed —
+  // a missed celebration is recoverable, a duplicate one is not.
   const stamped = await db('system_settings')
     .where({ key: milestoneStampKey(threshold) })
     .first('key')
-    .catch(() => null);
+    .catch(() => ({ unreadable: true }));
   if (stamped) return true;
   const inflightSince = new Date(Date.now() - MILESTONE_INFLIGHT_MS);
   const row = await db('social_content_studio_runs')

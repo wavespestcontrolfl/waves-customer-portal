@@ -552,6 +552,13 @@ describe('autonomous review-milestone lane', () => {
     // Rows for unconfigured locations are ignored; no ratings → average null, never an invented 5.0.
     expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 50 }), row('venice', { totalReviews: 10 }), row('retired', { rating: 5, totalReviews: 999 })], locs, now))
       .toEqual({ count: 60, average: null });
+    // A location WITH reviews but no rating hides the whole average (a partial
+    // "5.0" from the other location would not describe the fleet)...
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 300 }), row('venice', { rating: 5.0, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 310, average: null });
+    // ...while a zero-review location without a rating does not.
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 0 }), row('venice', { rating: 4.6, totalReviews: 10 })], locs, now))
+      .toEqual({ count: 10, average: 4.6 });
   });
 
   test('milestoneDrift blocks a stored plan the current stats no longer support', () => {
