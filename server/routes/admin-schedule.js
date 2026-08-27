@@ -11848,7 +11848,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // knows nothing about skip_weekends, so a seeded tail can land on the
     // Sat/Sun the operator excluded. Only refuse when there IS a tail — a
     // fully pre-seeded year is adopted as booked, weekend rule included.
-    if (coverageSeedsTail && input.skipWeekends) {
+    // B6: the customer's LIVE weekday preference counts like the operator
+    // flag here — the preference is never persisted onto rows, and a
+    // pref customer's weekend-blind seeded tail would violate it the same
+    // way. Consulted only when a tail would actually seed.
+    if (coverageSeedsTail
+      && (input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))) {
       return blocked(`isn’t available on an ongoing series that skips weekends — the ${visitsPerYear - ONGOING_PRESEEDED_VISITS} visits seeded after the booked ones ignore that rule. Enter ${visitsPerYear} in Visits to book the whole year`);
     }
 

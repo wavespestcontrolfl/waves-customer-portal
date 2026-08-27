@@ -128,10 +128,12 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
 
 describe('every consumer consults the preference LIVE (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-  test('all seven admin-schedule consult sites present', () => {
-    // import + create route + plan helper + cadence-rewrite + spawn +
-    // reconcile + maintenance + alert action
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
+  test('all eight admin-schedule consult sites present', () => {
+    // import + create route + plan helper (shared by all three branches) +
+    // cadence-rewrite + spawn + reconcile + maintenance + alert action +
+    // annual-prepay weekend gate
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
+    expect(src).toContain('(input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const prefNoWeekends = await customerPrefersNoWeekends(conn, before.customer_id);');
     // Edit paths: the preference ORs over the form's routinely-submitted

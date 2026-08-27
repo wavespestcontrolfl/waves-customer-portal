@@ -381,8 +381,15 @@ describe('live-status reschedule override (allowLive)', () => {
   }
 
   test('non-seasonal series re-anchor shifts weekend siblings for a weekday-preference customer (B6)', async () => {
-    const SAT_TARGET = '2027-05-01'; // Saturday — customer-picked anchor, honored as-is
-    const MON_SIB_SHIFTED = '2027-05-10'; // raw +7d sibling lands Sat 05-08 → forward to Monday
+    // Relative dates (AGENTS.md — freshness-validated values must not be
+    // fixed): the next Saturday at least 3 weeks out, so the not-in-the-past
+    // guard holds on any run date. Customer-picked anchor, honored as-is;
+    // the raw +7d sibling lands the following Saturday → forward to Monday.
+    const satBase = new Date(Date.now() + 21 * 86400000);
+    while (satBase.getUTCDay() !== 6) satBase.setUTCDate(satBase.getUTCDate() + 1);
+    const iso = (d) => d.toISOString().slice(0, 10);
+    const SAT_TARGET = iso(satBase);
+    const MON_SIB_SHIFTED = iso(new Date(satBase.getTime() + 9 * 86400000));
     const { updates } = wireSeriesMocks('confirmed', [
       { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
       { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
