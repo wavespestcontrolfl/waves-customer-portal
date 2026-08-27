@@ -282,7 +282,17 @@ router.use(adminAuthenticate, requireTechOrAdmin);
 // Prime the percent-discount exclusion catalog before any schedule route
 // prices, spawns, or lists a visit (see primePercentDiscountExclusions).
 router.use((req, res, next) => {
-  primePercentDiscountExclusions().then(() => next(), () => next());
+  primePercentDiscountExclusions().then(() => {
+    // Reads still serve (their exclusion flags are preview hints; the save
+    // is authoritative); anything that can price or spawn a visit waits.
+    if (req.method !== 'GET' && !percentExclusionCatalogIsReady()) {
+      return res.status(503).json({
+        error: 'Service catalog unavailable — pricing is paused until it loads. Retry in a moment.',
+        code: 'percent_exclusion_catalog_unavailable',
+      });
+    }
+    return next();
+  }, () => next());
 });
 
 // ─── Technician job scoping ─────────────────────────────────────────────────
@@ -2119,6 +2129,16 @@ const PERCENT_EXCLUSION_KEY_ALIASES = Object.freeze({
 // its engine identity alone — no alias or map lookup can override it.
 let percentExclusionCatalog = new Map();
 let percentExcludedCatalogLoadedAt = 0;
+// FAIL CLOSED (pre-push Codex P0): until the catalog has loaded once,
+// variant keys (rodent_bait_quarterly, bed_bug_treatment, …) would resolve
+// as discountable, so pricing mutations are refused (503) rather than
+// priced against an empty catalog. A later refresh failure keeps the
+// last-good catalog.
+let percentExclusionCatalogReady = false;
+function percentExclusionCatalogIsReady() {
+  // No raw() = mocked/absent knex (unit tests): nothing to load, nothing to gate.
+  return percentExclusionCatalogReady || typeof db?.raw !== 'function';
+}
 let percentExcludedCatalogInflight = null;
 
 function buildPercentExclusionCatalog(rows) {
@@ -2143,6 +2163,7 @@ async function primePercentDiscountExclusions() {
       const result = await db.raw('select service_key, engine_keys from services where engine_keys is not null');
       percentExclusionCatalog = buildPercentExclusionCatalog(Array.isArray(result?.rows) ? result.rows : []);
       percentExcludedCatalogLoadedAt = Date.now();
+      percentExclusionCatalogReady = true;
     } catch (e) {
       logger.warn(`[schedule] percent-discount exclusion catalog prime failed: ${e.message}`);
     } finally {
@@ -14826,6 +14847,13 @@ router.get('/services-dropdown', async (req, res, next) => {
       ];
     }
 
+    // Fallback items carry their group's category so a pick keeps the
+    // catalog scope a category-filtered preset compares against.
+    for (const group of groups) {
+      for (const item of group.items || []) {
+        if (item.serviceCategory === undefined) item.serviceCategory = group.category || null;
+      }
+    }
     res.json({ groups });
   } catch (err) { next(err); }
 });

@@ -1119,7 +1119,14 @@ const EDIT_FALLBACK_SERVICES = [
       { name: "Rodent Control Service", serviceKey: "rodent_general_one_time" },
       { name: "Rodent Trapping Service", serviceKey: "rodent_trapping" },
       { name: "Rodent Exclusion Service", serviceKey: "rodent_exclusion_only" },
-      { name: "Rodent Bait Station Service", serviceKey: "rodent_bait_quarterly" },
+      {
+        name: "Rodent Bait Station Service",
+        serviceKey: "rodent_bait_quarterly",
+        // rodent_bait is a percent-excluded family (pricing-engine
+        // WAVEGUARD.excludedFromPercentDiscount) — the only such family in
+        // this static list; stamped so the preview matches the save.
+        excludedFromPercentDiscount: true,
+      },
     ],
   },
   {
@@ -2650,9 +2657,12 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                                   svc.excludedFromPercentDiscount === true,
                                 );
                                 onField("serviceKey", svc.serviceKey || null);
+                                // Static-fallback items carry no category of
+                                // their own; the group's is the catalog
+                                // category a category-scoped preset compares.
                                 onField(
                                   "serviceCategory",
-                                  svc.serviceCategory || null,
+                                  svc.serviceCategory || group.category || null,
                                 );
                                 setPickerKey(null);
                                 setExpandedCategory(null);
