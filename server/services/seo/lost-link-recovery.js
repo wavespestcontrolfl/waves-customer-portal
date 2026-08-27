@@ -25,8 +25,31 @@ function normalizeDomain(d) {
   return String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^(www|mail)\./, '').replace(/[/:].*$/, '');
 }
 
+// Canonical board form of a Waves target page. The board's unique key is
+// textual (target_domain, target_page) and existing rows use both
+// https://wavespestcontrol.com/... and https://www.wavespestcontrol.com/...
+// (always with a trailing slash), so: lookups try every variant, inserts use
+// one canonical spelling (homepage bare — the 150-row majority — pages www).
+function targetPathOf(url) {
+  const raw = String(url || '').split('#')[0].split('?')[0];
+  let path = '/';
+  try { path = new URL(raw).pathname || '/'; } catch { path = raw.replace(/^https?:\/\/[^/]+/, '') || '/'; }
+  path = path.replace(/\/+$/, '');
+  return path ? `${path}/` : '/';
+}
 function targetPageOf(url) {
-  return String(url || '').split('#')[0].split('?')[0] || 'https://wavespestcontrol.com/';
+  const path = targetPathOf(url);
+  return path === '/' ? 'https://wavespestcontrol.com/' : `https://www.wavespestcontrol.com${path}`;
+}
+function targetPageVariants(url) {
+  const path = targetPathOf(url);
+  const bare = path.replace(/\/$/, '');
+  const out = new Set();
+  for (const host of ['https://wavespestcontrol.com', 'https://www.wavespestcontrol.com', 'http://wavespestcontrol.com', 'http://www.wavespestcontrol.com']) {
+    out.add(`${host}${path}`);
+    if (bare) out.add(`${host}${bare}`);
+  }
+  return [...out];
 }
 
 /**
@@ -70,7 +93,7 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that row is REOPENED as a
     // fresh prospect (the worker only claims status='prospect'). Rows still in
     // flight, or rejected by the owner, are left alone.
-    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page: targetPage }).first('id', 'status', 'notes', 'link_type');
+    const exists = await db('seo_link_prospects').where({ target_domain: domain }).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -88,7 +111,10 @@ async function queueOne(loss, out, scoreMod) {
       // the worker claims only OUTREACH_TYPES — a reopen must leave a claimable type.
       const reopenType = OUTREACH_TYPES.has(exists.link_type) ? exists.link_type
         : OUTREACH_TYPES.has(loss.link_type) ? loss.link_type : 'resource';
-      await db('seo_link_prospects').where({ id: exists.id }).update({
+      // Conditional on status='lost': the daily verifier can restore the row to
+      // live between our read and this write — a 0-row update means it is no
+      // longer lost and must not be reopened for outreach.
+      const reopened = await db('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
         status: 'prospect',
         priority: 'high',
         link_type: reopenType,
@@ -102,6 +128,11 @@ async function queueOne(loss, out, scoreMod) {
         notes: exists.notes ? `${exists.notes}\n${note}` : note,
         updated_at: new Date(),
       });
+      if (!reopened) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: 'board row no longer lost (restored concurrently)' });
+        return;
+      }
       out.queued++;
       out.reasons.push({ domain, reason: 'reopened lost prospect' });
       return;
@@ -202,11 +233,16 @@ async function queueOne(loss, out, scoreMod) {
  */
 async function resolveRecoveredLink(backlink, now = new Date()) {
   const domain = normalizeDomain(backlink.source_domain);
-  const targetPage = targetPageOf(backlink.target_url);
   if (!domain) return { resolved: 0 };
+  // Only UNSENT rows close automatically: a 'sending' row has a Gmail send in
+  // flight whose finalizer needs the token; sent/send_error rows are the
+  // operator's reconciliation, not ours.
   const n = await db('seo_link_prospects')
-    .where({ target_domain: domain, target_page: targetPage, status: 'prospect' })
+    .where({ target_domain: domain, status: 'prospect' })
+    .whereIn('target_page', targetPageVariants(backlink.target_url))
     .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
+    .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
+    .whereNull('outreach_sent_at')
     .update({
       status: 'live',
       live_url: backlink.source_url,
@@ -221,4 +257,4 @@ async function resolveRecoveredLink(backlink, now = new Date()) {
   return { resolved: n || 0 };
 }
 
-module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf } };
+module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf, targetPageVariants } };

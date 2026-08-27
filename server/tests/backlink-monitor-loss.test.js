@@ -228,7 +228,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-9', event_type: 'recovered' })]);
     // the un-pitched lost_recovery prospect for this link is resolved, not left for the drafter
     const resolve = prospectOps.find(o => o.op === 'update');
-    expect(resolve.wheres[0][0]).toEqual({ target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/', status: 'prospect' });
+    expect(resolve.wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
     expect(resolve.raws[0][0]).toMatch(/lost_recovery/);
     expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
   });
@@ -329,7 +329,7 @@ describe('lost-link recovery', () => {
     const r = await recovery.queueLostDomains([loss], { scorer });
     expect(r).toEqual(expect.objectContaining({ queued: 1, skipped: 0 }));
     expect(inserts[0]).toEqual(expect.objectContaining({
-      target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/',
+      target_domain: 'blog.example', target_page: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/',
       link_type: 'resource', priority: 'high', source: 'lost_recovery', source_ref: 'bl-1', owner: 'backlink_monitor',
       contact_email: 'ed@blog.example', domain_rating: 45, anchor_planned: 'Waves Pest Control',
     }));
@@ -354,7 +354,7 @@ describe('lost-link recovery', () => {
     const scorer = { scoreCandidates: jest.fn() };
     const r = await recovery.queueLostDomains([loss], { scorer });
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'queued' }] });
-    expect(updates[0].where).toEqual({ id: 'p-lost' });
+    expect(updates[0].where).toEqual({ id: 'p-lost', status: 'lost' }); // conditional reopen
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'prospect', priority: 'high', claimed_at: null, attempts: 0, outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null }));
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_outreach_sent_at/); // prior send preserved, not erased
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
@@ -390,10 +390,14 @@ describe('lost-link recovery', () => {
 
   test('resolveRecoveredLink closes only un-pitched recovery prospects for that exact page', async () => {
     const ops = [];
-    makeDb({ seo_link_prospects: (op, st) => { ops.push({ op, wheres: st.wheres, raws: st.raws, payload: st.payload }); return 2; } });
+    makeDb({ seo_link_prospects: (op, st) => { ops.push({ op, wheres: st.wheres, ins: st.ins, nulls: st.nulls, raws: st.raws, payload: st.payload }); return 2; } });
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
     expect(r).toEqual({ resolved: 2 });
-    expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/x/', status: 'prospect' });
+    expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
+    expect(ops[0].ins[0]).toEqual(['target_page', expect.arrayContaining(['https://wavespestcontrol.com/x/', 'https://www.wavespestcontrol.com/x', 'https://www.wavespestcontrol.com/x/'])]);
+    // only unsent rows: none/drafted and outreach_sent_at IS NULL — sending/sent are left for reconciliation
+    expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
+    expect(ops[0].nulls).toContain('outreach_sent_at');
     expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', first_live_at: new Date('2026-09-06T08:00:00Z'), backlink_id: 'bl-1' }));
   });
 
@@ -405,6 +409,22 @@ describe('lost-link recovery', () => {
     updates.length = 0;
     await recovery.queueLostDomains([{ ...loss, link_type: 'unknown' }], { scorer: { scoreCandidates: jest.fn() } });
     expect(updates[0].link_type).toBe('resource');
+  });
+
+  test('board lookup matches every spelling of the target page; canonical insert form', () => {
+    const { targetPageOf, targetPageVariants } = recovery._test;
+    expect(targetPageOf('https://www.wavespestcontrol.com/x?utm=1#f')).toBe('https://www.wavespestcontrol.com/x/');
+    expect(targetPageOf('http://wavespestcontrol.com')).toBe('https://wavespestcontrol.com/');
+    expect(targetPageVariants('https://wavespestcontrol.com/x/')).toEqual(expect.arrayContaining([
+      'https://wavespestcontrol.com/x', 'https://wavespestcontrol.com/x/', 'https://www.wavespestcontrol.com/x', 'https://www.wavespestcontrol.com/x/',
+    ]));
+    expect(targetPageVariants('https://www.wavespestcontrol.com/?ref=x')).toContain('https://wavespestcontrol.com/');
+  });
+
+  test('reopen is conditional on the row still being lost (0-row update = skip)', async () => {
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource' }; if (op === 'update') { expect(st.wheres[0][0]).toEqual({ id: 'p-lost', status: 'lost' }); return 0; } } });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'board row no longer lost (restored concurrently)' }] }));
   });
 
   test('fail-soft fallback link_type is coerced to a worker-claimable type', async () => {
