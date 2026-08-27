@@ -132,6 +132,13 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
     });
 }
 
+// Last pay-page activity on a PaymentIntent (epoch seconds), stamped into
+// metadata at every seam that rewrites the PI (setup mint/reuse,
+// update-amount, finalize). pay-combined's abandoned-sibling triage reads it
+// as the lease that proves a bound PI is a dead session rather than a page
+// the customer is actively paying on.
+const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
+
 async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
@@ -3631,11 +3638,10 @@ const StripeService = {
             : `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
-            // Last pay-page activity on this PI (epoch seconds). Re-stamped
-            // on every setup reuse so a sibling triage can tell "abandoned
-            // weeks ago" from "reopened just now" — `created` is immutable
-            // and single-invoice setup reuses old PIs in place.
-            pay_session_touched_at: String(Math.floor(Date.now() / 1000)),
+            // Re-stamped on every setup reuse so the sibling triage can tell
+            // "abandoned weeks ago" from "reopened just now" — `created` is
+            // immutable and single-invoice setup reuses old PIs in place.
+            pay_session_touched_at: paySessionTouchedAt(),
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
             base_amount: String(baseAmount),
@@ -4126,6 +4132,7 @@ const StripeService = {
         // Refresh (or clear) the combined allocation alongside the amount —
         // the two must never disagree, and Stripe metadata updates MERGE.
         combined_allocation: combinedCtx ? PayCombined.encodeAllocation(combinedCtx.allocation) : '',
+        pay_session_touched_at: paySessionTouchedAt(),
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
         // CLEAR any surcharge-finalization metadata (Stripe metadata updates
@@ -4625,6 +4632,7 @@ const StripeService = {
         // The allocation the settle paths will split this charge by — kept
         // in lockstep with the amount (empty string CLEARS a stale one).
         combined_allocation: finalizeCombinedCtx ? PayCombined.encodeAllocation(finalizeCombinedCtx.allocation) : '',
+        pay_session_touched_at: paySessionTouchedAt(),
         surcharge_rate_bps: String(rateBps),
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',

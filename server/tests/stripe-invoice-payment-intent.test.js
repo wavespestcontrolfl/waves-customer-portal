@@ -284,6 +284,10 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         surcharge_policy_version: '',
         surcharge_rate_bps: '',
         card_funding: '',
+        // Activity lease for pay-combined's abandoned-sibling triage: a
+        // reused PI's immutable `created` may be weeks old, so every setup
+        // reuse must re-stamp "touched now".
+        pay_session_touched_at: expect.stringMatching(/^\d{10}$/),
       }),
     }));
   });
@@ -812,6 +816,9 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7717);
     expect(params.amount_details).toEqual({ surcharge: { amount: 217, enforce_validation: 'enabled' } });
+    // Finalize is the last server seam before confirm — refresh the
+    // abandoned-sibling activity lease here too.
+    expect(params.metadata.pay_session_touched_at).toMatch(/^\d{10}$/);
   });
 
   test('unset-rejected fallback verifies the PI is clean before confirming', async () => {
@@ -1119,6 +1126,10 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
         surcharge_policy_version: '',
         surcharge_rate_bps: '',
         card_funding: '',
+        // Tender selection is pay-page activity — refresh the abandoned-
+        // sibling lease so a page open >1h that the customer is now acting
+        // on is never canceled by a concurrent combined setup.
+        pay_session_touched_at: expect.stringMatching(/^\d{10}$/),
       }),
     }));
   });
