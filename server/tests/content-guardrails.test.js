@@ -2380,6 +2380,16 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A VALID fence-opener line interrupts the paragraph — a span cannot
     // close on its run, so the fence opens and hides the table.
     expect(guardrails.hasRawMarkdownTable('Intro ```\n```\n| A | B |\n| - | - |')).toBe(false);
+    // Header and delimiter pair only at the SAME quote depth — an outer
+    // paragraph over a NESTED quote is not a table.
+    expect(guardrails.hasRawMarkdownTable('> A | B\n> > - | -')).toBe(false);
+    // A fence opened on a QUOTED list continuation line ("> - item" then
+    // ">   ~~~") scopes to the item's quote-relative column — content at
+    // that column stays fenced…
+    expect(guardrails.hasRawMarkdownTable('> - item\n>   ~~~\n>   | A | B |\n>   | - | - |\n>   ~~~')).toBe(false);
+    // …while quoted content dedenting out of the item ends the fence,
+    // exposing the quoted table.
+    expect(guardrails.hasRawMarkdownTable('> - item\n>   ~~~\n> | A | B |\n> | - | - |')).toBe(true);
     // An ESCAPED pipe inside a code span is cell CONTENT even at block
     // level — "| `a \| b` | c |" is a 2-cell header, no match for a 3-cell
     // delimiter.

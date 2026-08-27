@@ -1881,7 +1881,7 @@ function spanCrossesBlockBoundary(whole, start, matched) {
   return false;
 }
 
-function blankNonRenderedMarkdown(text) {
+function blankNonRenderedMarkdownWithDepths(text) {
   const raw = String(text || '');
   // Pass 1 — comments and <pre> (whole-text, newline-preserving). A
   // delimiter that sits INSIDE an inline code span renders as code
@@ -1906,7 +1906,7 @@ function blankNonRenderedMarkdown(text) {
     // opened on a list CONTINUATION line ("- item" then "  ~~~") scopes to
     // that item's content column too, not just fences whose own line
     // carries the marker.
-    let ambientListIndent = 0; let prevBlank = true;
+    let ambientListIndent = 0; let ambientListDepth = 0; let prevBlank = true;
     for (const line of raw.split('\n')) {
       const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
       const depth = (quotePrefix.match(/>/g) || []).length;
@@ -1927,22 +1927,28 @@ function blankNonRenderedMarkdown(text) {
         // A fence may open DIRECTLY as list-item content ("- ~~~html").
         const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
         const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
-        if (marker && depth === 0 && markerIndent <= ambientListIndent + 3) ambientListIndent = marker[0].length;
-        else if (!blank && depth === 0 && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
+        // The ambient list column applies at ITS quote depth — leaving the
+        // quote ends a quoted list; markers at any depth (quote-relative)
+        // set both the column and the depth.
+        if (!blank && depth < ambientListDepth) { ambientListIndent = 0; ambientListDepth = 0; }
+        if (marker && markerIndent <= (depth === ambientListDepth ? ambientListIndent : 0) + 3) {
+          ambientListIndent = marker[0].length;
+          ambientListDepth = depth;
+        } else if (!blank && depth === ambientListDepth && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
         const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
         const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
           || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
         if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
           // A dedented fence itself ends the ambient list (pass-3 posture).
-          if (!marker && depth === 0 && indent < ambientListIndent) ambientListIndent = 0;
+          if (!marker && depth === ambientListDepth && indent < ambientListIndent) ambientListIndent = 0;
           openCh = opener[1][0]; openLen = opener[1].length; start = pos;
           openDepth = depth;
           // The list column is QUOTE-RELATIVE (indent above is computed on
           // the quote-stripped line): a fence opened as list-item content
-          // INSIDE a blockquote ("> - ~~~"), or on an unquoted list
-          // CONTINUATION line, still ends when content dedents out of the
-          // item.
-          openListIndent = marker ? marker[0].length : (depth === 0 ? ambientListIndent : 0);
+          // ("> - ~~~"), or on a CONTINUATION line of a quoted or unquoted
+          // item ("> - item" then ">   ~~~"), still ends when content
+          // dedents out of the item.
+          openListIndent = marker ? marker[0].length : (depth === ambientListDepth ? ambientListIndent : 0);
         }
         prevBlank = blank;
       }
@@ -2019,6 +2025,7 @@ function blankNonRenderedMarkdown(text) {
   const sourceLines = afterComments.split('\n');
   let fence = null; // { ch, len, depth, listIndent }
   let fenceListIndent = 0; // content column of the current list item (0 = top level)
+  let fenceListDepth = 0; // quote depth the current list lives at (0 = unquoted)
   let fencePrevBlank = true;
   // Line indices where THIS pass ends the list via fence geometry (a
   // dedented fence opener, or content dedented out of a fence's list item).
@@ -2033,7 +2040,7 @@ function blankNonRenderedMarkdown(text) {
     // content column ("10. x" + "    > ```"). A fence opened at quote
     // depth > 0 scopes to its QUOTE container (depth check), so its
     // listIndent is 0.
-    const quoteRe = fenceListIndent > 0
+    const quoteRe = fenceListIndent > 0 && fenceListDepth === 0
       ? new RegExp(`^ {0,${fenceListIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
       : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
     const prefix = l.match(quoteRe);
@@ -2041,17 +2048,22 @@ function blankNonRenderedMarkdown(text) {
     const stripped = prefix ? l.slice(prefix[0].length) : l;
     const blank = stripped.trim() === '';
     const indent = stripped.match(/^ */)[0].length;
-    // A DEDENTED blockquote interrupts the list (no lazy continuation).
+    // A DEDENTED blockquote interrupts an UNQUOTED list (no lazy
+    // continuation); leaving the quote entirely ends a QUOTED list.
     const rawIndent = l.match(/^ */)[0].length;
-    if (depth > 0 && !blank && fenceListIndent > 0 && rawIndent < fenceListIndent && !fence) fenceListIndent = 0;
+    if (depth > 0 && !blank && fenceListIndent > 0 && fenceListDepth === 0 && rawIndent < fenceListIndent && !fence) fenceListIndent = 0;
+    if (!blank && depth < fenceListDepth && !fence) { fenceListIndent = 0; fenceListDepth = 0; }
     // A fence opened inside a container ends with its container: a
     // non-blank line at a shallower quote depth — or dedented out of the
     // fence's list item (code has no lazy continuation) — is outside the
     // block and renders normally.
     if (fence && !blank && (depth < fence.depth || indent < fence.listIndent)) {
-      // Only a TOP-LEVEL fence's list end touches the ambient (unquoted)
-      // list state — a quote-scoped fence's item lives inside its quote.
-      if (indent < fence.listIndent && fence.depth === 0) { fenceListIndent = 0; listEndAt.add(i); }
+      // A fence's list end clears the tracked list only at the SAME quote
+      // depth; only a top-level end propagates to pass 4's ambient state.
+      if (indent < fence.listIndent) {
+        if (fence.depth === fenceListDepth) { fenceListIndent = 0; fenceListDepth = 0; }
+        if (fence.depth === 0) listEndAt.add(i);
+      }
       fence = null;
     }
     if (fence) {
@@ -2071,15 +2083,18 @@ function blankNonRenderedMarkdown(text) {
     // A dashes-only break ("- - -") is a break, not a list marker.
     const fenceInterrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
     const listItem = fenceInterrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
-    const markerAccepted = Boolean(listItem && listItem[1].length <= fenceListIndent + 3);
-    if (markerAccepted) fenceListIndent = listItem[1].length + listItem[2].length;
-    else if (!blank && depth === 0 && indent < fenceListIndent
-      && (fencePrevBlank || fenceInterrupting)) fenceListIndent = 0;
+    // The tracked list column applies only at ITS quote depth — a line at
+    // a different depth measures against a fresh (zero) column.
+    const listCol = depth === fenceListDepth ? fenceListIndent : 0;
+    const markerAccepted = Boolean(listItem && listItem[1].length <= listCol + 3);
+    if (markerAccepted) { fenceListIndent = listItem[1].length + listItem[2].length; fenceListDepth = depth; }
+    else if (!blank && depth === fenceListDepth && indent < fenceListIndent
+      && (fencePrevBlank || fenceInterrupting)) { fenceListIndent = 0; fenceListDepth = 0; }
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
     // the item's content column, so "10. item" + a 4-space fence is a fence
     // (relative indent 0), not indented code. Resolved in pass 4.
-    if (/^\t/.test(stripped) || (!markerAccepted && indent >= fenceListIndent + 4)) return l;
+    if (/^\t/.test(stripped) || (!markerAccepted && indent >= (depth === fenceListDepth ? fenceListIndent : 0) + 4)) return l;
     // A fence may open DIRECTLY as list-item content ("- ~~~") — the
     // opener is matched on the post-marker text.
     const markerLen = markerAccepted ? listItem[1].length + listItem[2].length : 0;
@@ -2089,22 +2104,30 @@ function blankNonRenderedMarkdown(text) {
       const srcTail = sourceLines[i].slice((prefix ? prefix[0].length : 0) + markerLen);
       const srcOpen = srcTail.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
-        if (!markerAccepted && depth === 0 && indent < fenceListIndent) { fenceListIndent = 0; listEndAt.add(i); } // a dedented fence ends the list
-        // A fence opened at quote depth > 0 scopes to its QUOTE, and — when
-        // its own line carries a list marker ("> - ~~~") — to that item's
-        // QUOTE-RELATIVE content column too: quoted content dedenting out
-        // of the item ends the fence (CommonMark), exposing what follows.
-        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? markerLen : fenceListIndent };
+        if (!markerAccepted && depth === fenceListDepth && indent < fenceListIndent) {
+          fenceListIndent = 0; // a dedented fence ends the list
+          if (depth === 0) listEndAt.add(i);
+        }
+        // A fence scopes to its QUOTE depth AND to the current list item's
+        // QUOTE-RELATIVE content column — whether its own line carries the
+        // marker ("> - ~~~") or it opens on a CONTINUATION line of a
+        // quoted item ("> - item" then ">   ~~~"): quoted content
+        // dedenting out of the item ends the fence (CommonMark).
+        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth === fenceListDepth ? fenceListIndent : markerLen };
         return '';
       }
     }
     return l;
   }).join('\n');
   // Pass 4 — blockquote prefixes, indented code (list-aware), per line.
+  // Each line's QUOTE DEPTH is recorded alongside the stripped text: the
+  // markers are removed here, but depth still separates blocks (a header
+  // and delimiter at DIFFERENT depths are not one table).
   let listContext = false;
   let listContentIndent = 0;
   let prevBlank = true;
-  return fenced.split('\n').map((l, i) => {
+  const outDepths = [];
+  const outText = fenced.split('\n').map((l, i) => {
     // A fence-geometry list end recorded by pass 3 (the fence lines it
     // judged are blanked here, so this pass cannot re-derive it).
     if (listEndAt.has(i)) listContext = false;
@@ -2118,6 +2141,7 @@ function blankNonRenderedMarkdown(text) {
       ? new RegExp(`^ {0,${listContentIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
       : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
     const quotePrefix = l.match(quoteRe);
+    outDepths.push(quotePrefix ? (quotePrefix[0].match(/>/g) || []).length : 0);
     const stripped = quotePrefix ? l.slice(quotePrefix[0].length) : l;
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
@@ -2144,6 +2168,11 @@ function blankNonRenderedMarkdown(text) {
     }
     return stripped.replace(/^\s+/, '');
   }).join('\n');
+  return { text: outText, depths: outDepths };
+}
+
+function blankNonRenderedMarkdown(text) {
+  return blankNonRenderedMarkdownWithDepths(text).text;
 }
 
 // GFM: a table is recognized only when header and delimiter rows have the
@@ -2166,13 +2195,13 @@ function isDelimiterRow(line) {
 }
 
 function extractRawMarkdownTables(text) {
-  const lines = blankNonRenderedMarkdown(text).split('\n');
+  const { text: blanked, depths } = blankNonRenderedMarkdownWithDepths(text);
+  const lines = blanked.split('\n');
   const tables = [];
   // Raw HTML tables are the other non-component table representation —
   // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
   // too (fence-blanked text, whitespace-normalized block).
   const htmlTable = /<table\b[\s\S]*?<\/table\s*>/gi;
-  const blanked = lines.join('\n');
   let hm;
   while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
@@ -2185,14 +2214,18 @@ function extractRawMarkdownTables(text) {
     if (marked) headerCandidates.push(marked[1]);
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
+    // Header and delimiter pair only at the SAME quote depth — "> A | B"
+    // over "> > - | -" is an outer-quote paragraph before a nested quote,
+    // not a table.
     const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i])
+      && depths[i] === depths[i - 1]
       && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
     if (!delimiter) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
     // whitespace-normalized, so refresh grandfathering can compare table
     // CONTENT rather than counts.
     let end = i + 1;
-    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== '') end += 1;
+    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== '' && depths[end] === depths[i]) end += 1;
     tables.push(lines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
     i = end;
   }
@@ -4414,6 +4447,7 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  blankNonRenderedMarkdownWithDepths,
   // entity decoder (fail-closed, sentinel for control chars) — consumed by
   // seo-completion-gate so CTA anchors are classified as RENDERED text.
   decodeEntitiesForScan,

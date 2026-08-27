@@ -408,14 +408,28 @@ function isConversionPath(href) {
 // Non-rendered regions never reach a reader — reuse the guardrails'
 // fence/comment-aware stripper (single Markdown scanner, no parallel parser)
 // so the gate judges rendered CTAs only.
-function renderedText(body) {
-  const { blankNonRenderedMarkdown } = require('./content-guardrails');
-  return blankNonRenderedMarkdown(body);
+function renderedTextWithDepths(body) {
+  const g = require('./content-guardrails');
+  // Rendered text plus each line's original QUOTE DEPTH — the markers are
+  // stripped, but depth still separates paragraphs (a deeper quote line
+  // interrupts, so a link label cannot continue across it). A test double
+  // without the depth-aware variant degrades to depthless text (the
+  // quote-boundary checks become inert, everything else holds).
+  if (typeof g.blankNonRenderedMarkdownWithDepths === 'function') return g.blankNonRenderedMarkdownWithDepths(body);
+  return { text: g.blankNonRenderedMarkdown(body), depths: null };
 }
 
 function extractLinks(body) {
-  const s = renderedText(body);
+  const { text: s, depths: lineDepths } = renderedTextWithDepths(body);
   const links = [];
+  const lineStarts = [0];
+  for (let p = s.indexOf('\n'); p !== -1; p = s.indexOf('\n', p + 1)) lineStarts.push(p + 1);
+  const lineIndexAt = (pos) => {
+    let lo = 0; let hi = lineStarts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
+  const depthAtPos = (pos) => (lineDepths ? (lineDepths[lineIndexAt(pos)] || 0) : 0);
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -428,6 +442,9 @@ function extractLinks(body) {
   // ("/x/../contact/" is /contact/) before classification.
   const dest = (h) => {
     let raw = decodeEntitiesForScan(String(h || '')).replace(/^<|>$/g, '');
+    // CommonMark backslash escapes render in destinations too —
+    // "(\/contact/)" is /contact/ in the browser.
+    raw = raw.replace(/\\([!-/:-@[-`{-~])/g, '$1');
     // Authority parsed with URL — default ports (":443") drop and hostnames
     // lowercase, exactly as the browser resolves them.
     if (/^https?:\/\//i.test(raw)) {
@@ -448,6 +465,24 @@ function extractLinks(body) {
     }
     return raw;
   };
+  // Quoted ATTRIBUTE VALUES do not render Markdown — link syntax inside
+  // `<span title="[x](/contact/)">` is tooltip text, not a clickable link —
+  // so a LENGTH-PRESERVING copy with those values blanked (newlines kept)
+  // feeds the definition parse and the Markdown walk. The HTML-anchor and
+  // autolink passes keep the original: href values live in quotes.
+  let sMd = s;
+  {
+    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
+    let tm;
+    while ((tm = tagScan.exec(s)) !== null) {
+      const local = tm[0].replace(/"[^"]*"|'[^']*'/g, (q) => q[0] + q.slice(1, -1).replace(/[^\n]/g, ' ') + q[q.length - 1]);
+      if (local !== tm[0]) sMd = sMd.slice(0, tm.index) + local + sMd.slice(tm.index + tm[0].length);
+    }
+  }
+  // Regions the Markdown passes CONSUME (definition lines, whole inline
+  // links) — the autolink pass must not re-read an angle-bracketed
+  // destination inside them as a separate bare-URL link.
+  const consumed = [];
   // Reference definitions are registered FIRST so the single link walk
   // below can resolve full and shortcut references as it goes.
   // CommonMark label matching is case-insensitive with internal whitespace
@@ -464,9 +499,10 @@ function extractLinks(body) {
   // CommonMark accepts them; matching is on the raw label text, identical
   // on the definition and reference sides, so no unescaping is needed.
   const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)/gm;
-  while ((m = def.exec(s)) !== null) {
+  while ((m = def.exec(sMd)) !== null) {
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
+    consumed.push([m.index, m.index + m[0].length]);
   }
   // Markdown links — inline, full-reference, and shortcut-reference — in one
   // procedural walk. Link TEXT is matched with a balanced-bracket scan, so
@@ -481,23 +517,25 @@ function extractLinks(body) {
     return n % 2 === 1;
   };
   // A label cannot cross a PARAGRAPH boundary — a blank line (a blank
-  // quote line included), an ATX heading, a thematic break, or a list-item
-  // opener (bullet, or ordered numbered 1) ends the paragraph, so
-  // "[Get a Termite" + blank line + "Estimate](/contact/)" renders no link
-  // and must not satisfy CTA presence.
-  const labelBoundaryLine = (line) => {
-    const stripped = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '');
-    if (!stripped.trim()) return true;
-    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:[-*+]|1[.)])[ \t]+\S)/.test(stripped);
+  // quote line included), an ATX heading, a thematic break, a list-item
+  // opener (bullet, or ordered numbered 1), or a line that DEEPENS the
+  // blockquote context (the quote interrupts the paragraph) ends the
+  // paragraph, so "[Get a Termite" + blank line (or "> Estimate](…)")
+  // renders no link and must not satisfy CTA presence. Same-depth quoted
+  // continuation and lazy continuation still soft-wrap.
+  const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
+    if (lineQuoteDepth > openQuoteDepth) return true;
+    if (!line.trim()) return true;
+    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
   };
-  const balancedLabelEnd = (str, open) => {
+  const balancedLabelEnd = (str, open, openQuoteDepth, depthAt) => {
     let depth = 0;
     for (let i = open; i < str.length; i += 1) {
       const ch = str[i];
       if (ch === '\\') { i += 1; continue; }
       if (ch === '\n') {
         const le = str.indexOf('\n', i + 1);
-        if (labelBoundaryLine(str.slice(i + 1, le === -1 ? undefined : le))) return -1;
+        if (labelBoundaryLine(str.slice(i + 1, le === -1 ? undefined : le), openQuoteDepth, depthAt(i + 1))) return -1;
         continue;
       }
       if (ch === '[') depth += 1;
@@ -537,24 +575,64 @@ function extractLinks(body) {
       if (depth > 0 || i === from) return null;
       destRaw = str.slice(from, i);
     }
-    const close = str.indexOf(')', i);
-    if (close === -1) return null;
-    return { destRaw, end: close };
+    // Only whitespace, then an optional VALID title ('"…"', "'…'", "(…)"),
+    // then whitespace and the closing ")" may follow the destination —
+    // "(/contact/ garbage)" renders no link.
+    let j = i;
+    while (j < str.length && /[ \t\n]/.test(str[j])) j += 1;
+    if (str[j] === '"' || str[j] === "'" || str[j] === '(') {
+      const closeCh = str[j] === '(' ? ')' : str[j];
+      const parenTitle = str[j] === '(';
+      j += 1;
+      while (j < str.length && str[j] !== closeCh) {
+        if (str[j] === '\\') { j += 1; }
+        else if (parenTitle && str[j] === '(') return null;
+        j += 1;
+      }
+      if (j >= str.length) return null;
+      j += 1;
+      while (j < str.length && /[ \t\n]/.test(str[j])) j += 1;
+    }
+    if (str[j] !== ')') return null;
+    return { destRaw, end: j };
   };
   const refLabel = /^\[((?:\\[\s\S]|[^\]\\])*)\]/;
-  for (let i = 0; i < s.length; i += 1) {
-    if (s[i] !== '[' || oddEscaped(s, i)) continue;
+  // CommonMark forbids a link INSIDE a link: when an outer bracket pair's
+  // label itself contains a live link (inline, full-reference, or
+  // shortcut), the INNER link wins and the outer brackets render as
+  // literal text — so an outer candidate whose label carries one is
+  // rejected without advancing, letting the walk find the inner link.
+  const labelContainsLink = (text, openQuoteDepth) => {
+    for (let j = 0; j < text.length; j += 1) {
+      if (text[j] !== '[' || oddEscaped(text, j)) continue;
+      if (text[j - 1] === '!' && !oddEscaped(text, j - 1)) continue; // images MAY nest in links
+      const lEnd = balancedLabelEnd(text, j, openQuoteDepth, () => openQuoteDepth);
+      if (lEnd === -1) continue;
+      const after = text.slice(lEnd + 1);
+      if (parseInlineDest(after)) return true;
+      const fullRef = after.match(refLabel);
+      if (fullRef && defs.get(label(fullRef[1] || text.slice(j + 1, lEnd)))) return true;
+      if (after[0] !== '(' && after[0] !== ':' && after[0] !== '[' && defs.get(label(text.slice(j + 1, lEnd)))) return true;
+      j = lEnd;
+    }
+    return false;
+  };
+  for (let i = 0; i < sMd.length; i += 1) {
+    if (sMd[i] !== '[' || oddEscaped(sMd, i)) continue;
     // An UNESCAPED "!" directly before means image syntax `![alt](src)` —
     // not a link; "\\![link]" is a literal "!" followed by a real link.
-    if (s[i - 1] === '!' && !oddEscaped(s, i - 1)) continue;
-    const end = balancedLabelEnd(s, i);
+    if (sMd[i - 1] === '!' && !oddEscaped(sMd, i - 1)) continue;
+    const openQuoteDepth = depthAtPos(i);
+    const end = balancedLabelEnd(sMd, i, openQuoteDepth, depthAtPos);
     if (end === -1) continue;
-    const text = s.slice(i + 1, end);
+    const text = sMd.slice(i + 1, end);
     if (!text) { i = end; continue; }
-    const rest = s.slice(end + 1);
+    if (labelContainsLink(text, openQuoteDepth)) continue;
+    const rest = sMd.slice(end + 1);
     const inline = parseInlineDest(rest);
     if (inline) {
       links.push({ anchor: text, href: dest(inline.destRaw) });
+      consumed.push([i, end + 2 + inline.end]);
       i = end + 1 + inline.end;
       continue;
     }
@@ -591,9 +669,15 @@ function extractLinks(body) {
   // attribute may contain ">" (`<span title="1 > 0">`).
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
   // CommonMark AUTOLINKS (`<https://…>`) render as live links whose anchor
-  // is the bare URL — first-party ones canonicalize through dest().
+  // is the bare URL — first-party ones canonicalize through dest(). A
+  // bracketed URL already CONSUMED as an inline-link destination or a
+  // reference definition is not a separate autolink.
   const auto = /<(https?:\/\/[^<>\s]+)>/gi;
-  while ((m = auto.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[1]) });
+  while ((m = auto.exec(s)) !== null) {
+    const at = m.index;
+    if (consumed.some(([a, b]) => at >= a && at < b)) continue;
+    links.push({ anchor: m[1], href: dest(m[1]) });
+  }
   return links;
 }
 

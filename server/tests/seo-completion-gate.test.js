@@ -1198,6 +1198,86 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(continuationFence.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Links cannot NEST: an outer bracket pair whose label contains a live
+    // link renders as literal text around the INNER link — the inner
+    // wording-free CTA is the one judged.
+    const nestedLiveLink = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [wrapper [Schedule Service](/contact/)](/about/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(nestedLiveLink.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Text after the destination must be a VALID title — "(/contact/
+    // garbage)" renders no link, so it cannot satisfy presence; a proper
+    // quoted title still does.
+    const garbageTitle = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](/contact/ garbage) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(garbageTitle.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const quotedTitle = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](/contact/ "call us") x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(quotedTitle.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // Backslash escapes render in destinations — "(\\/contact/)" is
+    // /contact/, so the wording-free CTA is caught.
+    const escapedDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Schedule Service](\\/contact/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(escapedDest.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Link syntax inside a QUOTED tag attribute is tooltip text, not a
+    // clickable link — it cannot satisfy presence.
+    const attrLink = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<span title="[Get a Termite Estimate](/contact/)">Info</span> text.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(attrLink.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // A line that DEEPENS the quote context interrupts the paragraph — a
+    // label split across it renders no link; same-depth quoted labels
+    // still soft-wrap.
+    const quoteSplitLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite\n> Estimate](/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(quoteSplitLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const quotedLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '> [Get a Termite\n> Estimate](/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(quotedLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // An angle-bracketed DESTINATION is not a separate autolink — a valid
+    // first-party CTA spelled long-form stays a single compliant link.
+    const angleDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get a Termite Estimate](<https://www.wavespestcontrol.com/contact/>) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(angleDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(angleDest.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A fence opened on a QUOTED list continuation line ends when quoted
+    // content dedents out of the item — the quoted wording-free CTA after
+    // it is live and flagged.
+    const quotedContinuationFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '> - item\n>   ~~~\n> [Schedule Service](/contact/)' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quotedContinuationFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {
