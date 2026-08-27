@@ -3445,6 +3445,752 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
+// Visit statuses that can no longer complete (and so can no longer charge).
+// Mirrors job-status ONE_WAY_FROM_STATUSES + the no-show/reschedule forms the
+// coverage set excludes; everything else (pending, confirmed, en_route,
+// on_site, …) is still completable and therefore still chargeable.
+const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled'];
+
+// 'YYYY-MM-DD' + 1 day. Pure calendar math on validated date strings
+// (term_start/term_end are plain DATE columns — no timezone involved).
+function dayAfter(ymd) {
+  const parts = parseYmd(ymd);
+  if (!parts) return null;
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1)).toISOString().slice(0, 10);
+}
+
+// Completion's charge cap, mirrored CONSERVATIVELY for the card-expiry
+// exemption: the completion authority (admin-dispatch) compares the reused
+// invoice's subtotal net of discounts against the accepted amount for its
+// lane (visit price / per-application fee / membership dues anchor / the
+// appointment-card accepted amount) plus a BOUNDED setup-fee allowance,
+// and routes an over-cap invoice to office review WITHOUT charging. The
+// exemption only needs the safe direction: report over-cap (→ no card
+// charge → exempt) only when the invoice exceeds the MOST GENEROUS
+// ceiling completion could grant — the max of every anchor plus the full
+// setup-fee line (the real allowance is min(line, fee) ≤ the line, and
+// the real anchor is one of these candidates). Anything not clearly over
+// that bound is treated as chargeable and keeps the warning.
+async function openInvoiceClearlyOverCompletionCap(inv, visit, laneMode, conn) {
+  const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
+  const discount = Math.max(0, Number(inv.discount_amount) || 0);
+  const netSubtotal = Math.round((subtotal - discount) * 100) / 100;
+  const anchors = [visit.estimated_price, visit.per_application_fee, visit.monthly_rate]
+    .map(Number).filter((n) => Number.isFinite(n) && n > 0);
+  // Appointment-card one-time accepts cap against the series' accepted
+  // amount — search the whole series, like the completion allowance does.
+  const seriesParentId = visit.recurring_parent_id || visit.id;
+  const apptRows = await conn('appointment_card_requests')
+    .whereIn('scheduled_service_id', conn('scheduled_services').where(function series() {
+      this.where({ id: seriesParentId }).orWhere({ recurring_parent_id: seriesParentId });
+    }).select('id'))
+    .select('accepted_amount', 'selected_plan');
+  for (const row of apptRows || []) {
+    const amt = Number(row.accepted_amount);
+    if (Number.isFinite(amt) && amt > 0) anchors.push(amt);
+  }
+  // No accepted amount under ANY lane → completion never auto-charges
+  // uncapped: it routes to office review instead.
+  if (!anchors.length) return true;
+  // The setup-fee ALLOWANCE mirrors completion's AUTHORIZATION, not just
+  // the line text: completion widens the cap only for PER-APPLICATION
+  // billing whose line has real provenance — an accept-minted invoice, a
+  // durable plan-choice selection on the series, a frozen wizard fee on
+  // the linked estimate, or an immutable setup_fee_claims record matching
+  // the line to the cent. A stale/office-added setup line earns NO
+  // allowance and the over-cap invoice routes to office review without
+  // charging — so it must not keep the warning either. The authorized
+  // bound uses the full line amount (the real allowance is min(line, fee)
+  // ≤ the line — anything inside the bound keeps the warning).
+  let setupLineAllowance = 0;
+  let setupLineAmt = 0;
+  try {
+    const lines = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
+    for (const li of Array.isArray(lines) ? lines : []) {
+      if (!/one-time setup fee/i.test(String(li?.description || ''))) continue;
+      const amt = Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0)));
+      if (Number.isFinite(amt) && amt > 0) setupLineAmt = Math.max(setupLineAmt, amt);
+    }
+  } catch (e) { /* unparseable lines grant completion NO allowance — the bound stays valid */ }
+  // Provenance lookup errors PROPAGATE (→ the caller's fail-toward-warning
+  // catch): a transient read error must not shrink the bound and widen the
+  // exemption while completion could still grant the allowance and charge.
+  if (setupLineAmt > 0 && laneMode === 'per_application') {
+    let authorized = /Auto-generated from accepted estimate #/.test(String(inv.notes || ''));
+    if (!authorized) {
+      authorized = (apptRows || []).some((row) => row.selected_plan === 'per_application');
+    }
+    // Deliberately NOT the estimate JSON: completion treats the frozen
+    // wizard fee as an amount CAP only, never the allowance PREDICATE —
+    // every seeded child keeps source_estimate_id, so estimate-derived
+    // authorization would outlive the one-time obligation. The predicate
+    // comes from current consent (above) or the immutable claim (below).
+    if (!authorized) {
+      const claim = await conn('setup_fee_claims').where({ invoice_id: inv.id }).first('amount');
+      authorized = !!(claim && Math.round(Number(claim.amount) * 100) > 0
+        && Math.round(Number(claim.amount) * 100) === Math.round(setupLineAmt * 100));
+    }
+    if (authorized) setupLineAllowance = setupLineAmt;
+  }
+  return netSubtotal > Math.max(...anchors) + setupLineAllowance + 0.005;
+}
+
+// True when the union of [start, end] date ranges covers EVERY day of
+// [windowStart, windowEnd]. Terms are inclusive on both ends, so a term
+// ending 09-30 followed by one starting 10-01 is continuous coverage
+// (renewals are written as adjacent rows, not extensions of the old row);
+// a missing day between them is a real gap — monthly billing charges the
+// card during it — and breaks the span.
+function mergedRangesSpan(ranges, windowStart, windowEnd) {
+  const sorted = [...ranges].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const merged = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= dayAfter(last[1])) {
+      if (end > last[1]) last[1] = end;
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return merged.some(([start, end]) => start <= windowStart && end >= windowEnd);
+}
+
+/**
+ * Customer IDs that every CARD-EXPIRY surface (dashboard cards_expiring_7d,
+ * Monday sendCardExpiryWarnings, daily workflows/payment-expiry) must leave
+ * alone: paid prepay coverage spanning the WHOLE window — one term, or
+ * several ADJACENT paid terms merged (a renewal term starting the day after
+ * the prior term ends is continuous coverage; a term starting inside the
+ * window does not cover today, a term ending inside it does not cover the
+ * horizon, and two terms with a day's gap between them are not continuous)
+ * MINUS customers who still have a card charge coming inside the window
+ * anyway.
+ * Both subtractions DELEGATE to the billing authorities rather than
+ * re-deriving them:
+ *
+ *   (a) a genuinely collectible retry — classified exactly as the retry sweep
+ *       (billing-cron retryFailedPayments) would: armed (failed, not
+ *       superseded, retry_count < 3, next_retry_at set) AND, for a WaveGuard
+ *       Monthly row, neither "already collected" (a paid/processing sibling
+ *       for the same billed month — the sweep disarms it without charging)
+ *       nor "absorbed" (the obligation date itself is prepay-covered — the
+ *       sweep self-supersedes it), and for any row not "parked" (no
+ *       PaymentIntent id + metadata.ambiguous_outcome — the sweep supersedes
+ *       it without charging), not Auto-Pay-disabled (autopay_enabled=false —
+ *       the sweep disarms the ladder without charging) and not paused
+ *       through the horizon (autopay_paused_until >= horizon — the sweep's
+ *       pause guard skips the retry on every day of the window). Other
+ *       one-time retries are collectible.
+ *   (b) a visit completion will bill: every still-completable visit in
+ *       [today, horizon] run through predictCompletionBilling (billing-lane,
+ *       the shared completion predicate) with the same inputs the schedule
+ *       sheet feeds it — lane, payer, callback / always-free service type,
+ *       the live annual_prepay_invoice stamp validated by
+ *       annualPrepayCoversVisit (a bare annual_prepay_term_id link is NOT
+ *       per-application fee, completion-auto-charge gate, and LIVE Auto Pay
+ *       eligibility (enrollment flag + pause evaluated against the
+ *       horizon — deliberately NOT the candidate card's own expiry, which
+ *       must never prove its warning unnecessary). Only kind
+ *       'auto_charge' keeps the warning — that is the one outcome that
+ *       charges the saved card at completion; 'invoice' (pay-link),
+ *       'payer', 'covered_*', 'prepaid' and 'no_charge' do not — and only
+ *       when neither the visit's own invoices nor the sibling
+ *       first-application invoice of its estimate/date already suppress
+ *       the completion charge.
+ *
+ * A term ending inside the window is not covered at the horizon and stays
+ * flagged (that card is needed to renew). Fails toward the warning: any
+ * lookup error → empty set (nobody exempt).
+ */
+// HOT-PATH MEMO (Codex PR r13): the dashboard/bell generator polls its
+// cache every 30 seconds per process and the alert cron recomputes on a
+// five-minute cadence, while this classification runs a per-visit billing
+// audit (payer, eligibility, coverage, invoices, suppressors). Memoized
+// per horizon on the DEFAULT connection for a short TTL, sharing in-flight
+// computations so concurrent cache misses run ONE scan. A fail-toward-
+// warning result (lookup error → empty set) is never cached — a transient
+// error must not pin "nobody exempt" for the TTL. Explicit connections
+// (transactions) bypass the memo entirely. Freshness bound: an exemption
+// state change reaches the dashboard at most TTL late, well inside the
+// alert cron's own five-minute cadence; the daily/Monday jobs make one
+// call each and are unaffected.
+const CARD_EXPIRY_EXEMPT_TTL_MS = 2 * 60 * 1000;
+const cardExpiryExemptCache = new Map();
+
+function clearCardExpiryExemptCache() {
+  cardExpiryExemptCache.clear();
+}
+
+async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  if (conn !== db) return computeCardExpiryExemptCustomerIds(horizon, conn);
+  const hit = cardExpiryExemptCache.get(horizon);
+  if (hit && Date.now() - hit.at < CARD_EXPIRY_EXEMPT_TTL_MS) {
+    return new Set(await hit.promise);
+  }
+  // evict expired horizons on insert — callers derive a fresh horizon as
+  // calendar time advances, so without eviction the map grows with uptime
+  for (const [key, staleEntry] of cardExpiryExemptCache) {
+    if (Date.now() - staleEntry.at >= CARD_EXPIRY_EXEMPT_TTL_MS) cardExpiryExemptCache.delete(key);
+  }
+  const entry = { at: Date.now(), promise: computeCardExpiryExemptCustomerIds(horizon, conn) };
+  cardExpiryExemptCache.set(horizon, entry);
+  const result = await entry.promise;
+  if (result.lookupFailed && cardExpiryExemptCache.get(horizon) === entry) {
+    cardExpiryExemptCache.delete(horizon);
+  }
+  // callers get a plain copy — the cached set stays immutable and the
+  // lookupFailed marker never leaks
+  return new Set(result);
+}
+
+async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  const today = etDateString();
+  let covered;
+  try {
+    // Paid coverage must span the whole window [today, horizon], but it may
+    // be SPLIT across adjacent terms (createTermForAnnualPrepay writes a
+    // renewal as a NEW row starting the day after the old term ends). So:
+    // fetch every paid term overlapping the window — same covered-term SQL
+    // as getActivelyCoveredCustomerIds (coveredTermsAsOf) — and merge each
+    // customer's ranges; "covered today" ∩ "covered at the horizon" alone
+    // would miss a mid-window gap during which monthly billing charges the
+    // card, and a single-term span test would miss an adjacent renewal.
+    const rows = await coveredTermsAsOf(conn, null)
+      .where('t.term_start', '<=', horizon)
+      .where('t.term_end', '>=', today)
+      .select('t.customer_id', 't.term_start', 't.term_end');
+    const rangesByCustomer = new Map();
+    for (const row of rows || []) {
+      if (row.customer_id == null) continue;
+      const start = dateOnly(row.term_start);
+      const end = dateOnly(row.term_end);
+      if (!parseYmd(start) || !parseYmd(end)) continue;
+      const key = String(row.customer_id);
+      if (!rangesByCustomer.has(key)) rangesByCustomer.set(key, []);
+      rangesByCustomer.get(key).push([start, end]);
+    }
+    covered = new Set();
+    for (const [customerId, ranges] of rangesByCustomer) {
+      if (mergedRangesSpan(ranges, today, horizon)) covered.add(customerId);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
+    const failed = new Set();
+    failed.lookupFailed = true;
+    return failed;
+  }
+  if (!covered.size) return covered;
+  try {
+    // (a) armed retries, classified like the sweep — bounded to the
+    // horizon: the sweep only fires rows with next_retry_at <= now, so a
+    // retry armed for AFTER the horizon cannot charge inside this warning
+    // window (ET end of the horizon day, exclusive next-midnight bound).
+    const retryQuery = conn('payments')
+      .whereIn('customer_id', [...covered])
+      .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
+      .where('retry_count', '<', 3)
+      .whereNotNull('next_retry_at');
+    const horizonNextMidnight = dayAfter(dateOnly(horizon));
+    if (horizonNextMidnight) {
+      retryQuery.where('next_retry_at', '<', parseETDateTime(`${horizonNextMidnight}T00:00:00`));
+    }
+    const retrying = await retryQuery
+      .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id', 'next_retry_at');
+    // The sweep's state guards (billing-cron retryFailedPayments /
+    // autopay-eligibility.isPaused): disabled Auto Pay permanently DISARMS
+    // the ladder without charging; a paused customer's retries are skipped
+    // daily WITHOUT disarming, and the pause is date-INCLUSIVE (paused
+    // while paused_until >= today, resumes the day after).
+    let retryStateByCustomer = new Map();
+    if ((retrying || []).length) {
+      const stateRows = await conn('customers')
+        .whereIn('id', [...new Set(retrying.map((row) => row.customer_id))])
+        .select('id', 'autopay_enabled', 'autopay_paused_until', 'billing_mode', 'waveguard_tier', 'monthly_rate');
+      retryStateByCustomer = new Map((stateRows || []).map((row) => [String(row.id), row]));
+    }
+    const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
+    const coveredOn = new Map();
+    let pendingHoldIds = null;
+    for (const row of retrying || []) {
+      const customerId = String(row.customer_id);
+      if (!covered.has(customerId)) continue;
+      const state = retryStateByCustomer.get(customerId) || {};
+      // Auto Pay disabled → the sweep disarms the ladder without charging;
+      // the armed row is not a forthcoming card charge.
+      if (state.autopay_enabled === false) continue;
+      // Paused through the horizon → the sweep skips this retry on every
+      // day of [today, horizon]; nothing charges the card inside the
+      // window, so the retry does not revoke the exemption. A pause
+      // lapsing INSIDE the window keeps the warning — the retry resumes
+      // and can charge before the horizon.
+      const pausedUntil = dateOnly(state.autopay_paused_until);
+      if (pausedUntil && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil >= horizon) continue;
+      let meta = {};
+      try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
+      // Ambiguous Stripe outcome (no PaymentIntent id): the sweep PARKS the
+      // row — supersedes it and raises a health alert, never re-charges — so
+      // it is not a forthcoming card charge.
+      if (!row.stripe_payment_intent_id && meta.ambiguous_outcome) continue;
+      const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
+      if (isMonthly) {
+        // GUARD 5 mirror: a pending annual-prepay commitment holds the
+        // monthly ladder (skip, stay armed) until it activates or cancels.
+        // The sweep selects past-due rows on EVERY later run and its
+        // pending guard stops the moment term_end passes — a still-armed
+        // retry fires the day the hold lapses — so the hold suppresses the
+        // warning only when the commitment covers the ENTIRE horizon.
+        if (pendingHoldIds == null) pendingHoldIds = await getPaymentPendingCustomerIds(horizon, conn);
+        if (pendingHoldIds.has(customerId)) continue;
+        // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
+        // obligation row for a customer whose lane is no longer monthly
+        // (explicit per_application/per_visit/one_time, or a NULL mode the
+        // resolver classifies non-monthly), with NO successfully paid
+        // monthly charge on file, is DISARMED without charging (likely
+        // mis-created; left for manual triage) — not a forthcoming card
+        // charge. A missing customer row skips the guard (keep the
+        // warning).
+        if (state.id != null) {
+          const laneNotMonthly = ['per_application', 'per_visit', 'one_time'].includes(state.billing_mode)
+            || (!state.billing_mode && resolveRetryLane(state).mode !== 'monthly_membership');
+          if (laneNotMonthly) {
+            const paidMonthly = await conn('payments')
+              .where({ customer_id: row.customer_id, status: 'paid' })
+              .where('description', 'like', '%WaveGuard Monthly%')
+              .whereNot({ id: row.id })
+              .first('id');
+            if (!paidMonthly) continue;
+          }
+        }
+        const paidDate = dateOnly(row.payment_date);
+        const obligationMonth = meta.billed_month || (paidDate ? paidDate.slice(0, 7) : null);
+        if (obligationMonth) {
+          // already collected → the sweep disarms without charging
+          const [obYear, obMonth] = obligationMonth.split('-').map(Number);
+          const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
+          const collected = await conn('payments')
+            .where({ customer_id: row.customer_id })
+            .whereNot({ id: row.id })
+            .whereIn('status', ['paid', 'processing'])
+            .where(function alreadyCollected() {
+              this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
+                .orWhere(function legacyRow() {
+                  this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                    .andWhere('payment_date', '>=', `${obligationMonth}-01`)
+                    .andWhere('payment_date', '<=', `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`)
+                    .andWhere('description', 'like', '%WaveGuard Monthly%');
+                });
+            })
+            .first('id');
+          if (collected) continue;
+          // absorbed → the sweep self-supersedes without charging
+          const obligationDate = (paidDate && paidDate.slice(0, 7) === obligationMonth) ? paidDate : `${obligationMonth}-01`;
+          if (!coveredOn.has(obligationDate)) coveredOn.set(obligationDate, await getActivelyCoveredCustomerIds(obligationDate, conn));
+          if (coveredOn.get(obligationDate).has(customerId)) continue;
+        }
+      }
+      covered.delete(customerId);
+    }
+    if (!covered.size) return covered;
+
+    // (b) still-completable visits inside the window, judged by the shared
+    // completion predicate with the schedule sheet's inputs.
+    const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
+    const { resolveForInvoice } = require('./payer');
+    const { isCardHoldEnabled } = require('./estimate-card-holds');
+    const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
+    const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+    const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
+    // Real columns only: the payer is resolved by the payer authority
+    // (scheduled_services.payer_id → self-pay override → customers.payer_id,
+    // payer.resolveForInvoice — the same resolver completion uses), and
+    // per_application_fee lives on customers.
+    // No lower date bound: an OVERDUE nonterminal visit (pending/confirmed/
+    // en_route/on_site with a past scheduled_date) is still completable —
+    // the completion handler rejects only terminal states — and its
+    // auto-charge would land inside the window, today at the earliest.
+    const visits = await conn('scheduled_services as ss')
+      .join('customers as c', 'c.id', 'ss.customer_id')
+      .whereIn('ss.customer_id', [...covered])
+      .where(function stillChargeable() {
+        this.whereNotIn('ss.status', CARD_EXPIRY_TERMINAL_VISIT_STATUSES)
+          // A COMPLETED visit whose completion attempt still has
+          // unfinished resumable billing side effects (crash/503 between
+          // the durable completion commit and the invoice/charge) is
+          // still chargeable — the resume path permits completed→
+          // completed and continues the billing. Terminal 'completed'
+          // hides the visit only once no such attempt remains.
+          .orWhere(function completedUnfinishedBilling() {
+            this.where('ss.status', 'completed').whereExists(function unfinishedAttempt() {
+              this.from('service_completion_attempts as sca')
+                .whereRaw('sca.service_id = ss.id')
+                .whereIn('sca.status', ['side_effects_pending', 'side_effects_running'])
+                .select('sca.id');
+            });
+          });
+      })
+      .where('ss.scheduled_date', '<=', horizon)
+      .select(
+        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
+        'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
+        'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id', 'ss.recurring_pattern',
+        'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
+        'c.autopay_paused_until as customer_autopay_paused_until',
+        'c.autopay_payment_method_id as customer_autopay_payment_method_id',
+        'c.ach_status as customer_ach_status',
+        'c.per_application_fee', 'c.payer_id as customer_payer_id',
+      );
+    for (const v of visits || []) {
+      const customerId = String(v.customer_id);
+      if (!covered.has(customerId)) continue;
+      // Strict validation, and its failure PROPAGATES to the outer catch:
+      // a malformed stamp (no amount / no term) or a failed coverage query
+      // must fail toward the warning, not fall back to trusting the stamp
+      // (predictCompletionBilling treats null as "trust the stamp").
+      const annualCoverageValidated = v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+        ? await annualPrepayCoversVisit(v, conn, { throwOnError: true })
+        : null;
+      const payer = await resolveForInvoice({
+        database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
+        scheduledServiceId: v.id, throwOnError: true,
+      });
+      // Auto Pay eligibility for the PREDICTION: the enrollment flag plus
+      // the pause — deliberately NOT the live chargeable-method walk. The
+      // warning's whole purpose is to prompt replacing a dying card, so
+      // the candidate card's own expiry state must not prove the warning
+      // unnecessary (an expired card would read as "no chargeable method
+      // → pay-link → exempt" and suppress exactly the notice that fixes
+      // it); a customer with no method at all keeps the warning too —
+      // noise, never a missed charge. The pause suppresses THIS visit's
+      // charge only when it covers the ENTIRE remaining completion window
+      // (paused_until >= horizon, date-INCLUSIVE): completion rejects only
+      // terminal statuses, so a late completion after a shorter pause
+      // lapses re-reads the then-current pause and charges.
+      const pausedUntilYmd = dateOnly(v.customer_autopay_paused_until);
+      const pauseCoversChargeWindow = !!(pausedUntilYmd && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntilYmd) && pausedUntilYmd >= horizon);
+      const autopayActive = v.autopay_enabled !== false && !pauseCoversChargeWindow;
+      const lane = resolveBillingLane({ billing_mode: v.billing_mode, waveguard_tier: v.waveguard_tier, monthly_rate: v.monthly_rate });
+      const prediction = predictCompletionBilling({
+        lane: lane.mode,
+        billingMode: v.billing_mode || null,
+        autopayActive,
+        estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
+        monthlyRate: v.monthly_rate,
+        perApplicationFee: v.per_application_fee,
+        isRecurring: !!v.is_recurring,
+        isCallback: !!v.is_callback,
+        serviceType: v.service_type,
+        payerBilled: !!payer?.payerId,
+        prepaidAmount: v.prepaid_amount,
+        prepaidMethod: v.prepaid_method || null,
+        annualCoverageValidated,
+        completionAutopayChargeEnabled,
+      });
+      // Estimate card holds are NEVER Auto-Pay-gated: completion charges a
+      // live ('held') hold against the visit's collectible completion
+      // invoice (chargeCardHoldOnCompletion — the same predicate as
+      // heldCardForScheduledService), whatever the pause or method
+      // eligibility says. So a visit that will produce a priced completion
+      // invoice — kind 'auto_charge' OR pay-link 'invoice' — with a live
+      // hold keeps the warning even when Auto Pay cannot charge; kinds
+      // that mint no invoice (covered_*, prepaid, no_charge) leave the
+      // hold nothing to charge, and a payer-billed invoice refuses the
+      // hold's self-pay binding.
+      // The visit's service records: record-linked invoices take lookup
+      // precedence (below), and a COMPLETED visit resumed in FROZEN
+      // BACKFILL mode (structured_notes.backfill === true — the committed
+      // record's mode wins on resume) skips the entire auto-charge rail:
+      // its invoice is deliberately left for operator collection, so no
+      // card charge and no warning.
+      const serviceRecords = await conn('service_records')
+        .where({ scheduled_service_id: v.id })
+        .select('id', 'structured_notes');
+      // Only records OWNED by an unfinished resumable attempt participate
+      // in invoice lookup precedence and the backfill verdict — the resume
+      // path loads claim.serviceRecordId, never "any record linked to the
+      // visit", so a historical record's invoices must not stand in.
+      const attemptRecordIds = new Set();
+      if (String(v.status) === 'completed') {
+        const unfinishedAttempts = await conn('service_completion_attempts')
+          .where({ service_id: v.id })
+          .whereIn('status', ['side_effects_pending', 'side_effects_running'])
+          .select('service_record_id');
+        for (const attempt of unfinishedAttempts || []) {
+          if (attempt.service_record_id != null) attemptRecordIds.add(String(attempt.service_record_id));
+        }
+        // Frozen-backfill exemption: EVERY unfinished attempt must be
+        // bound to a record that froze backfill — an attempt on a normal
+        // record (or with no committed record yet) can still charge.
+        const recordById = new Map((serviceRecords || []).map((record) => [String(record.id), record]));
+        const allResumesFrozenBackfill = (unfinishedAttempts || []).length > 0
+          && (unfinishedAttempts || []).every((attempt) => {
+            const record = attempt.service_record_id != null ? recordById.get(String(attempt.service_record_id)) : null;
+            if (!record) return false;
+            let notes = record.structured_notes;
+            if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+            return notes?.backfill === true;
+          });
+        if (allResumesFrozenBackfill) continue;
+      }
+      // The hold rail's charge passes requireCompletedOneTimeVisit — a
+      // visit with recurring lineage (is_recurring, recurring_parent_id,
+      // or a recurring_pattern) is refused at the Stripe boundary, so a
+      // leftover hold on such a visit is no charge vector.
+      const oneTimeLineage = v.is_recurring !== true && !v.recurring_parent_id && !v.recurring_pattern;
+      let liveHold = null;
+      if (oneTimeLineage && isCardHoldEnabled()) {
+        // The charge rail's own resolution and admission: it selects the
+        // NEWEST 'held' row (heldCardForScheduledService orders by held_at
+        // DESC) and THEN refuses a parked row and a missing/non-positive
+        // frozen accepted amount (withheld fail-closed) — so the same row
+        // the rail would resolve decides here, not some other consent.
+        const holdRow = await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id, status: 'held' })
+          .orderBy('held_at', 'desc')
+          .first('id', 'accepted_amount', 'parked_at');
+        if (holdRow && !holdRow.parked_at) {
+          const acceptedRaw = Number(holdRow.accepted_amount);
+          liveHold = Number.isFinite(acceptedRaw) && acceptedRaw > 0
+            ? { id: holdRow.id, acceptedAmount: acceptedRaw }
+            : null;
+        }
+      }
+      // Appointment-card consent state feeds TWO verdicts: the lane's own
+      // charge (GATE_APPT_CARD_COMPLETION_CHARGE — a completed/satisfied
+      // consent for the visit's CURRENT customer, no hold row, one-time
+      // visit — charges even while the generic completion gate is off),
+      // and the extended charge's exclusion (requireNoAppointmentCardLane
+      // refuses ANY consent row, matching or not). A visit whose consent
+      // rows block the extended charge while the lane itself cannot charge
+      // has nothing left to touch the card.
+      const consentRows = await conn('appointment_card_requests')
+        .where({ scheduled_service_id: v.id })
+        .select('id', 'customer_id', 'status', 'accepted_amount');
+      let apptCardCharge = false;
+      let apptLaneChargeable = false;
+      let apptAcceptedAmount = null;
+      if ((consentRows || []).length) {
+        // The hold rail itself passes requireNoAppointmentCardLane — ANY
+        // competing consent row refuses the hold charge, so a hold beside
+        // consent rows is not a charge vector (and the hold row already
+        // excludes the appointment and extended lanes).
+        liveHold = null;
+        const laneRow = (consentRows || []).find((row) => ['completed', 'satisfied'].includes(String(row.status)));
+        const anyHoldRow = await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id })
+          .first('id');
+        // The lane's cap is the amount FROZEN at consent — a missing/
+        // non-positive accepted_amount routes to office review without
+        // charging, so the lane is not chargeable at all.
+        const acceptedRaw = laneRow ? Number(laneRow.accepted_amount) : NaN;
+        apptAcceptedAmount = Number.isFinite(acceptedRaw) && acceptedRaw > 0 ? acceptedRaw : null;
+        apptLaneChargeable = !!laneRow && !anyHoldRow && v.is_recurring !== true
+          && apptAcceptedAmount != null
+          && String(laneRow.customer_id) === String(v.customer_id)
+          && require('../config/feature-gates').isEnabled('apptCardCompletionCharge');
+        apptCardCharge = apptLaneChargeable && !liveHold && prediction.kind === 'invoice' && autopayActive;
+        if (prediction.kind === 'auto_charge' && lane.mode !== 'per_application' && !liveHold && !apptLaneChargeable) {
+          // stale/mismatched/pending/uncapped consent: the extended charge
+          // refuses any consent row and the lane cannot charge either →
+          // no card charge, no warning
+          continue;
+        }
+      }
+      // ANY non-terminal hold row (held/charging/charge_review/parked-held)
+      // closes the EXTENDED lane (extendedHoldExcluded — the customer
+      // consented to THAT card at THAT amount): on a non-per-application
+      // lane the hold rail is then the only remaining vector, so a hold
+      // row the rail refuses (parked, no frozen amount) leaves nothing to
+      // charge even when the predictor says auto_charge.
+      let holdClosesExtended = false;
+      if (lane.mode !== 'per_application') {
+        holdClosesExtended = !!(await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id })
+          .whereNotIn('status', ['released', 'cancelled', 'failed'])
+          .first('id'));
+      }
+      if (holdClosesExtended && !liveHold && !apptCardCharge) continue;
+      if (prediction.kind !== 'auto_charge' && !liveHold && !apptCardCharge) continue;
+      // Kinds that MINT no bill (covered_*, prepaid, no_charge — e.g. a
+      // callback) can still charge through a live hold, but only against
+      // an EXISTING collectible invoice: completion reuses any open
+      // invoice it finds and the hold rail does not reject callbacks or
+      // free service types. With no existing invoice there is nothing to
+      // charge — the invoice checks below decide.
+      const mintsNothing = !['auto_charge', 'invoice'].includes(prediction.kind);
+      // Completion's invoice state machine (admin-dispatch; route-module
+      // helpers, mirrored here with the same status sets):
+      //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
+      //     parks it — no charge;
+      //   - completionSuppressorInvoiceLookup: the most recent NON-cancelled
+      //     invoice is reused, and paid / prepaid / processing means already
+      //     settled — no second card charge.
+      // Either way the expiring card is not what breaks: no warning.
+      const visitInvoices = await conn('invoices')
+        // Both identifiers, like the completion lookups: a resumed
+        // completed visit's invoice may be linked only through its
+        // service record.
+        .where(function ownedByVisit() {
+          this.where({ scheduled_service_id: v.id });
+          if (attemptRecordIds.size) {
+            this.orWhereIn('service_record_id', [...attemptRecordIds]);
+          }
+        })
+        .orderBy('created_at', 'desc')
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id', 'scheduled_service_id');
+      const statusOf = (inv) => String(inv?.status || '').toLowerCase();
+      // The refunded (terminal) check spans BOTH identifiers, like
+      // completionTerminalInvoiceLookup.
+      if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
+      // Reuse PRECEDENCE mirrors the completion suppressor chain: the
+      // service-record link is checked first, and the scheduled_service_id
+      // rows are consulted only when no live record-linked row stands.
+      const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && attemptRecordIds.has(String(inv.service_record_id)));
+      const reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
+        || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
+      if (mintsNothing && !reused) continue;
+      if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
+      if (reused && lane.mode !== 'per_application' && String(reused.scheduled_service_id || '') !== String(v.id)) {
+        // An OPEN record-only invoice (no scheduled_service_id binding to
+        // THIS visit) cannot be card-charged: the extended money boundary
+        // returns invoice_unbound, and the hold/appointment rails re-prove
+        // the same binding under their own locks — it is reused as a
+        // pay-link only. Settled/refunded record-linked suppressors above
+        // still count.
+        continue;
+      }
+      // An explicit "stop collecting this invoice" instruction (disputed
+      // bill, check in the mail): the EXTENDED completion charge — the
+      // lane that charges existing reused invoices — passes
+      // refuseWhenDunningStopped and the Stripe transaction refuses the
+      // invoice, so no saved-card charge can occur. Scoped to non-
+      // per-application lanes because only the extended charge honors the
+      // stop (the per-application path does not pass the flag — keep that
+      // warning).
+      const dunningStopped = async (inv) => {
+        if (lane.mode === 'per_application') return false;
+        const seq = await conn('invoice_followup_sequences')
+          .where({ invoice_id: inv.id })
+          .first('status');
+        return !!(seq && String(seq.status || '').toLowerCase() === 'stopped');
+      };
+      if (reused) {
+        // A reused invoice with FROZEN payer ownership is owed by the
+        // payer's AP inbox — completion requires !invoice.payer_id before
+        // every saved-card charge, whatever the service/customer links
+        // currently resolve to (the invoice's stamp is authoritative for
+        // the invoice it reuses).
+        if (reused.payer_id) continue;
+        // An OPEN reused invoice charges only within completion's cap —
+        // over the accepted amount it routes to office review instead.
+        if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
+        // the appointment rail does NOT honor the dunning stop — when its
+        // lane can charge this visit, the stop does not make the bill safe
+        if (!liveHold && !apptLaneChargeable && await dunningStopped(reused)) continue;
+        // An ACTIVE payment plan owns this invoice's collection — the
+        // shared anchor verdict (verifyExtendedCompletionAnchor) refuses
+        // the completion charge with active_payment_plan. Scoped like the
+        // dunning stop (extended lanes; the hold rail does not run the
+        // anchor verdict, so a live hold keeps the warning).
+        // …and, like the dunning stop, never when the appointment lane
+        // can charge — that rail does not run the anchor verdict.
+        if (!liveHold && !apptLaneChargeable && lane.mode !== 'per_application') {
+          const activePlan = await conn('payment_plans')
+            .where({ invoice_id: reused.id, status: 'active' })
+            .first('id');
+          if (activePlan) continue;
+        }
+      } else {
+        // No direct invoice on the visit → completion consults the SIBLING
+        // first-application invoice of the same estimate/date
+        // (findFirstApplicationInvoiceForEstimateService, the shared
+        // service completion itself calls): a refunded match PARKS the
+        // completion (manual billing, no charge); a live match is REUSED —
+        // settled (paid/prepaid/processing) means no card charge; a
+        // canceled setup-fee acceptance invoice with no live replacement
+        // also parks (bill both charges by hand). Only "no suppressor at
+        // all" or a live OPEN sibling (which completion can still
+        // auto-charge, inside the same cap) keeps the warning.
+        const sibling = await findFirstApplicationInvoiceForEstimateService(v, conn);
+        const siblingStatus = statusOf(sibling.invoice);
+        if (siblingStatus === 'refunded') continue;
+        if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
+        if (!sibling.invoice && sibling.canceledSetupFee) continue;
+        if (sibling.invoice && lane.mode !== 'per_application'
+          && String(sibling.invoice.scheduled_service_id || '') !== String(v.id)) {
+          // an OPEN invoice bound to a SIBLING visit cannot be charged for
+          // THIS one — the extended money boundary returns invoice_unbound
+          // and the hold/appointment rails re-prove the same binding; it
+          // is reused as a pay-link only
+          continue;
+        }
+        if (sibling.invoice && sibling.invoice.payer_id) continue;
+        if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
+        if (sibling.invoice && !liveHold && !apptLaneChargeable && await dunningStopped(sibling.invoice)) continue;
+      }
+      // Frozen-cap verdicts for the consent rails, applied whenever that
+      // rail is the ONLY charge vector: the hold rail withholds a bill
+      // net-above its accepted_amount (and the hold row itself closes the
+      // extended lane, so this holds even when the predictor says
+      // auto_charge); the appointment lane routes an over-cap bill to
+      // office review the same way. Nothing then touches the card.
+      const chargeBasis = reused
+        ? Math.round(((reused.subtotal != null ? Number(reused.subtotal) : Number(reused.total || 0))
+          - Math.max(0, Number(reused.discount_amount) || 0)) * 100) / 100
+        : (v.estimated_price != null ? Number(v.estimated_price) : null);
+      if (liveHold && !apptCardCharge
+        && (prediction.kind !== 'auto_charge' || holdClosesExtended)) {
+        if (chargeBasis != null && chargeBasis > liveHold.acceptedAmount + 0.005) continue;
+      }
+      const apptLaneIsVector = apptLaneChargeable && !liveHold
+        && (apptCardCharge || (prediction.kind === 'auto_charge' && lane.mode !== 'per_application'));
+      if (apptLaneIsVector && chargeBasis != null && apptAcceptedAmount != null
+        && chargeBasis > apptAcceptedAmount + 0.005) continue;
+      // The unminted setup-fee completion hold (owner ruling 2026-08-24,
+      // GATE_UNMINTED_SETUP_FEE_PARK): a Mark Won estimate's plan visit
+      // that still owes the never-minted setup fee is PARKED for manual
+      // billing — both charges — instead of touching the saved card. One
+      // parked visit per estimate: when a DIFFERENT visit already holds
+      // the parked alert, this one mints and charges normally (keep the
+      // warning). A detector error means the completion mints normally
+      // too — same catch direction, keep the warning.
+      if (v.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
+        let parkedHere = false;
+        try {
+          const { findUnmintedSetupFeeObligation } = require('./setup-fee-obligation');
+          const obligation = await findUnmintedSetupFeeObligation({
+            sourceEstimateId: v.source_estimate_id,
+            customerId: v.customer_id,
+            excludeScheduledServiceId: v.id,
+            visitPlanRow: { is_recurring: v.is_recurring, recurring_parent_id: v.recurring_parent_id || null },
+          }, conn);
+          if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+            const priorParkedAlert = await conn('notifications')
+              .where({ recipient_type: 'admin' })
+              .whereRaw("metadata->>'dedupeKey' = ?", [`unminted_setup_fee_manual_billing:${v.source_estimate_id}`])
+              .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
+              .first('id', 'metadata');
+            const parkedVisitId = priorParkedAlert && (typeof priorParkedAlert.metadata === 'string'
+              ? (() => { try { return JSON.parse(priorParkedAlert.metadata)?.scheduledServiceId; } catch { return null; } })()
+              : priorParkedAlert.metadata?.scheduledServiceId);
+            parkedHere = !priorParkedAlert || String(parkedVisitId || '') === String(v.id);
+          }
+        } catch (e) { parkedHere = false; }
+        if (parkedHere) continue;
+      }
+      // Only an auto_charge touches the saved card at completion ('invoice'
+      // — gate off or a priced callback — goes out as a pay-link).
+      covered.delete(customerId);
+    }
+  } catch (err) {
+    logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
+    const failed = new Set();
+    failed.lookupFailed = true;
+    return failed;
+  }
+  return covered;
+}
+
 /**
  * Customer IDs with an annual-prepay commitment whose invoice is still open.
  * These customers have not paid for coverage yet, so they are not "actively
@@ -4627,6 +5373,8 @@ module.exports = {
   suspendActiveTermsForDisputedInvoice,
   reconcileCoveredTermsSweep,
   getActivelyCoveredCustomerIds,
+  getCardExpiryExemptCustomerIds,
+  clearCardExpiryExemptCache,
   getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,
   sendCustomerTermNotice,

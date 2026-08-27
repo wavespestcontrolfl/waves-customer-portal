@@ -198,9 +198,35 @@ class PaymentExpiry {
       )
       .select('pm.id', 'pm.customer_id', 'pm.last_four', 'pm.exp_month', 'pm.exp_year', 'pm.card_brand');
 
+    // Prepay-covered customers are exempt (same helper as the dashboard alert
+    // and the Monday warning job): this window is "this month or next", so
+    // the horizon is the last day of next month — coverage still active then
+    // means no card charge inside the window. Covered customers with a
+    // still-collectible pre-term retry stay in (the retry charges the card).
+    let exemptIds = new Set();
+    try {
+      const { getCardExpiryExemptCustomerIds } = require('../annual-prepay-renewals');
+      const lastOfNextMonth = new Date(Date.UTC(nextYear, nextMonth, 0)).toISOString().slice(0, 10);
+      exemptIds = await getCardExpiryExemptCustomerIds(lastOfNextMonth);
+    } catch (exemptErr) {
+      logger.warn(`Payment expiry: prepay exemption lookup failed, exempting nobody: ${exemptErr.message}`);
+    }
+    let prepayExempt = 0;
+
+    // The skip below only prevents FUTURE alerts — an alert created before
+    // the customer became exempt (e.g. pre-prepay) would otherwise sit in
+    // front of the operator forever: the active-alert reader
+    // (admin-compliance /alerts/active) returns every resolved=false row
+    // and nothing else resolves payment_expiry alerts. Reconciled against
+    // the FULL exemption set, not the expiring-card rows — a customer who
+    // also replaced or disabled the old card is absent from expiringCards
+    // but their stale alert still needs resolving.
+    await this.resolveAlertsForExemptCustomers(exemptIds);
+
     let notified = 0;
 
     for (const rawCard of expiringCards) {
+      if (exemptIds.has(String(rawCard.customer_id))) { prepayExempt += 1; continue; }
       // Normalize legacy 2-digit years for EVERY downstream consumer — the
       // email path's expiry-stage math runs new Date(year, ...), where a raw
       // '26' reads as 1926 and the card emails as already expired.
@@ -288,8 +314,41 @@ class PaymentExpiry {
       }
     }
 
-    logger.info(`Payment expiry: ${notified} customers notified, ${expiringCards.length} cards found`);
+    logger.info(`Payment expiry: ${notified} customers notified, ${expiringCards.length} cards found, ${prepayExempt} prepay-covered exempt`);
     return { notified, totalExpiring: expiringCards.length };
+  }
+
+  /**
+   * Resolve any still-open payment_expiry alerts for customers the prepay
+   * exemption now covers — a stale "card expiring" alert from before the
+   * coverage began is exactly the false signal this exemption suppresses.
+   * Reads the open alerts and matches them against the exemption set, so a
+   * customer whose expiring card has since been replaced or disabled (and
+   * who therefore no longer appears in the expiring-cards query) is still
+   * reconciled. Best-effort: alert bookkeeping must never fail the scan.
+   * The insert above keys the customer via reference_id; the base
+   * migration only defines customer_id — match whichever columns this
+   * environment has.
+   */
+  async resolveAlertsForExemptCustomers(exemptIds) {
+    if (!exemptIds || !exemptIds.size) return;
+    try {
+      const hasReferenceId = await db.schema.hasColumn('inventory_alerts', 'reference_id');
+      const openAlerts = await db('inventory_alerts')
+        .where({ alert_type: 'payment_expiry', resolved: false })
+        .select(hasReferenceId ? ['id', 'customer_id', 'reference_id'] : ['id', 'customer_id']);
+      const toResolve = (openAlerts || [])
+        .filter((a) => (a.customer_id != null && exemptIds.has(String(a.customer_id)))
+          || (hasReferenceId && a.reference_id != null && exemptIds.has(String(a.reference_id))))
+        .map((a) => a.id);
+      if (!toResolve.length) return;
+      await db('inventory_alerts')
+        .whereIn('id', toResolve)
+        .update({ resolved: true, resolved_at: db.fn.now() });
+      logger.info(`Payment expiry: resolved ${toResolve.length} stale expiry alert(s) for prepay-exempt customers`);
+    } catch (alertErr) {
+      logger.warn(`Payment expiry: stale-alert resolution failed: ${alertErr.message}`);
+    }
   }
 }
 
