@@ -3577,6 +3577,11 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
   if (hit && Date.now() - hit.at < CARD_EXPIRY_EXEMPT_TTL_MS) {
     return new Set(await hit.promise);
   }
+  // evict expired horizons on insert — callers derive a fresh horizon as
+  // calendar time advances, so without eviction the map grows with uptime
+  for (const [key, staleEntry] of cardExpiryExemptCache) {
+    if (Date.now() - staleEntry.at >= CARD_EXPIRY_EXEMPT_TTL_MS) cardExpiryExemptCache.delete(key);
+  }
   const entry = { at: Date.now(), promise: computeCardExpiryExemptCustomerIds(horizon, conn) };
   cardExpiryExemptCache.set(horizon, entry);
   const result = await entry.promise;
@@ -3861,47 +3866,71 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         .where({ scheduled_service_id: v.id })
         .select('id', 'structured_notes');
       if (String(v.status) === 'completed') {
-        const frozenBackfill = (serviceRecords || []).some((record) => {
-          let notes = record.structured_notes;
-          if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
-          return notes?.backfill === true;
-        });
-        if (frozenBackfill) continue;
+        // Bound to the RESUMED attempt's own record (the resume restores
+        // the mode from claim.serviceRecordId, not from any linked
+        // record): exempt only when EVERY unfinished resumable attempt is
+        // bound to a record that froze backfill — an attempt on a normal
+        // record (or with no committed record yet) can still charge.
+        const unfinishedAttempts = await conn('service_completion_attempts')
+          .where({ service_id: v.id })
+          .whereIn('status', ['side_effects_pending', 'side_effects_running'])
+          .select('service_record_id');
+        const recordById = new Map((serviceRecords || []).map((record) => [String(record.id), record]));
+        const allResumesFrozenBackfill = (unfinishedAttempts || []).length > 0
+          && (unfinishedAttempts || []).every((attempt) => {
+            const record = attempt.service_record_id != null ? recordById.get(String(attempt.service_record_id)) : null;
+            if (!record) return false;
+            let notes = record.structured_notes;
+            if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+            return notes?.backfill === true;
+          });
+        if (allResumesFrozenBackfill) continue;
       }
       let liveHold = null;
       if (['auto_charge', 'invoice'].includes(prediction.kind) && isCardHoldEnabled()) {
-        // The charge rail's own admission: feature gate on, newest 'held'
-        // row, NOT parked (a parked hold is untouchable by every charge
-        // path), and a positive FROZEN accepted amount — the rail
-        // withholds fail-closed with no amount to cap against.
+        // The charge rail's own resolution and admission: it selects the
+        // NEWEST 'held' row (heldCardForScheduledService orders by held_at
+        // DESC) and THEN refuses a parked row and a missing/non-positive
+        // frozen accepted amount (withheld fail-closed) — so the same row
+        // the rail would resolve decides here, not some other consent.
         const holdRow = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id, status: 'held' })
-          .whereNull('parked_at')
-          .first('id', 'accepted_amount');
-        if (holdRow) {
+          .orderBy('held_at', 'desc')
+          .first('id', 'accepted_amount', 'parked_at');
+        if (holdRow && !holdRow.parked_at) {
           const acceptedRaw = Number(holdRow.accepted_amount);
           liveHold = Number.isFinite(acceptedRaw) && acceptedRaw > 0
             ? { id: holdRow.id, acceptedAmount: acceptedRaw }
             : null;
         }
       }
-      // The appointment-card completion lane (GATE_APPT_CARD_COMPLETION_
-      // CHARGE) auto-charges a consented one-time visit's card even while
-      // the generic completion gate is off: a completed/satisfied consent
-      // row belonging to the visit's CURRENT customer, no estimate-card
-      // hold row (the hold rail owns that visit instead), Auto Pay active.
-      // Its frozen accepted amount already rides the cap anchors below.
+      // Appointment-card consent state feeds TWO verdicts: the lane's own
+      // charge (GATE_APPT_CARD_COMPLETION_CHARGE — a completed/satisfied
+      // consent for the visit's CURRENT customer, no hold row, one-time
+      // visit — charges even while the generic completion gate is off),
+      // and the extended charge's exclusion (requireNoAppointmentCardLane
+      // refuses ANY consent row, matching or not). A visit whose consent
+      // rows block the extended charge while the lane itself cannot charge
+      // has nothing left to touch the card.
+      const consentRows = await conn('appointment_card_requests')
+        .where({ scheduled_service_id: v.id })
+        .select('id', 'customer_id', 'status');
       let apptCardCharge = false;
-      if (!liveHold && prediction.kind === 'invoice' && autopayActive && v.is_recurring !== true
-        && require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
-        const laneRow = await conn('appointment_card_requests')
+      if ((consentRows || []).length) {
+        const laneRow = (consentRows || []).find((row) => ['completed', 'satisfied'].includes(String(row.status)));
+        const anyHoldRow = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id })
-          .whereIn('status', ['completed', 'satisfied'])
-          .first('id', 'customer_id');
-        const holdRow = laneRow ? await conn('estimate_card_holds')
-          .where({ scheduled_service_id: v.id })
-          .first('id') : null;
-        apptCardCharge = !!laneRow && !holdRow && String(laneRow.customer_id) === String(v.customer_id);
+          .first('id');
+        const apptLaneChargeable = !!laneRow && !anyHoldRow && v.is_recurring !== true
+          && String(laneRow.customer_id) === String(v.customer_id)
+          && require('../config/feature-gates').isEnabled('apptCardCompletionCharge');
+        apptCardCharge = apptLaneChargeable && !liveHold && prediction.kind === 'invoice' && autopayActive;
+        if (prediction.kind === 'auto_charge' && lane.mode !== 'per_application' && !liveHold && !apptLaneChargeable) {
+          // stale/mismatched/pending consent: the extended charge refuses
+          // any consent row and the lane cannot charge either → no card
+          // charge, no warning
+          continue;
+        }
       }
       if (prediction.kind !== 'auto_charge' && !liveHold && !apptCardCharge) continue;
       // Completion's invoice state machine (admin-dispatch; route-module
@@ -3923,7 +3952,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
           }
         })
         .orderBy('created_at', 'desc')
-        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id');
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id', 'scheduled_service_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
       // The refunded (terminal) check spans BOTH identifiers, like
       // completionTerminalInvoiceLookup.
@@ -3936,6 +3965,15 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       const reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
         || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
       if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
+      if (reused && lane.mode !== 'per_application' && String(reused.scheduled_service_id || '') !== String(v.id)) {
+        // An OPEN record-only invoice (no scheduled_service_id binding to
+        // THIS visit) cannot be card-charged: the extended money boundary
+        // returns invoice_unbound, and the hold/appointment rails re-prove
+        // the same binding under their own locks — it is reused as a
+        // pay-link only. Settled/refunded record-linked suppressors above
+        // still count.
+        continue;
+      }
       // An explicit "stop collecting this invoice" instruction (disputed
       // bill, check in the mail): the EXTENDED completion charge — the
       // lane that charges existing reused invoices — passes
@@ -3962,6 +4000,17 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         // over the accepted amount it routes to office review instead.
         if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
         if (!liveHold && await dunningStopped(reused)) continue;
+        // An ACTIVE payment plan owns this invoice's collection — the
+        // shared anchor verdict (verifyExtendedCompletionAnchor) refuses
+        // the completion charge with active_payment_plan. Scoped like the
+        // dunning stop (extended lanes; the hold rail does not run the
+        // anchor verdict, so a live hold keeps the warning).
+        if (!liveHold && lane.mode !== 'per_application') {
+          const activePlan = await conn('payment_plans')
+            .where({ invoice_id: reused.id, status: 'active' })
+            .first('id');
+          if (activePlan) continue;
+        }
       } else {
         // No direct invoice on the visit → completion consults the SIBLING
         // first-application invoice of the same estimate/date
