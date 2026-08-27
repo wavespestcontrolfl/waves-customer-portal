@@ -83,7 +83,11 @@ async function hasWelcomeSequence(customerId, conn = db) {
   if (!customerId) return false;
 
   try {
-    if (!(await db.schema.hasTable('sms_sequences'))) return false;
+    // Schema probe on the SUPPLIED connection (codex #3504 r17): callers
+    // inside a transaction already hold one pool connection, and a probe
+    // on the global pool would need a second — at pool saturation every
+    // enqueue waits on every other until an acquire timeout.
+    if (!(await conn.schema.hasTable('sms_sequences'))) return false;
     const existing = await conn('sms_sequences')
       .where({ customer_id: customerId, sequence_type: SEQUENCE_TYPE })
       .first('id');

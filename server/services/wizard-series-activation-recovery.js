@@ -49,6 +49,14 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // live draft. Disposition below is by status class; nothing drops out
     // of recovery silently.
     .whereNotIn('ss.status', ['cancelled', 'canceled'])
+    // PEST rows leave the predicate IN SQL, before the LIMIT (codex #3504
+    // r17): the pest funnel's duplicate-kept disposition presents this
+    // exact stranded shape BY DESIGN and stays eligible forever, so a
+    // JS-side skip after an oldest-first bounded fetch would pin the
+    // page on the same pest rows and starve every newer stranded
+    // lawn/mosquito/tree/palm activation. The family check in the sweep
+    // loop stays as belt-and-braces for labels this pattern misses.
+    .whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'")
     .where('e.source', 'quote_wizard')
     .where('e.status', 'draft')
     .whereNull('e.archived_at')

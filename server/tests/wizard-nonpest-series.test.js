@@ -820,6 +820,10 @@ describe('booking route wiring (source contracts)', () => {
   test('the recovery sweep never touches the PEST funnel (duplicate-kept pest visits stay billable by design)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control' \|\| \/\\bpest\\b\/i\.test\(String\(parent\.service_type \|\| ''\)\)\) continue;/);
+    // r17: the exclusion ALSO lives in the bounded query, before the LIMIT —
+    // permanently-eligible pest rows must never pin the oldest-first page.
+    const findBody = recoverySrc.slice(recoverySrc.indexOf('function findStrandedParents'), recoverySrc.indexOf('.limit(limit)'));
+    expect(findBody).toMatch(/whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\)/);
   });
 
   test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
