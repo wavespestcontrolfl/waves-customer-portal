@@ -580,7 +580,9 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
     const charged = normalizedRows.filter((row) => row && row.kind === 'charge' && num(row.amount) > 0);
     const included = normalizedRows.filter((row) => row && row.kind === 'included');
     const rowsTotal = Math.round(charged.reduce((sum, row) => sum + num(row.amount), 0) * 100) / 100;
-    if (charged.length > 0 && oneTimeTotal > 0 && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
+    // Included-only (every row comped, stored total $0) still prints the
+    // approved scope — the charged sum ($0) reconciles to the $0 total.
+    if ((charged.length > 0 || included.length > 0) && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
       for (const row of normalizedRows) {
         const isCharged = charged.includes(row);
         if (!isCharged && !included.includes(row)) continue;

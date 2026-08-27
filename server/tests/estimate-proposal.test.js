@@ -799,3 +799,21 @@ describe('one-time itemization reads every persisted result shape (codex #3521 r
     expect(oneTime.map((l) => l.description).sort()).toEqual(['Flea Treatment', 'Rodent Trapping']);
   });
 });
+
+describe('fully credited one-time scope still prints on the proposal (uncapped audit P1 on #3521)', () => {
+  test('every row comped, stored total $0 → included rows print at $0', () => {
+    const p = normalizeProposal({
+      customer_name: 'C', address: '3 Attic Ln', monthly_total: 0, onetime_total: 0,
+      estimate_data: { result: { oneTime: { total: 0, items: [
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 0, serviceSpecificDiscountApplied: true },
+      ] } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([['Rodent Inspection (Included)', 0]]);
+  });
+
+  test('no rows and no total still adds nothing', () => {
+    const p = normalizeProposal({ customer_name: 'C', address: '3 Attic Ln', monthly_total: 120, onetime_total: 0, estimate_data: {} });
+    expect(p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time')).toHaveLength(0);
+  });
+});
