@@ -79,11 +79,23 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(trapSvc(db).description).toBe('Edited after the migration ran.');
   });
 
-  test('an already-Standard-only row is a no-op', async () => {
+  test('a pricing row already at target STILL aligns the catalog copy, and down() restores it', async () => {
     const db = seedDb();
     trapCfg(db).data = { base: 350, standard_price: 350, included_followups: 'unlimited' };
     await migration.up(fakeKnex(db));
-    expect(db.pricing_config_audit).toHaveLength(0);
+    expect(JSON.parse(trapCfg(db).data)).toEqual({ base: 350, standard_price: 350, included_followups: 'unlimited' });
+    expect(trapSvc(db).description).toMatch(/unlimited callbacks\/checks for the same active trapping job/);
+    expect(db.pricing_config_audit).toHaveLength(1);
+    await migration.down(fakeKnex(db));
     expect(trapSvc(db).description).toBe(PRIOR_DESCRIPTION);
+  });
+
+  test('everything already at target is a true no-op', async () => {
+    const db = seedDb();
+    trapCfg(db).data = { base: 350, standard_price: 350, included_followups: 'unlimited' };
+    trapSvc(db).description = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
+    await migration.up(fakeKnex(db));
+    expect(db.pricing_config_audit).toHaveLength(0);
+    expect(db.pricing_changelog).toHaveLength(0);
   });
 });

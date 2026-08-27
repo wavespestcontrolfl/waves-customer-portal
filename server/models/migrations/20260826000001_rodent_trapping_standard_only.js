@@ -77,31 +77,40 @@ exports.up = async function (knex) {
   // catalog and client mirror say $350 (uncapped audit P1 on #3521). Pin
   // it; the prior value rides the audit row for rollback.
   const STANDARD_PRICE = 350;
-  const needsChange = RETIRED_KEYS.some((key) => data[key] != null)
+  const pricingNeedsChange = RETIRED_KEYS.some((key) => data[key] != null)
     || data.included_followups !== 'unlimited'
     || Number(data.standard_price) !== STANDARD_PRICE;
-  if (!needsChange) return;
 
-  const newData = { ...data, included_followups: 'unlimited', standard_price: STANDARD_PRICE };
-  for (const key of RETIRED_KEYS) delete newData[key];
-
-  // Catalog copy still described the two-plan terms (20260526000009) —
-  // align it with the Standard-only plan, remembering what it said so
-  // down() restores the real predecessor rather than a guess.
+  // Catalog copy is judged INDEPENDENTLY of the pricing row (uncapped audit
+  // P1 on #3521): a config already at target must not leave the Service
+  // Library describing the retired two-plan terms. The prior copy is
+  // remembered so down() restores the real predecessor.
   let priorServiceDescription = null;
+  let descriptionChanged = false;
   if (await knex.schema.hasTable('services')) {
     const svc = await knex('services').where('service_key', 'rodent_trapping').first('description');
-    if (svc) priorServiceDescription = svc.description ?? null;
-    await knex('services')
-      .where('service_key', 'rodent_trapping')
-      .update({ description: STANDARD_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
+    if (svc && String(svc.description || '') !== STANDARD_SERVICE_DESCRIPTION) {
+      priorServiceDescription = svc.description ?? null;
+      await knex('services')
+        .where('service_key', 'rodent_trapping')
+        .update({ description: STANDARD_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
+      descriptionChanged = true;
+    }
   }
+  if (!pricingNeedsChange && !descriptionChanged) return;
+
+  const newData = pricingNeedsChange
+    ? { ...data, included_followups: 'unlimited', standard_price: STANDARD_PRICE }
+    : { ...data };
+  if (pricingNeedsChange) for (const key of RETIRED_KEYS) delete newData[key];
+  // One audit row per up(), even for a description-only change — down()
+  // keys its rollback (pricing keys AND the captured catalog copy) off it.
   await saveTrappingRow(
     knex,
     { ...data, __service_description: priorServiceDescription },
     newData,
     UP_REASON,
-    STANDARD_ROW_NAME
+    pricingNeedsChange ? STANDARD_ROW_NAME : null
   );
 
   if (await knex.schema.hasTable('pricing_changelog')) {
