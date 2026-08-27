@@ -2130,6 +2130,7 @@ const StripeService = {
                 visit_not_completed: 'The visit is no longer completed. Review before charging.',
                 no_cost_visit: 'Callbacks and no-cost visit types are never auto-charged. Review before charging.',
                 invoice_unbound: 'The invoice is no longer bound to this appointment. Review before charging.',
+                active_payment_plan: 'An active payment plan owns this invoice. Review before charging.',
                 dues_covered: 'Membership dues cover this visit. Review before charging.',
               };
               throw new Error(anchorRefusals[anchorVerdict.reason]

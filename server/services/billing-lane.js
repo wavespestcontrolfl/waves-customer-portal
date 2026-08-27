@@ -336,6 +336,7 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   if (String(lockedInvoice.scheduled_service_id || '') !== String(lockedSvc.id)) {
     return { ok: false, reason: 'invoice_unbound' };
   }
+
   // Callbacks / re-treats and always-free service types never auto-charge
   // (manual-audit P0) — revalidated under the lock so a visit re-typed or
   // re-flagged after the route's admission check refuses too.
@@ -366,6 +367,20 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
     } catch {
       return { ok: false, reason: 'annual_prepay_coverage_unverifiable' };
     }
+  }
+  // An ACTIVE payment plan owns this invoice's collection (GitHub review
+  // P1): the plan keeps drafting installments against its creation-time
+  // snapshot — a completion charge beside it double-collects. Same guard
+  // the credit apply has carried; through the shared verdict the CHARGE
+  // now refuses too. Read on the caller's lock connection; an unreadable
+  // plan state fails TOWARD refusal.
+  try {
+    const activePlan = await dbConn('payment_plans')
+      .where({ invoice_id: lockedInvoice.id, status: 'active' })
+      .first('id');
+    if (activePlan) return { ok: false, reason: 'active_payment_plan' };
+  } catch {
+    return { ok: false, reason: 'active_payment_plan_unverifiable' };
   }
   const hasVisitPrice = lockedSvc.estimated_price != null && Number(lockedSvc.estimated_price) > 0;
   let duesCollected = true;

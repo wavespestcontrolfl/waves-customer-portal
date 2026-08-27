@@ -487,6 +487,24 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, service_type: 'Pest Control Re-Service' }, lockedInvoice: invoiceAt(90.55),
     })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
   });
+  test('an ACTIVE payment plan on the invoice refuses the charge (active_payment_plan)', async () => {
+    const planConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'payment_plans' ? { id: 'plan1' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: planConn, lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'active_payment_plan' });
+  });
   test('an invoice rebound to another visit refuses under the lock (invoice_unbound)', async () => {
     await expect(verifyExtendedCompletionAnchor({
       dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit,
