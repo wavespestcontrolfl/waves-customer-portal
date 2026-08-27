@@ -133,10 +133,10 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 }
 
 // Last pay-page activity on a PaymentIntent (epoch seconds), stamped into
-// metadata at every seam that rewrites the PI (setup mint/reuse,
-// update-amount, finalize). pay-combined's abandoned-sibling triage reads it
-// as the lease that proves a bound PI is a dead session rather than a page
-// the customer is actively paying on.
+// metadata at every seam that UPDATES the PI (setup reuse, update-amount,
+// finalize) - never into an idempotent create, whose `created` already carries
+// the same information. pay-combined's abandoned-sibling triage reads it as the
+// lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
 async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
@@ -3643,10 +3643,11 @@ const StripeService = {
             : `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
-            // Re-stamped on every setup reuse so the sibling triage can tell
-            // "abandoned weeks ago" from "reopened just now" — `created` is
-            // immutable and single-invoice setup reuses old PIs in place.
-            pay_session_touched_at: paySessionTouchedAt(),
+            // NO pay_session_touched_at here: piParams feeds an IDEMPOTENT
+            // create (deterministic key below) and a time-varying value would
+            // make a retry after a rolled-back mint a changed-parameters
+            // rejection. A fresh PI's `created` is its activity; the reuse
+            // update adds the stamp (see updateParams).
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
             base_amount: String(baseAmount),
@@ -3736,7 +3737,10 @@ const StripeService = {
               || (String(activeIntent.metadata?.combined_allocation || '') === String(piParams.metadata.combined_allocation || '')
                 && Number(activeIntent.amount) === baseCents)
             )) {
-            const updateParams = { ...piParams };
+            // Re-stamp activity on reuse so the sibling triage can tell
+            // "abandoned weeks ago" from "reopened just now" — `created` is
+            // immutable and single-invoice setup reuses old PIs in place.
+            const updateParams = { ...piParams, metadata: { ...piParams.metadata, pay_session_touched_at: paySessionTouchedAt() } };
             delete updateParams.currency;
             if (!stripeCustomerId) {
               updateParams.setup_future_usage = '';

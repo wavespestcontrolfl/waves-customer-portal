@@ -259,6 +259,18 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     });
   });
 
+  test('fresh-PI create params carry no activity stamp (idempotent replay must not see changed parameters)', async () => {
+    // A rolled-back mint retries /setup with the SAME deterministic
+    // idempotency key; a time-varying metadata value would make Stripe
+    // reject the replay. `created` is the fresh PI's activity.
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    for (const [params] of stripeClient.paymentIntents.create.mock.calls) {
+      expect(params.metadata).not.toHaveProperty('pay_session_touched_at');
+    }
+  });
+
   test('a rollback AFTER an abandoned sibling PI was canceled re-clears its stamps outside the transaction', async () => {
     // The sibling release cancels at Stripe (irreversible) then clears
     // stamps inside setup's transaction. If the locked verify then refuses
