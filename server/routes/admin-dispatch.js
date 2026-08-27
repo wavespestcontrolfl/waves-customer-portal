@@ -10918,14 +10918,86 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         logger.warn(`[dispatch] appointment-card completion-lane check failed for visit ${svc.id} — no auto-charge, credit auto-apply suppressed: ${e.message}`);
       }
     }
+    // Extended completion auto-charge lane (owner rulings 2026-08-26/27;
+    // GATE_COMPLETION_AUTOPAY_CHARGE): ANY autopay customer's collectible
+    // self-pay completion invoice auto-charges — not just per-application
+    // and the appointment-card lane. Lane + PRE-CREDIT anchor derived HERE,
+    // before the account-credit apply (pre-push P1: an over-cap or
+    // anchor-less invoice routes to office review, and review must see the
+    // bill exactly as minted — credit must not be consumed for it, nor may
+    // it flip the invoice prepaid past a never-evaluated cap). Anchor = the
+    // SAME resolution the completion mint prices from (the visit's stamped
+    // accepted price, else the membership dues rate via the shared
+    // completionInvoiceAmount precedence — owner cap ruling: those ARE the
+    // agreed price). The charge block below consumes these values and the
+    // charge service re-asserts the anchor under its own locks.
+    const extendedAutopayCharge = !perApplicationBilling && !apptCardOneTimeCharge
+      && require('../config/feature-gates').gates.completionAutopayCharge === true;
+    // Callbacks / re-treats and always-free service types (appointment,
+    // estimate, re-service, follow-up) never auto-charge (manual-audit P0):
+    // shouldAutoInvoiceCompletion treats them as free, but a reused or
+    // pre-minted collectible invoice with a stale estimated_price would
+    // otherwise pass the anchor — the same exclusions every explicit lane
+    // applies, revalidated again under the locked visit row inside
+    // verifyExtendedCompletionAnchor.
+    // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
+    // a live estimate_card_holds row means the customer consented to THAT
+    // card at THAT amount — the extended lane must not charge the default
+    // Auto Pay method beside (or instead of) it. Fail closed when the
+    // lookup errors; re-checked under the money locks in the shared
+    // verdict.
+    let extendedHoldExcluded = false;
+    if (extendedAutopayCharge) {
+      try {
+        extendedHoldExcluded = !!(await db('estimate_card_holds')
+          .where({ scheduled_service_id: svc.id })
+          .whereNotIn('status', ['released', 'cancelled', 'failed'])
+          .first('id'));
+      } catch (e) {
+        extendedHoldExcluded = true;
+        logger.warn(`[dispatch] extended-lane hold lookup failed for visit ${svc.id} — lane closed: ${e.message}`);
+      }
+    }
+    // An UNRESOLVED appointment-card lane fails the extended lane closed
+    // too (pre-push P0): apptCardOneTimeCharge=false because the lookup
+    // ERRORED is not "no consent row" — charging the mutable visit price
+    // could exceed a frozen accepted_amount we couldn't read. The money
+    // boundary additionally excludes any consent row under the visit lock
+    // (requireNoAppointmentCardLane on the charge below).
+    const extendedChargeCandidate = extendedAutopayCharge && visitPerformed
+      && !apptCardLaneUnresolved && !extendedHoldExcluded
+      && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
+      && !!invoice?.id && !alreadyPaid && !invoice.payer_id && customerAutopayActive;
+    let extendedLaneAnchor = null;
+    let extendedLaneOverCap = false;
+    if (extendedChargeCandidate) {
+      const duesAnchor = completionInvoiceAmount({
+        estimatedPrice: null,
+        isCallback: !!svc.is_callback,
+        perApplicationBilling: false,
+        perApplicationFee: null,
+        monthlyRate: svc.cust_monthly_rate,
+        billingMode: svc.cust_billing_mode,
+      });
+      const anchor = svc.estimated_price != null && Number(svc.estimated_price) > 0
+        ? Number(svc.estimated_price)
+        : (Number(duesAnchor) > 0 ? Number(duesAnchor) : null);
+      extendedLaneAnchor = anchor;
+      const preCreditSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
+      const preCreditNet = Math.round((preCreditSubtotal - Math.max(0, Number(invoice.discount_amount) || 0)) * 100) / 100;
+      extendedLaneOverCap = extendedLaneAnchor == null || preCreditNet > extendedLaneAnchor + 0.005;
+    }
     if (!isBackfillCompletion
       && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid'].includes(String(invoice.status || '').toLowerCase())
       // Over-cap appointment-lane invoices keep their credit untouched
       // (Codex #3153 r9 P1) — the lane routes them to office review, and
       // review must see the bill exactly as minted. An UNVERIFIABLE lane
-      // (lookup error) is treated the same (r10).
+      // (lookup error) is treated the same (r10). The extended lane
+      // mirrors the posture: over-cap / anchor-less invoices keep their
+      // credit untouched for review.
       && !apptCardOverCap && !apptCardLaneUnresolved
+      && !(extendedChargeCandidate && extendedLaneOverCap)
       && require('../config/feature-gates').gates.autoApplyAccountCredit) {
       try {
         const { applyAccountCreditToInvoice } = require('../services/customer-credit');
@@ -10947,6 +11019,25 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // credit consumed (or the invoice marked prepaid) for a visit
             // that is no longer one-time — mirrors the saved-card guard.
             requireOneTimeLane: true,
+          } : {}),
+          // The extended lane's anchor rides INTO the credit apply the same
+          // way the appointment lane's frozen cap does (pre-push P1) and is
+          // re-checked against the LOCKED invoice — an invoice edit racing
+          // this window must not have credit consumed past the anchor.
+          ...(extendedChargeCandidate && !apptCardOneTimeCharge ? {
+            maxAuthorizedSubtotal: extendedLaneAnchor != null ? extendedLaneAnchor : 0,
+            requireSelfPayScheduledServiceId: svc.id,
+            // Stopped-dunning honored before credit moves (pre-push P0
+            // round 9) — a stop instruction must not have credit consumed
+            // or the invoice flipped prepaid past the charge guard.
+            refuseWhenDunningStopped: true,
+            // Competing card-consent excluded before credit moves too
+            // (pre-push P0 round 10) — mirrors the charge boundary.
+            requireNoAppointmentCardLane: true,
+            // The anchor AUTHORITY is re-derived under the credit apply's
+            // own locks too (pre-push P0 round 2) — a price drop, mode
+            // flip, or coverage stamp racing this window consumes nothing.
+            requireExtendedCompletionAnchor: true,
           } : {}),
         });
         if (creditResult?.applied > 0) {
@@ -10996,13 +11087,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
       logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
-    const completionChargeSource = perApplicationBilling ? 'per_application_completion' : 'appointment_card_completion';
+    const completionChargeSource = perApplicationBilling
+      ? 'per_application_completion'
+      : (apptCardOneTimeCharge ? 'appointment_card_completion' : 'autopay_completion');
     if (!isBackfillCompletion
-      && (perApplicationBilling || apptCardOneTimeCharge) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -11020,12 +11113,20 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       // per-application acceptance-fee fallback and the setup-fee
       // allowances below are per-application concepts and never widen this
       // lane's cap.
+      // Extended-lane anchor (owner cap ruling 2026-08-27: the accepted
+      // membership/estimate amount or the customer's normal rate ARE the
+      // agreed price) was derived PRE-CREDIT above — the visit's stamped
+      // estimated_price first, else the same completionInvoiceAmount
+      // resolution the mint prices membership invoices from. null → office
+      // review, exactly the uncapped posture below; the charge service
+      // re-asserts the anchor under its own locks
+      // (requireExtendedCompletionAnchor).
       const acceptedPerVisit = apptCardOneTimeCharge
         ? apptCardAcceptedAmount
         : (svc.estimated_price != null && Number(svc.estimated_price) > 0
           ? Number(svc.estimated_price)
           : (perApplicationBilling && svc.cust_per_application_fee != null && Number(svc.cust_per_application_fee) > 0
-            ? Number(svc.cust_per_application_fee) : null));
+            ? Number(svc.cust_per_application_fee) : extendedLaneAnchor));
       const invoiceSubtotal = invoice.subtotal != null ? Number(invoice.subtotal) : Number(invoice.total || 0);
       // Manual-discount accepts gross the service line up and bring it back
       // with a negative discount line — invoices.subtotal is the PRE-discount
@@ -11160,12 +11261,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         // No accepted amount to cap against (multi-service plan with no
         // row price or customer fee) — never auto-charge uncapped
         // (Codex #2680): route to office review, keep the pay-link flow.
-        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: no accepted per-visit amount on file to cap against — routed to office review`);
+        logger.warn(`[dispatch] completion auto-charge (${completionChargeSource}) skipped for visit ${svc.id}: no accepted amount on file to cap against — routed to office review`);
         try {
           await require('../services/notification-service').notifyAdmin(
             'billing',
             'Auto Pay charge skipped — no accepted amount on file',
-            `A completed visit has an invoice but no per-application amount on file to cap the auto-charge against. Auto Pay was NOT charged — review and bill manually or stamp the amount.`,
+            extendedAutopayCharge
+              ? `A completed visit has an invoice but no accepted amount on file to cap the auto-charge against (no visit price and no membership rate). Auto Pay was NOT charged — review and bill manually or stamp the amount.`
+              : `A completed visit has an invoice but no per-application amount on file to cap the auto-charge against. Auto Pay was NOT charged — review and bill manually or stamp the amount.`,
             { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal } },
           );
         } catch (e) { logger.warn(`[dispatch] uncapped-charge review alert failed: ${e.message}`); }
@@ -11175,7 +11278,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           await require('../services/notification-service').notifyAdmin(
             'billing',
             'Auto Pay charge above accepted amount — review',
-            `A completed visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the accepted per-application amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
+            `A completed visit's invoice ($${netInvoiceSubtotal.toFixed(2)} before tax, net of discounts) exceeds the accepted ${extendedAutopayCharge ? 'per-visit/membership' : 'per-application'} amount ($${acceptedPerVisit.toFixed(2)}). Auto Pay was NOT charged — review and bill manually or adjust the invoice.`,
             { link: `/admin/customers/${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, invoiceId: invoice.id, invoiceSubtotal: netInvoiceSubtotal, acceptedPerVisit } },
           );
         } catch (e) { logger.warn(`[dispatch] above-quote review alert failed: ${e.message}`); }
@@ -11247,6 +11350,41 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // double-collect beside dues/prepay. Per-application keeps its
             // own semantics (false).
             requireOneTimeLane: apptCardOneTimeCharge,
+            // The extended lane must not charge past a FROZEN
+            // appointment-card consent it failed to classify (pre-push
+            // P0): any appointment_card_requests row appearing on the
+            // visit — gate off, lookup raced, or inserted after the
+            // unlocked admission check — refuses under the visit lock
+            // (COMPETING_CARD_CONSENT → office review); a visit the
+            // appt-card lane itself owns has apptCardOneTimeCharge=true
+            // and never sets this.
+            requireNoAppointmentCardLane: extendedAutopayCharge,
+            // The locked invoice must still be THIS visit's bill (pre-push
+            // P0 round 8) — the shared verdict checks it too; this is the
+            // charge service's own assertion under the same locks.
+            ...(extendedAutopayCharge ? { requireInvoiceScheduledServiceBinding: true } : {}),
+            // The extended lane's cap AUTHORITY is re-derived and
+            // re-asserted under the charge's own customer/visit/invoice
+            // locks (pre-push P0): a billing-mode flip into
+            // per-application/membership/annual-prepay, a coverage stamp,
+            // or a price edit racing this window refuses instead of
+            // charging beside dues/prepay coverage.
+            requireExtendedCompletionAnchor: extendedAutopayCharge,
+            ...(extendedAutopayCharge ? {
+              // The extended lane charges EXISTING invoices, so it must
+              // honor an explicit stopped-dunning instruction (pre-push P0
+              // round 3: disputed bill / check in the mail stays
+              // 'sent'/'overdue' and collectible) — the guard re-checks
+              // under the invoice lock.
+              refuseWhenDunningStopped: true,
+              // Freeze the POST-CREDIT amount due in cents against the
+              // locked invoice (pre-push P0 round 3): a tax-rate or raw
+              // total edit racing this window can raise invoice.total
+              // without moving the subtotal the cap compares — the
+              // due-cents ceiling refuses instead of charging the larger
+              // amount.
+              maxAuthorizedChargeCents: Math.max(0, Math.round((Number(invoice.total || 0) - Number(invoice.credit_applied || 0)) * 100)),
+            } : {}),
             deferReceiptDelivery: combinedReceiptArmed,
           });
           const fresh = await db('invoices').where({ id: invoice.id }).first();

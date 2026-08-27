@@ -199,6 +199,12 @@ function predictCompletionBilling({
   annualCoverageValidated,
   billingMode,
   duesCollectedThisMonth = false,
+  // GATE_COMPLETION_AUTOPAY_CHARGE (owner ruling 2026-08-26/27): with the
+  // gate on, ANY autopay customer's collectible self-pay completion invoice
+  // auto-charges, so the sheet's 'invoice' predictions become 'auto_charge'
+  // for autopay-active customers. Callers pass the live gate value; the
+  // default keeps this function's predictions byte-identical when off.
+  completionAutopayChargeEnabled = false,
 }) {
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   const none = { kind: 'no_charge', amount: 0, conflictStampedPrice: false };
@@ -241,7 +247,14 @@ function predictCompletionBilling({
     if (!hasVisitPrice) return none;
     const amount = Number(estimatedPrice);
     if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
-    return { kind: 'invoice', amount: Math.max(0, amount - prepaid), conflictStampedPrice: false };
+    return {
+      // No-cost exclusions mirror the charge lane (manual-audit P1): a
+      // callback/always-free visit never auto-charges, so never promise it.
+      kind: (autopayActive && completionAutopayChargeEnabled
+        && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
+      amount: Math.max(0, amount - prepaid),
+      conflictStampedPrice: false,
+    };
   }
   if (lane === 'per_application') {
     // Mirrors the completion gate: per-application bills performed
@@ -280,7 +293,261 @@ function predictCompletionBilling({
   });
   if (!(amount > 0)) return none;
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
-  return { kind: 'invoice', amount: Math.max(0, amount - prepaid), conflictStampedPrice: false };
+  return {
+    // Same no-cost exclusion as the annual branch (manual-audit P1).
+    kind: (autopayActive && completionAutopayChargeEnabled
+      && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
+    amount: Math.max(0, amount - prepaid),
+    conflictStampedPrice: false,
+  };
+}
+
+// Extended-completion cap-AUTHORITY revalidation
+// (GATE_COMPLETION_AUTOPAY_CHARGE), run UNDER the caller's already-held
+// customer/visit/invoice row locks — the one shared verdict both money
+// movers consult (chargeInvoiceWithSavedCard's
+// requireExtendedCompletionAnchor guard and applyAccountCreditToInvoice's
+// credit-side mirror), so a billing-mode flip, a coverage stamp, dues
+// coverage, or a price edit racing either transaction refuses in BOTH.
+// Coverage nuance (pre-push P1): only the VALIDATED annual stamp
+// (prepaid_method='annual_prepay_invoice') refuses — the annual-prepay LANE
+// itself still auto-charges its uncovered, explicitly priced add-ons; an
+// unpriced annual visit has no anchor and refuses on that instead. Returns
+// { ok: true, anchor } or { ok: false, reason } — pure verdict, callers
+// decide throw vs skip. dbConn is the caller's lock transaction (used only
+// for the dues-collected read; unreadable dues fail TOWARD coverage, i.e.
+// refusal).
+async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSvc, lockedInvoice }) {
+  if (!lockedCustomer || !lockedSvc || !lockedInvoice) return { ok: false, reason: 'rows_missing' };
+  // The visit must still BE completed under the lock (pre-push P0 round
+  // 4): a cancel/reschedule committing between the route's preflight and
+  // the money transaction leaves an invoice for a visit that no longer
+  // happened as billed. (requireCompletedOneTimeVisit can't serve here —
+  // this lane legitimately includes recurring visits.)
+  if (String(lockedSvc.status || '') !== 'completed') {
+    return { ok: false, reason: 'visit_not_completed' };
+  }
+  // The locked invoice must still be THIS visit's bill (pre-push P0 round
+  // 8): a concurrent rebind to another of the customer's visits would
+  // otherwise charge (or consume credit against) the wrong invoice under
+  // this visit's authorization. Both movers get this through the shared
+  // verdict; the charge additionally asserts
+  // requireInvoiceScheduledServiceBinding under its own lock.
+  if (String(lockedInvoice.scheduled_service_id || '') !== String(lockedSvc.id)) {
+    return { ok: false, reason: 'invoice_unbound' };
+  }
+
+  // Callbacks / re-treats and always-free service types never auto-charge
+  // (manual-audit P0) — revalidated under the lock so a visit re-typed or
+  // re-flagged after the route's admission check refuses too.
+  if (lockedSvc.is_callback === true || isAlwaysFreeServiceType(lockedSvc.service_type)) {
+    return { ok: false, reason: 'no_cost_visit' };
+  }
+  const lane = resolveBillingLane(lockedCustomer);
+  if (lockedCustomer.billing_mode === 'per_application' || lane.mode === 'per_application') {
+    return { ok: false, reason: 'per_application_lane' };
+  }
+  if (String(lockedSvc.prepaid_method || '') === 'annual_prepay_invoice') {
+    // Validate the stamp against the LIVE term (pre-push P1 round 3): the
+    // stamp survives refunds/voids/expiry, and completion + the schedule
+    // sheet both treat a stale one as NOT covered — a priced uncovered
+    // add-on must keep its auto-charge. Same authority completion uses
+    // (annualPrepayCoversVisit, full row re-read on the lock connection);
+    // an unreadable row fails TOWARD refusal.
+    // throwOnError (pre-push P0 round 4): coversVisit's own catch returns
+    // false for BILLING suppression — the opposite of this caller's
+    // fail-closed direction. An unverifiable coverage authority must
+    // refuse the charge, never read as a confirmed-stale stamp.
+    try {
+      const fullSvc = await dbConn('scheduled_services').where({ id: lockedSvc.id }).first();
+      if (!fullSvc) return { ok: false, reason: 'annual_prepay_coverage_unverifiable' };
+      const stampCovered = (await require('./annual-prepay-renewals')
+        .annualPrepayCoversVisit(fullSvc, dbConn, { throwOnError: true })) === true;
+      if (stampCovered) return { ok: false, reason: 'annual_prepay_coverage' };
+    } catch {
+      return { ok: false, reason: 'annual_prepay_coverage_unverifiable' };
+    }
+  }
+  // An ACTIVE payment plan owns this invoice's collection (GitHub review
+  // P1): the plan keeps drafting installments against its creation-time
+  // snapshot — a completion charge beside it double-collects. Same guard
+  // the credit apply has carried; through the shared verdict the CHARGE
+  // now refuses too. Read on the caller's lock connection; an unreadable
+  // plan state fails TOWARD refusal.
+  try {
+    const activePlan = await dbConn('payment_plans')
+      .where({ invoice_id: lockedInvoice.id, status: 'active' })
+      .first('id');
+    if (activePlan) return { ok: false, reason: 'active_payment_plan' };
+  } catch {
+    return { ok: false, reason: 'active_payment_plan_unverifiable' };
+  }
+  // Out-of-band (cash/Zelle) prepayment on the LOCKED row (GitHub r2 P1):
+  // the route's netting decisions used a pre-lock snapshot — a prepayment
+  // recorded inside the window would be double-collected by a full charge.
+  // Fail closed to office review; legitimate partial-prepay netting
+  // happens at mint time, before this lane admits the invoice.
+  if (String(lockedSvc.prepaid_method || '') !== ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(lockedSvc.prepaid_amount) > 0) {
+    // An ALREADY-APPLIED prepayment (completion netted invoice.total and
+    // booked the scheduled_service_prepaid payment marker) leaves the
+    // stamp populated — the residual is legitimately chargeable
+    // (manual-audit P1: an unconditional refusal would permanently
+    // disable Auto Pay on every partial-prepay visit). Only an
+    // unapplied/racing prepayment refuses; unreadable state refuses.
+    try {
+      const appliedMarker = await dbConn('payments')
+        .where({ customer_id: lockedSvc.customer_id, status: 'paid' })
+        .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(lockedInvoice.id)])
+        .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(lockedSvc.id)])
+        .first('id');
+      if (!appliedMarker) return { ok: false, reason: 'out_of_band_prepayment' };
+    } catch {
+      return { ok: false, reason: 'out_of_band_prepayment' };
+    }
+  }
+  // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
+  // a live hold re-checked under the money locks — the admission-side
+  // read is an unlocked snapshot a hold insert can outrun. Unreadable
+  // state fails toward refusal.
+  try {
+    const liveHold = await dbConn('estimate_card_holds')
+      .where({ scheduled_service_id: lockedSvc.id })
+      .whereNotIn('status', ['released', 'cancelled', 'failed'])
+      .first('id');
+    if (liveHold) return { ok: false, reason: 'estimate_card_hold' };
+  } catch {
+    return { ok: false, reason: 'estimate_card_hold_unverifiable' };
+  }
+  const hasVisitPrice = lockedSvc.estimated_price != null && Number(lockedSvc.estimated_price) > 0;
+  let duesCollected = true;
+  try { duesCollected = await monthlyDuesCollected(dbConn, lockedSvc.customer_id); } catch { duesCollected = true; }
+  if (membershipDuesCoverVisit({
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: lane.mode === 'annual_prepay',
+    customerAutopayActive: true,
+    duesCollectedThisMonth: duesCollected,
+    hasVisitPrice,
+    isRecurring: lockedSvc.is_recurring === true,
+    waveguardTier: lockedCustomer.waveguard_tier,
+    monthlyRate: lockedCustomer.monthly_rate,
+    billingMode: lockedCustomer.billing_mode,
+  })) {
+    return { ok: false, reason: 'dues_covered' };
+  }
+  const anchor = hasVisitPrice
+    ? Number(lockedSvc.estimated_price)
+    : Number(completionInvoiceAmount({
+      estimatedPrice: null,
+      isCallback: !!lockedSvc.is_callback,
+      perApplicationBilling: false,
+      perApplicationFee: null,
+      monthlyRate: lockedCustomer.monthly_rate,
+      billingMode: lockedCustomer.billing_mode,
+    })) || 0;
+  const subtotalCents = Math.round(Number(lockedInvoice.subtotal != null ? lockedInvoice.subtotal : lockedInvoice.total || 0) * 100);
+  const discountCents = Math.max(0, Math.round(Number(lockedInvoice.discount_amount || 0) * 100));
+  if (!(anchor > 0) || (subtotalCents - discountCents) > Math.round(anchor * 100)) {
+    return { ok: false, reason: 'anchor_exceeded' };
+  }
+  return { ok: true, anchor };
+}
+
+// Sync approximation of verifyExtendedCompletionAnchor for the schedule
+// sheet's ATTACHED-invoice prediction (pre-push P1): the sheet must not
+// promise an auto_charge the completion guard will deterministically
+// refuse — dues coverage, a missing anchor, an over-cap subtotal, or a
+// no-cost visit. Conservative by construction: an unknown subtotal falls
+// back to the tax-inclusive total, which can only DEMOTE a promise to
+// 'invoice', never over-promise a charge. Per-application invoices answer
+// true — that lane's own rail charges its attached invoices.
+function attachedInvoiceAutoChargeLikely({
+  invoice,
+  autopayActive,
+  duesCollectedThisMonth = false,
+  estimatedPrice,
+  isRecurring,
+  isCallback,
+  serviceType,
+  waveguardTier,
+  monthlyRate,
+  billingMode,
+  prepaidMethod = null,
+  prepaidAmount = null,
+  prepaidApplied = false,
+  annualCoverageValidated = null,
+  perApplicationFee = null,
+}) {
+  if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
+  // An UNAPPLIED out-of-band (cash/Zelle) prepayment demotes (GitHub r3
+  // P2) — completion nets it first; once the netting marker exists
+  // (prepaidApplied, the same scheduled_service_prepaid detection the
+  // sheets already run) the residual legitimately auto-charges.
+  if (String(prepaidMethod || '') !== ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(prepaidAmount) > 0 && !prepaidApplied) return false;
+  // A stamped annual-prepay visit demotes unless the stamp was VALIDATED
+  // stale (pre-push P1 round 8) — completion settles/voids the covered
+  // invoice, and an unverifiable stamp refuses the charge anyway.
+  if (String(prepaidMethod || '') === ANNUAL_PREPAY_PREPAID_METHOD
+    && annualCoverageValidated !== false) return false;
+  if (billingMode === 'per_application') {
+    // The per-application rail is ALSO capped (GitHub r4 P2): an
+    // admin-edited invoice above the accepted per-visit amount routes to
+    // office review at completion, so the sheet must not promise the
+    // charge. Anchor mirrors the rail (visit price, else the acceptance
+    // fee); a setup-fee line on the invoice extends the cap by that line
+    // (approximation of the rail's bounded allowance — its authorization
+    // predicates aren't cheaply readable here, and over-allowing only
+    // risks a promise the rail then routes to review, never a charge).
+    const perAppAnchor = estimatedPrice != null && Number(estimatedPrice) > 0
+      ? Number(estimatedPrice)
+      : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null);
+    if (perAppAnchor == null) return false;
+    let setupLineAmount = 0;
+    try {
+      const rawLines = invoice?.line_items;
+      const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+        /one-time setup fee/i.test(String(li?.description || ''))
+      ));
+      if (setupLine) {
+        setupLineAmount = Number(setupLine.amount
+          ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+      }
+    } catch { /* unreadable lines -> no allowance */ }
+    const perAppSub = invoice?.subtotal != null ? Number(invoice.subtotal) : Number(invoice?.total || 0);
+    const perAppNet = perAppSub - Math.max(0, Number(invoice?.discount_amount) || 0);
+    return perAppNet <= perAppAnchor + Math.max(0, setupLineAmount) + 0.005;
+  }
+  const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  if (membershipDuesCoverVisit({
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: billingMode === 'annual_prepay',
+    customerAutopayActive: autopayActive,
+    duesCollectedThisMonth,
+    hasVisitPrice,
+    isRecurring,
+    waveguardTier,
+    monthlyRate,
+    billingMode,
+  })) return false;
+  const anchor = hasVisitPrice
+    ? Number(estimatedPrice)
+    : Number(completionInvoiceAmount({
+      estimatedPrice: null,
+      isCallback: !!isCallback,
+      perApplicationBilling: false,
+      perApplicationFee: null,
+      monthlyRate,
+      billingMode,
+    })) || 0;
+  if (!(anchor > 0)) return false;
+  const sub = invoice?.subtotal != null ? Number(invoice.subtotal) : Number(invoice?.total || 0);
+  const net = sub - Math.max(0, Number(invoice?.discount_amount) || 0);
+  return net <= anchor + 0.005;
 }
 
 // Has THIS ET month's membership dues payment been collected (paid or
@@ -317,4 +584,6 @@ module.exports = {
   completionInvoiceAmount,
   predictCompletionBilling,
   monthlyDuesCollected,
+  verifyExtendedCompletionAnchor,
+  attachedInvoiceAutoChargeLikely,
 };

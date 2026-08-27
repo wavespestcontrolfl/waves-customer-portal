@@ -31,7 +31,8 @@ const {
 } = require('../utils/datetime-et');
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
-const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
+const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected, attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
@@ -2745,7 +2746,50 @@ const ZONE_COORDS = {
 // existingCompletionInvoice) — so when one exists, the sheet's prediction
 // must mirror it, not recompute from the visit price/fee, or the card
 // quotes an amount (or a paying party) completion will ignore (Codex r7).
-function predictionFromAttachedInvoice(invoice) {
+// The two remaining deterministic charge-guard states the sheet must not
+// promise past (pre-push P1 round 11): a stopped-dunning instruction and a
+// competing appointment_card_requests consent row. Read-only; any failure
+// reads as NOT clear (conservative — demotes the promise, never invents
+// one). Skipped entirely when the gate/autopay can't label auto_charge
+// anyway, so the sheets add no queries while the lane is dark.
+async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayActive, billingMode = null) {
+  if (!invoice || !autopayActive) return false;
+  // Extended-lane blockers apply only to extended-lane candidates
+  // (pre-push P1 round 12): a per-application invoice is that rail's own
+  // auto-charge — it uses neither the stopped-dunning guard nor the
+  // consent exclusion, so demoting it here would mislabel a charge
+  // completion WILL run. (An appointment-card consent row still reads NOT
+  // clear below: the extended lane genuinely refuses beside any consent
+  // row, and that lane's own display semantics are unchanged from before
+  // this PR.)
+  if (billingMode === 'per_application') return true;
+  if (require('../config/feature-gates').gates.completionAutopayCharge !== true) return false;
+  try {
+    // ONE probe per row, not four (pre-push P1): the four blocker tables —
+    // stopped dunning, any appointment-card consent, an active payment
+    // plan (both own the invoice's collection), and a live estimate card
+    // hold — union into a single LIMIT-1-per-arm existence query, keeping
+    // this within the page's existing per-row query budget (the row loops
+    // already read the attached invoice, prepaid marker, and coverage
+    // per visit).
+    const blockers = await db.unionAll([
+      db('invoice_followup_sequences').where({ invoice_id: invoice.id, status: 'stopped' })
+        .select(db.raw("'dunning' as blocker")).limit(1),
+      db('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId })
+        .select(db.raw("'consent' as blocker")).limit(1),
+      db('payment_plans').where({ invoice_id: invoice.id, status: 'active' })
+        .select(db.raw("'plan' as blocker")).limit(1),
+      db('estimate_card_holds').where({ scheduled_service_id: scheduledServiceId })
+        .whereNotIn('status', ['released', 'cancelled', 'failed'])
+        .select(db.raw("'hold' as blocker")).limit(1),
+    ], true);
+    return blockers.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || invoice.status === 'void') return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
@@ -2754,7 +2798,29 @@ function predictionFromAttachedInvoice(invoice) {
     return { kind: 'prepaid', amount, conflictStampedPrice: false, source: 'attached_invoice' };
   }
   if (invoice.payer_id) return { kind: 'payer', amount, conflictStampedPrice: false, source: 'attached_invoice' };
-  return { kind: 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
+  // GATE_COMPLETION_AUTOPAY_CHARGE (pre-push P1): the completion route now
+  // auto-charges exactly these attached collectible self-pay invoices for
+  // autopay-active customers, so the sheet must say auto_charge, not
+  // invoice. COLLECTIBLE only (pre-push P1 round 3, shared helper): a
+  // 'processing' ACH invoice is money in flight — completion excludes it
+  // and must not be promised a second charge; it keeps the historical
+  // label. The cap can still route an over-anchor invoice to review at
+  // completion — the closest honest label is still the charge attempt.
+  // chargeLikely = the caller's sync verdict approximation
+  // (attachedInvoiceAutoChargeLikely — no-cost, dues-coverage, anchor and
+  // over-cap checks), so the sheet never promises a charge the completion
+  // guard deterministically refuses (pre-push P1 round 7).
+  // A payer assigned at the VISIT level after the invoice was pre-minted
+  // leaves invoice.payer_id null (pre-push P1 round 10) — completion's
+  // live payer resolution refuses the homeowner charge, so never promise
+  // it; the invoice label stays (the payer flows own the bill from there).
+  const autoCharge = autopayActive
+    && chargeLikely
+    && chargeGuardsClear
+    && !visitPayerBilled
+    && require('../config/feature-gates').gates.completionAutopayCharge === true
+    && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status);
+  return { kind: autoCharge ? 'auto_charge' : 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
 }
 
 // Compact, client-safe summary of an attached invoice's line items for the
@@ -2972,7 +3038,7 @@ router.get('/', async (req, res, next) => {
           .where({ scheduled_service_id: s.id })
           .whereNot('status', 'void')
           .orderBy('created_at', 'desc')
-          .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+          .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
       } catch { /* scheduled_service_id may be absent before migration */ }
       // Whether the visit's recorded prepayment has ALREADY been consumed by
       // this invoice (Charge-now's applyPrepaidCredit reduces invoices.total
@@ -3019,10 +3085,15 @@ router.get('/', async (req, res, next) => {
       // authority completion uses; null = validation unavailable, the
       // prediction falls back to the stamp (Codex r3).
       let annualCoverageValidated = null;
-      if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+      if (s.prepaid_method === 'annual_prepay_invoice') {
+        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
+        // customer reclassified off annual_prepay keeps stale stamps from
+        // refunded/voided terms — leaving validation null would demote the
+        // prediction forever while completion's strict verdict validates
+        // and charges. Stamp present = validate, whatever the lane.
         try {
           const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+          annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
         } catch { annualCoverageValidated = null; }
       }
       // Present-tense money state for the sheet's billing card: what the
@@ -3070,7 +3141,28 @@ router.get('/', async (req, res, next) => {
         hasOverdue: openInvoices.overdue,
         duesPaidThisMonth,
         servicePausedAt: s.service_paused_at || null,
-        prediction: predictionFromAttachedInvoice(checkoutInvoice) || predictCompletionBilling({
+        prediction: predictionFromAttachedInvoice(checkoutInvoice, {
+          autopayActive,
+          chargeGuardsClear: await extendedChargeGuardsClear(checkoutInvoice, s.id, autopayActive, s.billing_mode || null),
+          visitPayerBilled: !!s.billed_to_payer_id,
+          chargeLikely: attachedInvoiceAutoChargeLikely({
+            invoice: checkoutInvoice,
+            autopayActive,
+            duesCollectedThisMonth: visitMonthDuesCollected,
+            estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+            isRecurring: !!s.is_recurring,
+            isCallback: !!s.is_callback,
+            serviceType: s.service_type,
+            waveguardTier: s.waveguard_tier,
+            monthlyRate: s.monthly_rate,
+            billingMode: s.billing_mode || null,
+            prepaidMethod: s.prepaid_method || null,
+            prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+            prepaidApplied: checkoutInvoicePrepaidApplied,
+            annualCoverageValidated,
+            perApplicationFee: s.per_application_fee,
+          }),
+        }) || predictCompletionBilling({
           lane: lane.mode,
           billingMode: s.billing_mode || null,
           autopayActive,
@@ -3085,6 +3177,7 @@ router.get('/', async (req, res, next) => {
           prepaidMethod: s.prepaid_method || null,
           annualCoverageValidated,
           duesCollectedThisMonth: visitMonthDuesCollected,
+          completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
         }),
       };
       // Payment-capture flag — the tech needs to know at the doorstep that
@@ -3499,7 +3592,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'token', 'invoice_number', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
         // Mirrors the day-view enrichment: has the visit's prepayment already
         // been consumed by this invoice? Gated to the prepaid+invoice overlap.
@@ -3529,10 +3622,15 @@ router.get('/week', async (req, res, next) => {
         // authority completion uses; null = validation unavailable, the
         // prediction falls back to the stamp (Codex r3).
         let annualCoverageValidated = null;
-        if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+        if (s.prepaid_method === 'annual_prepay_invoice') {
+        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
+        // customer reclassified off annual_prepay keeps stale stamps from
+        // refunded/voided terms — leaving validation null would demote the
+        // prediction forever while completion's strict verdict validates
+        // and charges. Stamp present = validate, whatever the lane.
           try {
             const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
-            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db);
+            annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
           } catch { annualCoverageValidated = null; }
         }
         // Present-tense money state for the sheet's billing card: what the
@@ -3575,7 +3673,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
         const billingLane = {
           mode: lane.mode,
@@ -3587,7 +3685,28 @@ router.get('/week', async (req, res, next) => {
           hasOverdue: openInvoices.overdue,
           duesPaidThisMonth,
           servicePausedAt: s.service_paused_at || null,
-          prediction: predictionFromAttachedInvoice(attachedInvoice) || predictCompletionBilling({
+          prediction: predictionFromAttachedInvoice(attachedInvoice, {
+            autopayActive,
+            chargeGuardsClear: await extendedChargeGuardsClear(attachedInvoice, s.id, autopayActive, s.billing_mode || null),
+            visitPayerBilled: !!s.billed_to_payer_id,
+            chargeLikely: attachedInvoiceAutoChargeLikely({
+              invoice: attachedInvoice,
+              autopayActive,
+              duesCollectedThisMonth: visitMonthDuesCollected,
+              estimatedPrice: s.estimated_price != null ? Number(s.estimated_price) : null,
+              isRecurring: !!s.is_recurring,
+              isCallback: !!s.is_callback,
+              serviceType: s.service_type,
+              waveguardTier: s.waveguard_tier,
+              monthlyRate: s.monthly_rate,
+              billingMode: s.billing_mode || null,
+              prepaidMethod: s.prepaid_method || null,
+              prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
+              prepaidApplied: checkoutInvoicePrepaidApplied,
+              annualCoverageValidated,
+              perApplicationFee: s.per_application_fee,
+            }),
+          }) || predictCompletionBilling({
             lane: lane.mode,
             billingMode: s.billing_mode || null,
             autopayActive,
@@ -3602,6 +3721,7 @@ router.get('/week', async (req, res, next) => {
             prepaidMethod: s.prepaid_method || null,
             annualCoverageValidated,
             duesCollectedThisMonth: visitMonthDuesCollected,
+            completionAutopayChargeEnabled: require('../config/feature-gates').gates.completionAutopayCharge === true,
           }),
         };
         return {

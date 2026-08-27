@@ -343,3 +343,317 @@ describe('membershipDuesCoverVisit — dues already collected this month', () =>
     await expect(monthlyDuesCollected(fakeDb(rows), 42, new Date('2026-09-03T12:00:00Z'))).resolves.toBe(false);
   });
 });
+
+describe('predictCompletionBilling — GATE_COMPLETION_AUTOPAY_CHARGE extension (owner ruling 2026-08-26/27)', () => {
+  const memberBase = {
+    lane: 'monthly_membership',
+    billingMode: 'monthly_membership',
+    autopayActive: true,
+    estimatedPrice: null,
+    monthlyRate: 33.33,
+    perApplicationFee: null,
+    isRecurring: true,
+    isCallback: false,
+    payerBilled: false,
+    prepaidAmount: null,
+  };
+  test('an uncovered member invoice predicts auto_charge with the gate on + autopay active', () => {
+    // one-off (non-recurring) priced visit — dues never cover it
+    expect(predictCompletionBilling({
+      ...memberBase, isRecurring: false, estimatedPrice: 90.55, completionAutopayChargeEnabled: true,
+    })).toEqual({ kind: 'auto_charge', amount: 90.55, conflictStampedPrice: false });
+  });
+  test('gate off keeps the historical invoice prediction byte-identical', () => {
+    expect(predictCompletionBilling({ ...memberBase, isRecurring: false, estimatedPrice: 90.55 }))
+      .toEqual({ kind: 'invoice', amount: 90.55, conflictStampedPrice: false });
+  });
+  test('autopay inactive keeps invoice even with the gate on', () => {
+    expect(predictCompletionBilling({
+      ...memberBase, autopayActive: false, isRecurring: false, estimatedPrice: 90.55, completionAutopayChargeEnabled: true,
+    }).kind).toBe('invoice');
+  });
+  test('annual-prepay uncovered priced add-on predicts auto_charge under the gate', () => {
+    expect(predictCompletionBilling({
+      ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay', estimatedPrice: 150, completionAutopayChargeEnabled: true,
+    })).toEqual({ kind: 'auto_charge', amount: 150, conflictStampedPrice: false });
+  });
+  test('per-visit lane priced invoice predicts auto_charge under the gate; partial prepay still nets', () => {
+    const perVisit = { ...memberBase, lane: 'per_visit', billingMode: 'per_visit', monthlyRate: null, estimatedPrice: 100, completionAutopayChargeEnabled: true };
+    expect(predictCompletionBilling(perVisit))
+      .toEqual({ kind: 'auto_charge', amount: 100, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 50 }))
+      .toEqual({ kind: 'auto_charge', amount: 50, conflictStampedPrice: false });
+    expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 120 }).kind).toBe('prepaid');
+  });
+  test('no-cost visits never predict auto_charge even under the gate (mirror of the charge lane)', () => {
+    expect(predictCompletionBilling({
+      ...memberBase, isRecurring: false, estimatedPrice: 90.55, isCallback: true, completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+    expect(predictCompletionBilling({
+      ...memberBase, isRecurring: false, estimatedPrice: 90.55, serviceType: 'Pest Control Re-Service', completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+    expect(predictCompletionBilling({
+      ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay', estimatedPrice: 150, isCallback: true, completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+  });
+  test('dues-covered visits stay covered_membership regardless of the gate', () => {
+    expect(predictCompletionBilling({ ...memberBase, completionAutopayChargeEnabled: true }).kind)
+      .toBe('covered_membership');
+  });
+  test('the gate never revives an amount the lane refused (explicit non-monthly lingering rate)', () => {
+    expect(predictCompletionBilling({
+      ...memberBase, lane: 'per_visit', billingMode: 'per_visit', estimatedPrice: null, completionAutopayChargeEnabled: true,
+    }).kind).toBe('no_charge');
+  });
+});
+
+describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => {
+  const { verifyExtendedCompletionAnchor } = require('../services/billing-lane');
+  // Chainable stub for the monthlyDuesCollected read inside the verdict.
+  const duesConn = (collected) => (table) => {
+    const chain = {
+      where() { return chain; },
+      whereIn() { return chain; },
+      whereNotIn() { return chain; },
+      whereRaw() { return chain; },
+      orWhere() { return chain; },
+      andWhereRaw() { return chain; },
+      andWhere() { return chain; },
+      // scheduled_services = the verdict's full-row re-read for annual
+      // coverage validation; payments = the dues-collected probe.
+      first: async () => (table === 'scheduled_services'
+        ? { id: 's1', customer_id: 'c1' }
+        : (table === 'payments' && collected ? { id: 'p1' } : null)),
+    };
+    return chain;
+  };
+  const member = { id: 'c1', billing_mode: 'monthly_membership', monthly_rate: 33.33, waveguard_tier: 'Silver' };
+  const visit = { id: 's1', customer_id: 'c1', status: 'completed', is_recurring: false, estimated_price: 90.55, is_callback: false, prepaid_method: null };
+  const invoiceAt = (subtotal) => ({ subtotal, total: subtotal, discount_amount: 0, scheduled_service_id: 's1' });
+
+  test('priced one-off member invoice at the visit price verifies with that anchor', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: true, anchor: 90.55 });
+  });
+  test('an invoice above the anchor refuses (anchor_exceeded)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(120),
+    })).resolves.toEqual({ ok: false, reason: 'anchor_exceeded' });
+  });
+  test('a per-application flip refuses before any anchor math', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false),
+      lockedCustomer: { ...member, billing_mode: 'per_application' },
+      lockedSvc: visit,
+      lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'per_application_lane' });
+  });
+  test('LIVE annual coverage refuses; a validated-STALE stamp and the annual LANE alone do not (priced add-on charges)', async () => {
+    const renewals = require('../services/annual-prepay-renewals');
+    const coversSpy = jest.spyOn(renewals, 'annualPrepayCoversVisit');
+    try {
+      coversSpy.mockResolvedValue(true);
+      await expect(verifyExtendedCompletionAnchor({
+        dbConn: duesConn(false),
+        lockedCustomer: member,
+        lockedSvc: { ...visit, prepaid_method: 'annual_prepay_invoice' },
+        lockedInvoice: invoiceAt(90.55),
+      })).resolves.toEqual({ ok: false, reason: 'annual_prepay_coverage' });
+      // Validated-stale stamp: the coverage authority says NOT covered —
+      // the priced add-on keeps its charge at the visit price.
+      coversSpy.mockResolvedValue(false);
+      await expect(verifyExtendedCompletionAnchor({
+        dbConn: duesConn(false),
+        lockedCustomer: member,
+        lockedSvc: { ...visit, prepaid_method: 'annual_prepay_invoice' },
+        lockedInvoice: invoiceAt(90.55),
+      })).resolves.toEqual({ ok: true, anchor: 90.55 });
+    } finally {
+      coversSpy.mockRestore();
+    }
+    // Annual LANE with no stamp: never consults coverage, charges the add-on.
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false),
+      lockedCustomer: { ...member, billing_mode: 'annual_prepay' },
+      lockedSvc: { ...visit, estimated_price: 150 },
+      lockedInvoice: invoiceAt(150),
+    })).resolves.toEqual({ ok: true, anchor: 150 });
+  });
+  test('callbacks and always-free service types refuse under the lock (no_cost_visit)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, is_callback: true }, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, service_type: 'Pest Control Re-Service' }, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'no_cost_visit' });
+  });
+  test('an out-of-band prepayment on the locked visit refuses (out_of_band_prepayment)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member,
+      lockedSvc: { ...visit, prepaid_method: 'cash', prepaid_amount: 50 },
+      lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'out_of_band_prepayment' });
+  });
+  test('an ALREADY-APPLIED prepayment (netting marker present) charges the residual', async () => {
+    const markerConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereNotIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'payments' ? { id: 'prepaid-marker' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: markerConn, lockedCustomer: member,
+      lockedSvc: { ...visit, prepaid_method: 'cash', prepaid_amount: 50 },
+      lockedInvoice: invoiceAt(40.55),
+    })).resolves.toEqual({ ok: true, anchor: 90.55 });
+  });
+  test('a live estimate card hold owns the booking (estimate_card_hold)', async () => {
+    const holdConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereNotIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'estimate_card_holds' ? { id: 'hold1' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: holdConn, lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'estimate_card_hold' });
+  });
+  test('an ACTIVE payment plan on the invoice refuses the charge (active_payment_plan)', async () => {
+    const planConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereNotIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'payment_plans' ? { id: 'plan1' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: planConn, lockedCustomer: member, lockedSvc: visit, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'active_payment_plan' });
+  });
+  test('an invoice rebound to another visit refuses under the lock (invoice_unbound)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: visit,
+      lockedInvoice: { subtotal: 90.55, total: 90.55, discount_amount: 0, scheduled_service_id: 'OTHER' },
+    })).resolves.toEqual({ ok: false, reason: 'invoice_unbound' });
+  });
+  test('a visit that is no longer completed refuses under the lock (cancel/reschedule race)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false), lockedCustomer: member, lockedSvc: { ...visit, status: 'cancelled' }, lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'visit_not_completed' });
+  });
+  test('an UNVERIFIABLE annual-coverage authority refuses the charge (never reads as stale)', async () => {
+    const throwingConn = () => { throw new Error('db unavailable'); };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: throwingConn,
+      lockedCustomer: member,
+      lockedSvc: { ...visit, prepaid_method: 'annual_prepay_invoice' },
+      lockedInvoice: invoiceAt(90.55),
+    })).resolves.toEqual({ ok: false, reason: 'annual_prepay_coverage_unverifiable' });
+  });
+  test('dues coverage refuses a recurring unpriced member visit (autopay active in-lock by definition)', async () => {
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false),
+      lockedCustomer: member,
+      lockedSvc: { ...visit, is_recurring: true, estimated_price: null },
+      lockedInvoice: invoiceAt(33.33),
+    })).resolves.toEqual({ ok: false, reason: 'dues_covered' });
+  });
+  test('unpriced legacy (null-mode, tier-less) rate customer anchors at the monthly rate; unpriced per_visit has no anchor', async () => {
+    // An unpriced MEMBER visit is dues-covered (refuses above); the
+    // monthly-rate anchor serves the legacy null-mode customer whose tier
+    // is not a membership tier — dues coverage never applies, and the
+    // completion mint bills exactly this rate.
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false),
+      lockedCustomer: { id: 'c1', billing_mode: null, monthly_rate: 33.33, waveguard_tier: null },
+      lockedSvc: { ...visit, estimated_price: null },
+      lockedInvoice: invoiceAt(33.33),
+    })).resolves.toEqual({ ok: true, anchor: 33.33 });
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: duesConn(false),
+      lockedCustomer: { ...member, billing_mode: 'per_visit' },
+      lockedSvc: { ...visit, estimated_price: null },
+      lockedInvoice: invoiceAt(33.33),
+    })).resolves.toEqual({ ok: false, reason: 'anchor_exceeded' });
+  });
+});
+
+describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () => {
+  const { attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+  const base = {
+    invoice: { subtotal: 90.55, total: 96.98, discount_amount: 0 },
+    autopayActive: true,
+    duesCollectedThisMonth: false,
+    estimatedPrice: 90.55,
+    isRecurring: false,
+    isCallback: false,
+    serviceType: 'Quarterly Pest Control Service',
+    waveguardTier: 'Silver',
+    monthlyRate: 33.33,
+    billingMode: 'monthly_membership',
+  };
+  test('a priced one-off member invoice at the visit price is likely', () => {
+    expect(attachedInvoiceAutoChargeLikely(base)).toBe(true);
+  });
+  test('no-cost visits, dues coverage, missing anchor, and over-cap all demote', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, isCallback: true })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, isRecurring: true, estimatedPrice: null, invoice: { subtotal: 33.33, total: 33.33 } })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_visit', estimatedPrice: null })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, invoice: { subtotal: 150, total: 160, discount_amount: 0 } })).toBe(false);
+  });
+  test('a stamped annual visit demotes unless the stamp was VALIDATED stale', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice' })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false })).toBe(true);
+  });
+  test('an UNAPPLIED out-of-band prepayment demotes; the netted residual stays a promise', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50 })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: null, prepaidAmount: 50 })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50, prepaidApplied: true })).toBe(true);
+  });
+  test('per-application attached invoices promise the charge ONLY within the accepted cap (setup-fee line extends it)', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);
+    // over-cap → review at completion, never promised
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base, billingMode: 'per_application', invoice: { subtotal: 150, total: 150, discount_amount: 0 },
+    })).toBe(false);
+    // setup-fee line extends the cap by the line amount
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base,
+      billingMode: 'per_application',
+      invoice: {
+        subtotal: 189.55, total: 189.55, discount_amount: 0,
+        line_items: JSON.stringify([{ description: 'One-Time Setup Fee', amount: 99 }]),
+      },
+    })).toBe(true);
+    // no anchor at all → never promised
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base, billingMode: 'per_application', estimatedPrice: null, perApplicationFee: null,
+    })).toBe(false);
+  });
+});

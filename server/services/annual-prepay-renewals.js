@@ -2335,13 +2335,36 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 // paid-coverage checks, which is what the window was actually guarding.
 // Absence/ambiguity => false; the caller then falls back to the numeric
 // prepaid_amount >= amount comparison for other (cash/Zelle) methods.
-async function annualPrepayCoversVisit(scheduledService, conn = db) {
+async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
-  if (!(Number(scheduledService.prepaid_amount) > 0)) return false;
+  // Strict callers (the extended-completion charging guard): a STAMPED
+  // visit whose linkage is incomplete (no amount, no term id, or the terms
+  // table itself missing) is UNVERIFIABLE, not validated-stale — billing
+  // suppression treats these as uncovered, but the charging side must
+  // refuse rather than charge a possibly-prepaid visit (pre-push P0
+  // round 11). Only a successful coverage-authority query may return
+  // uncovered in strict mode.
+  if (!(Number(scheduledService.prepaid_amount) > 0)) {
+    if (throwOnError) throw new Error('stamped visit carries no prepaid_amount — coverage unverifiable');
+    return false;
+  }
   const termId = scheduledService.annual_prepay_term_id;
-  if (!termId) return false;
-  if (!(await annualPrepayTableExists())) return false;
+  if (!termId) {
+    if (throwOnError) throw new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable');
+    return false;
+  }
+  // Strict callers (the extended-completion charging guard) must see a
+  // schema-probe failure as UNVERIFIABLE, not as "no table → not covered"
+  // (manual-audit P0): annualPrepayTableExists catches probe errors and
+  // caches false, which would read a db failure as confirmed-stale
+  // coverage on the charging side. Probe directly so the error propagates;
+  // a genuinely absent table (fresh env) still returns false.
+  if (throwOnError) {
+    if (!(await conn.schema.hasTable('annual_prepay_terms'))) {
+      throw new Error('annual_prepay_terms table missing for a stamped visit — coverage unverifiable');
+    }
+  } else if (!(await annualPrepayTableExists())) return false;
   try {
     const term = await coveredTermsAsOf(conn, null)
       .where('t.id', termId)
@@ -2365,6 +2388,11 @@ async function annualPrepayCoversVisit(scheduledService, conn = db) {
     return true;
   } catch (err) {
     // Fail-closed: if the term/invoice can't be validated, DON'T suppress billing.
+    // Callers on the CHARGING side have the opposite fail-closed direction —
+    // an unverifiable coverage must refuse the charge, not read as "stale
+    // stamp, charge away" (extended completion lane pre-push P0) — so they
+    // opt into error propagation and refuse on throw.
+    if (throwOnError) throw err;
     logger.warn(`[annual-prepay] coverage validation failed for scheduled service ${scheduledService.id}: ${err.message}`);
     return false;
   }
