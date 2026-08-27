@@ -363,8 +363,17 @@ const CONVERSION_PATH_RE = /^\/(?:contact|[^\s)"']*quote|[^\s)"']*estimate|pest-
 
 // Markdown links AND literal HTML anchors (the passive-HTML allowlist admits
 // <a>, so a forbidden CTA could otherwise hide in one).
+// Non-rendered regions never reach a reader — strip HTML/MDX comments and
+// fenced code before extracting links so the gate judges rendered CTAs only.
+function renderedText(body) {
+  return String(body || '')
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1\s*$/gm, '');
+}
+
 function extractLinks(body) {
-  const s = String(body || '');
+  const s = renderedText(body);
   const links = [];
   const md = /\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;

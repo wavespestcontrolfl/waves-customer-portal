@@ -397,6 +397,17 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('links inside comments and fenced code are not rendered CTAs', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n<!-- [Request an Inspection](/contact/) -->\n\n\`\`\`md\n[Schedule Service](/contact/)\n\`\`\``,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('raw HTML anchors are validated like markdown links', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
