@@ -7,6 +7,16 @@ import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Mirror a server-confirmed unread count onto the home-screen app icon
+// (Badging API — iOS 16.4+ installed PWAs; no-op elsewhere). Only called
+// with counts the server returned or accepted a read-write for, so an
+// offline session never wipes a real badge.
+function syncAppBadge(count) {
+  if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
+  const p = count > 0 ? navigator.setAppBadge(count) : navigator.clearAppBadge();
+  if (p && typeof p.catch === 'function') p.catch(() => {});
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -58,7 +68,10 @@ export default function NotificationBell({ type = 'admin', customerId }) {
   useEffect(() => {
     const fetchCount = () => {
       requestJson(`${basePath}/unread-count`)
-        .then(d => setUnreadCount(d.count || 0))
+        .then(d => {
+          setUnreadCount(d.count || 0);
+          if (type === 'admin') syncAppBadge(d.count || 0);
+        })
         .catch(() => {});
     };
     fetchCount();
@@ -207,7 +220,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
-    setUnreadCount(prev => Math.max(0, prev - 1));
+    setUnreadCount(prev => {
+      const next = Math.max(0, prev - 1);
+      // Idempotent, so a double-invoked updater (StrictMode) is harmless.
+      if (type === 'admin') syncAppBadge(next);
+      return next;
+    });
   };
 
   const markAllRead = async () => {
@@ -216,6 +234,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
+    if (type === 'admin') syncAppBadge(0);
   };
 
   // Group by time: Today, Yesterday, This Week, Older
