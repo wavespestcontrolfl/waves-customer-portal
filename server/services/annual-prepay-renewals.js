@@ -3662,7 +3662,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     }
     const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
     const coveredOn = new Map();
-    const pendingHoldIdsByDate = new Map();
+    let pendingHoldIds = null;
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
@@ -3687,15 +3687,12 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       if (isMonthly) {
         // GUARD 5 mirror: a pending annual-prepay commitment holds the
         // monthly ladder (skip, stay armed) until it activates or cancels.
-        // The sweep recomputes the pending set on the day it runs and the
-        // helper excludes pending rows once term_end has passed — so the
-        // hold suppresses this retry only when the commitment still covers
-        // the RETRY's scheduled day, not merely today.
-        const retryYmd = dateOnly(row.next_retry_at) || today;
-        if (!pendingHoldIdsByDate.has(retryYmd)) {
-          pendingHoldIdsByDate.set(retryYmd, await getPaymentPendingCustomerIds(retryYmd, conn));
-        }
-        if (pendingHoldIdsByDate.get(retryYmd).has(customerId)) continue;
+        // The sweep selects past-due rows on EVERY later run and its
+        // pending guard stops the moment term_end passes — a still-armed
+        // retry fires the day the hold lapses — so the hold suppresses the
+        // warning only when the commitment covers the ENTIRE horizon.
+        if (pendingHoldIds == null) pendingHoldIds = await getPaymentPendingCustomerIds(horizon, conn);
+        if (pendingHoldIds.has(customerId)) continue;
         // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
         // obligation row for a customer whose lane is no longer monthly
         // (explicit per_application/per_visit/one_time, or a NULL mode the
@@ -3787,7 +3784,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       .select(
         'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
-        'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id',
+        'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id', 'ss.recurring_pattern',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
         'c.autopay_paused_until as customer_autopay_paused_until',
         'c.autopay_payment_method_id as customer_autopay_payment_method_id',
@@ -3886,8 +3883,13 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
           });
         if (allResumesFrozenBackfill) continue;
       }
+      // The hold rail's charge passes requireCompletedOneTimeVisit — a
+      // visit with recurring lineage (is_recurring, recurring_parent_id,
+      // or a recurring_pattern) is refused at the Stripe boundary, so a
+      // leftover hold on such a visit is no charge vector.
+      const oneTimeLineage = v.is_recurring !== true && !v.recurring_parent_id && !v.recurring_pattern;
       let liveHold = null;
-      if (isCardHoldEnabled()) {
+      if (oneTimeLineage && isCardHoldEnabled()) {
         // The charge rail's own resolution and admission: it selects the
         // NEWEST 'held' row (heldCardForScheduledService orders by held_at
         // DESC) and THEN refuses a parked row and a missing/non-positive
@@ -4041,7 +4043,9 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         // the completion charge with active_payment_plan. Scoped like the
         // dunning stop (extended lanes; the hold rail does not run the
         // anchor verdict, so a live hold keeps the warning).
-        if (!liveHold && lane.mode !== 'per_application') {
+        // …and, like the dunning stop, never when the appointment lane
+        // can charge — that rail does not run the anchor verdict.
+        if (!liveHold && !apptLaneChargeable && lane.mode !== 'per_application') {
           const activePlan = await conn('payment_plans')
             .where({ invoice_id: reused.id, status: 'active' })
             .first('id');
