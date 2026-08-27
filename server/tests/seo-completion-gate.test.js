@@ -179,6 +179,29 @@ describe('seo-completion-gate', () => {
     expect(clean.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('conversion CTA is judged on the link anchor, not loose body wording', () => {
+    // A conversion-path link with generic anchor + estimate wording only in
+    // prose does NOT satisfy the CTA check.
+    const generic = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Ants are busy. Get an estimate. [Schedule Service](/contact/) now.',
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(generic.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Estimate/quote wording IN the anchor satisfies it.
+    const anchored = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n[Request a Quote](/pest-control-quote/) today.`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(anchored.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+  });
+
   test('blocks customer PII and unapproved hardcoded prices', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({

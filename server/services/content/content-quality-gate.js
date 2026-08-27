@@ -1020,13 +1020,16 @@ function checkFaqSectionPresent(draft, brief) {
 // Raw markdown pipe table detector — delegates to the single-source
 // predicate in content-guardrails (hasRawMarkdownTable), which also
 // enforces the rule on the manual publishAstro lane, so the two
-// enforcement points can never drift.
-function checkNoRawMarkdownTables(draft) {
+// enforcement points can never drift. Mirrors the guardrails refresh
+// grandfather: a table the prior live body already carried must not
+// permanently park the refresh lane — only ADDED tables block.
+function checkNoRawMarkdownTables(draft, _brief, context = {}) {
   const { hasRawMarkdownTable } = require('./content-guardrails');
-  if (hasRawMarkdownTable(draft.body)) {
-    return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
+  if (!hasRawMarkdownTable(draft.body)) return { ok: true };
+  if (context.previousVersion && hasRawMarkdownTable(context.previousVersion.body)) {
+    return { ok: true };
   }
-  return { ok: true };
+  return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
 }
 
 function checkVoiceMatch(draft) {

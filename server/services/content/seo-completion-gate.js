@@ -252,11 +252,19 @@ function hasIncludedLinkReason(contract, reason) {
 }
 
 function hasConversionCta(body) {
-  // Owner rule 2026-08-27: conversion CTAs use estimate/quote wording —
-  // "inspection" wording no longer satisfies the check (a termite post may
-  // still discuss inspections; its CTA must offer a quote/estimate/booking).
-  return /\b(request a quote|schedule|contact waves|call waves|estimate|book)\b/i.test(String(body || ''))
-    && /\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/i.test(String(body || ''));
+  // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
+  // not loose body wording — at least one link to a conversion path whose
+  // anchor carries estimate/quote wording ("Get My Free Termite Estimate",
+  // "Request a Quote"). Discussion text stays independent: a termite post
+  // may talk about inspections all it wants; `[Schedule Service](/contact/)`
+  // or "Get an estimate. [Click here](/contact/)" no longer qualify.
+  const s = String(body || '');
+  const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
+  let m;
+  while ((m = conversionLink.exec(s)) !== null) {
+    if (/(estimat|quot|pric)/i.test(m[1])) return true;
+  }
+  return false;
 }
 
 // Deterministic backstop to the writer prompt's CTA-wording rule (owner
