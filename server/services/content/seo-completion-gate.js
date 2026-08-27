@@ -340,8 +340,13 @@ function allowedAnchorServices(briefService) {
 // references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
 const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
 // Derived from the SHARED request-verb set (plus contact/navigation verbs)
-// — parallel partial verb lists drifted apart across rounds.
-const ACTION_VERB_RE = new RegExp(`\\b(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)\\b`, 'i');
+// — parallel partial verb lists drifted apart across rounds. An anchor is
+// ACTIONABLE when the verb leads it (imperative, with optional
+// please/click-to lead-in) or appears as an INFINITIVE invitation
+// ("…page to reserve service"); a subordinate verb with its own subject
+// ("…customers get after an inspection") is still prose.
+const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)`;
+const ACTION_VERB_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?${ACTION_VERB_SET}\\b|\\bto\\s+${ACTION_VERB_SET}\\b`, 'i');
 function isProseReferenceAnchor(anchor) {
   return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
 }
@@ -492,6 +497,10 @@ function extractLinks(body) {
   // Nested-tag stripping is quote-aware too — an inner tag's quoted
   // attribute may contain ">" (`<span title="1 > 0">`).
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
+  // CommonMark AUTOLINKS (`<https://…>`) render as live links whose anchor
+  // is the bare URL — first-party ones canonicalize through dest().
+  const auto = /<(https?:\/\/[^<>\s]+)>/gi;
+  while ((m = auto.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[1]) });
   return links;
 }
 
@@ -674,7 +683,7 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection". Qualifiers exclude the function words that mark EDITORIAL
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
-const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z&-]+\\s+){0,4}inspection\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
+const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspection\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

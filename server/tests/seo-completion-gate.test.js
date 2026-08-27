@@ -821,6 +821,33 @@ describe('seo-completion-gate', () => {
     expect(proseEstimate.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
     expect(proseEstimate.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // Numeric qualifiers do not launder inspection requests.
+    const numericInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule a 30-minute Termite Inspection](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(numericInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A subordinate verb with its own subject is still prose — it neither
+    // satisfies presence nor counts as an actionable CTA.
+    const subordinateVerb = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers everywhere.\n\nSee [the termite estimate customers get after an inspection](/contact/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(subordinateVerb.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    expect(subordinateVerb.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A first-party AUTOLINK is a rendered conversion link whose bare-URL
+    // anchor carries no estimate wording.
+    const autolink = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<https://www.wavespestcontrol.com/contact/>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(autolink.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     // Comment delimiters inside code spans do not hide the link between
     // them, and spans stop at thematic breaks.
     const spanComment = SeoCompletionGate.evaluate({
