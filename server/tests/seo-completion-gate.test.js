@@ -1310,6 +1310,47 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(getReadyFor.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // "Deep Root Fertilization" names the tree & shrub service — a valid
+    // CTA on that brief is neither missing nor mixed.
+    const deepRoot = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Palms. [Request a Deep Root Fertilization Estimate](/contact/) now.' }),
+      brief: baseBrief({ service: 'tree-shrub-care' }),
+      shadowMode: true,
+    });
+    expect(deepRoot.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(deepRoot.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A REQUEST-VERB-LED anchor on a SERVICE-PAGE destination is a CTA in
+    // disguise — flagged without estimate/quote wording, while descriptive
+    // service links stay exempt.
+    const servicePageCta = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) or [Schedule Termite Service](/termite-control/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(servicePageCta.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const descriptiveServiceLink = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) and our [Termite Control Services](/termite-control/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(descriptiveServiceLink.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // A BLANK line inside inline link syntax ends the paragraph — no link
+    // renders, so presence is not satisfied; a single newline still works.
+    const blankInDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](\n\n/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(blankInDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const newlineInDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite Estimate](\n/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(newlineInDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {

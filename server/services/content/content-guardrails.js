@@ -2219,7 +2219,12 @@ function extractRawMarkdownTables(text) {
     // table — OR when the delimiter is an UNQUOTED lazy continuation of a
     // quoted header's paragraph ("> A | B" then "- | -"), which GFM still
     // reads as one table.
-    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i])
+    // A delimiter-shaped SIBLING list item is not a table: when the header
+    // line is itself a list item, a nested table's delimiter must be the
+    // item's INDENTED content — a same-level marker on the delimiter line
+    // ("- A | B" then "- | -") is the next bullet.
+    const siblingItems = Boolean(marked) && /^(?:[-*+]|\d+[.)])\s+/.test(lines[i]);
+    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && !siblingItems
       && (depths[i] === depths[i - 1] || (depths[i] === 0 && depths[i - 1] > 0))
       && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
     if (!delimiter) continue;

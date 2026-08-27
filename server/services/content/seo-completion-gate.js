@@ -279,7 +279,9 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   termite: /\btermite/i,
   mosquito: /\bmosquito/i,
   rodent: /\brodent|\brats?\b|\bmice\b|\bmouse\b/i,
-  'tree-shrub': /\btree\b|\bshrub|\bpalms?\b|\bornamentals?\b/i,
+  // "Deep Root Fertilization" is the established tree & shrub treatment
+  // name (the lawn-fertilization entry already excludes "root fertiliz").
+  'tree-shrub': /\btree\b|\bshrub|\bpalms?\b|\bornamentals?\b|\bdeep[ -]?root/i,
   'bed-bug': /\bbed[ -]?bug/i,
   cockroach: /\b(?:cock)?roach(?:es)?\b/i,
   ant: /\bants?\b/i,
@@ -555,10 +557,22 @@ function extractLinks(body) {
   // whitespace (an optional title may follow) or the link's closing ")".
   // Whitespace is allowed inside the parentheses ("( /contact/ )"); an
   // UNBALANCED destination is not a link.
+  // Whitespace INSIDE the link syntax may include single newlines but
+  // never a BLANK line — that ends the paragraph, so "(\n\n/contact/)"
+  // renders no link.
+  const skipInlineWs = (str, from) => {
+    let k = from;
+    let nl = 0;
+    while (k < str.length && /[ \t\n]/.test(str[k])) {
+      if (str[k] === '\n') { nl += 1; if (nl > 1) return -1; }
+      k += 1;
+    }
+    return k;
+  };
   const parseInlineDest = (str) => {
     if (str[0] !== '(') return null;
-    let i = 1;
-    while (i < str.length && /[ \t\n]/.test(str[i])) i += 1;
+    let i = skipInlineWs(str, 1);
+    if (i === -1) return null;
     let destRaw;
     if (str[i] === '<') {
       const close = str.indexOf('>', i + 1);
@@ -583,8 +597,8 @@ function extractLinks(body) {
     // Only whitespace, then an optional VALID title ('"…"', "'…'", "(…)"),
     // then whitespace and the closing ")" may follow the destination —
     // "(/contact/ garbage)" renders no link.
-    let j = i;
-    while (j < str.length && /[ \t\n]/.test(str[j])) j += 1;
+    let j = skipInlineWs(str, i);
+    if (j === -1) return null;
     if (str[j] === '"' || str[j] === "'" || str[j] === '(') {
       const closeCh = str[j] === '(' ? ')' : str[j];
       const parenTitle = str[j] === '(';
@@ -595,8 +609,8 @@ function extractLinks(body) {
         j += 1;
       }
       if (j >= str.length) return null;
-      j += 1;
-      while (j < str.length && /[ \t\n]/.test(str[j])) j += 1;
+      j = skipInlineWs(str, j + 1);
+      if (j === -1) return null;
     }
     if (str[j] !== ')') return null;
     return { destRaw, end: j };
@@ -868,13 +882,29 @@ function badCtaAnchor(body, brief = {}) {
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
 const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspections?\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
+// A REQUEST-VERB-LED anchor on a SERVICE or CITY page destination is a
+// conversion CTA in disguise ("Schedule Termite Service" →
+// /termite-control/) — the estimate/quote wording rule covers it too.
+// Descriptive service links (bare noun phrases, prose references,
+// editorial "Get ready …" shapes) stay exempt.
+const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
+const ESTIMATE_KW_RE = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
+function isServicePageRequestCta(href, anchor) {
+  if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;
+  const { inferLinkReason } = require('./blog-seo-contract')._internals;
+  if (!['service', 'city'].includes(inferLinkReason(href))) return false;
+  return REQUEST_LED_RE.test(anchor) && !ESTIMATE_KW_RE.test(anchor);
+}
+
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor
-  // is inspection-request wording.
+  // is inspection-request wording, or a request-led service-page CTA
+  // without estimate/quote wording.
   for (const link of extractLinks(body)) {
     const anchor = plainAnchor(link.anchor);
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;
+    if (isServicePageRequestCta(link.href, anchor)) return anchor;
   }
   return null;
 }
@@ -934,9 +964,12 @@ function collectForbiddenCtaAnchors(body, { service = null } = {}) {
   for (const link of extractLinks(body)) {
     const anchor = plainAnchor(link.anchor);
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) { out.push(anchor); continue; }
-    if (!isConversionPath(link.href)) continue;
-    const kw = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i.test(anchor);
-    if (!kw && !isProseReferenceAnchor(anchor)) out.push(anchor);
+    if (!isConversionPath(link.href)) {
+      // Request-led service/city-page CTAs (see isServicePageRequestCta).
+      if (isServicePageRequestCta(link.href, anchor)) out.push(anchor);
+      continue;
+    }
+    if (!ESTIMATE_KW_RE.test(anchor) && !isProseReferenceAnchor(anchor)) out.push(anchor);
   }
   if (allowed) {
     // Same posture as badCtaAnchor: EVERY estimate/quote conversion anchor
