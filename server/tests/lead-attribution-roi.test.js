@@ -256,46 +256,54 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
   });
 });
 
-describe('allocatePooledChannelCost — Google Ads spend is one budget across its rows', () => {
-  const row = (name, totalLeads, conversions, totalRevenue, totalCost, source_type = 'google_ads') => ({
-    source: { name, source_type }, totalLeads, conversions, totalRevenue, totalCost,
-    costPerLead: totalLeads ? totalCost / totalLeads : 0,
-    costPerAcquisition: conversions ? totalCost / conversions : 0,
-    roi: totalCost > 0 ? ((totalRevenue - totalCost) / totalCost) * 100 : (totalRevenue > 0 ? 9999 : 0),
-  });
+describe('allocatePooledChannelCost — Google Ads ad spend is one budget across its rows', () => {
+  // totalCost = row-specific costs + adSpend; only adSpend is pooled.
+  const row = (name, totalLeads, conversions, totalRevenue, adSpend, ownCost = 0, source_type = 'google_ads') => {
+    const totalCost = ownCost + adSpend;
+    return {
+      source: { name, source_type }, totalLeads, conversions, totalRevenue, totalCost, adSpend,
+      costPerLead: totalLeads ? totalCost / totalLeads : 0,
+      costPerAcquisition: conversions ? totalCost / conversions : 0,
+      roi: totalCost > 0 ? ((totalRevenue - totalCost) / totalCost) * 100 : (totalRevenue > 0 ? 9999 : 0),
+    };
+  };
 
-  test('re-allocates the spend-bearing row cost across google_ads rows by lead share', () => {
-    const call = row('Google Ads — Pest (call-extension)', 2, 1, 400, 900);
+  test('re-allocates ad spend across google_ads rows by lead share; row-specific costs stay put', () => {
+    const call = row('Google Ads — Pest (call-extension)', 2, 1, 400, 900, 50); // $50 monthly_fee is the call row's own
     const form = row('Google Ads — Web Form', 6, 3, 1200, 0);
-    const other = row('Main Site (wavespestcontrol.com)', 10, 2, 800, 0, 'main_site');
+    const other = row('Main Site (wavespestcontrol.com)', 10, 2, 800, 0, 0, 'main_site');
     const out = allocatePooledChannelCost([call, form, other]);
     expect(out).toHaveLength(3);
-    // 900 pooled, 8 leads → 112.5/lead: call 225, form 675
-    expect(call.totalCost).toBe(225);
+    // 900 pooled ad spend, 8 leads → 112.5/lead: call 225 (+50 own), form 675
+    expect(call.adSpend).toBe(225);
+    expect(call.totalCost).toBe(275);
+    expect(form.adSpend).toBe(675);
     expect(form.totalCost).toBe(675);
-    expect(call.totalCost + form.totalCost).toBe(900);
+    expect(call.adSpend + form.adSpend).toBe(900);
     expect(form.roi).toBe(Math.round(((1200 - 675) / 675) * 1000) / 10);
     expect(form.costPerLead).toBe(112.5);
     expect(form.costPerAcquisition).toBe(225);
-    expect(call.pooledCostAllocation).toEqual({ pooledCost: 900, share: 0.25 });
+    expect(call.pooledCostAllocation).toEqual({ pooledAdSpend: 900, share: 0.25 });
     // Non-pooled source types untouched.
     expect(other.totalCost).toBe(0);
     expect(other.pooledCostAllocation).toBeUndefined();
   });
 
-  test('splits equally when the pool has spend but no leads; no-op when the pool has no spend', () => {
+  test('non-ad-spend cost on a google_ads row is NOT pooled', () => {
+    const call = row('Google Ads — Pest (call-extension)', 1, 0, 0, 0, 120); // monthly_fee only
+    const form = row('Google Ads — Web Form', 3, 1, 500, 0);
+    allocatePooledChannelCost([call, form]);
+    expect(call.totalCost).toBe(120);
+    expect(form.totalCost).toBe(0);
+    expect(form.pooledCostAllocation).toBeUndefined();
+  });
+
+  test('splits equally when the pool has spend but no leads', () => {
     const a = row('Google Ads — Pest (call-extension)', 0, 0, 0, 300);
     const b = row('Google Ads — Web Form', 0, 0, 0, 0);
     allocatePooledChannelCost([a, b]);
     expect(a.totalCost).toBe(150);
     expect(b.totalCost).toBe(150);
-
-    const c = row('Google Ads — Pest (call-extension)', 3, 1, 500, 0);
-    const d = row('Google Ads — Web Form', 5, 2, 900, 0);
-    allocatePooledChannelCost([c, d]);
-    expect(c.totalCost).toBe(0);
-    expect(d.roi).toBe(9999);
-    expect(d.pooledCostAllocation).toBeUndefined();
   });
 
   test('allocates integer cents — rows always sum to the pool, remainder goes to the largest fraction', () => {
