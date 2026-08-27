@@ -3631,6 +3631,11 @@ const StripeService = {
             : `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
+            // Last pay-page activity on this PI (epoch seconds). Re-stamped
+            // on every setup reuse so a sibling triage can tell "abandoned
+            // weeks ago" from "reopened just now" — `created` is immutable
+            // and single-invoice setup reuses old PIs in place.
+            pay_session_touched_at: String(Math.floor(Date.now() / 1000)),
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
             base_amount: String(baseAmount),

@@ -90,12 +90,21 @@ describe('abandoned sibling PI — preview (GET) mode', () => {
     ['requires_capture', deadPi({ status: 'requires_capture' })],
     ['ACH micro-deposit verification', deadPi({ status: 'requires_action', next_action: { type: 'verify_with_microdeposits' } })],
     ['minted 10 minutes ago', deadPi({ created: Math.floor(Date.now() / 1000) - 600 })],
+    // Single-invoice setup REUSES an old PI in place — a weeks-old `created`
+    // with a fresh pay_session_touched_at is a page reopened just now.
+    ['minted weeks ago but re-set-up 10 minutes ago', deadPi({ metadata: { waves_invoice_id: SIBLING_ID, pay_session_touched_at: String(Math.floor(Date.now() / 1000) - 600) } })],
+    ['carrying an unparseable pay_session_touched_at', deadPi({ metadata: { waves_invoice_id: SIBLING_ID, pay_session_touched_at: 'yesterday' } })],
     ['missing created timestamp', deadPi({ created: undefined })],
     ['owned by a different invoice', deadPi({ metadata: { waves_invoice_id: 'cccccccc-0000-0000-0000-000000000003' } })],
   ])('a sibling whose PI is %s stays excluded (fail closed)', async (_label, pi) => {
     mockRetrieve.mockResolvedValue(pi);
     expect(await PayCombined.combinedEligibleSiblings(anchor())).toBeNull();
     expect(mockCancel).not.toHaveBeenCalled();
+  });
+
+  test('a weeks-old pay_session_touched_at stamp is abandoned like a bare old PI', async () => {
+    mockRetrieve.mockResolvedValue(deadPi({ metadata: { waves_invoice_id: SIBLING_ID, pay_session_touched_at: String(SEVEN_WEEKS_AGO + 3600) } }));
+    expect(await PayCombined.combinedEligibleSiblings(anchor())).toHaveLength(1);
   });
 
   test('a live payments row on the PI keeps the sibling excluded without reading Stripe', async () => {

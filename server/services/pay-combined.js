@@ -53,8 +53,13 @@ const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-help
 // MORE than 8 means the combined total could not be complete → decline to
 // engage rather than force a partial "total".
 const MAX_COMBINED_SIBLINGS = 8;
-// A sibling's bound PI younger than this is presumed to be a pay page the
-// customer still has open (two tabs) — never canceled out from under it.
+// A sibling's bound PI with pay-page activity younger than this is presumed
+// to be a page the customer still has open (two tabs) — never canceled out
+// from under it. Activity = the newer of the PI's immutable `created` and
+// `metadata.pay_session_touched_at`, which createInvoicePaymentIntent
+// re-stamps on every setup reuse (single-invoice setup reuses an old
+// requires_payment_method PI in place, so `created` alone can be weeks old
+// on a page reopened a minute ago).
 const ABANDONED_SIBLING_PI_MIN_AGE_MS = 60 * 60 * 1000;
 const UNCONFIRMED_PI_STATUSES = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
 const TERMINAL_PAYMENT_ROW_STATUSES = ['failed', 'canceled', 'cancelled', 'refunded'];
@@ -65,7 +70,8 @@ const TERMINAL_PAYMENT_ROW_STATUSES = ['failed', 'canceled', 'cancelled', 'refun
  * as "live, leave it to its own rail": a payment row that isn't terminal, an
  * unreadable/unconfigured Stripe, a PI that doesn't own this invoice, money
  * in flight (processing / succeeded / requires_capture / ACH micro-deposit
- * verification), or a PI minted within the last hour. Returns the Stripe PI
+ * verification), or pay-page activity on the PI within the last hour (the
+ * newer of `created` and `metadata.pay_session_touched_at`). Returns the Stripe PI
  * when abandoned (already-canceled PIs count — their stamp cleanup is what's
  * still owed), null otherwise.
  */
@@ -84,7 +90,12 @@ async function abandonedSiblingPaymentIntent(inv, { database = db } = {}) {
     if (pi.status === 'requires_action' && pi.next_action?.type === 'verify_with_microdeposits') return null;
     const createdMs = Number(pi.created) * 1000;
     if (!Number.isFinite(createdMs) || createdMs <= 0) return null;
-    if (Date.now() - createdMs < ABANDONED_SIBLING_PI_MIN_AGE_MS) return null;
+    const touchedRaw = pi.metadata?.pay_session_touched_at;
+    const touchedMs = touchedRaw != null && touchedRaw !== '' ? Number(touchedRaw) * 1000 : 0;
+    // Unparseable stamp ⇒ can't prove inactivity ⇒ live.
+    if (!Number.isFinite(touchedMs) || touchedMs < 0) return null;
+    const lastActivityMs = Math.max(createdMs, touchedMs);
+    if (Date.now() - lastActivityMs < ABANDONED_SIBLING_PI_MIN_AGE_MS) return null;
     return pi;
   } catch (err) {
     logger.warn(`[pay-combined] could not triage PI ${piId} on sibling ${inv.invoice_number}: ${err.message} — treating as live`);
