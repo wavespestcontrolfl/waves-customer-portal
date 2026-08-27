@@ -3539,8 +3539,9 @@ function mergedRangesSpan(ranges, windowStart, windowEnd) {
  *       the live annual_prepay_invoice stamp validated by
  *       annualPrepayCoversVisit (a bare annual_prepay_term_id link is NOT
  *       per-application fee, completion-auto-charge gate, and LIVE Auto Pay
- *       eligibility (customerOnAutopay — pause evaluated against the
- *       horizon, chargeable-method walk as of now). Only kind
+ *       eligibility (enrollment flag + pause evaluated against the
+ *       horizon — deliberately NOT the candidate card's own expiry, which
+ *       must never prove its warning unnecessary). Only kind
  *       'auto_charge' keeps the warning — that is the one outcome that
  *       charges the saved card at completion; 'invoice' (pay-link),
  *       'payer', 'covered_*', 'prepaid' and 'no_charge' do not — and only
@@ -3646,7 +3647,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       retryQuery.where('next_retry_at', '<', parseETDateTime(`${horizonNextMidnight}T00:00:00`));
     }
     const retrying = await retryQuery
-      .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id');
+      .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id', 'next_retry_at');
     // The sweep's state guards (billing-cron retryFailedPayments /
     // autopay-eligibility.isPaused): disabled Auto Pay permanently DISARMS
     // the ladder without charging; a paused customer's retries are skipped
@@ -3661,7 +3662,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     }
     const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
     const coveredOn = new Map();
-    let pendingHoldIds = null;
+    const pendingHoldIdsByDate = new Map();
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
@@ -3685,11 +3686,16 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
       if (isMonthly) {
         // GUARD 5 mirror: a pending annual-prepay commitment holds the
-        // monthly ladder (skip, stay armed) until it activates or cancels
-        // — while it stands, the sweep cannot charge this row. Same
-        // authority the sweep consults (getPaymentPendingCustomerIds).
-        if (pendingHoldIds == null) pendingHoldIds = await getPaymentPendingCustomerIds(today, conn);
-        if (pendingHoldIds.has(customerId)) continue;
+        // monthly ladder (skip, stay armed) until it activates or cancels.
+        // The sweep recomputes the pending set on the day it runs and the
+        // helper excludes pending rows once term_end has passed — so the
+        // hold suppresses this retry only when the commitment still covers
+        // the RETRY's scheduled day, not merely today.
+        const retryYmd = dateOnly(row.next_retry_at) || today;
+        if (!pendingHoldIdsByDate.has(retryYmd)) {
+          pendingHoldIdsByDate.set(retryYmd, await getPaymentPendingCustomerIds(retryYmd, conn));
+        }
+        if (pendingHoldIdsByDate.get(retryYmd).has(customerId)) continue;
         // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
         // obligation row for a customer whose lane is no longer monthly
         // (explicit per_application/per_visit/one_time, or a NULL mode the
@@ -3745,7 +3751,6 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     // completion predicate with the schedule sheet's inputs.
     const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
     const { resolveForInvoice } = require('./payer');
-    const { customerOnAutopay } = require('./autopay-eligibility');
     const { isCardHoldEnabled } = require('./estimate-card-holds');
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
@@ -3803,32 +3808,21 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
         scheduledServiceId: v.id, throwOnError: true,
       });
-      // LIVE Auto Pay eligibility, exactly as completion asks it
-      // (customerOnAutopay: enrollment flag + pause + chargeable-method
-      // walk — a paused customer or one with no chargeable method gets a
-      // pay-link, not a card charge). The pause suppresses THIS visit's
-      // charge only when it covers the visit's ENTIRE remaining
-      // completion window: completion rejects only terminal statuses, so
-      // a nonterminal visit can complete on ANY later day — a late
-      // completion after the pause lapses re-reads the then-current pause
-      // and charges — and the pause is date-INCLUSIVE, so covering every
-      // chargeable day inside [today, horizon] means paused_until >=
-      // horizon. A shorter pause leaves a chargeable day inside the
-      // window and keeps the warning; it is stripped from the eligibility
-      // call rather than passed as-is (customerOnAutopay would read it as
-      // of NOW and wrongly clear the later completion). failClosed: an
-      // eligibility read error propagates to the outer catch and exempts
-      // nobody, instead of reading as "no chargeable method" and silently
-      // widening the exemption.
+      // Auto Pay eligibility for the PREDICTION: the enrollment flag plus
+      // the pause — deliberately NOT the live chargeable-method walk. The
+      // warning's whole purpose is to prompt replacing a dying card, so
+      // the candidate card's own expiry state must not prove the warning
+      // unnecessary (an expired card would read as "no chargeable method
+      // → pay-link → exempt" and suppress exactly the notice that fixes
+      // it); a customer with no method at all keeps the warning too —
+      // noise, never a missed charge. The pause suppresses THIS visit's
+      // charge only when it covers the ENTIRE remaining completion window
+      // (paused_until >= horizon, date-INCLUSIVE): completion rejects only
+      // terminal statuses, so a late completion after a shorter pause
+      // lapses re-reads the then-current pause and charges.
       const pausedUntilYmd = dateOnly(v.customer_autopay_paused_until);
       const pauseCoversChargeWindow = !!(pausedUntilYmd && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntilYmd) && pausedUntilYmd >= horizon);
-      const autopayActive = !pauseCoversChargeWindow && await customerOnAutopay({
-        id: v.customer_id,
-        autopay_enabled: v.autopay_enabled,
-        autopay_paused_until: null,
-        autopay_payment_method_id: v.customer_autopay_payment_method_id ?? null,
-        ach_status: v.customer_ach_status ?? null,
-      }, { db: conn, failClosed: true });
+      const autopayActive = v.autopay_enabled !== false && !pauseCoversChargeWindow;
       const lane = resolveBillingLane({ billing_mode: v.billing_mode, waveguard_tier: v.waveguard_tier, monthly_rate: v.monthly_rate });
       const prediction = predictCompletionBilling({
         lane: lane.mode,
@@ -3865,16 +3859,22 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       const serviceRecords = await conn('service_records')
         .where({ scheduled_service_id: v.id })
         .select('id', 'structured_notes');
+      // Only records OWNED by an unfinished resumable attempt participate
+      // in invoice lookup precedence and the backfill verdict — the resume
+      // path loads claim.serviceRecordId, never "any record linked to the
+      // visit", so a historical record's invoices must not stand in.
+      const attemptRecordIds = new Set();
       if (String(v.status) === 'completed') {
-        // Bound to the RESUMED attempt's own record (the resume restores
-        // the mode from claim.serviceRecordId, not from any linked
-        // record): exempt only when EVERY unfinished resumable attempt is
-        // bound to a record that froze backfill — an attempt on a normal
-        // record (or with no committed record yet) can still charge.
         const unfinishedAttempts = await conn('service_completion_attempts')
           .where({ service_id: v.id })
           .whereIn('status', ['side_effects_pending', 'side_effects_running'])
           .select('service_record_id');
+        for (const attempt of unfinishedAttempts || []) {
+          if (attempt.service_record_id != null) attemptRecordIds.add(String(attempt.service_record_id));
+        }
+        // Frozen-backfill exemption: EVERY unfinished attempt must be
+        // bound to a record that froze backfill — an attempt on a normal
+        // record (or with no committed record yet) can still charge.
         const recordById = new Map((serviceRecords || []).map((record) => [String(record.id), record]));
         const allResumesFrozenBackfill = (unfinishedAttempts || []).length > 0
           && (unfinishedAttempts || []).every((attempt) => {
@@ -3887,7 +3887,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         if (allResumesFrozenBackfill) continue;
       }
       let liveHold = null;
-      if (['auto_charge', 'invoice'].includes(prediction.kind) && isCardHoldEnabled()) {
+      if (isCardHoldEnabled()) {
         // The charge rail's own resolution and admission: it selects the
         // NEWEST 'held' row (heldCardForScheduledService orders by held_at
         // DESC) and THEN refuses a parked row and a missing/non-positive
@@ -3919,6 +3919,11 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       let apptLaneChargeable = false;
       let apptAcceptedAmount = null;
       if ((consentRows || []).length) {
+        // The hold rail itself passes requireNoAppointmentCardLane — ANY
+        // competing consent row refuses the hold charge, so a hold beside
+        // consent rows is not a charge vector (and the hold row already
+        // excludes the appointment and extended lanes).
+        liveHold = null;
         const laneRow = (consentRows || []).find((row) => ['completed', 'satisfied'].includes(String(row.status)));
         const anyHoldRow = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id })
@@ -3947,7 +3952,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // row the rail refuses (parked, no frozen amount) leaves nothing to
       // charge even when the predictor says auto_charge.
       let holdClosesExtended = false;
-      if (lane.mode !== 'per_application' && ['auto_charge', 'invoice'].includes(prediction.kind)) {
+      if (lane.mode !== 'per_application') {
         holdClosesExtended = !!(await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id })
           .whereNotIn('status', ['released', 'cancelled', 'failed'])
@@ -3955,6 +3960,13 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       }
       if (holdClosesExtended && !liveHold && !apptCardCharge) continue;
       if (prediction.kind !== 'auto_charge' && !liveHold && !apptCardCharge) continue;
+      // Kinds that MINT no bill (covered_*, prepaid, no_charge — e.g. a
+      // callback) can still charge through a live hold, but only against
+      // an EXISTING collectible invoice: completion reuses any open
+      // invoice it finds and the hold rail does not reject callbacks or
+      // free service types. With no existing invoice there is nothing to
+      // charge — the invoice checks below decide.
+      const mintsNothing = !['auto_charge', 'invoice'].includes(prediction.kind);
       // Completion's invoice state machine (admin-dispatch; route-module
       // helpers, mirrored here with the same status sets):
       //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
@@ -3969,8 +3981,8 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         // service record.
         .where(function ownedByVisit() {
           this.where({ scheduled_service_id: v.id });
-          if ((serviceRecords || []).length) {
-            this.orWhereIn('service_record_id', serviceRecords.map((record) => record.id));
+          if (attemptRecordIds.size) {
+            this.orWhereIn('service_record_id', [...attemptRecordIds]);
           }
         })
         .orderBy('created_at', 'desc')
@@ -3982,10 +3994,10 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // Reuse PRECEDENCE mirrors the completion suppressor chain: the
       // service-record link is checked first, and the scheduled_service_id
       // rows are consulted only when no live record-linked row stands.
-      const recordIdSet = new Set((serviceRecords || []).map((record) => String(record.id)));
-      const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && recordIdSet.has(String(inv.service_record_id)));
+      const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && attemptRecordIds.has(String(inv.service_record_id)));
       const reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
         || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
+      if (mintsNothing && !reused) continue;
       if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
       if (reused && lane.mode !== 'per_application' && String(reused.scheduled_service_id || '') !== String(v.id)) {
         // An OPEN record-only invoice (no scheduled_service_id binding to
