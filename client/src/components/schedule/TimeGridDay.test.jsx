@@ -78,6 +78,10 @@ describe('TimeGridDay hour-aligned grid', () => {
           id: 'svc-early', customerName: 'Early Customer', status: 'confirmed',
           windowStart: '07:00', windowEnd: '08:00', windowDisplay: '7–8 AM',
           technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-predawn', customerName: 'Predawn Customer', status: 'confirmed',
+          windowStart: '05:00', windowEnd: '06:00', windowDisplay: '5–6 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
         }]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={vi.fn()}
@@ -85,8 +89,10 @@ describe('TimeGridDay hour-aligned grid', () => {
     );
     expect(screen.getByText('6 AM')).toBeInTheDocument();
     expect(screen.getByText('8 AM')).toBeInTheDocument();
-    // A legacy 7 AM visit is not hidden from dispatch.
+    // A 7 AM visit is not hidden from dispatch, and neither is one timed
+    // BEFORE the grid's first row — it is pinned to the 6 AM row instead.
     expect(screen.getByTitle(/Early Customer/)).toBeInTheDocument();
+    expect(screen.getByTitle(/Predawn Customer/)).toBeInTheDocument();
     // No row is muted for being early — the former 8 AM floor is gone.
     const rows = container.querySelectorAll('[data-slot-min]');
     expect(rows.length).toBeGreaterThan(0);

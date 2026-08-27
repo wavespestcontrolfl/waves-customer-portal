@@ -4403,10 +4403,13 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
     }
     // ADVISORY overlap probe (owner ruling 2026-08-27 — schedule overlaps
     // never block a booking anywhere): a promised time that already collides
-    // is still accepted; the warning rides the response so the operator can
-    // eyeball the day while the customer is on the phone. The seeder re-probes
-    // at payment time and likewise keeps the window, filing a coverage
-    // exception. A probe failure is ignored — it can only warn.
+    // is still accepted; the warning rides the response in the SAME
+    // `warnings[]` shape every other staff booking surface returns
+    // (window-rules slotOverlapWarning — consumed by CreateAppointmentModal
+    // and Customer 360), so the operator can eyeball the day while the
+    // customer is on the phone. The seeder re-probes at payment time and
+    // likewise keeps the window, filing a coverage exception. A probe
+    // failure is ignored — it can only warn.
     let overlapWarning = null;
     if (firstVisitDate && firstVisitWindowStart) {
       try {
@@ -4419,7 +4422,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
           adoptableFor: { customerId: customer.id, coverageServiceType },
         });
         if (conflict) {
-          overlapWarning = `Heads up: ${firstVisitWindowStart} on ${firstVisitDate} overlaps another appointment on the schedule — both are kept on the calendar.`;
+          overlapWarning = `Heads up: the promised ${firstVisitWindowStart} first visit on ${firstVisitDate} overlaps another appointment on the schedule — both are kept on the calendar.`;
         }
       } catch (probeErr) {
         logger.warn(`[annual-prepay] first-visit overlap probe failed (${probeErr.message}) — continuing without a warning`);
@@ -4717,7 +4720,7 @@ router.post('/:id/annual-prepay-invoice', requireAdmin, async (req, res, next) =
       settledByDepositCredit,
       annualPrepayTerm: term ? mapAnnualPrepayTerm(term) : null,
       delivery,
-      ...(overlapWarning ? { overlapWarning } : {}),
+      ...(overlapWarning ? { warnings: [overlapWarning] } : {}),
     });
   } catch (err) {
     if (err && err.annualPrepayOverlap) return res.status(409).json(err.annualPrepayOverlap);

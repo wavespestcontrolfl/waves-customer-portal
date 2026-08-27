@@ -1789,6 +1789,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // can change the rate or date after the last preview), and the server's
     // own mintPayload is what gets posted.
     let prepayNotice = '';
+    let prepayWarnings = [];
     // manualPrepayArmable is re-read here, not just at click time: it is false
     // unless a resolved, eligible preview is on screen, so a choice armed and
     // then invalidated by an edit can never reach the mint.
@@ -1819,6 +1820,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           body: JSON.stringify(fresh.mintPayload),
         });
         const num = minted?.invoice?.invoice_number ? ` ${minted.invoice.invoice_number}` : '';
+        // Advisory notes from the mint (e.g. the promised first visit overlaps
+        // another job) ride the same warnings[] shape as the booking itself
+        // and join the blocking alert below.
+        if (Array.isArray(minted?.warnings)) prepayWarnings = minted.warnings;
         if (minted?.delivery?.covered_by_credit) {
           // Account credit covered it outright, so nothing was sent — saying
           // "sent" would have the office believe the customer was notified.
@@ -1848,7 +1853,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     }
     const apptCount = results.length || createdGroupKeysRef.current.size;
     const estimateAccepted = results.some((r) => r?.estimateAccepted);
-    const apptWarnings = results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : []));
+    const apptWarnings = [
+      ...results.flatMap((r) => (Array.isArray(r?.warnings) ? r.warnings : [])),
+      ...prepayWarnings,
+    ];
     // A prepaid year is NOT billed per service report — say what actually
     // happens instead of the per-visit copy.
     const baseMessage = prepayNotice

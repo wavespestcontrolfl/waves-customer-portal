@@ -605,8 +605,12 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
             .map((s) => s.id);
           return services.map((svc) => {
             const startMin = parseHHMM(svc.windowStart);
-            if (startMin == null || startMin < DAY_START_HOUR * 60 || startMin >= DAY_END_HOUR * 60) return null;
-            const top = minutesToTopPx(startMin);
+            if (startMin == null || startMin >= DAY_END_HOUR * 60) return null;
+            // A visit timed before the grid's first row (there is no server
+            // floor any more) is pinned to that row rather than dropped — the
+            // block still carries its real window, so nothing accepted by the
+            // server ever vanishes from the board.
+            const top = minutesToTopPx(Math.max(startMin, DAY_START_HOUR * 60));
             const dur = effectiveDuration(svc);
             const height = (dur / SLOT_MIN) * SLOT_HEIGHT;
             const lane = lanes.get(svc.id) || { laneIdx: 0, laneCount: 1 };

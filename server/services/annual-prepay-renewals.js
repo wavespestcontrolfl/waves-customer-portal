@@ -1058,7 +1058,7 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     })());
 
   const seedTimedFirstVisit = async (trx, scheduledDate) => {
-    const windowStart = firstVisitWindowStart;
+    let windowStart = firstVisitWindowStart;
     let concurrentAdoptable = null;
     let overlapConflict = null;
     try {
@@ -1073,7 +1073,8 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         // invoice/term row locks here, so reaching rung 1 late and WAITING
         // could deadlock against a booking that holds the date lock and wants
         // those rows (AGENTS.md occupancy ordering). Failing to get the lock
-        // degrades to a windowless seed — never an overlap, never a deadlock.
+        // degrades to a windowless seed (see the catch below) — never a
+        // deadlock, never a timed insert behind a writer we could not see.
         const { tryAcquireOccupancyLock } = require('./scheduling/occupancy');
         if (!(await tryAcquireOccupancyLock(sp, scheduledDate))) {
           throw new Error('occupancy date lock unavailable');
@@ -1105,9 +1106,15 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
         }
       });
     } catch (err) {
-      // The probe is advisory, so a failed probe changes nothing about the
-      // window — the visit still seeds at the promised time.
-      logger.warn(`[annual-prepay] term ${term.id} first-visit overlap probe failed (${err.message}) — seeding with the promised window unprobed`);
+      // A FOUND overlap is advisory (kept above), but an overlap we could
+      // not even probe is different: the date lock is held by a concurrent
+      // writer whose own capacity check still blocks (public self-booking),
+      // and a timed insert behind its probe would commit a second timed
+      // visit it never saw (occupancy.js lock contract). Degrade to a
+      // windowless seed — the visit still lands on the right date and the
+      // exception below tells the office to time it by hand.
+      logger.warn(`[annual-prepay] term ${term.id} first-visit overlap probe could not complete (${err.message}) — seeding without a window`);
+      windowStart = null;
       // The savepoint died before its adoption recheck ran (e.g. the date
       // lock was held by a concurrent booking — which may be creating exactly
       // the visit we would duplicate). Best-effort unlocked recheck before
@@ -1132,6 +1139,9 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     if (overlapConflict) {
       await fileCoverageException(term, 'window_conflict',
         `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
+    } else if (!windowStart && firstVisitWindowStart) {
+      await fileCoverageException(term, 'window_unverified',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} could not be checked against the schedule while payment landed. The visit is on the schedule without a time — time it by hand.`);
     }
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
     // activation already holds invoice/term row locks, and a merge-undo

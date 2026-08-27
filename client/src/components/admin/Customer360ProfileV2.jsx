@@ -4122,6 +4122,10 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
         setSaving(false);
         return;
       }
+      // Advisory warnings (the promised first visit overlaps another job) —
+      // blocking on purpose: onSaved closes this modal, so a toast would
+      // unmount with it.
+      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       await onSaved?.(result);
     } catch (err) {
       setError(err.message || "Annual prepay invoice failed");
@@ -4160,6 +4164,9 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           chargeInPerson: true,
         }),
       });
+      // Same advisory-overlap surfacing as the send path (blocking: the
+      // modal closes / hands off to the payment sheet right after).
+      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       // Credit covered the whole invoice — it's already settled server-side,
       // so there's nothing for the payment sheet to collect.
       if (result?.settledByDepositCredit) {
