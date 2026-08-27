@@ -1,22 +1,7 @@
 import { useEffect, useState } from "react";
 import { Button, Card, CardBody } from "../ui";
 import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
-
-const API_BASE = import.meta.env.VITE_API_URL || "/api";
-
-function adminFetch(path, options = {}) {
-  return fetch(`${API_BASE}${path}`, {
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}`,
-      "Content-Type": "application/json",
-    },
-    ...options,
-  }).then(async (r) => {
-    const body = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(body?.error || `HTTP ${r.status}`);
-    return body;
-  });
-}
+import { adminFetch } from "../../utils/admin-fetch";
 
 const EMPTY_FORM = {
   address_line1: "",
