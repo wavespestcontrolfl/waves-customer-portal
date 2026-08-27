@@ -1097,35 +1097,38 @@ function editClampToSeason(date, pattern, skip) {
   }
   return date;
 }
+// serviceKey = the stable catalog identity (labels here are NOT catalog
+// display names — the save resolves the row by key). Items without a key
+// (the lawn one-offs) have no single catalog row and save identity-less.
 const EDIT_FALLBACK_SERVICES = [
   {
     category: "pest_control",
     items: [
-      { name: "Pest Control Service" },
-      { name: "Mosquito Control Service" },
-      { name: "Tick Control Service" },
-      { name: "Wasp Control Service" },
-      { name: "Quarterly Pest Control Service" },
-      { name: "Bi-Monthly Pest Control Service" },
-      { name: "Monthly Pest Control Service" },
+      { name: "Pest Control Service", serviceKey: "one_time_pest_control" },
+      { name: "Mosquito Control Service", serviceKey: "mosquito_one_time" },
+      { name: "Tick Control Service", serviceKey: "tick_control" },
+      { name: "Wasp Control Service", serviceKey: "bee_wasp_removal" },
+      { name: "Quarterly Pest Control Service", serviceKey: "pest_general_quarterly" },
+      { name: "Bi-Monthly Pest Control Service", serviceKey: "pest_general_bimonthly" },
+      { name: "Monthly Pest Control Service", serviceKey: "pest_general_monthly" },
     ],
   },
   {
     category: "rodent",
     items: [
-      { name: "Rodent Control Service" },
-      { name: "Rodent Trapping Service" },
-      { name: "Rodent Exclusion Service" },
-      { name: "Rodent Bait Station Service" },
+      { name: "Rodent Control Service", serviceKey: "rodent_general_one_time" },
+      { name: "Rodent Trapping Service", serviceKey: "rodent_trapping" },
+      { name: "Rodent Exclusion Service", serviceKey: "rodent_exclusion_only" },
+      { name: "Rodent Bait Station Service", serviceKey: "rodent_bait_quarterly" },
     ],
   },
   {
     category: "termite",
     items: [
-      { name: "Termite Monitoring Service" },
-      { name: "Termite Active Bait Station Service" },
-      { name: "Termite Spot Treatment Service" },
-      { name: "Termite Trenching Service" },
+      { name: "Termite Monitoring Service", serviceKey: "termite_monitoring" },
+      { name: "Termite Active Bait Station Service", serviceKey: "termite_active_bait_quarterly" },
+      { name: "Termite Spot Treatment Service", serviceKey: "termite_spot_treatment" },
+      { name: "Termite Trenching Service", serviceKey: "termite_trenching" },
     ],
   },
   {
@@ -1140,15 +1143,15 @@ const EDIT_FALLBACK_SERVICES = [
   {
     category: "tree_shrub",
     items: [
-      { name: "Every 6 Weeks Tree & Shrub Care Service" },
-      { name: "Bi-Monthly Tree & Shrub Care Service" },
+      { name: "Every 6 Weeks Tree & Shrub Care Service", serviceKey: "tree_shrub_6week" },
+      { name: "Bi-Monthly Tree & Shrub Care Service", serviceKey: "tree_shrub_program" },
     ],
   },
   {
     category: "specialty",
     items: [
-      { name: "WaveGuard Membership" },
-      { name: "Waves Pest Control Appointment" },
+      { name: "WaveGuard Membership", serviceKey: "waveguard_membership" },
+      { name: "Waves Pest Control Appointment", serviceKey: "general_appointment" },
     ],
   },
 ];
@@ -1962,6 +1965,9 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
         ? cleanLines.map((l) => {
             const common = {
               serviceId: l.serviceId || null,
+              // Stable catalog key for a fallback pick (no serviceId) — the
+              // server resolves the row by it before trying the label.
+              serviceKey: l.serviceKey || undefined,
               serviceName: l.serviceType,
               estimatedDuration:
                 l.estimatedDuration !== "" && !isNaN(parseInt(l.estimatedDuration, 10))

@@ -415,6 +415,11 @@ describe('admin schedule appointment discount eligibility', () => {
     );
     expect(groups.priceChanged).toBe(true);
     expect(groups.fields.discount_max_dollars).toBe(5);
+    // a catalog cap change on the SAME preset still counts (r8 P1)
+    expect(computePriceServiceGroupChanges(
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 5 },
+      { primary_line_price: 200, discount_type: 'percentage', discount_amount: 10, discount_id: 'capped', discount_max_dollars: 8 },
+    ).priceChanged).toBe(true);
   });
 
   test('still spreads a fixed-dollar appointment discount across every line', () => {

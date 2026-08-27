@@ -2412,7 +2412,9 @@ function computePriceServiceGroupChanges(before, updates) {
     || (updates.discount_service_key_filter !== undefined
       && (updates.discount_service_key_filter || null) !== (before?.discount_service_key_filter || null))
     || (updates.discount_service_category_filter !== undefined
-      && (updates.discount_service_category_filter || null) !== (before?.discount_service_category_filter || null));
+      && (updates.discount_service_category_filter || null) !== (before?.discount_service_category_filter || null))
+    || (updates.discount_max_dollars !== undefined
+      && moneyValuesDiffer(updates.discount_max_dollars, before?.discount_max_dollars));
   const fields = {};
   if (serviceChanged) {
     for (const key of PRICE_SERVICE_SERVICE_KEYS) {
@@ -6433,6 +6435,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       primaryLinePrice,
       addons,
       serviceId,
+      serviceKey: postedServiceKey,
       createInvoice,
       payerId, poNumber, selfPayOverride,
       notifyCustomer,
@@ -6540,14 +6543,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (serviceId !== undefined) {
           // serviceId null + a label = a pick from the modal's static fallback
           // list (services-dropdown unavailable). Recover the catalog identity
-          // by exact name so the discount exclusion / completion profile keep
-          // working; an unknown label clears the stale snapshot instead of
-          // carrying the replaced service's identity (Codex #3531 r6 P2).
+          // by the item's STABLE service_key first (fallback labels are not
+          // catalog display names — "Rodent Bait Station Service" vs the
+          // seeded "Quarterly Rodent Bait Station Service"), then by exact
+          // name as a last resort; an unknown pick clears the stale snapshot
+          // instead of carrying the replaced service's identity (Codex #3531
+          // r6/r8 P2).
+          const fallbackKey = String(postedServiceKey || '').trim().toLowerCase();
           const svcRow = serviceId
             ? await db('services').where({ id: serviceId }).first('id', 'service_key', 'category', 'name').catch(() => null)
-            : (serviceType
-              ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
-              : null);
+            : ((fallbackKey
+              ? await db('services').where({ service_key: fallbackKey, is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+              : null)
+              || (serviceType
+                ? await db('services').where({ name: String(serviceType).trim(), is_active: true }).first('id', 'service_key', 'category', 'name').catch(() => null)
+                : null));
           incomingIsReService = isReService({ serviceKey: svcRow?.service_key, serviceName: svcRow?.name, serviceType });
           resolvedServiceId = serviceId || svcRow?.id || null;
           resolvedServiceKey = svcRow?.service_key || null;
@@ -6910,6 +6920,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         ? await db('services').whereIn('name', addonFallbackNames).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
         : [];
       const addonServiceByName = new Map(addonServicesByName.map((service) => [service.name, service]));
+      const addonFallbackKeys = Array.from(new Set(addons
+        .filter((addon) => addon && !addon.serviceId && addon.serviceKey)
+        .map((addon) => String(addon.serviceKey).trim().toLowerCase())
+        .filter(Boolean)));
+      const addonServicesByKey = addonFallbackKeys.length > 0
+        ? await db('services').whereIn('service_key', addonFallbackKeys).where({ is_active: true }).select('id', 'service_key', 'category', 'name').catch(() => [])
+        : [];
+      const addonServiceByKey = new Map(addonServicesByKey.map((service) => [service.service_key, service]));
       if (addonServices.length !== addonServiceIds.length) {
         return res.status(400).json({ error: 'One or more add-on services no longer exist' });
       }
@@ -6924,7 +6942,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (!serviceName) continue;
         const catalogService = a.serviceId
           ? addonServiceById.get(a.serviceId)
-          : (addonServiceByName.get(serviceName) || null);
+          : (addonServiceByKey.get(String(a.serviceKey || '').trim().toLowerCase())
+            || addonServiceByName.get(serviceName)
+            || null);
         const gross = toMoney(a.basePrice ?? a.price ?? a.estimatedPrice);
         const lineType = a.discountType || null;
         const lineAmount = (a.discountAmount != null && a.discountAmount !== '') ? Number(a.discountAmount) : null;
@@ -14733,7 +14753,13 @@ router.get('/services-dropdown', async (req, res, next) => {
 
     // Fallback to full service library (42 services, all default 1hr / $0 except noted)
     if (groups.length === 0) {
-      const S = (name, dur = 60) => ({ name, duration: dur, priceMin: 0, priceMax: 0 });
+      // serviceKey = the stable catalog identity for a fallback item (labels
+      // are not display names); carried through a pick so the save can
+      // resolve the row and the discount exclusion holds.
+      const S = (name, dur = 60, serviceKey = null) => ({
+        name, duration: dur, priceMin: 0, priceMax: 0,
+        serviceKey, excludedFromPercentDiscount: lineExcludedFromPercentDiscount(serviceKey),
+      });
       groups = [
         { category: 'pest_control', items: [
           // One-Time
@@ -14745,40 +14771,40 @@ router.get('/services-dropdown', async (req, res, next) => {
           S('Tick Control Service'),
           S('Yellow Jacket Control Service'),
           S('Wasp Control Service'),
-          S('Wildlife Trapping Service'),
+          S('Wildlife Trapping Service', 60, 'wildlife_trapping'),
           // Recurring
-          S('Semiannual Pest Control Service'),
-          S('Quarterly Pest Control Service'),
-          S('Bi-Monthly Pest Control Service'),
-          S('Monthly Pest Control Service'),
+          S('Semiannual Pest Control Service', 60, 'pest_general_semiannual'),
+          S('Quarterly Pest Control Service', 60, 'pest_general_quarterly'),
+          S('Bi-Monthly Pest Control Service', 60, 'pest_general_bimonthly'),
+          S('Monthly Pest Control Service', 60, 'pest_general_monthly'),
         ]},
         { category: 'rodent', items: [
           // One-Time
           S('Rodent Control Service'),
-          S('Rodent Trapping Service'),
-          S('Rodent Exclusion Service'),
-          S('Rodent Trapping & Exclusion Service'),
-          S('Rodent Trapping & Sanitation Service'),
-          S('Rodent Trapping, Exclusion & Sanitation Service'),
-          S('Rodent Pest Control'),
+          S('Rodent Trapping Service', 60, 'rodent_trapping'),
+          S('Rodent Exclusion Service', 60, 'rodent_exclusion_only'),
+          S('Rodent Trapping & Exclusion Service', 60, 'rodent_trapping_exclusion'),
+          S('Rodent Trapping & Sanitation Service', 60, 'rodent_trapping_sanitation'),
+          S('Rodent Trapping, Exclusion & Sanitation Service', 60, 'rodent_trapping_exclusion_sanitation'),
+          S('Rodent Pest Control', 60, 'rodent_general_one_time'),
           // Recurring
-          S('Rodent Bait Station Service'),
+          S('Rodent Bait Station Service', 60, 'rodent_bait_quarterly'),
         ]},
         { category: 'termite', items: [
           // Recurring - Bonds
-          { name: 'Termite Bond (Billed Quarterly | 10-Year Term)', duration: 60, priceMin: 45, priceMax: 45 },
-          { name: 'Termite Bond (Billed Quarterly | 5-Year Term)', duration: 60, priceMin: 54, priceMax: 54 },
-          { name: 'Termite Bond (Billed Quarterly | 1-Year Term)', duration: 60, priceMin: 60, priceMax: 60 },
+          { name: 'Termite Bond (Billed Quarterly | 10-Year Term)', duration: 60, priceMin: 45, priceMax: 45, serviceKey: 'termite_bond_10yr', excludedFromPercentDiscount: true },
+          { name: 'Termite Bond (Billed Quarterly | 5-Year Term)', duration: 60, priceMin: 54, priceMax: 54, serviceKey: 'termite_bond_5yr', excludedFromPercentDiscount: true },
+          { name: 'Termite Bond (Billed Quarterly | 1-Year Term)', duration: 60, priceMin: 60, priceMax: 60, serviceKey: 'termite_bond_1yr', excludedFromPercentDiscount: true },
           // Recurring - Monitoring
-          { name: 'Termite Monitoring Service', duration: 60, priceMin: 99, priceMax: 99 },
-          { name: 'Termite Active Annual Bait Station Service', duration: 60, priceMin: 199, priceMax: 199 },
-          S('Termite Active Bait Station Service'),
-          S('Termite Installation Setup'),
+          { name: 'Termite Monitoring Service', duration: 60, priceMin: 99, priceMax: 99, serviceKey: 'termite_monitoring', excludedFromPercentDiscount: false },
+          { name: 'Termite Active Annual Bait Station Service', duration: 60, priceMin: 199, priceMax: 199, serviceKey: 'termite_active_annual', excludedFromPercentDiscount: false },
+          S('Termite Active Bait Station Service', 60, 'termite_active_bait_quarterly'),
+          S('Termite Installation Setup', 60, 'termite_installation_setup'),
           // One-Time
-          S('Termite Spot Treatment Service'),
-          S('Termite Pretreatment Service'),
-          S('Termite Trenching Service'),
-          { name: 'Termite Bait Station Cartridge Replacement', duration: 60, priceMin: 20, priceMax: 20 },
+          S('Termite Spot Treatment Service', 60, 'termite_spot_treatment'),
+          S('Termite Pretreatment Service', 60, 'termite_pretreatment'),
+          S('Termite Trenching Service', 60, 'termite_trenching'),
+          { name: 'Termite Bait Station Cartridge Replacement', duration: 60, priceMin: 20, priceMax: 20, serviceKey: 'termite_cartridge_replacement', excludedFromPercentDiscount: false },
           S('Slab Pre-Treat Termite'),
         ]},
         { category: 'lawn_care', items: [
@@ -14789,13 +14815,13 @@ router.get('/services-dropdown', async (req, res, next) => {
           S('Lawn Aeration Service'),
         ]},
         { category: 'tree_shrub', items: [
-          S('Every 6 Weeks Tree & Shrub Care Service'),
-          S('Bi-Monthly Tree & Shrub Care Service'),
+          S('Every 6 Weeks Tree & Shrub Care Service', 60, 'tree_shrub_6week'),
+          S('Bi-Monthly Tree & Shrub Care Service', 60, 'tree_shrub_program'),
         ]},
         { category: 'specialty', items: [
-          S('WaveGuard Membership', 0),
-          S('WaveGuard Initial Setup'),
-          S('Waves Pest Control Appointment'),
+          S('WaveGuard Membership', 0, 'waveguard_membership'),
+          S('WaveGuard Initial Setup', 60, 'waveguard_initial_setup'),
+          S('Waves Pest Control Appointment', 60, 'general_appointment'),
         ]},
       ];
     }
