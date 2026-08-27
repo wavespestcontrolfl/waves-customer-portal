@@ -181,17 +181,17 @@ async function computeUnreadCount({ adminUserId, role } = {}) {
 // never break on infrastructure.
 const BADGE_LOCK_NS = 'waves-badge:';
 
-// In-process serialization FIRST, before any pool connection is reserved:
-// at most ONE badge transaction exists per process — GLOBAL, not
-// per-admin, because the trigger fans out recipients with Promise.all
-// and a per-admin queue still opened one transaction per distinct admin
-// concurrently (codex #3541 rounds 7–8). One process-wide section means
-// badge work can never hold more than one pool connection while its
-// compute queries borrow another, so the pool cannot be exhausted by
-// badges regardless of recipient count; the per-admin advisory lock
-// inside remains the cross-replica ordering authority. Sequential badge
-// computes for multiple staff are acceptable: the badge is garnish and
-// each caller's 1.5s race simply omits it when the queue is slow.
+// In-process serialization for the TRIGGER path only, before any pool
+// connection is reserved: the push fan-out (Promise.all over recipients)
+// is the one caller whose concurrency is unbounded, so its badge
+// transactions queue through one process-wide chain — at most one badge
+// transaction from pushes per process, and the pool cannot be exhausted
+// by badges (codex #3541 rounds 7–8). Bell routes (unread-count,
+// read/read-all stamps) deliberately BYPASS this chain: their
+// concurrency is one small user-driven request at a time, and queueing
+// them behind a push burst would let a single stuck badge computation
+// hang the bell (codex round 10). Cross-replica/cross-path ordering is
+// the advisory lock's job either way; the chain is purely a pool bound.
 let badgeSectionTail = Promise.resolve();
 function serializeBadgeSection(task) {
   const run = badgeSectionTail.then(task, task);
@@ -199,49 +199,87 @@ function serializeBadgeSection(task) {
   return run;
 }
 
-async function withBadgeOrderingStamp(adminUserId, fn) {
+// One bounded critical section: per-admin advisory lock (wait capped by
+// lock_timeout so a wedged peer errors into the caller's fallback
+// instead of stacking transactions behind it), fn, then the stamp.
+async function runBadgeSection(key, fn) {
+  return db.transaction(async (trx) => {
+    await trx.raw("SET LOCAL lock_timeout = '2500ms'");
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${key}`]);
+    let result;
+    try {
+      result = await fn();
+    } catch (err) {
+      err.badgeComputeError = true; // fn's own failure — never retried below
+      throw err;
+    }
+    // Microsecond DB-clock token: consecutive serialized sections are
+    // separated by at least a DB round-trip (≫1µs), so tokens are
+    // strictly increasing in section order — a pre-read push snapshot
+    // and the read stamp that follows it can never draw equal tokens
+    // (codex round 7). Epoch µs stays well inside Number precision.
+    const { rows } = await trx.raw(
+      'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint AS us',
+    );
+    const us = Number(rows?.[0]?.us);
+    return { ...result, at: Number.isFinite(us) ? us : Date.now() * 1000 };
+  });
+}
+
+// Cap on a QUEUED (trigger-path) section so one stuck query cannot wedge
+// the chain forever: the chain advances, the abandoned section finishes
+// in the background, and lock_timeout keeps follow-on sections from
+// stacking behind its advisory lock.
+const BADGE_SECTION_TIMEOUT_MS = 5000;
+
+async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandoned } = {}) {
   const key = String(adminUserId ?? '');
-  return serializeBadgeSection(async () => {
+  const attempt = async () => {
     try {
       if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
-      return await db.transaction(async (trx) => {
-        // pg_advisory_xact_lock blocks until acquired and releases on
-        // commit/rollback — no leak risk. Scoped per admin so different
-        // admins' snapshots never contend.
-        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${key}`]);
-        let result;
-        try {
-          result = await fn();
-        } catch (err) {
-          err.badgeComputeError = true; // fn's own failure — never retried below
-          throw err;
-        }
-        // Microsecond DB-clock token: consecutive serialized sections are
-        // separated by at least a DB round-trip (≫1µs), so tokens are
-        // strictly increasing in section order — a pre-read push snapshot
-        // and the read stamp that follows it can never draw equal tokens
-        // (codex round 7). Epoch µs stays well inside Number precision.
-        const { rows } = await trx.raw(
-          'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000000)::bigint AS us',
-        );
-        const us = Number(rows?.[0]?.us);
-        return { ...result, at: Number.isFinite(us) ? us : Date.now() * 1000 };
-      });
+      return await runBadgeSection(key, fn);
     } catch (err) {
       if (err && err.badgeComputeError) throw err;
       // Same µs unit as the locked path so a fallback stamp still competes.
       logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
       return { ...(await fn()), at: Date.now() * 1000 };
     }
+  };
+  if (!queued) return attempt();
+  return serializeBadgeSection(async () => {
+    // The trigger's own 1.5s race may have given up while this task sat
+    // in the queue — drop it before spending a transaction on a badge
+    // nobody will send (codex round 10).
+    if (typeof abandoned === 'function' && abandoned()) {
+      const err = new Error('badge snapshot abandoned by caller');
+      err.badgeComputeError = true;
+      throw err;
+    }
+    let timer;
+    try {
+      return await Promise.race([
+        attempt(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject(Object.assign(new Error('badge section timed out'), { badgeComputeError: true }));
+          }, BADGE_SECTION_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
   });
 }
 
 // Returns { count, at }: the unread snapshot plus its ordering stamp,
-// both produced inside the per-admin serialized section.
-async function getUnreadCountForAdmin({ adminUserId, role } = {}) {
+// both produced inside the per-admin serialized section. opts.queued
+// routes the section through the process-wide trigger chain (push
+// fan-out only); opts.abandoned lets a queued caller that already gave
+// up cancel the task before it starts.
+async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
   return withBadgeOrderingStamp(adminUserId, async () => ({
     count: await computeUnreadCount({ adminUserId, role }),
-  }));
+  }), opts);
 }
 
 // Stamp-only critical section for read mutations (mark-read/read-all).

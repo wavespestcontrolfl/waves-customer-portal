@@ -7,6 +7,22 @@ import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Local, unverified role hint from the staff JWT — gates nothing
+// security-sensitive (same pattern as push-subscribe.js): the server
+// already scopes counts and push badge fields to admin-role users; this
+// only keeps a technician's portal session from painting a badge onto
+// their home-screen icon, matching the push side's admin-only scope.
+function staffRoleFromToken() {
+  try {
+    const raw = localStorage.getItem('waves_admin_token');
+    if (!raw) return null;
+    const payload = JSON.parse(atob(raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload.role || null;
+  } catch {
+    return null;
+  }
+}
+
 // Mirror a server-confirmed unread count onto the home-screen app icon
 // (Badging API — iOS 16.4+ installed PWAs; no-op elsewhere). Only called
 // with counts the server returned or accepted a read-write for, so an
@@ -92,7 +108,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       requestJson(`${basePath}/unread-count`)
         .then(d => {
           setUnreadCount(d.count || 0);
-          if (type === 'admin') syncAppBadge(d.count || 0, d.at);
+          if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(d.count || 0, d.at);
         })
         .catch(() => {});
     };
@@ -246,7 +262,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     setUnreadCount(prev => {
       const next = Math.max(0, prev - 1);
       // Idempotent, so a double-invoked updater (StrictMode) is harmless.
-      if (type === 'admin') syncAppBadge(next, readRes?.at);
+      if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(next, readRes?.at);
       return next;
     });
   };
@@ -258,7 +274,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
-    if (type === 'admin') syncAppBadge(0, readAllRes?.at);
+    if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(0, readAllRes?.at);
   };
 
   // Group by time: Today, Yesterday, This Week, Older

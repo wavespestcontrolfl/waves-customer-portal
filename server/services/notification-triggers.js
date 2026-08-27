@@ -815,8 +815,16 @@ async function triggerNotification(triggerKey, payload = {}) {
             .filter((u) => u.role === 'admin' && enabledUserIds.includes(u.id))
             .map(async (user) => {
               let timer;
+              // queued: this is the unbounded fan-out path, so it goes
+              // through admin-unread's process-wide chain; abandoned lets
+              // the chain drop this task unstarted once the race below
+              // has already given up on it.
+              let abandoned = false;
               const snapshot = await Promise.race([
-                getUnreadCountForAdmin({ adminUserId: user.id, role: user.role }).catch((e) => {
+                getUnreadCountForAdmin(
+                  { adminUserId: user.id, role: user.role },
+                  { queued: true, abandoned: () => abandoned },
+                ).catch((e) => {
                   logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
                   return null;
                 }),
@@ -824,6 +832,7 @@ async function triggerNotification(triggerKey, payload = {}) {
               ]);
               clearTimeout(timer);
               if (snapshot === BADGE_TIMED_OUT) {
+                abandoned = true;
                 logger.warn(`[notification-triggers] badge count timed out for admin ${user.id} — sending push without badge`);
                 return;
               }
