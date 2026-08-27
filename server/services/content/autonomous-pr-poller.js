@@ -1175,15 +1175,18 @@ async function maybeAutoMerge(run, pr) {
               if (k === 'modified' || k === 'updated') continue; // re-checked below
               if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
             }
-            // Freshness fields mirror the publisher's ACTUAL mutation (PR
-            // r11 P2): with no body/meta change they must be untouched; with
-            // a change, only an ALREADY-PRESENT field may move (no
-            // additions, no deletions) and only forward to a real date no
-            // later than tomorrow — never an arbitrary or backdated stamp.
+            // Freshness fields mirror the publisher's EXACT mutation (PR
+            // r11 P2 + r13 P1): with no body/meta change both must be
+            // untouched. With a change, publishRefresh bumps exactly the
+            // field the live page uses — `modified` if present, else
+            // `updated` — so the SELECTED field must move forward (real
+            // date, never before the base, never past tomorrow) or already
+            // sit within the same-day no-op window, the OTHER field must be
+            // untouched, and neither may be added or removed.
             if (!drift) {
-              // publishRefresh updates exactly ONE already-present freshness
-              // field (hook r12 P1) — two moving at once is not its output.
-              let freshnessChanged = 0;
+              const selected = boundTargetingWant.modified !== undefined
+                ? 'modified'
+                : (boundTargetingWant.updated !== undefined ? 'updated' : null);
               for (const k of ['modified', 'updated']) {
                 const want = boundTargetingWant[k];
                 const got = headFm[k];
@@ -1192,14 +1195,23 @@ async function maybeAutoMerge(run, pr) {
                   continue;
                 }
                 if ((want === undefined) !== (got === undefined)) { drift = true; break; }
-                if (want !== undefined && canonVal(want) !== canonVal(got)) {
+                if (want === undefined) continue;
+                if (k !== selected) {
+                  if (canonVal(want) !== canonVal(got)) { drift = true; break; }
+                  continue;
+                }
+                if (canonVal(want) !== canonVal(got)) {
                   const b = Date.parse(String(want));
                   const h = Date.parse(String(got));
                   if (!Number.isFinite(h) || (Number.isFinite(b) && h < b) || h > Date.now() + 86400000) { drift = true; break; }
-                  freshnessChanged += 1;
+                } else {
+                  // Unchanged selected field is publisher output only as a
+                  // same-day no-op — the base stamp must be recent (48h
+                  // covers a publish-day stamp merged overnight).
+                  const b = Date.parse(String(want));
+                  if (!Number.isFinite(b) || (Date.now() - b) > 172800000) { drift = true; break; }
                 }
               }
-              if (freshnessChanged > 1) drift = true;
             }
           } else {
             for (const k of boundTargetingKeys) {
@@ -1255,16 +1267,23 @@ async function maybeAutoMerge(run, pr) {
     if (!eligible) {
       try {
         const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
-        const runner = require('./autonomous-runner');
-        // Bind to the run's EXACT brief (PR r11 P1): _loadReviewedBrief
-        // falls back to the opportunity's LATEST brief when brief_id is
-        // null/unresolvable (the FK is ON DELETE SET NULL), and a later
-        // true-intercept brief must not authorize an older PR it never
-        // produced. Nulling opportunity_id disables that fallback — a run
-        // without a resolvable brief_id is simply ineligible.
-        const brief = run.brief_id
-          ? await runner._loadReviewedBrief({ ...run, opportunity_id: null })
-          : null;
+        // Bind to the run's EXACT brief via a RAW load (PR r11 + r13 P1s):
+        // _loadReviewedBrief both falls back to the opportunity's LATEST
+        // brief and SYNTHESIZES a missing gsc_signal.intercept from the
+        // opportunity's CURRENT signal_metadata — either path could let a
+        // later intercept payload authorize an older PR it never produced.
+        // Only the brief row's own PERSISTED marker counts here; a run
+        // without a resolvable brief_id, or a marker-less legacy brief, is
+        // simply ineligible (fail closed).
+        let brief = null;
+        if (run.brief_id) {
+          const row = await db('content_briefs').where('id', run.brief_id).first('gsc_signal', 'action_type');
+          if (row) {
+            let gs = row.gsc_signal;
+            if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
+            brief = { action_type: row.action_type, gsc_signal: gs };
+          }
+        }
         eligible = namedCompetitorAutopublishEligible(brief) === true;
       } catch (_) { eligible = false; }
     }

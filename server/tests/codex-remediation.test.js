@@ -696,6 +696,8 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
         const db = makeDb({
           autonomous_runs: [runRow],
           opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
+          // Eligibility reads the brief row's RAW persisted marker (r13).
+          content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept } }],
         });
         const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
         const pr = { number: 7, state: 'open', head: { sha: HEAD_SHA, ref: 'content/autonomous-x' } };
@@ -1256,7 +1258,10 @@ describe('validateAutonomousRunGates', () => {
     try {
       const deps = goodDeps();
       // The canonical TRUE-intercept marker — bucket/operator_brief alone
-      // must NOT qualify (category/spoke seeds share those).
+      // must NOT qualify (category/spoke seeds share those). Eligibility
+      // reads the brief row's RAW persisted gsc_signal (r13), so the db
+      // carries the marker brief.
+      deps.db._tables.content_briefs = [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }];
       deps.autonomousRunner._loadReviewedBrief = async () => ({
         page_type: 'supporting-blog', action_type: 'new_supporting_blog', gsc_signal: { intercept: true },
       });

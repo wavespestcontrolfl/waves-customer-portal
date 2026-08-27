@@ -72,6 +72,21 @@ const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connecto
 // gate) imports it from there.
 const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
 
+// RAW eligibility load (PR #3508 r11 + r13 P1s): only the brief row's own
+// PERSISTED gsc_signal marker counts for the autopublish decision —
+// _loadReviewedBrief's latest-for-opportunity fallback AND its
+// synthesize-from-current-signal_metadata backfill could each let a later
+// intercept payload authorize a run it never produced. Marker-less legacy
+// briefs are simply ineligible (fail closed).
+async function rawEligibilityBrief(db, briefId) {
+  if (!briefId) return null;
+  const row = await db('content_briefs').where({ id: briefId }).first('gsc_signal', 'action_type');
+  if (!row) return null;
+  let gs = row.gsc_signal;
+  if (typeof gs === 'string') { try { gs = JSON.parse(gs); } catch (_) { gs = null; } }
+  return { action_type: row.action_type, gsc_signal: gs };
+}
+
 function remediationEnabled() {
   const v = String(process.env.AUTONOMOUS_CODEX_REMEDIATION || '').trim().toLowerCase();
   return v === 'true' || v === '1' || v === 'on';
@@ -1180,14 +1195,11 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // Owner directive 2026-08-26: an opted-in TRUE-intercept run continues —
     // the same scoped eligibility the runner applies at its review-park
     // decision (fail-closed: no marker / gates off → park as before).
-    // Eligibility binds to the run's EXACT brief (PR r11 P1): the fallback
-    // to the opportunity's latest brief must not let a newer intercept
-    // brief authorize a run it never produced.
+    // Eligibility binds to the run's EXACT brief via the RAW persisted
+    // marker (PR r11 + r13 P1s — see rawEligibilityBrief).
     if (comparisonResult.requiresHumanReview === true) {
       let strictBrief = null;
-      try {
-        strictBrief = run.brief_id ? await runner._loadReviewedBrief({ ...run, opportunity_id: null }) : null;
-      } catch (_) { strictBrief = null; }
+      try { strictBrief = await rawEligibilityBrief(db, run.brief_id); } catch (_) { strictBrief = null; }
       if (!namedCompetitorAutopublishEligible(strictBrief)) {
         return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
       }
@@ -2202,13 +2214,10 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
             ? runner._internals.operatorBriefTextForComparisonGate(opp, brief)
             : null,
         };
-        // Eligibility binds to the run's EXACT brief (PR r11 P1) — the
-        // latest-for-opportunity fallback must not authorize this PR.
+        // Eligibility binds to the run's EXACT brief via the RAW persisted
+        // marker (PR r11 + r13 P1s — see rawEligibilityBrief).
         try {
-          const strictBrief = fullRun.brief_id
-            ? await runner._loadReviewedBrief({ ...fullRun, opportunity_id: null })
-            : null;
-          namedCompetitorAutopublish = namedCompetitorAutopublishEligible(strictBrief);
+          namedCompetitorAutopublish = namedCompetitorAutopublishEligible(await rawEligibilityBrief(db, fullRun.brief_id));
         } catch (_) { namedCompetitorAutopublish = false; }
       }
     }
