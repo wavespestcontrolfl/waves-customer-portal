@@ -435,8 +435,13 @@ function extractLinks(body) {
   // ("/x/../contact/" is /contact/) before classification.
   const dest = (h) => {
     let raw = decodeEntitiesForScan(String(h || '')).replace(/^<|>$/g, '');
-    const abs = raw.match(/^https?:\/\/([^/\s]+)(\/[^\s]*)?$/i);
-    if (abs && firstParty.has(abs[1].toLowerCase())) raw = abs[2] || '/';
+    // Authority parsed with URL — default ports (":443") drop and hostnames
+    // lowercase, exactly as the browser resolves them.
+    if (/^https?:\/\//i.test(raw)) {
+      let parsed = null;
+      try { parsed = new URL(raw); } catch (err) { parsed = null; }
+      if (parsed && firstParty.has(parsed.hostname.toLowerCase())) raw = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+    }
     if (raw.startsWith('/') && /(?:^|\/)\.\.?(?:\/|$)/.test(raw)) {
       const trailing = /\/$/.test(raw);
       const segs = [];
@@ -683,7 +688,7 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection". Qualifiers exclude the function words that mark EDITORIAL
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
-const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspection\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
+const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspections?\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

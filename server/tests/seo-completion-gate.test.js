@@ -842,6 +842,20 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(numericInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    // Plural inspection wording is the same request shape.
+    const pluralInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Termite Inspections](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(pluralInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    // Explicit default ports drop during first-party canonicalization.
+    const portedUrl = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service](https://www.wavespestcontrol.com:443/contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(portedUrl.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
     // A subordinate verb with its own subject is still prose — it neither
     // satisfies presence nor counts as an actionable CTA.

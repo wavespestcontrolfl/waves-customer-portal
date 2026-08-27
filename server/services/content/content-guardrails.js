@@ -1857,10 +1857,13 @@ function blankNonRenderedMarkdown(text) {
     for (const line of raw.split('\n')) {
       const strippedLine = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '');
       if (openCh) {
-        const close = strippedLine.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        const close = strippedLine.match(/^ *(`{3,}|~{3,})\s*$/);
         if (close && close[1][0] === openCh && close[1].length >= openLen) { fenceIntervals.push([start, pos + line.length]); openCh = null; }
       } else {
-        const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        // A fence may open DIRECTLY as list-item content ("- ~~~html").
+        const afterMarker = strippedLine.replace(/^ *(?:[-*+]|\d+[.)])\s+/, '');
+        const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+          || (afterMarker !== strippedLine ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
         if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) { openCh = opener[1][0]; openLen = opener[1].length; start = pos; }
       }
       pos += line.length + 1;
@@ -1925,6 +1928,9 @@ function blankNonRenderedMarkdown(text) {
     const stripped = prefix ? l.slice(prefix[0].length) : l;
     const blank = stripped.trim() === '';
     const indent = stripped.match(/^ */)[0].length;
+    // A DEDENTED blockquote interrupts the list (no lazy continuation).
+    const rawIndent = l.match(/^ */)[0].length;
+    if (depth > 0 && !blank && fenceListIndent > 0 && rawIndent < fenceListIndent && !fence) fenceListIndent = 0;
     // A fence opened inside a container ends with its container: a
     // non-blank line at a shallower quote depth — or dedented out of the
     // fence's list item (code has no lazy continuation) — is outside the
@@ -1989,14 +1995,17 @@ function blankNonRenderedMarkdown(text) {
     const quoteRe = listContext
       ? new RegExp(`^ {0,${listContentIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
       : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
-    const stripped = l.replace(quoteRe, '');
+    const quotePrefix = l.match(quoteRe);
+    const stripped = quotePrefix ? l.slice(quotePrefix[0].length) : l;
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
     // NESTED list markers sit up to 3 past the parent's content column —
     // the content column moves with them ("- outer" + "    - inner"). An
-    // INTERRUPTING block (ATX heading or thematic break, dashes-only "- - -"
-    // included) ends the list even with no blank line.
-    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    // INTERRUPTING block (ATX heading, thematic break — dashes-only "- - -"
+    // included — or a DEDENTED blockquote) ends the list even with no blank
+    // line; none can lazily continue a list item.
+    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped)
+      || Boolean(quotePrefix && listContext && rawIndent < listContentIndent);
     const listItem = interrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
       listContext = true;

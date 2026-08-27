@@ -2312,8 +2312,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // …and inside FENCES likewise: content between a fence-enclosed "<!--"
     // and a later "-->" still renders.
     expect(guardrails.hasRawMarkdownTable('Intro.\n\n~~~html\n<!--\n~~~\n| A | B |\n| - | - |\n-->')).toBe(true);
+    // …including a fence opened directly as LIST-ITEM content.
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n- ~~~html\n  <!--\n  ~~~\n| A | B |\n| - | - |\n-->')).toBe(true);
     // A thematic break ends the list like a heading does.
     expect(guardrails.hasRawMarkdownTable('- item\n***\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // A dedented BLOCKQUOTE interrupts the list too — later 4-space content
+    // is indented code.
+    expect(guardrails.hasRawMarkdownTable('- item\n> quote\n\n    | A | B |\n    | - | - |')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
