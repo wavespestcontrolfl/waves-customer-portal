@@ -77,7 +77,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ scanned: 0, scanComplete: true, missed: 1, lostCount: 0 }));
     expect(increments).toEqual([{ ids: ['bl-1'], col: 'miss_count', n: 1 }]);
-    expect(dataforseo.getBacklinks).toHaveBeenCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false, offset: 0 });
+    expect(dataforseo.getBacklinks).toHaveBeenCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false });
 
     dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [null] }] });
     await expect(BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() })).resolves.toEqual({ scanned: 0, scanComplete: false });
@@ -87,12 +87,18 @@ describe('BacklinkMonitor verified loss detection', () => {
     const mk = (i) => ({ url_from: `https://s${i}.example/a`, url_to: 'https://wavespestcontrol.com/', domain_from: `s${i}.example`, domain_from_rank: 1, dofollow: true });
     const page1 = Array.from({ length: 1000 }, (_, i) => mk(i));
     const page2 = [mk(1000), mk(1001)];
-    dataforseo.getBacklinks.mockImplementation(async (_t, _l, { offset }) => ({ tasks: [{ result: [{ items: offset ? page2 : page1, total_count: 1002 }] }] }));
+    dataforseo.getBacklinks.mockImplementation(async (_t, _l, { searchAfterToken }) => ({ tasks: [{ result: [{ items: searchAfterToken ? page2 : page1, total_count: 1002, search_after_token: searchAfterToken ? null : 'tok-1' }] }] }));
     makeDb({ seo_backlinks: (op) => (op === 'select' ? [] : op === 'first' ? null : [1]) });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ scanned: 1002, scanComplete: true }));
     expect(dataforseo.getBacklinks).toHaveBeenCalledTimes(2);
-    expect(dataforseo.getBacklinks).toHaveBeenLastCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false, offset: 1000 });
+    // search_after_token, never offset (DataForSEO caps offsets at 20,000)
+    expect(dataforseo.getBacklinks).toHaveBeenLastCalledWith('wavespestcontrol.com', 1000, { dofollowOnly: false, searchAfterToken: 'tok-1' });
+
+    // a page that omits the token before total_count is reached → incomplete, loss detection skipped
+    dataforseo.getBacklinks.mockImplementation(async () => ({ tasks: [{ result: [{ items: page1, total_count: 1002 }] }] }));
+    const r2 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r2).toEqual(expect.objectContaining({ scanned: 1000, scanComplete: false }));
   });
 
   test('scan is single-flight through the cron advisory lock', async () => {
@@ -273,7 +279,7 @@ describe('BacklinkMonitor verified loss detection', () => {
   test('pages until total_count regardless of page count (no 5-page freeze)', async () => {
     const mk = (i) => ({ url_from: `https://s${i}.example/a`, url_to: 'https://wavespestcontrol.com/', domain_from: `s${i}.example`, domain_from_rank: 1, dofollow: true });
     const all = Array.from({ length: 14 }, (_, i) => mk(i));
-    dataforseo.getBacklinks.mockImplementation(async (_t, limit, { offset }) => ({ tasks: [{ result: [{ items: all.slice(offset, offset + limit), total_count: 14 }] }] }));
+    dataforseo.getBacklinks.mockImplementation(async (_t, limit, { searchAfterToken }) => { const offset = Number(searchAfterToken || 0); return { tasks: [{ result: [{ items: all.slice(offset, offset + limit), total_count: 14, search_after_token: String(offset + limit) }] }] }; });
     makeDb({ seo_backlinks: (op) => (op === 'select' ? [] : op === 'first' ? null : [1]) });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), pageSize: 2 });
     expect(r).toEqual(expect.objectContaining({ scanned: 14, scanComplete: true }));
@@ -427,7 +433,9 @@ describe('lost-link recovery', () => {
     // only unsent rows: none/drafted and outreach_sent_at IS NULL — sending/sent are left for reconciliation
     expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
     expect(ops[0].nulls).toContain('outreach_sent_at');
-    expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', first_live_at: new Date('2026-09-06T08:00:00Z'), backlink_id: 'bl-1' }));
+    expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', backlink_id: 'bl-1' }));
+    expect(ops[0].payload.first_live_at.__raw).toBe('COALESCE(first_live_at, ?)'); // original first-live history preserved
+    expect(ops[0].payload.notes.bind[0]).toMatch(/closed 2026-09-06:/); // 08:00Z = 04:00 ET → same ET day; ET date, not UTC
   });
 
   test('a reopened row with a null/unclaimable link_type gets a worker-claimable outreach type', async () => {

@@ -77,9 +77,12 @@ class BacklinkMonitor {
     let pagesOk = true;
 
     let gotResult = false;
+    let searchAfterToken = null;
 
     for (let page = 0; page < MAX_PAGES; page++) {
-      const data = await dataforseo.getBacklinks('wavespestcontrol.com', PAGE, { dofollowOnly: false, offset: page * PAGE });
+      // search_after_token paging: DataForSEO caps plain offsets at 20,000, so a
+      // token chain is the only way past ~21 pages.
+      const data = await dataforseo.getBacklinks('wavespestcontrol.com', PAGE, searchAfterToken ? { dofollowOnly: false, searchAfterToken } : { dofollowOnly: false });
       const result = data?.tasks?.[0]?.result?.[0];
       // A missing/invalid result (API error, null) is NOT the same as a valid
       // empty page: the former aborts, the latter is a complete scan.
@@ -88,7 +91,9 @@ class BacklinkMonitor {
       links.push(...result.items);
       totalCount = Number(result.total_count) || links.length;
       if (result.items.length < PAGE || links.length >= totalCount) break;
-      if (page === MAX_PAGES - 1) logger.warn(`Backlink scan: page cap ${MAX_PAGES} reached at ${links.length}/${totalCount} — loss detection will be skipped`);
+      searchAfterToken = result.search_after_token || null;
+      if (!searchAfterToken) { pagesOk = false; logger.warn(`Backlink scan: no search_after_token at ${links.length}/${totalCount} — cannot page further, loss detection skipped`); break; }
+      if (page === MAX_PAGES - 1) { pagesOk = false; logger.warn(`Backlink scan: page cap ${MAX_PAGES} reached at ${links.length}/${totalCount} — loss detection will be skipped`); }
     }
 
     if (!gotResult) {

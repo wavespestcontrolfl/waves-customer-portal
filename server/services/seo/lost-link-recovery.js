@@ -14,6 +14,7 @@
  */
 const db = require('../../models/db');
 const logger = require('../logger');
+const { etDateString } = require('../../utils/datetime-et');
 
 const NON_OUTREACH_TYPES = new Set(['directory', 'citation', 'social']);
 // The only link_types the outreach worker claims (link-prospect-worker OUTREACH_TYPES).
@@ -248,10 +249,12 @@ async function resolveRecoveredLink(backlink, now = new Date()) {
       status: 'live',
       live_url: backlink.source_url,
       backlink_id: backlink.id || null,
-      first_live_at: now,
+      // first_live_at = the FIRST time the placement went live (verifier sets it
+      // only when null); a re-close after a loss must not rewrite that history.
+      first_live_at: db.raw('COALESCE(first_live_at, ?)', [now]),
       claimed_at: null, claimed_by: null,
       outreach_status: 'none', outreach_send_token: null,
-      notes: db.raw("COALESCE(notes, '') || ?", [`\nLost-link recovery closed ${now.toISOString().slice(0, 10)}: the link reappeared on its own (no outreach needed).`]),
+      notes: db.raw("COALESCE(notes, '') || ?", [`\nLost-link recovery closed ${etDateString(now)}: the link reappeared on its own (no outreach needed).`]),
       updated_at: now,
     });
   if (n) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${n} recovery prospect(s) closed as live`);
