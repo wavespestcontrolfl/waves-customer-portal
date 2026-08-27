@@ -1702,6 +1702,44 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   // deliberately absent.
   'Lee County', 'Collier County', 'Pinellas County', 'Hendry County',
   'DeSoto County', 'Polk County', 'Miami-Dade County', 'Broward County',
+  // 2026-08-27 (topic-targeting gate, hook r4): the remaining FL cities of
+  // ~40k+ plus named destination geos, and the US metros a writer might
+  // target. Still curated: common-word and person-name places (Sunrise,
+  // Plantation, Cocoa, Mobile, Stuart, Sebastian, Brandon, Charlotte) stay
+  // out because they false-positive in ordinary prose.
+  'Coral Springs', 'Miramar', 'Pompano Beach', 'Davie', 'Deerfield Beach',
+  'Boynton Beach', 'Delray Beach', 'Lauderhill', 'Weston', 'Homestead',
+  'Tamarac', 'Miami Gardens', 'Miami Beach', 'Doral', 'Kendall',
+  'Coral Gables', 'North Miami', 'Pembroke Pines', 'Hollywood', 'Jupiter',
+  'Palm Beach Gardens', 'Royal Palm Beach', 'Lake Worth', 'Wellington',
+  'Titusville', 'Merritt Island', 'Cocoa Beach', 'Palm Coast', 'Ormond Beach',
+  'Port Orange', 'New Smyrna Beach', 'Deltona', 'DeLand', 'Sanford', 'Apopka',
+  'Altamonte Springs', 'Winter Park', 'Winter Garden', 'Winter Springs',
+  'Oviedo', 'Clermont', 'Poinciana', 'Bartow', 'Haines City', 'Lake Wales',
+  'Zephyrhills', 'Wesley Chapel', 'New Port Richey', 'Dunedin', 'Largo',
+  'Pinellas Park', 'Palm Harbor', 'Tarpon Springs', 'Oldsmar', 'Temple Terrace',
+  'Valrico', 'Fort Walton Beach', 'Destin', 'Navarre', 'Crestview',
+  'Panama City Beach', 'Lake City', 'Palatka', 'Fernandina Beach',
+  'Jacksonville Beach', 'Ponte Vedra', 'The Villages', 'Leesburg', 'Mount Dora',
+  'Inverness', 'Crystal River', 'Homosassa', 'Dade City', 'Wauchula',
+  'Avon Park', 'Okeechobee', 'Clewiston', 'Belle Glade', 'Jensen Beach',
+  'Hobe Sound', 'Key West', 'Key Largo', 'Islamorada', 'Everglades City',
+  'Fort Myers Beach', 'North Fort Myers', 'Ave Maria',
+  'Hillsborough County', 'Pasco County', 'Hernando County', 'Citrus County',
+  'Marion County', 'Volusia County', 'Brevard County', 'Seminole County',
+  'Osceola County', 'Orange County', 'Palm Beach County', 'Martin County',
+  'St. Lucie County', 'Indian River County', 'Duval County', 'Leon County',
+  'Escambia County', 'Okaloosa County', 'Alachua County', 'Highlands County',
+  'Hardee County', 'Glades County', 'Monroe County', 'Sumter County',
+  // Major out-of-state metros.
+  'Atlanta', 'Houston', 'Dallas', 'Austin', 'San Antonio', 'Phoenix', 'Tucson',
+  'Las Vegas', 'Los Angeles', 'San Diego', 'San Francisco', 'Sacramento',
+  'Seattle', 'Denver', 'Chicago', 'Detroit', 'Minneapolis', 'St. Louis',
+  'Kansas City', 'Nashville', 'Memphis', 'Raleigh', 'Charleston', 'Savannah',
+  'Birmingham', 'New Orleans', 'Baton Rouge', 'Louisville', 'Cincinnati',
+  'Cleveland', 'Pittsburgh', 'Philadelphia', 'New York', 'Boston', 'Baltimore',
+  'Richmond', 'Virginia Beach', 'Indianapolis', 'Milwaukee', 'Oklahoma City',
+  'Tulsa', 'Albuquerque', 'Salt Lake City', 'Honolulu',
 ]);
 
 function outOfAreaCities() {

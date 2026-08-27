@@ -286,3 +286,18 @@ describe('frontmatter is read by the canonical YAML parser', () => {
     expect(f.headings).toEqual([]);
   });
 });
+
+describe('out-of-footprint coverage beyond the original 48-name list (hook r4)', () => {
+  test('destination geos, second-tier FL cities, US metros, and other states all classify out_of_area', () => {
+    for (const t of ['pest control in key west', 'termite inspection coral springs', 'pest control atlanta', 'Termite Season in Georgia', 'mosquito control texas', 'lawn care pasco county']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+      expect(gate.geoBlockReason(t, { allowStatewide: true })).toBe(gate.CODES.GEO_OUT_OF_AREA);
+    }
+  });
+  test('served south-Hillsborough towns and person-name places stay clear', () => {
+    expect(gate.classifyGeoScope('pest control ruskin').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('pest control apollo beach').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('ask virginia about your plan').scope).toBe('none');
+    expect(gate.classifyGeoScope('brandon asked about ghost ants').scope).toBe('none');
+  });
+});

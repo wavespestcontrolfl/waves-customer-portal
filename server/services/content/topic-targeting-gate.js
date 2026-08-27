@@ -85,6 +85,10 @@ const CODES = Object.freeze({
 // live in the guardrails blocklist and classify as out_of_area.
 const REGIONAL_RE = /\b(southwest florida|sw florida|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
 const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
+// Any other US state (or territory) named in targeting text is
+// out-of-footprint by construction. "Virginia" and "Washington" are left
+// out — both are common person names (Virginia runs the Waves office).
+const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
 // entity-ownership scan regardless of document frequency.
@@ -134,6 +138,10 @@ function footprintCities() {
   return footprintCache;
 }
 
+// Coverage is the canonical content-guardrails blocklist (curated FL
+// cities/counties + major US metros) plus OUT_OF_STATE_RE. Unlisted small
+// towns are not detectable deterministically without a gazetteer; the
+// blocklist is the single place to grow.
 function outOfAreaCityList() {
   try {
     const { outOfAreaCities } = require('./content-guardrails');
@@ -164,7 +172,7 @@ function findAll(re, text) {
  */
 function classifyGeoScope(text) {
   const t = String(text || '');
-  const out_of_area = findAll(cityRe(outOfAreaCityList()), t);
+  const out_of_area = [...findAll(cityRe(outOfAreaCityList()), t), ...findAll(OUT_OF_STATE_RE, t)];
   const footprint = findAll(cityRe(footprintCities()), t);
   const regional = findAll(REGIONAL_RE, t);
   const statewide = STATEWIDE_RE.test(t);
