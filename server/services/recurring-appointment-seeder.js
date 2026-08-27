@@ -976,14 +976,44 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
   }
 }
 
+// B6 (owner ruling 2026-08-27): property_preferences.preferred_day has no
+// weekend values in its enum — a customer with ANY weekday preference has
+// said "not weekends", so series generators treat that as skip_weekends
+// unless the caller resolved it explicitly. Fail-OPEN: a lookup error
+// keeps the caller's existing behavior — the preference is an
+// enhancement, and an outage must not change scheduling semantics or
+// block seeding.
+const WEEKDAY_PREF_VALUES = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday']);
+async function customerPrefersNoWeekends(conn, customerId) {
+  if (!conn || !customerId) return false;
+  try {
+    const row = await conn('property_preferences').where({ customer_id: customerId }).first('preferred_day');
+    return WEEKDAY_PREF_VALUES.has(String(row?.preferred_day || '').toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
   }
   const columns = opts.columns || await scheduledServiceColumns(conn);
+  // B6: resolve the effective skip_weekends ONCE — explicit caller intent
+  // wins, then the parent flag, then the customer's saved weekday
+  // preference — and pass it explicitly so the parent stamp and the child
+  // rows stay consistent.
+  let skipWeekends;
+  if (opts.skipWeekends !== undefined) {
+    skipWeekends = !!opts.skipWeekends; // explicit caller intent wins outright
+  } else {
+    skipWeekends = !!parent.skip_weekends
+      || await customerPrefersNoWeekends(conn, parent.customer_id);
+  }
   await markParentRecurring(conn, parent, pattern, {
     ...opts,
+    skipWeekends,
     columns,
   });
 
@@ -1003,6 +1033,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
+    skipWeekends,
     existingDates,
     blackoutDates,
   });
@@ -1064,6 +1095,7 @@ module.exports = {
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,
+  customerPrefersNoWeekends,
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,
