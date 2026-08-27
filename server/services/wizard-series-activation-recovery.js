@@ -34,7 +34,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 // draft can match, and none of those exist before this feature family.
 const DEFAULT_OLDER_THAN_MINUTES = 15;
 
-async function findStrandedParents(database, { olderThanMinutes, limit }) {
+async function findStrandedParents(database, { olderThanMinutes, limit, cursor = null }) {
   return database('scheduled_services as ss')
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereNotNull('ss.self_booking_id')
@@ -55,14 +55,21 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // live draft. Disposition below is by status class; nothing drops out
     // of recovery silently.
     .whereNotIn('ss.status', ['cancelled', 'canceled'])
-    // PEST rows leave the predicate IN SQL, before the LIMIT (codex #3504
-    // r17): the pest funnel's duplicate-kept disposition presents this
-    // exact stranded shape BY DESIGN and stays eligible forever, so a
-    // JS-side skip after an oldest-first bounded fetch would pin the
-    // page on the same pest rows and starve every newer stranded
-    // lawn/mosquito/tree/palm activation. The family check in the sweep
-    // loop stays as belt-and-braces for labels this pattern misses.
-    .whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'")
+    // PEST is IN scope from an owner-set EPOCH (owner ruling 2026-08-27,
+    // Option A; codex r2 P1): the pest funnel's deliberate duplicate-kept
+    // one-off stamps wizard_recovery_reconciled_at at kept-time — but only
+    // marker-capable code does, and Railway keeps the previous version
+    // serving while migrations run and new instances roll, so a kept visit
+    // booked by OLD code in that overlap is unmarked and would read as
+    // stranded. GATE_PEST_STRANDED_RECOVERY carries an ISO timestamp the
+    // owner sets AFTER the rollout completes; pest parents created before
+    // it (or with the gate unset) stay excluded exactly as before. Other
+    // families are unaffected by the gate.
+    .where((qb) => {
+      qb.whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'");
+      const epoch = pestRecoveryEpoch();
+      if (epoch) qb.orWhere('ss.created_at', '>=', epoch);
+    })
     // The stranded claim is PARENT-scoped (codex #3504 r21): the wizard
     // draft row is shared and reusable, so its archive state belongs to
     // whichever booking last consumed it — a customer who re-runs the
@@ -82,9 +89,16 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
         .whereRaw('c.recurring_parent_id = ss.id')
         .whereNot('c.status', 'cancelled');
     })
+    // Keyset cursor (codex r3 P1): rows the sweep loop must skip (pre-epoch
+    // pest-family labels the SQL regex cannot classify — serviceKeyFor is
+    // order-dependent) would otherwise pin the oldest-first page forever.
+    .modify((qb) => {
+      if (cursor) qb.whereRaw('(ss.created_at, ss.id) > (?, ?)', [cursor.created_at, cursor.id]);
+    })
     .orderBy('ss.created_at', 'asc')
+    .orderBy('ss.id', 'asc')
     .limit(limit)
-    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status');
+    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status', 'ss.created_at');
 }
 
 // Terminal states, classified by what they mean for the MONEY (codex
@@ -107,6 +121,13 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
 //    original, so the office must NOT re-bill the application inside that
 //    window — the price stays for the record, the handoff retires (work
 //    was performed), and the bell parks the billing decision on a human.
+// ISO timestamp (or null) from GATE_PEST_STRANDED_RECOVERY — see the
+// findStrandedParents predicate. Read through the canonical feature-gate
+// registry (config/feature-gates gateEnvTimestamp: call-time, fail-closed).
+function pestRecoveryEpoch() {
+  return require('../config/feature-gates').gateEnvTimestamp('GATE_PEST_STRANDED_RECOVERY');
+}
+
 const COMPLETED_STATES = new Set(['completed']);
 const UNBILLED_TERMINAL_STATES = new Set(['skipped', 'no_show']);
 // Collected nothing and nothing can restore them (a canceled PaymentIntent
@@ -163,18 +184,34 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
     logger.error('[wizard-series-recovery] scheduled_services is missing source_estimate_generation / wizard_recovery_reconciled_at (migration 20260827000001 not applied) — stranded sweep SKIPPED');
     return { examined: 0, stripped: 0, skipped: 'schema' };
   }
-  const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
+  // Page by keyset until `limit` PROCESSABLE rows were handled or the set
+  // is exhausted (codex r3 P1): skipped rows advance the cursor instead of
+  // being re-selected every tick. Deliberately NO page cap (pre-push P1):
+  // the cursor is per-tick, so a cap would re-walk the same skipped pages
+  // every tick and starve newer rows — the skipped set (pre-epoch pest-
+  // family aliases the SQL regex cannot classify) is finite and each page
+  // is a cheap indexed read, so the walk runs to exhaustion like the
+  // follow-through healer's.
   let stripped = 0;
-  for (const parent of stranded) {
-    // The PEST funnel is OUT OF SCOPE (codex #3504 r12): its duplicate-kept
-    // disposition deliberately leaves the newly booked visit billable and
-    // returns before seeding or archiving the draft, so a legitimate kept
-    // pest visit matches this exact stranded shape and would be stripped
-    // as if a worker had died. (A genuinely stranded pest activation is a
-    // pre-existing exposure of that path, not this lane's.) Wizard-series
-    // families strip on kept, so they never present this shape.
+  let examined = 0;
+  let processed = 0;
+  let cursor = null;
+  let exhausted = false;
+  while (processed < limit && !exhausted) {
+    const stranded = await findStrandedParents(database, { olderThanMinutes, limit, cursor });
+    if (!stranded.length) break;
+    if (stranded.length < limit) exhausted = true;
+    for (const parent of stranded) {
+    cursor = parent;
+    if (processed >= limit) break;
+    // Belt-and-braces for the SQL epoch predicate (labels the regex misses).
     const familyKey = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: parent.service_type });
-    if (familyKey === 'pest_control' || /\bpest\b/i.test(String(parent.service_type || ''))) continue;
+    if (familyKey === 'pest_control') {
+      const epoch = pestRecoveryEpoch();
+      if (!epoch || !parent.created_at || new Date(parent.created_at) < epoch) continue;
+    }
+    examined += 1;
+    processed += 1;
     try {
       const didStrip = await database.transaction(async (trx) => {
         // Re-validate the ENTIRE stranded predicate under the comms lock
@@ -190,11 +227,15 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           .where({ id: parent.id })
           .forUpdate()
           .first('id', 'is_recurring', 'payment_method_preference', 'create_invoice_on_complete', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id',
-            ...(hasGenerationColumn ? ['source_estimate_generation'] : []));
+            'source_estimate_generation', 'wizard_recovery_reconciled_at');
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
           || fresh.create_invoice_on_complete !== true
+          // Reconciled (or kept-on-purpose) between discovery and this
+          // lock — e.g. the pest funnel's duplicate-kept stamp landing
+          // after the unlocked read: never strip a marked row.
+          || fresh.wizard_recovery_reconciled_at
           || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
         // A completion whose post-commit side effects (the completion
@@ -261,10 +302,13 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           try {
             const { wizardPlanServiceKey, resolveWizardSeriesPlan, resolveBookingVisitPrice } = require('./booking-pay-at-visit');
             const family = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: fresh.service_type });
-            const planKey = wizardPlanServiceKey(freshDraft, family);
-            const plan = resolveWizardSeriesPlan(freshDraft, planKey);
-            if (!plan) return false;
-            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: plan.visits });
+            // The pest funnel's plan is the fixed quarterly-4 (booking.js
+            // shouldSeedQuarterlyPestFollowUps), not a wizard-resolved
+            // cadence — price it the way the booking did.
+            const planKey = family === 'pest_control' ? 'pest_control' : wizardPlanServiceKey(freshDraft, family);
+            const planVisits = family === 'pest_control' ? 4 : resolveWizardSeriesPlan(freshDraft, planKey)?.visits;
+            if (!(planVisits > 0)) return false;
+            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: planVisits });
             return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
           } catch { return false; }
         })();
@@ -370,8 +414,9 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
     } catch (err) {
       logger.error(`[wizard-series-recovery] strip failed for parent=${parent.id}: ${err.message}`);
     }
+    }
   }
-  return { examined: stranded.length, stripped };
+  return { examined, stripped };
 }
 
 // Post-activation follow-through — tier sync, the tagger/welcome re-run,
@@ -518,4 +563,5 @@ module.exports = {
   runActivationFollowThroughForParent,
   healActivatedFollowThroughs,
   classifyStrandedDisposition,
+  pestRecoveryEpoch,
 };

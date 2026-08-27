@@ -2290,6 +2290,47 @@ async function createSelfBooking(payload = {}) {
     // the zone-engine confirmBooking and this path serialize against each
     // other. Lazy require: the route ↔ service load order must not cycle.
     const { acquireSelfBookingDayCapLock, countActiveSelfBookingsForDay } = require('../services/availability');
+    // Pest-series seeding condition — computed BEFORE the booking
+    // transaction (owner ruling 2026-08-27) so the duplicate-kept
+    // disposition can be decided atomically with the visit's creation.
+    const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
+    const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
+
+    // Public self-booking books only the single requested visit. It does NOT create a
+    // recurring WaveGuard series or activate a plan (owner policy: a WaveGuard plan is
+    // set up explicitly via admin/estimate/payment, not from a public booking — so we
+    // never seed future visits that would have no plan and no per-visit price to bill).
+    // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
+    // independently of WaveGuard plan state.
+    // Bind seeding to the SIGNED service, not just the client label. The
+    // slot_sig HMAC above proved `serviceKey` was the service actually
+    // OFFERED, whereas resolvedServiceType comes from the unsigned
+    // quoted_service_label — so a crafted label of "pest control" on a
+    // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
+    // Both must independently map to pest_control (a legit quarterly pest
+    // booking signs pest and labels pest, so this only tightens the gate).
+    // Composite-aware: a multi-service booking whose SIGNED key includes
+    // pest_control is a pest booking for series purposes — serviceKeyFor's
+    // regex order would otherwise classify "mosquito+pest_control" (or the
+    // joined label) as mosquito and silently drop the quarterly series the
+    // customer just bought (#2957 codex P1). Component check runs on the
+    // signed key ONLY — the label side stays serviceKeyFor so a crafted
+    // label still can't conjure a pest series from a non-pest signature.
+    const signedKeyComponents = String(serviceKey || '').split('+').filter(Boolean);
+    const signedServiceKeyIsPest = signedKeyComponents.includes('pest_control')
+      || RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
+    const resolvedLabelIsPest = signedKeyComponents.length > 1
+      ? String(resolvedServiceType || '').toLowerCase().includes('pest control')
+      : RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
+    const shouldSeedQuarterlyPestFollowUps =
+      !isOneTimeEstimateBooking
+      && requestedRecurringPattern === 'quarterly'
+      && signedServiceKeyIsPest
+      && resolvedLabelIsPest;
+    // Set inside the booking transaction when the customer already has an
+    // active pest series: the new visit is kept as a deliberate one-off,
+    // stamped reconciled at birth, and the post-commit seeding is skipped.
+    let pestDuplicateKeptAtBooking = null;
     let txResult;
     try {
       // Pre-fence fingerprint for the rung-6 revalidation inside the
@@ -2552,7 +2593,27 @@ async function createSelfBooking(payload = {}) {
       }).returning('*');
 
       const hasGenerationColumn = await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation');
+      const hasReconciledColumn = await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at');
+      // Duplicate-kept decided HERE, atomically with the visit (owner
+      // ruling 2026-08-27; pre-push P0): the post-commit seeding used to
+      // be the only place this was decided, so a worker death between the
+      // commit and the seeding left a deliberately kept one-off unmarked
+      // and the (now pest-covering) stranded sweep would strip it. Customer
+      // row FOR UPDATE first (re-lock no-op if already held) keeps the
+      // customer → series-advisory order the converter and activation use.
+      if (shouldSeedQuarterlyPestFollowUps && !callbackVisit && hasReconciledColumn) {
+        await trx('customers').where({ id: custId }).forUpdate().first('id');
+        const compositePestAtBooking = signedKeyComponents.length > 1 && signedKeyComponents.includes('pest_control');
+        const { matches: keptMatches, guardError: keptGuardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
+          customerId: custId,
+          serviceId: null,
+          serviceType: compositePestAtBooking ? 'Pest Control' : resolvedServiceType,
+        });
+        if (keptGuardError) logger.warn(`[booking:confirm] in-booking duplicate-series guard failed (post-commit guard decides): ${keptGuardError.message}`);
+        if (keptMatches.length > 0) pestDuplicateKeptAtBooking = keptMatches[0];
+      }
       const [scheduledRow] = await trx('scheduled_services').insert({
+        ...(pestDuplicateKeptAtBooking ? { wizard_recovery_reconciled_at: trx.fn.now() } : {}),
         ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
           ? { source_estimate_generation: sourceEstimateGeneration }
           : {}),
@@ -2601,6 +2662,11 @@ async function createSelfBooking(payload = {}) {
           create_invoice_on_complete: false,
         } : {}),
       }).returning('*');
+      if (pestDuplicateKeptAtBooking) {
+        await trx('scheduled_services')
+          .where({ id: scheduledRow.id })
+          .update({ notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'") });
+      }
 
       // Mark abandoned-booking recovery intents converted ATOMICALLY with the
       // booking (same transaction), so converted_at is visible the instant the
@@ -3911,41 +3977,7 @@ async function createSelfBooking(payload = {}) {
         .catch((e) => logger.error(`[booking:confirm] appointment automations failed (non-blocking) for ${serviceRow.id}: ${e.message}`));
     }
 
-    const requestedRecurringPattern = RecurringAppointmentSeeder.normalizeRecurringPattern(recurring_pattern);
-    const isOneTimeEstimateBooking = isOneTimeBookingSource(source);
     let followUpRows = [];
-
-    // Public self-booking books only the single requested visit. It does NOT create a
-    // recurring WaveGuard series or activate a plan (owner policy: a WaveGuard plan is
-    // set up explicitly via admin/estimate/payment, not from a public booking — so we
-    // never seed future visits that would have no plan and no per-visit price to bill).
-    // The quarterly-pest follow-up seeder below is the pre-existing exception and runs
-    // independently of WaveGuard plan state.
-    // Bind seeding to the SIGNED service, not just the client label. The
-    // slot_sig HMAC above proved `serviceKey` was the service actually
-    // OFFERED, whereas resolvedServiceType comes from the unsigned
-    // quoted_service_label — so a crafted label of "pest control" on a
-    // signed MOSQUITO slot must not conjure a 4-visit quarterly pest series.
-    // Both must independently map to pest_control (a legit quarterly pest
-    // booking signs pest and labels pest, so this only tightens the gate).
-    // Composite-aware: a multi-service booking whose SIGNED key includes
-    // pest_control is a pest booking for series purposes — serviceKeyFor's
-    // regex order would otherwise classify "mosquito+pest_control" (or the
-    // joined label) as mosquito and silently drop the quarterly series the
-    // customer just bought (#2957 codex P1). Component check runs on the
-    // signed key ONLY — the label side stays serviceKeyFor so a crafted
-    // label still can't conjure a pest series from a non-pest signature.
-    const signedKeyComponents = String(serviceKey || '').split('+').filter(Boolean);
-    const signedServiceKeyIsPest = signedKeyComponents.includes('pest_control')
-      || RecurringAppointmentSeeder.serviceKeyFor({ service_type: serviceKey }) === 'pest_control';
-    const resolvedLabelIsPest = signedKeyComponents.length > 1
-      ? String(resolvedServiceType || '').toLowerCase().includes('pest control')
-      : RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'pest_control';
-    const shouldSeedQuarterlyPestFollowUps =
-      !isOneTimeEstimateBooking
-      && requestedRecurringPattern === 'quarterly'
-      && signedServiceKeyIsPest
-      && resolvedLabelIsPest;
     // Duplicate-series guard: don't seed a SECOND active series of the same
     // service family — the booked visit itself stays (the customer chose it),
     // but the 3 seeded follow-ups are what mint a duplicate quarterly series
@@ -3962,7 +3994,8 @@ async function createSelfBooking(payload = {}) {
     // back (the helper's savepoint absorbs it) — seeding proceeds as before.
     let duplicateSeriesKept = null;
 
-    if (shouldSeedQuarterlyPestFollowUps) {
+    if (pestDuplicateKeptAtBooking) duplicateSeriesKept = pestDuplicateKeptAtBooking;
+    if (shouldSeedQuarterlyPestFollowUps && !pestDuplicateKeptAtBooking) {
       try {
         const outcome = await db.transaction(async (trx) => {
           // Rung 6 FIRST (Codex #3109 r37): admin/manual series creators
@@ -3984,7 +4017,25 @@ async function createSelfBooking(payload = {}) {
             excludeParentId: serviceRow.id,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (seeding proceeds): ${guardError.message}`);
-          if (matches.length > 0) return { kept: matches[0] };
+          if (matches.length > 0) {
+            // Duplicate-kept ON PURPOSE (owner ruling 2026-08-27): the new
+            // visit stays billable as a one-off beside the existing plan.
+            // Stamp the durable reconciled marker so the stranded-
+            // activation sweep — which now covers pest — can tell this
+            // deliberate lone billable visit from a crash between the
+            // booking commit and the seeding (migration 20260827000001;
+            // column-guarded for pre-migration schemas).
+            if (await trx.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at')) {
+              await trx('scheduled_services')
+                .where({ id: serviceRow.id })
+                .update({
+                  wizard_recovery_reconciled_at: trx.fn.now(),
+                  notes: trx.raw("COALESCE(notes, '') || ' — booked beside an existing pest plan; kept as a one-off visit (no second series seeded)'"),
+                  updated_at: trx.fn.now(),
+                });
+            }
+            return { kept: matches[0] };
+          }
           const pestDuration = BOOKING_FUNNEL_SERVICE_DURATIONS.pest_control;
           const pestEndMin = timeToMin(slot_start) + pestDuration;
           const pestWindowEnd = `${String(Math.floor(pestEndMin / 60)).padStart(2, '0')}:${String(pestEndMin % 60).padStart(2, '0')}`;
@@ -4004,6 +4055,13 @@ async function createSelfBooking(payload = {}) {
             // the remainder cents — instead of inheriting the parent's price
             // (which would re-introduce the ±cents/year drift on the series).
             ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
+            // FIXED-length 4-visit plan, never Ongoing (owner ruling
+            // 2026-08-27, Option A): the auto-extend maintenance templated
+            // every renewal visit off the PARENT's remainder-bearing price,
+            // overbilling each renewal cycle by the remainder cents. A fixed
+            // plan files the plan_ending alert and the office renews — the
+            // same shape the non-pest wizard series already use.
+            recurringOngoing: false,
           });
           // WaveGuard setup fee (frozen wizard disclosure): stamped ONLY
           // here, atomically with the series that justifies it — a failed
