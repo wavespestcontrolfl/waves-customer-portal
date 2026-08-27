@@ -289,5 +289,14 @@ describe('service credits span every itemized exclusion section (codex #3521 r1 
     const [credit] = estimate.summary.serviceSpecificDiscounts;
     expect(credit.amount).toBe(200);
     expect(estimate.summary.oneTimeTotal).toBe(380);
+    // Only the row the credit actually zeroed reads as "Included"; a
+    // partially credited row keeps its NET price and an untouched row its
+    // full price (uncapped audit r2 P0 — the flag renders as Included).
+    const rows = estimate.lineItems.filter((li) => li.service === 'rodent_exclusion');
+    expect(rows.map((li) => [li.component, li.priceAfterDiscount ?? li.price, li.serviceSpecificDiscountApplied === true])).toEqual([
+      ['wire_mesh_points', 0, true],
+      ['bird_boxes', 100, false],
+      ['linear_mesh', 280, false],
+    ]);
   });
 });

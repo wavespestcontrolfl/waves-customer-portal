@@ -317,7 +317,11 @@ function applyServiceSpecificCredits(lineItems = [], serviceSpecificDiscounts = 
         row.totalBeforeServiceSpecificDiscount = row.totalBeforeServiceSpecificDiscount ?? (row.totalAfterDiscount ?? row.total ?? 0);
         row.totalAfterDiscount = roundMoney(rowPrice - rowAmount);
       }
-      row.serviceSpecificDiscountApplied = true;
+      // The flag means "this row is INCLUDED" downstream (estimate-public
+      // renders it as Included with no dollars), so it is only true when the
+      // credit actually zeroes the row — a partially credited or untouched
+      // row keeps its (net) price on the page (uncapped audit r2 P0).
+      row.serviceSpecificDiscountApplied = roundMoney(rowPrice - rowAmount) === 0 && rowAmount > 0;
       row.serviceSpecificDiscounts = [
         ...(row.serviceSpecificDiscounts || []),
         {
