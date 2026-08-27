@@ -765,6 +765,30 @@ describe('seo-completion-gate', () => {
     });
     expect(escapedLabelBracket.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // A reference definition that is a LIST ITEM's content still resolves.
+    const listItemDef = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service][cta]\n\n- [cta]: /contact/` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(listItemDef.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A span cannot cross an ATX heading — the heading's live link is judged.
+    const headingBoundary = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n> \`sample\n# [Schedule Service](/contact/) \`` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(headingBoundary.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A fence opening directly as list-item content hides its CTA example.
+    const markerFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n- ~~~\n  [Schedule Service](/contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(markerFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // Lawn specialty terms name the lawn family in CTA anchors.
     // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
     // it satisfies presence and is not forbidden wording.

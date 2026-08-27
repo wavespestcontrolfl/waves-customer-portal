@@ -291,7 +291,7 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   // Lawn specialties (established brief service IDs) — their own terms name
   // the lawn family. Fertilization is lawn wording only when not the
   // tree/shrub/palm treatment ("Deep Root Fertilization").
-  'lawn-fertilization': /\b(?<!tree[ -])(?<!shrub[ -])(?<!palm[ -])(?<!root[ -])fertiliz/i,
+  'lawn-fertilization': /\b(?<!tree[ -])(?<!shrub[ -])(?<!palm[ -])(?<!root[ -])(?<!ornamental[ -])fertiliz/i,
   'lawn-aeration': /\baerat/i,
   'lawn-weed-control': /\bweed/i,
 };
@@ -450,7 +450,9 @@ function extractLinks(body) {
   // Duplicate definitions: CommonMark resolves references against the FIRST
   // definition of a label; later repeats are inert.
   const defs = new Map();
-  const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
+  // A definition may be a LIST ITEM's content ("- [cta]: /contact/") —
+  // CommonMark registers it document-wide after removing the marker.
+  const def = /^\s{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[([^\]]+)\]:\s*(\S+)/gm;
   while ((m = def.exec(s)) !== null) {
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));

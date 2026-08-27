@@ -1850,7 +1850,9 @@ function blankNonRenderedMarkdown(text) {
   // spans RENDER as visible text, so the sentinel keeps them countable as
   // header-cell content while matching no link/table/word pattern.
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
-  const spanned = afterComments.replace(/(?<!(?<!\\)(?:\\\\)*\\)(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
+  // A span also stops at an ATX HEADING line — a heading starts a new
+  // block and can never lazily continue the previous paragraph.
+  const spanned = afterComments.replace(/(?<!(?<!\\)(?:\\\\)*\\)(?<!`)(`+)(?!`)(?:(?!\n[ \t]*\n)(?!\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \t\r\n]|$))[\s\S])*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
@@ -1908,19 +1910,24 @@ function blankNonRenderedMarkdown(text) {
     // NESTED list markers sit up to 3 past the parent's content column
     // ("- outer" + "    - inner") — the content column moves with them.
     const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
-    if (listItem && listItem[1].length <= fenceListIndent + 3) fenceListIndent = listItem[1].length + listItem[2].length;
+    const markerAccepted = Boolean(listItem && listItem[1].length <= fenceListIndent + 3);
+    if (markerAccepted) fenceListIndent = listItem[1].length + listItem[2].length;
     else if (!blank && fencePrevBlank && depth === 0 && indent < fenceListIndent) fenceListIndent = 0;
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
     // the item's content column, so "10. item" + a 4-space fence is a fence
     // (relative indent 0), not indented code. Resolved in pass 4.
-    if (/^\t/.test(stripped) || indent >= fenceListIndent + 4) return l;
-    const open = stripped.match(/^ *(`{3,}|~{3,})(.*)$/);
+    if (/^\t/.test(stripped) || (!markerAccepted && indent >= fenceListIndent + 4)) return l;
+    // A fence may open DIRECTLY as list-item content ("- ~~~") — the
+    // opener is matched on the post-marker text.
+    const markerLen = markerAccepted ? listItem[1].length + listItem[2].length : 0;
+    const openLine = markerLen ? stripped.slice(markerLen) : stripped;
+    const open = openLine.match(/^ *(`{3,}|~{3,})(.*)$/);
     if (open) {
-      const srcStripped = sourceLines[i].slice(prefix ? prefix[0].length : 0);
-      const srcOpen = srcStripped.match(/^ *(`{3,}|~{3,})(.*)$/);
+      const srcTail = sourceLines[i].slice((prefix ? prefix[0].length : 0) + markerLen);
+      const srcOpen = srcTail.match(/^ *(`{3,}|~{3,})(.*)$/);
       if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
-        if (depth === 0 && indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
+        if (!markerAccepted && depth === 0 && indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
         fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth > 0 ? 0 : fenceListIndent };
         return '';
       }

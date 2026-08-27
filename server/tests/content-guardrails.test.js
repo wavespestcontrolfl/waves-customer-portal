@@ -2278,6 +2278,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A table starting AS a list item's content renders with the marker
     // removed — the marker-stripped header is a valid signature.
     expect(guardrails.hasRawMarkdownTable('- | A | B |\n  | - | - |')).toBe(true);
+    // A fence opening DIRECTLY as list-item content ("- ~~~") hides the
+    // item's indented continuation.
+    expect(guardrails.hasRawMarkdownTable('- ~~~\n  | A | B |\n  | - | - |')).toBe(false);
+    // A span never crosses an ATX heading — a heading starts a new block.
+    expect(guardrails.hasRawMarkdownTable('> `sample\n# | A | B | `\n| A | B |\n| - | - |')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
