@@ -6,6 +6,9 @@
  *   last_seen    last scan date the link WAS reported
  *   lost_at      when the monitor flipped the row to status='lost'
  *   lost_reason  page_gone | link_removed | unreachable | (null for legacy rows)
+ *   recovery_queued_at  when the loss was evaluated for the Link Building board
+ *                (queued, or terminally skipped); null = still owed a recovery
+ *                evaluation, which the next scan sweeps up
  *
  * seo_backlink_events is the append-only history the old status flip lacked
  * (lost, recovered, rel_changed, verify_survived) so a link that flaps in and
@@ -18,6 +21,7 @@ exports.up = async function (knex) {
     if (!cols.last_seen) t.date('last_seen');
     if (!cols.lost_at) t.timestamp('lost_at');
     if (!cols.lost_reason) t.string('lost_reason', 32);
+    if (!cols.recovery_queued_at) t.timestamp('recovery_queued_at');
   });
 
   // Legacy rows were flipped without a timestamp; updated_at is the best proxy.
@@ -43,6 +47,6 @@ exports.down = async function (knex) {
   await knex.schema.dropTableIfExists('seo_backlink_events');
   const cols = await knex('seo_backlinks').columnInfo();
   await knex.schema.alterTable('seo_backlinks', (t) => {
-    ['miss_count', 'last_seen', 'lost_at', 'lost_reason'].forEach((c) => { if (cols[c]) t.dropColumn(c); });
+    ['miss_count', 'last_seen', 'lost_at', 'lost_reason', 'recovery_queued_at'].forEach((c) => { if (cols[c]) t.dropColumn(c); });
   });
 };

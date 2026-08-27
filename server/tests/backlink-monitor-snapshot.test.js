@@ -101,8 +101,13 @@ describe('BacklinkMonitor snapshots', () => {
         },
       ]),
     };
+    // Serves the first-miss increment, then the "owed recovery" sweep query
+    // (no rows) and any settle-stamp update.
     const missUpdate = {
       whereIn: jest.fn(() => missUpdate),
+      where: jest.fn(() => missUpdate), whereNull: jest.fn(() => missUpdate),
+      whereRaw: jest.fn(() => missUpdate), whereNotIn: jest.fn(() => missUpdate),
+      select: jest.fn(async () => []), update: jest.fn(async () => 0),
       increment: jest.fn(async () => 1),
     };
     const upsert = {

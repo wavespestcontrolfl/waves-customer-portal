@@ -228,7 +228,8 @@ async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT
       // Injected fetchers (tests, global fetch) don't report `complete`; only an
       // explicit false — or our own size cap — marks the body as partial.
       const truncated = res.complete === false || html.length > 600000;
-      return { status: res.status, html: html.slice(0, 600000), blocked: false, truncated, error: null }; // cap pathological pages
+      const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || null;
+      return { status: res.status, html: html.slice(0, 600000), blocked: false, truncated, contentType, error: null }; // cap pathological pages
     } catch (err) {
       return { status: 0, html: null, blocked: false, truncated: false, error: (err && err.message) || 'fetch_failed' }; // timeout / DNS / TLS / abort
     } finally {

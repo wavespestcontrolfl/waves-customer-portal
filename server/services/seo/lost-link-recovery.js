@@ -32,14 +32,19 @@ function targetPageOf(url) {
  * BacklinkMonitor.domainLevelLosses(). Returns { queued, skipped, reasons[] }.
  */
 async function queueLostDomains(losses, { scorer } = {}) {
-  const out = { queued: 0, skipped: 0, reasons: [] };
+  // results[] carries one terminal verdict per loss so the caller can stamp the
+  // backlink row: 'queued' / 'skipped' are final, 'error' is retried next scan.
+  const out = { queued: 0, skipped: 0, reasons: [], results: [] };
   if (!Array.isArray(losses) || !losses.length) return out;
   const scoreMod = scorer || require('./prospect-scorer');
 
   for (const loss of losses) {
+    const before = { q: out.queued, s: out.skipped };
     try {
       await queueOne(loss, out, scoreMod);
+      out.results.push({ domain: loss && loss.domain, backlink_id: loss && loss.backlink_id, outcome: out.queued > before.q ? 'queued' : 'skipped' });
     } catch (err) {
+      out.results.push({ domain: loss && loss.domain, backlink_id: loss && loss.backlink_id, outcome: 'error' });
       // One bad row must not abort the batch — the rest still queue, and the
       // domain stays lost so the next scan does not retry it (logged instead).
       out.skipped++;

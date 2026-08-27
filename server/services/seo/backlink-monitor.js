@@ -155,6 +155,7 @@ class BacklinkMonitor {
     let lostLinks = [];
     let missed = 0, verifiedLive = 0, unverified = 0;
     let lostDomains = [];
+    let evaluated = []; // every lost row (new + owed) whose recovery was evaluated this scan
 
     if (scanComplete) {
       const missing = [...activeMap.keys()].filter(k => !seenKeys.has(k)).map(k => activeMap.get(k)).filter(Boolean);
@@ -201,7 +202,26 @@ class BacklinkMonitor {
         }
       }
 
-      lostDomains = await this.domainLevelLosses(lostLinks);
+      // Recovery is owed for every verified loss until it has been evaluated —
+      // this scan's new losses PLUS earlier ones whose queueing errored (scorer /
+      // contact / DB hiccup) and were left un-stamped.
+      const owed = await db('seo_backlinks')
+        .where('status', 'lost')
+        .whereNull('recovery_queued_at')
+        .whereIn('lost_reason', ['page_gone', 'link_removed'])
+        .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
+        .whereRaw("lost_at > now() - interval '90 days'")
+        .whereNotIn('id', lostLinks.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000']))
+        .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'severity', 'link_type', 'lost_reason');
+      if (owed.length) logger.info(`Backlink scan: ${owed.length} earlier verified loss(es) still owed a recovery evaluation`);
+      lostDomains = await this.domainLevelLosses(lostLinks.concat(owed));
+      // Rows that cannot lead to a recovery (domain still linking, directory,
+      // low DR, owned…) are evaluated once and stamped; alertable ones are
+      // stamped after queueLostDomains reports a terminal outcome below.
+      evaluated = lostLinks.concat(owed);
+      const alertableDomains = new Set(lostDomains.filter(d => d.alertable).map(d => d.domain));
+      const settled = evaluated.filter(l => !alertableDomains.has(comparableDomain(l.source_domain))).map(l => l.id);
+      if (settled.length) await db('seo_backlinks').whereIn('id', settled).update({ recovery_queued_at: now });
     } else {
       logger.info(`Backlink scan partial (${links.length}/${totalCount}) — loss detection skipped`);
     }
@@ -243,6 +263,13 @@ class BacklinkMonitor {
         const recovery = recoveryFn || require('./lost-link-recovery').queueLostDomains;
         const r = await recovery(alertable);
         recoveryQueued = r?.queued || 0;
+        // Stamp every loss whose domain reached a terminal outcome; 'error'
+        // rows stay unstamped and are swept again next scan.
+        const terminal = new Set((r?.results || []).filter(x => x.outcome !== 'error').map(x => x.domain));
+        // every lost row on a settled domain, not just the representative — else
+        // the sibling rows would be swept and re-evaluated on every scan
+        const ids = evaluated.filter(l => terminal.has(comparableDomain(l.source_domain))).map(l => l.id);
+        if (ids.length) await db('seo_backlinks').whereIn('id', ids).update({ recovery_queued_at: now });
       } catch (err) {
         logger.warn(`Backlink scan: lost-link recovery failed: ${err.message}`);
       }
@@ -279,13 +306,13 @@ class BacklinkMonitor {
     if (res?.found) return { outcome: 'live', isDofollow: res.isDofollow !== false, status: res.status };
     const status = Number(res?.status) || 0;
     // Only definitive answers verify a loss: the page is gone (404/410) or the
-    // page rendered fine without our link (2xx, COMPLETE body). 403/429/5xx,
-    // redirect loops, truncated bodies, DNS/TLS/timeouts and SSRF-blocked hosts
-    // prove nothing — keep counting and call it 'unreachable' only after a
+    // page rendered fine without our link (2xx, COMPLETE HTML body). 403/429/5xx,
+    // redirect loops, truncated bodies, bot-challenge/WAF interstitials, non-HTML
+    // bodies, DNS/TLS/timeouts and SSRF-blocked hosts prove nothing — keep counting and call it 'unreachable' only after a
     // longer patience window.
     if (status === 404 || status === 410) return { outcome: 'lost', reason: 'page_gone', status };
-    if (status >= 200 && status < 300 && !res?.truncated) return { outcome: 'lost', reason: 'link_removed', status };
-    const error = res?.error || (res?.truncated ? 'truncated_body' : status ? `http_${status}` : null);
+    if (status >= 200 && status < 300 && !res?.truncated && !res?.unverifiable) return { outcome: 'lost', reason: 'link_removed', status };
+    const error = res?.error || (res?.unverifiable ? `${res.unverifiable}_page` : res?.truncated ? 'truncated_body' : status ? `http_${status}` : null);
     if ((link.miss_count || 0) + 1 >= UNREACHABLE_THRESHOLD) return { outcome: 'lost', reason: 'unreachable', status: status || null, error };
     return { outcome: 'unverified', status: status || null, error };
   }

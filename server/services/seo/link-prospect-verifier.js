@@ -306,6 +306,18 @@ function matchesExactTargetUrl(candidate, expected) {
   return strip(candidate) === strip(expected);
 }
 
+// A 200 that is not really the page: bot-challenge interstitials (Cloudflare
+// "Just a moment…", Turnstile, hCaptcha/reCAPTCHA walls, WAF blocks) or a
+// non-HTML body. Absence of our link in such a response proves nothing.
+const CHALLENGE_RE = /just a moment|attention required|verify you are human|checking your browser|cf-chl|challenge-platform|turnstile|hcaptcha|g-recaptcha|access denied|request blocked|enable javascript and cookies/i;
+function classifyPageBody(html, contentType) {
+  if (contentType && !/html|xhtml|text\/plain|^\s*$/i.test(String(contentType))) return 'non_html';
+  const head = String(html || '').slice(0, 20000);
+  if (!/<(html|body|a|div|p|title)\b/i.test(head)) return 'non_html';
+  if (CHALLENGE_RE.test(head) && !/wavespestcontrol\.com/i.test(html)) return 'challenge';
+  return 'html';
+}
+
 // Pure: find the first <a> in html pointing at the intended Waves target page.
 // opts.exact → matchesExactTargetUrl instead of the prefix/boundary match.
 function findLinkInHtml(html, targetPage, { exact = false } = {}) {
@@ -342,6 +354,11 @@ async function crawlForLink(liveUrl, targetPage, { fetchPageFn, exact = false } 
   if (!page || !page.html) {
     // An empty 2xx body that was cut short is still a truncated page, not proof of absence.
     return { found: false, status: page ? page.status : 0, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated), error: page ? page.error : 'fetch_failed' };
+  }
+  const kind = classifyPageBody(page.html, page.contentType);
+  if (kind !== 'html') {
+    // Unparseable or interstitial response: report it as such, never as "not found on the page".
+    return { found: false, status: page.status, blocked: false, truncated: !!page.truncated, unverifiable: kind, error: null };
   }
   return { ...findLinkInHtml(page.html, targetPage, { exact }), status: page.status, blocked: false, truncated: !!page.truncated, error: null };
 }
@@ -466,7 +483,7 @@ async function run({ limit = 200 } = {}) {
   return { checked: prospects.length, live, lost, pending };
 }
 
-module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
   comparableDomain, parseQuality, expectedTargetUrl,
