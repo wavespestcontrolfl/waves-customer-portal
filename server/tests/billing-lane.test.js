@@ -528,3 +528,32 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
     })).resolves.toEqual({ ok: false, reason: 'anchor_exceeded' });
   });
 });
+
+describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () => {
+  const { attachedInvoiceAutoChargeLikely } = require('../services/billing-lane');
+  const base = {
+    invoice: { subtotal: 90.55, total: 96.98, discount_amount: 0 },
+    autopayActive: true,
+    duesCollectedThisMonth: false,
+    estimatedPrice: 90.55,
+    isRecurring: false,
+    isCallback: false,
+    serviceType: 'Quarterly Pest Control Service',
+    waveguardTier: 'Silver',
+    monthlyRate: 33.33,
+    billingMode: 'monthly_membership',
+  };
+  test('a priced one-off member invoice at the visit price is likely', () => {
+    expect(attachedInvoiceAutoChargeLikely(base)).toBe(true);
+  });
+  test('no-cost visits, dues coverage, missing anchor, and over-cap all demote', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, isCallback: true })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, serviceType: 'Pest Control Re-Service' })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, isRecurring: true, estimatedPrice: null, invoice: { subtotal: 33.33, total: 33.33 } })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_visit', estimatedPrice: null })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, invoice: { subtotal: 150, total: 160, discount_amount: 0 } })).toBe(false);
+  });
+  test('per-application attached invoices stay a charge promise (their own rail collects)', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);
+  });
+});

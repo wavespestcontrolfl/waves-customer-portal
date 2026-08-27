@@ -393,6 +393,57 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   return { ok: true, anchor };
 }
 
+// Sync approximation of verifyExtendedCompletionAnchor for the schedule
+// sheet's ATTACHED-invoice prediction (pre-push P1): the sheet must not
+// promise an auto_charge the completion guard will deterministically
+// refuse — dues coverage, a missing anchor, an over-cap subtotal, or a
+// no-cost visit. Conservative by construction: an unknown subtotal falls
+// back to the tax-inclusive total, which can only DEMOTE a promise to
+// 'invoice', never over-promise a charge. Per-application invoices answer
+// true — that lane's own rail charges its attached invoices.
+function attachedInvoiceAutoChargeLikely({
+  invoice,
+  autopayActive,
+  duesCollectedThisMonth = false,
+  estimatedPrice,
+  isRecurring,
+  isCallback,
+  serviceType,
+  waveguardTier,
+  monthlyRate,
+  billingMode,
+}) {
+  if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
+  if (billingMode === 'per_application') return true;
+  const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
+  if (membershipDuesCoverVisit({
+    visitIsPayerBilled: false,
+    perApplicationBilling: false,
+    annualPrepayBilling: billingMode === 'annual_prepay',
+    customerAutopayActive: autopayActive,
+    duesCollectedThisMonth,
+    hasVisitPrice,
+    isRecurring,
+    waveguardTier,
+    monthlyRate,
+    billingMode,
+  })) return false;
+  const anchor = hasVisitPrice
+    ? Number(estimatedPrice)
+    : Number(completionInvoiceAmount({
+      estimatedPrice: null,
+      isCallback: !!isCallback,
+      perApplicationBilling: false,
+      perApplicationFee: null,
+      monthlyRate,
+      billingMode,
+    })) || 0;
+  if (!(anchor > 0)) return false;
+  const sub = invoice?.subtotal != null ? Number(invoice.subtotal) : Number(invoice?.total || 0);
+  const net = sub - Math.max(0, Number(invoice?.discount_amount) || 0);
+  return net <= anchor + 0.005;
+}
+
 // Has THIS ET month's membership dues payment been collected (paid or
 // processing)? Mirrors the monthly cron's already-charged check: the
 // metadata.billed_month stamp is authoritative (month-of-obligation
@@ -428,4 +479,5 @@ module.exports = {
   predictCompletionBilling,
   monthlyDuesCollected,
   verifyExtendedCompletionAnchor,
+  attachedInvoiceAutoChargeLikely,
 };
