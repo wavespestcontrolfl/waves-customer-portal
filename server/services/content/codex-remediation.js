@@ -1847,6 +1847,19 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
   // blog_posts.content still pre-fix, and a later republish resurrects it.
   // SYNC_PENDING_PUSH_IN_FLIGHT is a non-SHA sentinel; the bar blocks on ANY
   // non-empty value, so the hold is live from here on.
+  // Last-instant parent recheck (PR r17 P1): the LLM + gate passes above
+  // take real time, and a foreign push touching ANOTHER file advances the
+  // branch without invalidating the target file's blob SHA — the Contents
+  // API would then create this fix on the foreign tip and onRemediated
+  // would pin it. Re-read the live branch head right before the hold/push;
+  // an unreadable or moved head skips (fail closed).
+  if (expectedParentSha) {
+    let liveHead = null;
+    try { liveHead = await gh.getBranchSha(branch); } catch (_) { liveHead = null; }
+    if (String(liveHead || '').toLowerCase() !== String(expectedParentSha).toLowerCase()) {
+      return { skipped: true, reason: 'branch advanced off the pinned parent during remediation — foreign parent needs a human decision' };
+    }
+  }
   const armed = await armPushHold(db, prNumber, branch, headSha);
   if (!armed) return { skipped: true, reason: 'pr left the open state during remediation (terminal row)' };
 

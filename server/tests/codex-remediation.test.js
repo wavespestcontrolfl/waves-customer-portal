@@ -149,7 +149,10 @@ function makeGh(over = {}) {
     async listPrReviews() { return over.reviews || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
     async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa' } }; },
-    async getBranchSha() { return 'newcommit999aaa'; },
+    // Post-push flows read the pushed commit; tests on the PINNED lanes
+    // pass over.preHead so the r17 pre-push parent recheck sees the pinned
+    // parent before the push.
+    async getBranchSha() { return calls.putFile.length ? 'newcommit999aaa' : (over.preHead || 'newcommit999aaa'); },
     async createIssueComment(n, body) { calls.comments.push({ n, body }); if (over.commentThrows) throw new Error('gh 502'); return {}; },
   };
   Object.assign(gh, over.gh || {});
@@ -510,7 +513,7 @@ describe('lane entry points', () => {
     // onRemediated re-pins draft_payload.autopublish_head_sha (r12) — the
     // run row must exist for the post-push stamp.
     const db = makeDb({ autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }] });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     const run = { id: 'run-1', action_type: 'new_supporting_blog' };
     // getPr returns the same open PR
@@ -701,7 +704,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
           // Eligibility reads the brief row's RAW persisted marker (r13).
           content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { bucket: 'operator_intercept', intercept } }],
         });
-        const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+        const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
         const pr = { number: 7, state: 'open', head: { sha: HEAD_SHA, ref: 'content/autonomous-x' } };
         gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
         const call = maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
@@ -759,7 +762,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'pest' }],
         content_briefs: [{ id: 'brief-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
       });
-      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
@@ -1003,7 +1006,7 @@ describe('round-11 hardening (Codex findings on 145dcee5)', () => {
 
   test('autonomous lane passes deps.prePushCheck through to the push guard', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     let checked = false;
@@ -1155,7 +1158,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
         autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
-      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
@@ -1183,7 +1186,7 @@ describe('operator-FAQ exception (intercept posts on FAQ-blocked services)', () 
         autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
         opportunity_queue: [{ id: 'opp-1', bucket: 'operator_intercept', service: 'termite' }],
       });
-      const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
+      const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/termite/x.mdx' })] });
       const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
       gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
       let optsSeen = null;
@@ -1634,7 +1637,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     const db = makeDb({
       autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678', type: 'draft', frontmatter: { canonical: 'https://x/a/', meta_description: 'Truncated ending with and' } }) }],
     });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
@@ -1654,7 +1657,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     const db = makeDb({
       autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: 'not json {' }],
     });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx', body: 'Complete the truncated meta description' })], fileContent: orig });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
@@ -1702,6 +1705,26 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(gh._calls.putFile).toHaveLength(0);
   });
 
+  test('a BRANCH tip that advances during the LLM/gate passes is caught right before the push (PR r17 P1)', async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => pr;
+    // The refetched PR still shows the pinned head, but by push time the
+    // live branch has a foreign tip.
+    gh.getBranchSha = async () => 'foreigntip42';
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.skipped).toBe(true);
+    expect(r.reason).toMatch(/advanced off the pinned parent/);
+    expect(gh._calls.putFile).toHaveLength(0);
+  });
+
   test('a competitor-REMOVING fix keeps the bypass marker STICKY — the persisted verdict stays flagged (PR r15 P1)', async () => {
     process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
     const db = makeDb({
@@ -1711,7 +1734,7 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
         draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }),
       }],
     });
-    const gh = makeGh({ reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const gh = makeGh({ preHead: 'abc1234def5678', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
     const pr = { number: 7, state: 'open', head: { sha: HEAD, ref: 'content/autonomous-x' } };
     gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
     const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
