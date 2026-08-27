@@ -906,6 +906,16 @@ async function maybeAutoMerge(run, pr) {
     // binds; a bound-looking file whose slug routes elsewhere would merge
     // unrelated content under the brief's authorization).
     let boundExpectedPath = null;
+    // Publisher-owned targeting fields the head must still carry: for a
+    // new-blog run, the STAMPED draft's canonical/domains/tracking (PR r7
+    // P1: a head that keeps the slug but redirects canonical or fans
+    // domains out to an unauthorized site must withhold); for a refresh,
+    // the LIVE target's own frozen frontmatter fetched from main.
+    let boundTargetingWant = null;
+    let boundTargetingKeys = [];
+    // Strict mode (refresh): every key compares, absent-vs-present is drift.
+    // Non-strict (new blog): keys the stamped draft omits are skipped.
+    let boundTargetingStrict = false;
     if (run.action_type === 'new_supporting_blog') {
       let boundOk = false;
       try {
@@ -948,6 +958,10 @@ async function maybeAutoMerge(run, pr) {
             const trimmed = expectedPath.replace(/^\/+|\/+$/g, '');
             if (trimmed) allowedAssetPrefixes.push(`public/images/blog/${trimmed}/`);
             if (leaf) allowedAssetPrefixes.push(`public/images/blog/${leaf}/`);
+            // Targeting fields present on the stamped draft must survive on
+            // the head verbatim.
+            boundTargetingWant = (dp && dp.frontmatter) || null;
+            boundTargetingKeys = ['canonical', 'domains', 'tracking'];
           }
         }
       } catch (_) { boundOk = false; }
@@ -990,6 +1004,20 @@ async function maybeAutoMerge(run, pr) {
             const targetPath = new URL(String(target), 'https://www.wavespestcontrol.com')
               .pathname.replace(/^\/+|\/+$/g, '');
             if (targetPath) allowedAssetPrefixes.push(`public/images/blog/${targetPath}/`);
+            // publishRefresh FREEZES the target's identity — the head's
+            // slug/canonical/domains/tracking must equal the LIVE target's
+            // own frontmatter on main (PR r7 P1: a head keeping the
+            // filename but rewriting these would retarget/fan out the
+            // page). Unreadable base fails closed.
+            const fmMod = require('../content-astro/frontmatter');
+            const baseFile = await gh.getFile(expected);
+            if (!baseFile || typeof baseFile.content !== 'string' || !baseFile.content.trim()) {
+              boundOk = false;
+            } else {
+              boundTargetingWant = (fmMod.parse(baseFile.content) || {}).data || {};
+              boundTargetingKeys = ['slug', 'canonical', 'domains', 'tracking'];
+              boundTargetingStrict = true;
+            }
           }
         }
       } catch (_) { boundOk = false; }
@@ -1050,6 +1078,20 @@ async function maybeAutoMerge(run, pr) {
           const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
           if (!rawSlug.trim() || slugPath !== boundExpectedPath) { comparisonBlocked = true; break; }
         }
+        // Publisher-owned targeting drift (PR r7 P1): the head's
+        // canonical/domains/tracking (and, for a refresh, its slug) must
+        // still equal what the run/live target authorized — a slug-stable
+        // head that redirects canonical or fans domains out withholds.
+        if (boundTargetingWant) {
+          let drift = false;
+          for (const k of boundTargetingKeys) {
+            if (!boundTargetingStrict && boundTargetingWant[k] === undefined) continue;
+            const want = JSON.stringify(boundTargetingWant[k] ?? null);
+            const got = JSON.stringify((parsed && parsed.data ? parsed.data[k] : undefined) ?? null);
+            if (want !== got) { drift = true; break; }
+          }
+          if (drift) { comparisonBlocked = true; break; }
+        }
         const verdict = comparisonMod.evaluate(
           { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
           { namedCompetitorEnabled: namedEnabled, operatorBriefText: opText },
@@ -1078,10 +1120,20 @@ async function maybeAutoMerge(run, pr) {
     // parked at astro_pr_pending_merge precisely for this poller to merge —
     // that approval IS the sign-off, independent of the scoped autopublish
     // eligibility (PR review P1: non-intercept approvals must keep working).
-    // Fresh read; a failed read just falls through to the scoped check.
+    // The approval binds to the HEAD the operator approved (PR r7 P1): the
+    // approve path stamps draft_payload.trust_build_approved_head_sha from
+    // the PR it opened, and a later push (even comparison-gate-clean copy)
+    // invalidates it — missing or mismatched SHA falls through to the
+    // scoped check. Fresh read; a failed read also falls through.
     try {
-      const freshRun = await db('autonomous_runs').where('id', run.id).first('trust_build_approved_at');
-      if (freshRun && freshRun.trust_build_approved_at) eligible = true;
+      const freshRun = await db('autonomous_runs').where('id', run.id).first('trust_build_approved_at', 'draft_payload');
+      if (freshRun && freshRun.trust_build_approved_at) {
+        let dp = freshRun.draft_payload;
+        if (typeof dp === 'string') { try { dp = JSON.parse(dp); } catch (_) { dp = null; } }
+        const approvedSha = String(dp?.trust_build_approved_head_sha || '').toLowerCase();
+        const headSha = String(pr.head?.sha || '').toLowerCase();
+        if (approvedSha && headSha && approvedSha === headSha) eligible = true;
+      }
     } catch (_) { /* fall through */ }
     if (!eligible) {
       try {

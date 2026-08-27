@@ -2902,6 +2902,24 @@ class AutonomousRunner {
     }
 
     const published = !!patch.published_url;
+    // Bind the approval to the exact HEAD it produced (PR #3508 r7 P1): the
+    // poller's merge gate honors trust_build_approved_at ONLY when the PR
+    // head still equals this stamped SHA — a later push (even
+    // comparison-gate-clean copy) needs a fresh sign-off. A failed SHA read
+    // leaves the stamp absent, which fails CLOSED at the poller (the PR
+    // waits for a human merge instead of auto-merging).
+    if (!published && patch.astro_pr_url && draft) {
+      try {
+        const prNum = Number((String(patch.astro_pr_url).match(/\/pull\/(\d+)/) || [])[1]);
+        if (prNum) {
+          const gh = require('../content-astro/github-client');
+          const prInfo = await gh.getPr(prNum);
+          if (prInfo?.head?.sha) draft.trust_build_approved_head_sha = prInfo.head.sha;
+        }
+      } catch (err) {
+        logger.warn(`[autonomous-runner] approved-head SHA read failed for run ${run.id}: ${err.message} — auto-merge will wait for a human`);
+      }
+    }
     // _publishAndDistribute mutates draft.frontmatter with the published
     // canonical/domains; persist the mutated draft so the PR poller can resolve
     // the merge target from draft_payload.frontmatter.canonical (A5). Stamp

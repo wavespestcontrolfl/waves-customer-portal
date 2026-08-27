@@ -211,7 +211,7 @@ beforeEach(() => {
   // (which runs the REAL comparison gate against these contents) passes for
   // the unrelated merge tests.
   gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/blog/test-post.mdx', status: 'added' }]);
-  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
 });
 
 afterEach(() => {
@@ -735,12 +735,18 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
-  test('a HUMAN-APPROVED named-competitor run (trust_build_approved_at) still auto-merges without autopublish eligibility (PR r1 P1)', async () => {
+  test('a HUMAN-APPROVED named-competitor run auto-merges ONLY while the head equals the approved SHA (PR r1 + r7 P1s)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const gate = require('../services/content/comparison-table-gate');
     jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
     try {
-      setupDb({ pending: [makeRun()], runFirst: { trust_build_approved_at: '2026-08-26T12:00:00Z' } });
+      setupDb({
+        pending: [makeRun()],
+        runFirst: {
+          trust_build_approved_at: '2026-08-26T12:00:00Z',
+          draft_payload: JSON.stringify({ trust_build_approved_head_sha: 'HEADSHA1' }),
+        },
+      });
       greenMergePath();
       gh.mergePr.mockResolvedValue({ merged: true });
       indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
@@ -753,6 +759,53 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     } finally { gate.evaluate.mockRestore(); }
   });
 
+  test('an approval for an EARLIER head does not cover a new push — withheld (PR r7 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    try {
+      setupDb({
+        pending: [makeRun()],
+        runFirst: {
+          trust_build_approved_at: '2026-08-26T12:00:00Z',
+          draft_payload: JSON.stringify({ trust_build_approved_head_sha: 'oldapprovedsha' }),
+        },
+      });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { gate.evaluate.mockRestore(); }
+  });
+
+  test('publisher-owned targeting drift on a bound head (canonical changed, slug intact) is withheld (PR r7 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://spoke-site.example/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a refresh head that rewrites the frozen target slug/canonical is withheld (PR r7 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    // Base (main) copy vs head copy differ on a frozen field.
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Pest Control Venice FL\ncanonical: https://elsewhere.example/x/\n---\n\nRewritten head.' }
+      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nLive base copy.' }));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('a LEGACY FLAT blog file at the canonical leaf passes the path binding when its slug routes to the canonical (PR r1 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
@@ -760,7 +813,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     // CANONICAL routes to /blog/test-post/ — the flat legacy file keeps the
     // leaf at the blog root and routes by frontmatter slug, which must match.
     gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -807,7 +860,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
       { filename: 'src/content/blog/blog/test-post.md', status: 'removed' },
     ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -841,7 +894,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     gh.listPrFiles.mockResolvedValue([
       { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/blog/test-post.md' },
     ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -891,7 +944,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
       // The publisher keys the hero dir by the post's route slug.
       { filename: 'public/images/blog/blog/test-post/hero.webp', status: 'added' },
     ]);
-    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\ncanonical: https://www.wavespestcontrol.com/blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
