@@ -86,21 +86,23 @@ describe('customerPrefersNoWeekends', () => {
 });
 
 describe('seedFollowUpsForParent honors the saved weekday preference', () => {
-  test('pref set + parent flag false → children skip weekends and are stamped skip_weekends', async () => {
+  test('pref set + parent flag false → children DATES skip weekends; rows stamped with operator intent only', async () => {
     const { conn, inserted, parentUpdates } = makeConn({ prefRow: { preferred_day: 'tuesday' } });
     const res = await seedFollowUpsForParent(conn, PARENT, { pattern: 'quarterly', plannedCount: 4 });
     expect(res.insertedCount).toBe(3);
     expect(inserted.map((r) => r.scheduled_date)).toEqual(['2026-09-07', '2026-12-07', '2027-03-08']);
     for (const row of inserted) {
-      expect(row.skip_weekends).toBe(true);
+      // The preference is consulted LIVE by every consumer, never
+      // persisted — the stamped flag stays the caller/operator value so
+      // removing the preference restores weekend eligibility.
+      expect(row.skip_weekends).toBe(false);
       expect(new Date(`${row.scheduled_date}T12:00:00Z`).getUTCDay()).not.toBe(0);
       expect(new Date(`${row.scheduled_date}T12:00:00Z`).getUTCDay()).not.toBe(6);
     }
-    // Parent stamped too, so later extends/reschedules inherit the decision.
-    expect(parentUpdates[0]).toEqual(expect.objectContaining({ skip_weekends: true }));
+    expect(parentUpdates[0]).toEqual(expect.objectContaining({ skip_weekends: false }));
   });
 
-  test('no preference → existing behavior unchanged (weekend dates allowed)', async () => {
+  test('preference removed (no_preference) → weekends immediately eligible again (nothing was persisted)', async () => {
     const { conn, inserted, parentUpdates } = makeConn({ prefRow: { preferred_day: 'no_preference' } });
     await seedFollowUpsForParent(conn, PARENT, { pattern: 'quarterly', plannedCount: 4 });
     expect(inserted.map((r) => r.scheduled_date)).toEqual(['2026-09-05', '2026-12-05', '2027-03-06']);
@@ -115,24 +117,36 @@ describe('seedFollowUpsForParent honors the saved weekday preference', () => {
   });
 });
 
-describe('every admin-schedule generator consults the preference (source pins)', () => {
+describe('every consumer consults the preference LIVE (source pins)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
-  test('all seven consult sites present', () => {
+  test('all seven admin-schedule consult sites present', () => {
     // import + create route + plan helper + cadence-rewrite + spawn +
     // reconcile + maintenance + alert action
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
-    // Edited parents persist the EFFECTIVE value (rebooker projects series
-    // moves off the parent flag alone).
-    expect(src).toContain('updates.skip_weekends = effectiveEditSkip;');
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const prefNoWeekends = await customerPrefersNoWeekends(conn, before.customer_id);');
     // Edit paths: the preference ORs over the form's routinely-submitted
     // false — an "explicit" checkbox value must not bypass the ruling.
-    expect(src).toContain('|| rewritePrefNoWeekends;');
-    expect(src).toContain('|| spawnPrefNoWeekends;');
     expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;');
     expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;');
-    expect((src.match(/\|\| await customerPrefersNoWeekends\(trx, parent\.customer_id\)/g) || []).length).toBe(2);
+    expect((src.match(/\|\| await customerPrefersNoWeekends\(trx, parent\.customer_id\)/g) || []).length).toBe(3);
     expect(src).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id)');
+  });
+  test('stamped flags carry operator intent only — no path persists the preference', () => {
+    // Stamps write the raw/Stamp variants, never the preference-ORed value.
+    expect(src).toContain('insertData.skip_weekends = !!skipWeekends;');
+    expect(src).toContain('childData.skip_weekends = !!skipWeekends;');
+    expect(src).toContain('boosterData.skip_weekends = !!skipWeekends;');
+    expect(src).toContain('childUpdates.skip_weekends = skipChildStamp;');
+    expect(src).toContain('childData.skip_weekends = skipChildStamp;');
+    expect(src).toContain('data.skip_weekends = skipParentStamp;');
+    expect(src).toContain('nextData.skip_weekends = skipParentStamp;');
+    expect(src).not.toContain('skip_weekends = skipWeekendsEffective');
+  });
+  test('rebooker projects seasonal siblings with the live preference', () => {
+    const rebookerSrc = fs.readFileSync(path.join(__dirname, '../services/rebooker.js'), 'utf8');
+    expect(rebookerSrc).toContain('const seriesSkipWeekends = !!parent.skip_weekends');
+    expect(rebookerSrc).toContain('|| await customerPrefersNoWeekends(db, parent.customer_id);');
+    expect(rebookerSrc).toContain('{ skipWeekends: seriesSkipWeekends }');
   });
 });

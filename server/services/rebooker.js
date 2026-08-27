@@ -53,7 +53,7 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('./recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
 
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
@@ -905,10 +905,15 @@ class SmartRebooker {
     // picked anchor date itself is honored as-is; only projected siblings
     // shift. Scoped to seasonal so every other cadence keeps its
     // long-standing unshifted re-anchor behavior.
+    // B6: the projected siblings honor the customer's LIVE weekday
+    // preference alongside the operator-set series flag — the flag alone
+    // is operator provenance; the preference is never persisted onto rows.
+    const seriesSkipWeekends = !!parent.skip_weekends
+      || await customerPrefersNoWeekends(db, parent.customer_id);
     const projectSeriesDate = (raw) => {
       if (pattern !== SEASONAL_FEB_OCT) return raw;
       let out = String(raw).split('T')[0];
-      if (parent.skip_weekends) {
+      if (seriesSkipWeekends) {
         const at = parseETDateTime(`${out}T12:00`);
         const { dayOfWeek } = etParts(at);
         if (dayOfWeek === 0 || dayOfWeek === 6) {
@@ -921,7 +926,7 @@ class SmartRebooker {
       // on 75 straight in-season weekend days — impossible. The || keeps
       // this caller's legacy always-a-date contract if that ever changes
       // (its write sites are not null-safe).
-      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: !!parent.skip_weekends }) || out;
+      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
     };
     const opts = {
       ...(isMonthBasedPattern

@@ -363,6 +363,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
 
   const shiftDir = opts.weekendShift === 'back' || parent.weekend_shift === 'back' ? 'back' : DEFAULT_WEEKEND_SHIFT;
   const skipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  // B6: rows are stamped with caller/operator intent only; skipWeekends
+  // above may additionally carry the customer's live weekday preference
+  // (resolved by seedFollowUpsForParent) and drives just the date walk.
+  const stampSkipWeekends = opts.stampSkipWeekends !== undefined ? !!opts.stampSkipWeekends : skipWeekends;
   const rOpts = recurrenceOrdinalOptions(baseDate, {
     nth: opts.recurringNth ?? parent.recurring_nth,
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
@@ -420,7 +424,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       recurring_ongoing: opts.recurringOngoing !== false,
       customer_confirmed: false,
       confirmed_at: null,
-      skip_weekends: skipWeekends,
+      skip_weekends: stampSkipWeekends,
       weekend_shift: shiftDir,
     };
     if (rOpts.nth != null) row.recurring_nth = rOpts.nth;
@@ -1000,20 +1004,17 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
   }
   const columns = opts.columns || await scheduledServiceColumns(conn);
-  // B6: resolve the effective skip_weekends ONCE — explicit caller intent
-  // wins, then the parent flag, then the customer's saved weekday
-  // preference — and pass it explicitly so the parent stamp and the child
-  // rows stay consistent.
-  let skipWeekends;
-  if (opts.skipWeekends !== undefined) {
-    skipWeekends = !!opts.skipWeekends; // explicit caller intent wins outright
-  } else {
-    skipWeekends = !!parent.skip_weekends
-      || await customerPrefersNoWeekends(conn, parent.customer_id);
-  }
+  // B6: seeded DATES honor the customer's live weekday preference, but
+  // the STAMPED flag (parent + children) carries only caller/operator
+  // intent — the preference is consulted live by every generator and the
+  // rebooker, never persisted, so removing it restores weekend
+  // eligibility without touching series rows.
+  const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  const skipWeekends = stampSkipWeekends
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
   await markParentRecurring(conn, parent, pattern, {
     ...opts,
-    skipWeekends,
+    skipWeekends: stampSkipWeekends,
     columns,
   });
 
@@ -1034,6 +1035,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     ...opts,
     pattern,
     skipWeekends,
+    stampSkipWeekends,
     existingDates,
     blackoutDates,
   });
