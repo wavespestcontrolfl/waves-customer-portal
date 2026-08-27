@@ -757,10 +757,40 @@ describe('one-time rows itemize on the proposal when they account for the stored
       estimate_data: { result: { oneTime: { total: 350, specItems: [
         rows[0],
         { service: 'rodent_sanitation', name: 'Rodent Sanitation', price: 0, quoteRequired: true },
-        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 75, kind: 'included' },
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 0, serviceSpecificDiscountApplied: true },
       ] } } },
     });
     const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
     expect(oneTime.map((l) => l.description)).toEqual(['Rodent Trapping']);
+  });
+});
+
+describe('one-time itemization reads every persisted result shape (codex #3521 r2 P2)', () => {
+  test('agent estimates persist engineResult, not result', () => {
+    const p = normalizeProposal({
+      customer_name: 'A', address: '2 Attic Ln', monthly_total: 0, onetime_total: 650,
+      estimate_data: { engineResult: { oneTime: { total: 650, items: [
+        { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+        { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+      ] } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Exclusion — Wire Mesh Points', 300],
+    ]);
+  });
+
+  test('items and specItems both contribute (mixed one-time estimate)', () => {
+    const p = normalizeProposal({
+      customer_name: 'A', address: '2 Attic Ln', monthly_total: 0, onetime_total: 500,
+      estimate_data: { result: { oneTime: {
+        total: 500,
+        items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 150 }],
+        specItems: [{ service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 }],
+      } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => l.description).sort()).toEqual(['Flea Treatment', 'Rodent Trapping']);
   });
 });

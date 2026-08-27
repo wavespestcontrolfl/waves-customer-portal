@@ -300,3 +300,23 @@ describe('service credits span every itemized exclusion section (codex #3521 r1 
     ]);
   });
 });
+
+describe('exclusion V2 rows reconcile to the price for fractional measurements (codex #3521 r2 P2)', () => {
+  test('20.1 LF of soft mesh: rows sum to result.price to the cent', () => {
+    const result = priceRodentExclusionV2({ meshSoftLF: 20.1, waiveInspection: true });
+    const rowsTotal = Math.round(result.lineItems.reduce((s, li) => s + li.price, 0) * 100) / 100;
+    expect(rowsTotal).toBe(result.price);
+    expect(Number.isInteger(result.price)).toBe(true);
+    const minimum = result.lineItems.find((li) => li.component === 'job_minimum');
+    // 20.1 × $14 = $281.40 of mesh; the job minimum row carries exactly the
+    // remainder up to the (whole-dollar) install price.
+    expect(result.lineItems.find((li) => li.component === 'linear_mesh').price).toBe(281.4);
+    expect(minimum.price).toBe(Math.round((result.price - 281.4) * 100) / 100);
+  });
+
+  test('whole quantities are unchanged', () => {
+    const result = priceRodentExclusionV2({ standardWireMeshPoints: 2, standardBirdBoxes: 1, meshSoftLF: 20 });
+    expect(result.price).toBe(655);
+    expect(result.lineItems.map((li) => li.price)).toEqual([150, 150, 280, 75]);
+  });
+});

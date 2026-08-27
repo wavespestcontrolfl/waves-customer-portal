@@ -8075,8 +8075,18 @@ function priceRodentExclusionV2(options = {}) {
   // identity as the old single row; rows sum EXACTLY to `total`. The word
   // "inspection" is deliberately avoided in names/labels — estimate-public's
   // isInspectionReviewOneTimeItem would classify such a row non-billable.
-  const floorDelta = Math.max(0, installPrice - Math.round(rawInstall));
-  const urgencyDelta = Math.max(0, installWithUrgency - installPrice);
+  // Rows must reconcile to installPrice to the CENT: a fractional measured
+  // quantity (20.1 LF) makes the component subtotals fractional, and a
+  // delta computed against the ROUNDED raw install would leave the rows
+  // summing $0.40 over the price the estimate persists (codex #3521 r2 P2).
+  // Each component is rounded to cents and the minimum delta is taken
+  // against that cent-rounded component sum.
+  const cents = (value) => Math.round(value * 100) / 100;
+  const componentSubtotal = cents(
+    cents(wireMeshPointSubtotal) + cents(birdBoxSubtotal) + cents(linearMeshSubtotal)
+  );
+  const floorDelta = Math.max(0, cents(installPrice - componentSubtotal));
+  const urgencyDelta = Math.max(0, cents(installWithUrgency - installPrice));
   const componentLineItems = [];
   const pushComponent = (component, label, price, componentDetail) => {
     componentLineItems.push({
@@ -8084,7 +8094,7 @@ function priceRodentExclusionV2(options = {}) {
       component,
       name: label,
       label,
-      price,
+      price: cents(price),
       detail: componentDetail,
       pricingVersion: 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX',
     });

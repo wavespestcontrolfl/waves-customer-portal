@@ -18,8 +18,12 @@ const UP_REASON = 'Rodent trapping Standard-only — $350 flat, unlimited callba
 const RETIRED_KEYS = ['unlimited_price', 'upgrade_to_unlimited_price', 'unlimited_floor', 'additional_followup_rate'];
 const STANDARD_ROW_NAME = 'Rodent Trapping (Standard — flat $350, unlimited callbacks)';
 const STANDARD_SERVICE_DESCRIPTION = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
-// Prior catalog copy (set by 20260516000009) — restored on rollback.
-const LEGACY_SERVICE_DESCRIPTION = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup and unlimited trap checks/callbacks during the 14-day active trapping window.';
+// Rollback restores the description the row ACTUALLY carried before up()
+// (captured in the audit row's old_value — an admin edit survives the
+// round trip). This constant is the fallback for a row whose prior copy
+// was not captured: the immediately preceding catalog copy, set by
+// 20260526000009 (two-plan Standard + Unlimited terms).
+const LEGACY_SERVICE_DESCRIPTION = 'Standard rodent trapping includes initial setup plus 2 callbacks/checks. Unlimited Callback trapping covers callbacks for the same active trapping job only.';
 const CHANGELOG_IDENTITY = {
   version_from: 'v4.6',
   version_to: 'v4.6',
@@ -66,15 +70,25 @@ exports.up = async function (knex) {
 
   const newData = { ...data, included_followups: 'unlimited' };
   for (const key of RETIRED_KEYS) delete newData[key];
-  await saveTrappingRow(knex, data, newData, UP_REASON, STANDARD_ROW_NAME);
 
-  // Catalog copy still described the retired active-window terms
-  // (20260516000009) — align it with the Standard-only plan.
+  // Catalog copy still described the two-plan terms (20260526000009) —
+  // align it with the Standard-only plan, remembering what it said so
+  // down() restores the real predecessor rather than a guess.
+  let priorServiceDescription = null;
   if (await knex.schema.hasTable('services')) {
+    const svc = await knex('services').where('service_key', 'rodent_trapping').first('description');
+    if (svc) priorServiceDescription = svc.description ?? null;
     await knex('services')
       .where('service_key', 'rodent_trapping')
       .update({ description: STANDARD_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
   }
+  await saveTrappingRow(
+    knex,
+    { ...data, __service_description: priorServiceDescription },
+    newData,
+    UP_REASON,
+    STANDARD_ROW_NAME
+  );
 
   if (await knex.schema.hasTable('pricing_changelog')) {
     const existing = await knex('pricing_changelog').where(CHANGELOG_IDENTITY).first('id');
@@ -123,9 +137,16 @@ exports.down = async function (knex) {
     );
   }
   if (await knex.schema.hasTable('services')) {
+    const oldValue = typeof ownUp.old_value === 'string' ? JSON.parse(ownUp.old_value) : ownUp.old_value;
+    const captured = oldValue && typeof oldValue.__service_description === 'string'
+      ? oldValue.__service_description
+      : null;
     await knex('services')
       .where('service_key', 'rodent_trapping')
-      .update({ description: LEGACY_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
+      // Value-guarded: only a row still carrying this migration's copy is
+      // restored, so a later admin edit survives the rollback.
+      .where('description', STANDARD_SERVICE_DESCRIPTION)
+      .update({ description: captured ?? LEGACY_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
   }
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();

@@ -561,19 +561,26 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
   // the page never showed. Otherwise the single total line below stands.
   if (!lineItems.some((item) => item.frequency === 'one_time')) {
     const oneTimeTotal = num(estimate.onetime_total);
-    const oneTimeBlock = estimateData?.result?.oneTime;
-    const rawRows = Array.isArray(oneTimeBlock?.specItems) && oneTimeBlock.specItems.length > 0
-      ? oneTimeBlock.specItems
-      : (Array.isArray(oneTimeBlock?.items) ? oneTimeBlock.items : []);
-    const rows = rawRows.filter((row) => row && typeof row === 'object'
-      && row.quoteRequired !== true && row.kind !== 'discount' && row.kind !== 'included'
-      && num(row.amount ?? row.price) > 0);
-    const rowsTotal = Math.round(rows.reduce((sum, row) => sum + num(row.amount ?? row.price), 0) * 100) / 100;
+    // The page's own normalizer: reads result OR engineResult (agent
+    // estimates persist the latter), merges items + specItems + the nested
+    // results bucket, dedupes, and classifies rows — so the PDF prints
+    // exactly the rows the estimate page prints. Lazy require: the route
+    // module requires this service lazily too; loading it at module scope
+    // would create a cycle.
+    let normalizedRows = [];
+    try {
+      const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+      if (typeof normalizeOneTimeBreakdown === 'function') {
+        normalizedRows = normalizeOneTimeBreakdown(estimateData).items || [];
+      }
+    } catch (_) { normalizedRows = []; }
+    const rows = normalizedRows.filter((row) => row && row.kind === 'charge' && num(row.amount) > 0);
+    const rowsTotal = Math.round(rows.reduce((sum, row) => sum + num(row.amount), 0) * 100) / 100;
     if (rows.length > 0 && oneTimeTotal > 0 && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
       for (const row of rows) {
         lineItems.push(normalizeLineItem({
-          description: row.displayName || row.label || row.name || row.service || 'One-time service',
-          unitPrice: num(row.amount ?? row.price),
+          description: row.label || row.service || 'One-time service',
+          unitPrice: num(row.amount),
           frequency: 'one_time',
           taxable: false,
         }));
