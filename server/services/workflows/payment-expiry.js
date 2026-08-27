@@ -198,9 +198,25 @@ class PaymentExpiry {
       )
       .select('pm.id', 'pm.customer_id', 'pm.last_four', 'pm.exp_month', 'pm.exp_year', 'pm.card_brand');
 
+    // Prepay-covered customers are exempt (same helper as the dashboard alert
+    // and the Monday warning job): this window is "this month or next", so
+    // the horizon is the last day of next month — coverage still active then
+    // means no card charge inside the window. Covered customers with a
+    // still-collectible pre-term retry stay in (the retry charges the card).
+    let exemptIds = new Set();
+    try {
+      const { getCardExpiryExemptCustomerIds } = require('../annual-prepay-renewals');
+      const lastOfNextMonth = new Date(Date.UTC(nextYear, nextMonth, 0)).toISOString().slice(0, 10);
+      exemptIds = await getCardExpiryExemptCustomerIds(lastOfNextMonth);
+    } catch (exemptErr) {
+      logger.warn(`Payment expiry: prepay exemption lookup failed, exempting nobody: ${exemptErr.message}`);
+    }
+    let prepayExempt = 0;
+
     let notified = 0;
 
     for (const rawCard of expiringCards) {
+      if (exemptIds.has(String(rawCard.customer_id))) { prepayExempt += 1; continue; }
       // Normalize legacy 2-digit years for EVERY downstream consumer — the
       // email path's expiry-stage math runs new Date(year, ...), where a raw
       // '26' reads as 1926 and the card emails as already expired.
@@ -288,7 +304,7 @@ class PaymentExpiry {
       }
     }
 
-    logger.info(`Payment expiry: ${notified} customers notified, ${expiringCards.length} cards found`);
+    logger.info(`Payment expiry: ${notified} customers notified, ${expiringCards.length} cards found, ${prepayExempt} prepay-covered exempt`);
     return { notified, totalExpiring: expiringCards.length };
   }
 }

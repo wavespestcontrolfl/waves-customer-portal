@@ -3397,6 +3397,48 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
 }
 
 /**
+ * Customer IDs that every CARD-EXPIRY surface (dashboard cards_expiring_7d,
+ * Monday sendCardExpiryWarnings, daily workflows/payment-expiry) must leave
+ * alone: prepay coverage still active at the surface's HORIZON date (no card
+ * charge inside the window — the billing cron suppresses them via the same
+ * covered set) MINUS customers who still owe a collectible pre-term retry.
+ *
+ * The retry sweep (billing-cron retryFailedPayments) checks coverage on the
+ * ORIGINAL obligation date, not today, then charges through the current
+ * method — so a covered customer with a failed pre-term monthly row that is
+ * still retryable (status failed, not superseded, retry_count < 3,
+ * next_retry_at set) WILL be charged inside the window and must keep their
+ * expiry alert/warning. A term ending inside the window is simply not covered
+ * at the horizon and stays flagged (that card is needed to renew).
+ *
+ * Fails toward the warning: any lookup error → empty set (nobody exempt).
+ */
+async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  let covered;
+  try {
+    covered = await getActivelyCoveredCustomerIds(horizon, conn);
+  } catch (err) {
+    logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
+    return new Set();
+  }
+  if (!covered.size) return covered;
+  try {
+    const retrying = await conn('payments')
+      .whereIn('customer_id', [...covered])
+      .where({ status: 'failed' })
+      .whereNull('superseded_by_payment_id')
+      .where('retry_count', '<', 3)
+      .whereNotNull('next_retry_at')
+      .distinct('customer_id');
+    for (const row of retrying || []) covered.delete(String(row.customer_id));
+  } catch (err) {
+    logger.warn(`[annual-prepay] card-expiry exemption: retry lookup failed, exempting nobody: ${err.message}`);
+    return new Set();
+  }
+  return covered;
+}
+
+/**
  * Customer IDs with an annual-prepay commitment whose invoice is still open.
  * These customers have not paid for coverage yet, so they are not "actively
  * covered"; the monthly billing cron still must not charge them while the
@@ -4578,6 +4620,7 @@ module.exports = {
   suspendActiveTermsForDisputedInvoice,
   reconcileCoveredTermsSweep,
   getActivelyCoveredCustomerIds,
+  getCardExpiryExemptCustomerIds,
   getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,
   sendCustomerTermNotice,

@@ -184,22 +184,23 @@ async function computeDashboardAlertsUncached() {
   //    and bound it to a forward window so already-expired cards
   //    (which belong in a different alert) don't pile in either.
   //
-  //    Prepay-covered customers are EXCLUDED: a customer whose annual
-  //    prepay coverage is still active at the end of the window has no
-  //    card charge inside it (the billing cron suppresses them via the same
-  //    getActivelyCoveredCustomerIds set), so their expiring card is not an
-  //    "autopay breaks this week" — it matters at renewal, which the
-  //    renewal notices own. A term ending INSIDE the window is not covered
-  //    at the horizon and stays flagged (the card is needed to renew).
+  //    Prepay-covered customers are EXCLUDED (getCardExpiryExemptCustomerIds,
+  //    shared with the Monday warning job and the daily payment-expiry
+  //    workflow): coverage still active at the end of the window means no
+  //    card charge inside it, so their expiring card is not an "autopay
+  //    breaks this week" — it matters at renewal, which the renewal notices
+  //    own. A term ending INSIDE the window is not covered at the horizon and
+  //    stays flagged; so does a covered customer with a still-collectible
+  //    pre-term retry (the retry charges through the current card).
   try {
     const horizon = etDateString(addETDays(new Date(), 7));
     let coveredIds = [];
     try {
-      const { getActivelyCoveredCustomerIds } = require('./annual-prepay-renewals');
-      coveredIds = [...(await getActivelyCoveredCustomerIds(horizon))];
+      const { getCardExpiryExemptCustomerIds } = require('./annual-prepay-renewals');
+      coveredIds = [...(await getCardExpiryExemptCustomerIds(horizon))];
     } catch (coverErr) {
       // Fail toward the warning: an over-flagged card is noise, not money.
-      logger.warn(`[dashboard-alerts] cards_expiring_7d: prepay coverage lookup failed, not excluding: ${coverErr.message}`);
+      logger.warn(`[dashboard-alerts] cards_expiring_7d: prepay exemption lookup failed, not excluding: ${coverErr.message}`);
     }
     let expiringQuery = db('payment_methods')
       .join('customers', 'customers.id', 'payment_methods.customer_id')

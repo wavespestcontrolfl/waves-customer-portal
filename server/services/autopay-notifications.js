@@ -150,18 +150,20 @@ async function sendCardExpiryWarnings() {
     .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
 
-  // Prepay-covered customers get NO card warning: coverage still active at
-  // the end of the 60-day outlook means no card charge inside it (the
-  // billing cron suppresses them via this same set), so "your card expires,
-  // autopay will fail" would be a false alarm to a customer who paid the
-  // year up front. Coverage ending inside the window is not covered at the
-  // horizon and keeps its warning — that card is needed to renew.
+  // Prepay-covered customers get NO card warning (getCardExpiryExemptCustomerIds,
+  // shared with the dashboard alert and the daily payment-expiry workflow):
+  // coverage still active at the end of the 60-day outlook means no card
+  // charge inside it, so "your card expires, autopay will fail" would be a
+  // false alarm to a customer who paid the year up front. Coverage ending
+  // inside the window is not covered at the horizon and keeps its warning
+  // (that card is needed to renew); so does a covered customer with a
+  // still-collectible pre-term retry.
   let coveredIds = new Set();
   try {
-    const { getActivelyCoveredCustomerIds } = require('./annual-prepay-renewals');
-    coveredIds = await getActivelyCoveredCustomerIds(etDateString(sixty));
+    const { getCardExpiryExemptCustomerIds } = require('./annual-prepay-renewals');
+    coveredIds = await getCardExpiryExemptCustomerIds(etDateString(sixty));
   } catch (coverErr) {
-    logger.warn(`[autopay-notifications] prepay coverage lookup failed, not excluding: ${coverErr.message}`);
+    logger.warn(`[autopay-notifications] prepay exemption lookup failed, not excluding: ${coverErr.message}`);
   }
   let prepayCovered = 0;
 
@@ -287,7 +289,7 @@ async function sendCardExpiryWarnings() {
     }
   }
 
-  logger.info(`[autopay-notifications] Expiry warnings: ${sent} sent, ${skipped} skipped of ${rows.length}`);
+  logger.info(`[autopay-notifications] Expiry warnings: ${sent} sent, ${skipped} skipped of ${rows.length}; ${prepayCovered} prepay-covered customer(s) exempt`);
   return { sent, skipped, total: rows.length };
 }
 
