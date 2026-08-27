@@ -65,20 +65,24 @@ async function seedWikiFiles() {
 }
 
 async function seedTokenCredentials() {
+  // Meta/LinkedIn trackers only. The GBP rows are owned end-to-end by
+  // TokenHealthService (canonical gbp_lwr … gbp_venice keys, OAuth tokens in
+  // system_settings, stale-row pruning) — seeding them here minted rows with
+  // legacy names and unauthenticated auth links.
   const credentials = [
     { platform: 'facebook', credential_type: 'oauth-token', env_var_name: 'FACEBOOK_ACCESS_TOKEN', metadata: { refreshUrl: 'https://developers.facebook.com/tools/explorer/', ttl: '60 days', notes: 'Long-lived page access token. Must regenerate via Graph API Explorer -> Exchange for long-lived -> Get page token from /me/accounts.' } },
     { platform: 'instagram', credential_type: 'oauth-token', env_var_name: 'FACEBOOK_ACCESS_TOKEN', metadata: { notes: 'Uses same Meta token as Facebook. Also requires INSTAGRAM_ACCOUNT_ID and a public image URL for posting.' } },
     { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_ACCESS_TOKEN', metadata: { refreshUrl: 'https://www.linkedin.com/developers/apps', ttl: '60 days (or 365 for some apps)', notes: 'LinkedIn OAuth 2.0 token. Regenerate via LinkedIn Developer Portal -> Auth tab -> Generate token.' } },
-    { platform: 'gbp-lakewood-ranch', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_LWR', metadata: { authUrl: '/api/admin/settings/google/auth?location=lakewood-ranch', requires: ['GBP_CLIENT_ID_LWR', 'GBP_CLIENT_SECRET_LWR'], notes: 'Google OAuth refresh token. Use the auth URL to re-authorize. Must set Client ID and Secret first.' } },
-    { platform: 'gbp-parrish', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_PARRISH', metadata: { authUrl: '/api/admin/settings/google/auth?location=parrish', requires: ['GBP_CLIENT_ID_PARRISH', 'GBP_CLIENT_SECRET_PARRISH'] } },
-    { platform: 'gbp-sarasota', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_SARASOTA', metadata: { authUrl: '/api/admin/settings/google/auth?location=sarasota', requires: ['GBP_CLIENT_ID_SARASOTA', 'GBP_CLIENT_SECRET_SARASOTA'] } },
-    { platform: 'gbp-venice', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_VENICE', metadata: { authUrl: '/api/admin/settings/google/auth?location=venice', requires: ['GBP_CLIENT_ID_VENICE', 'GBP_CLIENT_SECRET_VENICE'] } },
   ];
 
   let created = 0;
   for (const cred of credentials) {
+    // token_credentials is UNIQUE on platform alone, and the credential-health
+    // cron owns these rows with its own credential_type values — match on the
+    // constraint key, or the insert below collides (crashed the 2026-08-27
+    // prod seed run before the core knowledge phase).
     const existing = await db('token_credentials')
-      .where({ platform: cred.platform, credential_type: cred.credential_type }).first();
+      .where({ platform: cred.platform }).first();
     if (existing) {
       console.log(`  skip (exists): ${cred.platform}`);
       continue;

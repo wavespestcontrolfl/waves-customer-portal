@@ -397,29 +397,29 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── GBP (per location) ──
+    // Delegated to TokenHealthService.checkSingle: it exchanges the refresh
+    // token on every check (catching invalid_grant after a revocation), whereas
+    // google-business's cached client can hand back a still-valid access token
+    // and report a revoked grant as healthy. Same canonical gbp_* keys the
+    // scheduled checker maintains; this loop only persists the result.
     try {
-      const gbpService = require('./google-business');
-      const { WAVES_LOCATIONS } = require('../config/locations');
-      const LOC_KEYS = { 'bradenton': 'LWR', 'parrish': 'PARRISH', 'sarasota': 'SARASOTA', 'venice': 'VENICE' };
-
-      for (const loc of WAVES_LOCATIONS) {
-        const envKey = LOC_KEYS[loc.id];
-        const credential = {
-          platform: `gbp-${loc.id}`,
+      const TokenHealthService = require('./token-health');
+      const GBP_PLATFORMS = { gbp_lwr: 'LWR', gbp_parrish: 'PARRISH', gbp_sarasota: 'SARASOTA', gbp_venice: 'VENICE' };
+      for (const [platform, envKey] of Object.entries(GBP_PLATFORMS)) {
+        const res = await TokenHealthService.checkSingle(platform);
+        // TokenHealth vocabulary → this route's contract (healthy / expired /
+        // expiring-soon / error): a missing credential set was always reported
+        // here as status 'error' with the reason, and the KB page has no badge
+        // for 'not_configured'.
+        const notConfigured = res.status === 'not_configured';
+        results.push({
+          platform,
           credential_type: 'refresh-token',
           env_var_name: `GBP_REFRESH_TOKEN_${envKey}`,
-        };
-        const client = gbpService._getClient(loc.id);
-        if (!client) {
-          results.push({ ...credential, status: 'error', error: `Missing GBP_CLIENT_ID_${envKey}, GBP_CLIENT_SECRET_${envKey}, or GBP_REFRESH_TOKEN_${envKey}` });
-          continue;
-        }
-        try {
-          const { token } = await client.getAccessToken();
-          results.push({ ...credential, status: token ? 'healthy' : 'error', error: token ? null : 'No token returned' });
-        } catch (err) {
-          results.push({ ...credential, status: 'expired', error: err.message });
-        }
+          status: notConfigured ? 'error' : res.status,
+          error: res.lastError || (notConfigured ? `Missing GBP OAuth credentials for ${envKey}` : null),
+          expires_at: res.expiresAt || null,
+        });
       }
     } catch (err) {
       logger.warn(`[token-health] GBP check skipped: ${err.message}`);
@@ -464,7 +464,10 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── Alert on failures ──
-    const failures = results.filter(r => r.status === 'expired' || r.status === 'expiring-soon');
+    // 'error' (invalid credentials, provider/API failure, not configured) is a
+    // failure needing attention too — excluding it made an all-error check
+    // report zero failures and send no alert.
+    const failures = results.filter(r => r.status === 'expired' || r.status === 'expiring-soon' || r.status === 'error');
     if (failures.length > 0) {
       const alertMsg = `Token Alert: ${failures.length} credential(s) need attention:\n${failures.map(f => `- ${f.platform}: ${f.status}${f.error ? ' — ' + f.error.substring(0, 100) : ''}`).join('\n')}`;
       logger.warn(`[token-health] ${alertMsg}`);
