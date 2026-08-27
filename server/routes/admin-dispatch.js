@@ -9986,11 +9986,11 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       try {
         const { gateEnvValue } = require('../config/feature-gates');
         if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {
-          const { customerCopyViolations } = require('../services/service-report/technician-report-copy');
+          const { customerCopyViolations, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
           const candidates = await db('visual_service_moments')
             .where({ job_id: svc.id, visibility_status: 'internal_only' })
             .whereNull('deleted_at')
-            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_storage_key');
+            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_storage_key', 'note');
           // Provenance rules (codex P1 r4): never auto-publish moments whose
           // customer copy could derive from the raw technician note — the
           // 'recommendation' tag's template embeds the note verbatim — nor
@@ -10009,7 +10009,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // as a caption-only card (codex inline r7).
             if (!m.media_storage_key) return false;
             const caption = String(m.customer_caption || m.ai_caption || '').trim();
-            return caption && customerCopyViolations(caption).length === 0;
+            if (!caption || customerCopyViolations(caption).length) return false;
+            // The tech's raw note is never published, but it is the best
+            // available signal for what the MEDIA shows: a note that carries
+            // an access code (gate/lockbox/keypad) almost certainly describes
+            // a photo of one — hold that moment internal (uncapped codex P1
+            // r11). Media content itself is not machine-screenable here; the
+            // gate flip is the owner's acceptance of that residual risk.
+            if (containsReportAccessCode(String(m.note || ''))) return false;
+            return true;
           });
           let promoted = 0;
           let promotionError = null;

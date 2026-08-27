@@ -414,13 +414,17 @@ export default function ServiceReportDocument({ data, token }) {
   // application, which is the case that made this filter necessary.
   const isProductApplication = (app) => {
     if ((app.method || 'perimeter_spray') !== 'station_check') return true;
-    // An EXPLICIT station_check is a deliberate device inspection — never
-    // re-classified by product identity (codex P1 r19): checking a station
-    // baited with a registered rodenticide applies nothing. Identity may
-    // only override the INFERRED case (legacy null application_method).
-    // Legacy payloads without the flag (methodInferred undefined) keep the
-    // identity override — their station_check can only have been inferred.
-    if (app.methodInferred === false) return false;
+    // Checking a station baited with a registered rodenticide/termiticide
+    // cartridge applies nothing — bait / station / cartridge / monitor
+    // product FAMILIES are never applications, whatever their EPA number
+    // (codex P1 r19, generalized). Beyond that, product identity decides
+    // regardless of methodInferred: the completion panel DEFAULTS methodless
+    // termite products to station_check and persists it (methodInferred
+    // false), so a freshly recorded Termidor Foam row would otherwise vanish
+    // from the PDF while the advisory says treatment occurred — this
+    // mirrors the server's isNonBaitPesticideProduct (#3516 r11).
+    const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
+    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
     if (epaReg(app)) return true;
     const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
     return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);

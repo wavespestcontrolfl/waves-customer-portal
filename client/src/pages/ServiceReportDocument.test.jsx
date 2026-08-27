@@ -674,6 +674,29 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(container.textContent).not.toContain('Products applied');
   });
 
+  it('keeps a freshly recorded non-bait termiticide under the client-defaulted station_check', () => {
+    // The completion panel defaults methodless termite products to
+    // station_check and persists it (methodInferred false) — identity, not
+    // the flag, decides (#3516 r11).
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '2', amountUnit: 'fl_oz', product: { name: 'Termidor Foam', category: 'termiticide', epa_reg: '' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Termidor Foam');
+  });
+
+  it('never lists a bait cartridge as an application, even EPA-registered', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '1', amountUnit: 'ea', product: { name: 'Trelona ATBS Annual Bait Cartridge', category: 'termite bait', epa_reg: '499-557' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Products applied');
+  });
+
   it('does not list a station check under products applied', () => {
     const data = {
       ...BASE_DATA,
