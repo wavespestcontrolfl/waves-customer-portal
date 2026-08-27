@@ -174,7 +174,7 @@ describe('recommendations are screened at the payload boundary', () => {
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
       structured_notes: JSON.stringify({
-        recommendations: [
+        formRecommendations: [
           'Keep shrubs trimmed back from the exterior walls',
           'The side gate code is 4417 for our next visit',
           'Treated areas are completely safe for pets right away',
@@ -193,11 +193,32 @@ describe('recommendations are screened at the payload boundary', () => {
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
       technician_notes: '[Next] Office: bill the HOA, not the tenant\n[Next] Recheck the garage',
-      structured_notes: JSON.stringify({ recommendations: ['Keep mulch pulled back from the slab'] }),
+      structured_notes: JSON.stringify({
+        // The persisted MERGED list (what completion writes) already folds
+        // the note lines in — it must not drive the customer list.
+        recommendations: ['Keep mulch pulled back from the slab', 'Office: bill the HOA, not the tenant', 'Recheck the garage'],
+        formRecommendations: ['Keep mulch pulled back from the slab'],
+      }),
     }, 'token-recs', knex, { mode: 'live' });
     expect(data.recommendations).toEqual(['Keep mulch pulled back from the slab']);
     // The merged internal list (recap consumers) still carries the note lines.
     expect(data.protocol.recommendations).toEqual(expect.arrayContaining(['Recheck the garage']));
+  });
+
+  test('records without provenance (pre-formRecommendations) render findings recommendations only', async () => {
+    const knex = fixtureKnex({
+      ...EMPTY_TABLES,
+      service_findings: [
+        { id: 'f1', category: 'observation', severity: 'low', title: 'Ant trailing', detail: '', recommendation: 'Pull mulch back from the slab' },
+      ],
+    });
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      structured_notes: JSON.stringify({ recommendations: ['Legacy merged line with unknown provenance'] }),
+    }, 'token-recs', knex, { mode: 'live' });
+    expect(data.recommendations).toEqual(['Pull mulch back from the slab']);
   });
 });
 

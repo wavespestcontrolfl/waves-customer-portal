@@ -5280,6 +5280,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ...(Array.isArray(recommendations) ? recommendations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['next']),
     ]);
+    // Provenance-kept copy of ONLY the form's recommendation field — the
+    // merged list above folds in [Next] technician-note lines, and the
+    // customer report's "What we recommend" section may never render raw
+    // note text (AGENTS.md egress; codex P1 on #3516). Persisted beside
+    // the merged list as structured_notes.formRecommendations.
+    const formRecommendations = normalizeCompletionTextArray(
+      Array.isArray(recommendations) ? recommendations : [],
+    );
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -6586,6 +6594,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
+            formRecommendations,
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -6999,8 +7008,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const productReentryMin = productReentry.minutes;
             // Type-aware base: cockroach-family visits default to a 120-min
             // INTERIOR window (owner rule 2026-08-11) instead of the pest
-            // line's 30 — see getAdvisoryDefaults.
-            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+            // line's 30 — see getAdvisoryDefaults. Recorded applications are
+            // passed as evidence so a no-spray termite identity never zeroes
+            // a visit that actually applied product.
+            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
+              applicationsRecorded: Array.isArray(products) && products.length > 0,
+            });
             let advisoryDefaultsForVisit = productReentryMin != null
               ? {
                 ...lineAdvisoryDefaults,
@@ -9924,8 +9937,21 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           const candidates = await db('visual_service_moments')
             .where({ job_id: svc.id, visibility_status: 'internal_only' })
             .whereNull('deleted_at')
-            .select('id', 'customer_caption', 'ai_caption');
+            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_url', 'media_storage_key');
+          // Provenance rules (codex P1 r4): never auto-publish moments whose
+          // customer copy could derive from the raw technician note — the
+          // 'recommendation' tag's template embeds the note verbatim — nor
+          // the 'access' group (entry points / access issues carry the exact
+          // details the access-code screen exists to keep off reports).
+          // Only moments WITH media publish (a note-only moment is an
+          // internal visual note), and only on an explicit customer_caption
+          // or media-derived ai_caption — the note-templated fallback caption
+          // never qualifies. Media content itself is not machine-screenable;
+          // flipping the gate is the owner's acceptance of that.
+          const AUTO_PUBLISH_EXCLUDED_TAG_GROUPS = new Set(['recommendation', 'access']);
           const publishable = candidates.filter((m) => {
+            if (AUTO_PUBLISH_EXCLUDED_TAG_GROUPS.has(String(m.tag_group || ''))) return false;
+            if (!m.media_url && !m.media_storage_key) return false;
             const caption = String(m.customer_caption || m.ai_caption || '').trim();
             return caption && customerCopyViolations(caption).length === 0;
           });

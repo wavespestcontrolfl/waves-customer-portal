@@ -1486,16 +1486,15 @@ function buildProtocolPayload(record) {
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
     ]),
-    // Structured sources ONLY — the completion form's recommendation
-    // field (structured_notes / service_data.protocol), never lines
-    // extracted from raw technician_notes. This is the list the customer
-    // report renders verbatim; raw notes must never egress on a report
-    // (AGENTS.md; codex P1 r3). The merged list above stays for the
-    // internal/recap consumers that already read it.
-    structuredRecommendations: uniqueStrings([
-      ...parseJsonArray(protocol.recommendations),
-      ...parseJsonArray(structured.recommendations),
-    ]),
+    // Provenance-guaranteed source ONLY: structured_notes.formRecommendations
+    // is written at completion from the form's recommendation field alone.
+    // The merged lists (protocol.recommendations, structured.recommendations)
+    // fold in [Next] technician-note lines at persist time, so they can't
+    // distinguish form input from raw notes — and raw notes must never
+    // egress on a customer report (AGENTS.md; codex P1 r3 + inline on
+    // #3516). Records predating the field render findings recommendations
+    // only. The merged list above stays for its internal/recap consumers.
+    structuredRecommendations: uniqueStrings(parseJsonArray(structured.formRecommendations)),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
 }
@@ -3769,7 +3768,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // Type-aware defaults (cockroach-family visits default to a 120-min
     // interior window — owner rule 2026-08-11); the STORED advisory still
     // wins whenever the completion persisted one.
-    ...getAdvisoryDefaults(service.service_type),
+    ...getAdvisoryDefaults(service.service_type, { applicationsRecorded: applications.length > 0 }),
     ...parseJsonObject(service.advisory),
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, {

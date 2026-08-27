@@ -165,15 +165,26 @@ describe('service-line advisory defaults', () => {
     }
   });
 
+  test('a no-spray termite identity keeps 30/120 when the completion recorded applications', () => {
+    expect(getAdvisoryDefaults('Termite Bait Station System Service', { applicationsRecorded: true })).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 120,
+    });
+    expect(getAdvisoryDefaults('termite_inspection', { applicationsRecorded: true })).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 120,
+    });
+  });
+
   test('liquid/foam/trench termite forms keep the 30/120 line defaults', () => {
     for (const type of [
       // Mixed identities that ALSO apply product keep their guidance —
       // a no-spray token beside a treatment token never zeroes the
       // windows (uncapped codex P1 on this lane).
       'Termite Liquid Treatment & Inspection',
-      'Termite Station Check + Liquid Treatment',
-      'Termite Bait Service with Trenching',
-      'Termite Inspection and Spot Treatment',
+      'Termite Station Check & Liquid Treatment',
+      'Termite Bait Service & Trenching',
+      'Termite Inspection & Spot Treatment',
       'Termite Liquid Treatment Service',
       'Slab Pre-Treat Termite Service',
       'Termite Trenching Service',

@@ -261,8 +261,12 @@ function isTermiteNoReentryServiceType(serviceType) {
 
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
 // line id) so the cockroach and termite-station overrides can fire. Other
-// types return their line's defaults unchanged.
-function getAdvisoryDefaults(serviceType) {
+// types return their line's defaults unchanged. `applicationsRecorded`
+// is completion evidence: a station visit that recorded a supplemental
+// product application keeps the line's re-entry defaults regardless of
+// its name (codex inline on #3516) — the name alone never zeroes a
+// chemically treated visit.
+function getAdvisoryDefaults(serviceType, { applicationsRecorded = false } = {}) {
   const config = getServiceLineConfig(serviceType);
   if (config.id === 'pest' && isCockroachServiceType(serviceType)) {
     return {
@@ -270,7 +274,7 @@ function getAdvisoryDefaults(serviceType) {
       interior_reentry_min: COCKROACH_INTERIOR_REENTRY_MIN,
     };
   }
-  if (config.id === 'termite' && isTermiteNoReentryServiceType(serviceType)) {
+  if (config.id === 'termite' && !applicationsRecorded && isTermiteNoReentryServiceType(serviceType)) {
     return {
       ...config.advisoryDefaults,
       exterior_reentry_min: 0,
