@@ -83,6 +83,13 @@ describe('fetchEngagement', () => {
       .rejects.not.toThrow(/secret-token/);
   });
 
+  test('a 2xx with a malformed body is a fetch FAILURE, never an all-zero result', async () => {
+    process.env.FACEBOOK_ACCESS_TOKEN = 't';
+    const truncated = jest.fn(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }));
+    await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '1_2' }, { fetchFn: truncated }))
+      .rejects.toThrow(/malformed response body/);
+  });
+
   test('facebook/instagram without a token fails that target only', async () => {
     delete process.env.FACEBOOK_ACCESS_TOKEN;
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '1' }, { fetchFn: jest.fn() }))

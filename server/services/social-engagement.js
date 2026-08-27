@@ -89,7 +89,14 @@ function parseInstagramEngagement(json = {}) {
 
 async function fetchGraph(url, fetchFn) {
   const res = await fetchFn(url, { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
-  const body = await res.json().catch(() => ({}));
+  // A 2xx with an unparseable body is a FAILED fetch, not an all-zero
+  // result — a truncated response must not erase the last good counts.
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`Graph ${res.status}: malformed response body`);
+  }
   if (!res.ok || body?.error) {
     // Never echo the URL (it carries the access token) — message only.
     throw new Error(`Graph ${res.status}: ${String(body?.error?.message || 'request failed').slice(0, 200)}`);
@@ -149,10 +156,13 @@ async function upsertEngagement(postId, target, counts, error = null) {
 
 // Sweep-style (safe under runExclusive's skip-on-contention): every
 // published post inside the lookback window is refreshed each run. Idempotent.
-async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = fetch } = {}) {
+// onStart fires once preflight (table check + post query) has succeeded —
+// the manual-sync route uses it to answer 202 only for a sweep that will
+// actually fetch.
+async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = fetch, onStart = null } = {}) {
   const summary = { posts: 0, targets: 0, synced: 0, failed: 0, skipped: 0 };
   if (!(await db.schema.hasTable('social_post_engagement'))) {
-    return { ...summary, skipped: 1, reason: 'social_post_engagement table missing' };
+    throw new Error('social_post_engagement table missing — run migrations');
   }
   const since = new Date(Date.now() - Math.max(1, Math.min(365, Number(lookbackDays) || 30)) * 86400000);
   const posts = await db('social_media_posts')
@@ -164,6 +174,7 @@ async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = 
     .limit(Math.max(1, Math.min(1000, Number(limit) || 200)))
     .select('id', 'platforms_posted');
   summary.posts = posts.length;
+  if (typeof onStart === 'function') onStart();
 
   for (const post of posts) {
     for (const target of engagementTargets(post)) {

@@ -347,10 +347,13 @@ router.post('/engagement/sync', async (req, res, next) => {
 
     let markStarted;
     const started = new Promise((resolve) => { markStarted = resolve; });
-    runExclusive('social-engagement-ingest', async () => {
-      markStarted({ ok: true });
-      return syncRecentEngagement({ lookbackDays });
-    })
+    // Readiness is signalled by the sweep itself AFTER its preflight (table
+    // check + post query) — a sweep that dies before its first fetch
+    // reaches the rejection handler below and answers 503, not 202.
+    runExclusive('social-engagement-ingest', () => syncRecentEngagement({
+      lookbackDays,
+      onStart: () => markStarted({ ok: true }),
+    }))
       .then((result) => {
         if (result?.skipped) markStarted({ ok: false, reason: result.reason });
         else logger.info(`[social-engagement] manual sweep done: ${JSON.stringify(result)}`);

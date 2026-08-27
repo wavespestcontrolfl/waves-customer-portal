@@ -2629,16 +2629,16 @@ function AnalyticsTab() {
           <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
             {summary.engagementRanked ? "Top Posts by Engagement" : "Recent Published Posts"}
           </div>
-          <div style={{ fontSize: 11, color: D.muted }}>
+          <div style={{ fontSize: 14, color: D.muted }}>
             {summary.engagementRanked
               ? `${summary.engagementSyncedPosts} posts with engagement data`
               : "No engagement data yet — enable SOCIAL_ENGAGEMENT_SYNC_ENABLED"}
           </div>
         </div>
         {topPosts.length === 0 ? (
-          <div style={{ fontSize: 12, color: D.muted }}>No published posts</div>
+          <div style={{ fontSize: 14, color: D.muted }}>No published posts</div>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ color: D.muted, textAlign: "left" }}>
                 <th style={{ padding: "6px 8px", fontWeight: 500 }}>Post</th>
