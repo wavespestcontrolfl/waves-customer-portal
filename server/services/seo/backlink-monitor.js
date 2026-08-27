@@ -14,7 +14,7 @@ const UNREACHABLE_THRESHOLD = 4;
 const VERIFY_CAP = 300;
 const VERIFY_CONCURRENCY = 5;
 // Link types that never earn a bell or a recovery prospect when they drop.
-const NON_EDITORIAL_TYPES = new Set(['directory', 'social', 'comment', 'forum']);
+const NON_EDITORIAL_TYPES = new Set(['directory', 'citation', 'social', 'comment', 'forum']);
 // Waves-owned properties — losing a self-link is not a loss to chase. Seeded from
 // the canonical marketing fleet (hub + spokes); BACKLINK_OWNED_DOMAINS extends it
 // with comma-separated bare hosts (e.g. a newsletter host).
@@ -65,10 +65,13 @@ class BacklinkMonitor {
     return exclusive('backlink-scan', () => this.scanExclusive(opts), { recordHealth: false });
   }
 
-  async scanExclusive({ crawlFn, recoveryFn, snapshot = false, now = new Date() } = {}) {
+  async scanExclusive({ crawlFn, recoveryFn, snapshot = false, now = new Date(), pageSize = 1000 } = {}) {
     logger.info('Backlink scan starting...');
-    const PAGE = 1000;
-    const MAX_PAGES = 5;
+    const PAGE = pageSize;
+    // Page until DataForSEO's total_count is reached. The cap is a runaway
+    // guard only (50k links ≈ 50× the current profile); hitting it is logged and
+    // leaves scanComplete=false so loss detection is skipped, never guessed.
+    const MAX_PAGES = 50;
     const links = [];
     let totalCount = 0;
     let pagesOk = true;
@@ -85,6 +88,7 @@ class BacklinkMonitor {
       links.push(...result.items);
       totalCount = Number(result.total_count) || links.length;
       if (result.items.length < PAGE || links.length >= totalCount) break;
+      if (page === MAX_PAGES - 1) logger.warn(`Backlink scan: page cap ${MAX_PAGES} reached at ${links.length}/${totalCount} — loss detection will be skipped`);
     }
 
     if (!gotResult) {
@@ -126,6 +130,12 @@ class BacklinkMonitor {
           patch.lost_at = null; patch.lost_reason = null;
           recovered++;
           await this.recordEvent(existing.id, 'recovered', { previous_lost_reason: existing.lost_reason || null });
+          // A recovery prospect queued for this link (still un-pitched) is now
+          // moot — resolve it so the drafter never asks for a link that is live.
+          try {
+            const { resolveRecoveredLink } = require('./lost-link-recovery');
+            await resolveRecoveredLink({ ...existing, source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to }, now);
+          } catch (err) { logger.warn(`Backlink scan: recovery prospect resolve failed for ${link.domain_from}: ${err.message}`); }
         }
         if (existing.is_dofollow != null && existing.is_dofollow !== isDofollow) {
           relChanges++;
@@ -305,8 +315,12 @@ class BacklinkMonitor {
     }
     const out = [];
     for (const [domain, best] of byDomain) {
+      // Only scan-tracked rows count as survival: a GSC-export row is excluded
+      // from loss detection by design, so it can never go lost and must not
+      // stand as permanent proof the domain still links us.
       const stillActive = await db('seo_backlinks')
         .where('status', 'active')
+        .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
         .whereRaw("regexp_replace(lower(source_domain), '^(www|mail)\\.', '') = ?", [domain])
         .first('id');
       if (stillActive) continue;

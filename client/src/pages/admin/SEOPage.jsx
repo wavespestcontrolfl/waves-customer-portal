@@ -1677,7 +1677,7 @@ function RankingsMonitorTab() {
 // lost_reason is stamped by the weekly scan only after a crawl of the source page
 // confirmed the link is gone; rows without one predate verified loss tracking.
 const LOST_REASON_LABEL = {
-  page_gone: "page gone (4xx/5xx)",
+  page_gone: "page gone (404/410)",
   link_removed: "link removed",
   unreachable: "site unreachable",
 };

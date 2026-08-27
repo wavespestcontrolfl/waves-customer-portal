@@ -37,16 +37,40 @@ async function queueLostDomains(losses, { scorer } = {}) {
   const scoreMod = scorer || require('./prospect-scorer');
 
   for (const loss of losses) {
+    try {
+      await queueOne(loss, out, scoreMod);
+    } catch (err) {
+      // One bad row must not abort the batch — the rest still queue, and the
+      // domain stays lost so the next scan does not retry it (logged instead).
+      out.skipped++;
+      out.reasons.push({ domain: loss && loss.domain, reason: `error: ${err.message}` });
+      logger.warn(`[lost-link-recovery] ${loss && loss.domain}: ${err.message}`);
+    }
+  }
+
+  if (out.queued || out.skipped) logger.info(`[lost-link-recovery] queued ${out.queued}, skipped ${out.skipped}`);
+  return out;
+}
+
+async function queueOne(loss, out, scoreMod) {
+  {
     const domain = normalizeDomain(loss.domain);
     const targetPage = targetPageOf(loss.target_url);
-    if (!domain) { out.skipped++; continue; }
+    if (!domain) { out.skipped++; return; }
 
     // (target_domain, target_page) is unique on the board. A link we acquired
     // through the pipeline already has a row, and the outbound verifier moves
     // it to 'lost' when the inbound link disappears — that row is REOPENED as a
     // fresh prospect (the worker only claims status='prospect'). Rows still in
     // flight, or rejected by the owner, are left alone.
-    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page: targetPage }).first('id', 'status', 'notes');
+    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page: targetPage }).first('id', 'status', 'notes', 'link_type');
+    if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
+      // A lost signup-lane placement (citation/directory/social) is not an
+      // outreach target; reopening it would hand it to the citation runner.
+      out.skipped++;
+      out.reasons.push({ domain, reason: `lost ${exists.link_type} placement — signup lane, not reopened` });
+      return;
+    }
     if (exists && exists.status === 'lost') {
       const note = `Lost-link recovery: our link on ${loss.source_url} was verified gone (${loss.lost_reason}). Re-pitch for the same placement.`;
       // A fresh outreach cycle: the worker/send valve treat a populated
@@ -68,12 +92,12 @@ async function queueLostDomains(losses, { scorer } = {}) {
       });
       out.queued++;
       out.reasons.push({ domain, reason: 'reopened lost prospect' });
-      continue;
+      return;
     }
     if (exists) {
       out.skipped++;
       out.reasons.push({ domain, reason: IN_FLIGHT_STATUSES.has(exists.status) ? `already on board (${exists.status})` : `left alone (${exists.status})` });
-      continue;
+      return;
     }
 
     let scored = null;
@@ -101,7 +125,7 @@ async function queueLostDomains(losses, { scorer } = {}) {
     if (NON_OUTREACH_TYPES.has(linkType)) {
       out.skipped++;
       out.reasons.push({ domain, reason: `scorer classified as ${linkType}` });
-      continue;
+      return;
     }
     // Same contactability gate as create_link_prospects: an outreach target with
     // no way to reach a human (or a join-not-email HARO platform) never goes on
@@ -109,7 +133,7 @@ async function queueLostDomains(losses, { scorer } = {}) {
     if (scored && (!scored.gate?.ok || scored.gate.lane === 'haro_platform')) {
       out.skipped++;
       out.reasons.push({ domain, reason: scored.gate?.reason || 'no contact path' });
-      continue;
+      return;
     }
 
     const qs = {
@@ -124,7 +148,10 @@ async function queueLostDomains(losses, { scorer } = {}) {
       scored_by: 'lost_link_recovery',
     };
 
-    await db('seo_link_prospects').insert({
+    // Atomic against a concurrent writer racing the existence check (the
+    // scoring/contact lookup above is slow): the unique (target_domain,
+    // target_page) conflict is ignored and counted as a skip, never thrown.
+    const inserted = await db('seo_link_prospects').insert({
       target_domain: domain,
       target_url: loss.source_url || null,
       target_page: targetPage,
@@ -143,12 +170,43 @@ async function queueLostDomains(losses, { scorer } = {}) {
       source: 'lost_recovery',
       source_ref: loss.backlink_id || null,
       owner: 'backlink_monitor',
-    });
+    }).onConflict(['target_domain', 'target_page']).ignore();
+    const rowCount = Array.isArray(inserted) ? inserted.length : (inserted && inserted.rowCount != null ? inserted.rowCount : 1);
+    if (rowCount === 0) {
+      out.skipped++;
+      out.reasons.push({ domain, reason: 'already on board (concurrent insert)' });
+      return;
+    }
     out.queued++;
   }
-
-  if (out.queued || out.skipped) logger.info(`[lost-link-recovery] queued ${out.queued}, skipped ${out.skipped}`);
-  return out;
 }
 
-module.exports = { queueLostDomains, _test: { normalizeDomain, targetPageOf } };
+/**
+ * resolveRecoveredLink(backlink, now) — the inbound link came back on its own.
+ * Any un-pitched recovery prospect for it (queued by queueLostDomains or a
+ * reopened lost row) is closed as live so the drafter never pitches for a
+ * link that already exists. Rows already contacted/negotiating are left to the
+ * operator (a conversation is open); a parked draft is withdrawn.
+ */
+async function resolveRecoveredLink(backlink, now = new Date()) {
+  const domain = normalizeDomain(backlink.source_domain);
+  const targetPage = targetPageOf(backlink.target_url);
+  if (!domain) return { resolved: 0 };
+  const n = await db('seo_link_prospects')
+    .where({ target_domain: domain, target_page: targetPage, status: 'prospect' })
+    .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
+    .update({
+      status: 'live',
+      live_url: backlink.source_url,
+      backlink_id: backlink.id || null,
+      first_live_at: now,
+      claimed_at: null, claimed_by: null,
+      outreach_status: 'none', outreach_send_token: null,
+      notes: db.raw("COALESCE(notes, '') || ?", [`\nLost-link recovery closed ${now.toISOString().slice(0, 10)}: the link reappeared on its own (no outreach needed).`]),
+      updated_at: now,
+    });
+  if (n) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${n} recovery prospect(s) closed as live`);
+  return { resolved: n || 0 };
+}
+
+module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf } };

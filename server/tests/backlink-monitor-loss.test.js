@@ -27,7 +27,7 @@ function makeDb(handlers) {
       orderBy: jest.fn(() => b), orderByRaw: jest.fn(() => b), limit: jest.fn(() => b),
       select: jest.fn((...cols) => { state.select = cols; return done('select'); }),
       first: jest.fn((...cols) => { state.select = cols; return done('first'); }),
-      insert: jest.fn((p) => done('insert', p)),
+      insert: jest.fn((p) => { const pr = done('insert', p); pr.onConflict = jest.fn(() => ({ ignore: jest.fn(() => pr) })); return pr; }),
       update: jest.fn((p) => done('update', p)),
       increment: jest.fn((col, n) => done('increment', { col, n })),
     };
@@ -46,7 +46,7 @@ const activeRow = (over = {}) => ({
 
 function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false } = {}) {
   dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [{ items, total_count: total }] }] });
-  const events = [], updates = [], increments = [], inserts = [];
+  const events = [], updates = [], increments = [], inserts = [], prospectOps = [];
   makeDb({
     seo_backlinks: (op, st) => {
       if (op === 'select') return active;
@@ -63,8 +63,9 @@ function scanWith({ items = [], total = items.length, active = [], existingByUrl
       throw new Error(`unexpected op ${op}`);
     },
     seo_backlink_events: (op, st) => { events.push(st.payload); return [1]; },
+    seo_link_prospects: (op, st) => { prospectOps.push({ op, wheres: st.wheres, raws: st.raws, payload: st.payload }); return op === 'update' ? 1 : []; },
   });
-  return { events, updates, increments, inserts };
+  return { events, updates, increments, inserts, prospectOps };
 }
 
 describe('BacklinkMonitor verified loss detection', () => {
@@ -180,14 +181,42 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ event_type: 'rel_changed', detail: JSON.stringify({ from: 'dofollow', to: 'nofollow', source: 'dataforseo' }) })]);
   });
 
-  test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded)', async () => {
-    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+  test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded) and its recovery prospect closed as live', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: true };
     const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
-    const { updates, events } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const { updates, events, prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ recovered: 1 }));
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'active', lost_at: null, lost_reason: null, miss_count: 0 }));
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-9', event_type: 'recovered' })]);
+    // the un-pitched lost_recovery prospect for this link is resolved, not left for the drafter
+    const resolve = prospectOps.find(o => o.op === 'update');
+    expect(resolve.wheres[0][0]).toEqual({ target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/pest-control-sarasota-fl/', status: 'prospect' });
+    expect(resolve.raws[0][0]).toMatch(/lost_recovery/);
+    expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
+  });
+
+  test('pages until total_count regardless of page count (no 5-page freeze)', async () => {
+    const mk = (i) => ({ url_from: `https://s${i}.example/a`, url_to: 'https://wavespestcontrol.com/', domain_from: `s${i}.example`, domain_from_rank: 1, dofollow: true });
+    const all = Array.from({ length: 14 }, (_, i) => mk(i));
+    dataforseo.getBacklinks.mockImplementation(async (_t, limit, { offset }) => ({ tasks: [{ result: [{ items: all.slice(offset, offset + limit), total_count: 14 }] }] }));
+    makeDb({ seo_backlinks: (op) => (op === 'select' ? [] : op === 'first' ? null : [1]) });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), pageSize: 2 });
+    expect(r).toEqual(expect.objectContaining({ scanned: 14, scanComplete: true }));
+    expect(dataforseo.getBacklinks).toHaveBeenCalledTimes(7);
+  });
+
+  test('domain survival only counts scan-tracked rows (GSC-export rows are excluded)', async () => {
+    let survivalQuery = null;
+    makeDb({ seo_backlinks: (op, st) => { if (op === 'first') { survivalQuery = st; return null; } return []; } });
+    const out = await BacklinkMonitor.domainLevelLosses([
+      { id: 'a', source_domain: 'good.example', source_url: 'https://good.example/resources', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
+    ]);
+    expect(out[0].alertable).toBe(true);
+    // the builder passed to where(fn) exposes whereNull/orWhere — the mock records calls on the same builder
+    expect(survivalQuery).not.toBeNull();
+    expect(db.mock.results.at(-1).value.whereNull).toHaveBeenCalledWith('discovery_source');
+    expect(db.mock.results.at(-1).value.orWhere).toHaveBeenCalledWith('discovery_source', 'dataforseo');
   });
 
   test('domain-level rollup: directory / low-DR / owned / still-linking domains are not alertable', async () => {
@@ -272,7 +301,7 @@ describe('lost-link recovery', () => {
 
   test('a prospect the outbound verifier moved to lost is REOPENED, not duplicated', async () => {
     const updates = [];
-    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: 'placed via signup' }; if (op === 'update') { updates.push({ where: st.wheres[0][0], patch: st.payload }); return 1; } if (op === 'insert') throw new Error('must not insert'); } });
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: 'placed via signup', link_type: 'resource' }; if (op === 'update') { updates.push({ where: st.wheres[0][0], patch: st.payload }); return 1; } if (op === 'insert') throw new Error('must not insert'); } });
     const scorer = { scoreCandidates: jest.fn() };
     const r = await recovery.queueLostDomains([loss], { scorer });
     expect(r).toEqual({ queued: 1, skipped: 0, reasons: [{ domain: 'blog.example', reason: 'reopened lost prospect' }] });
@@ -282,6 +311,40 @@ describe('lost-link recovery', () => {
     expect(updates[0].patch.quality_signals.__raw).toMatch(/prior_attempts/); // retry budget restarts, history kept
     expect(updates[0].patch.notes).toMatch(/^placed via signup\nLost-link recovery/);
     expect(scorer.scoreCandidates).not.toHaveBeenCalled();
+  });
+
+  test('a concurrent insert of the same (domain, page) is ignored, counted as a skip, and does not abort the batch', async () => {
+    const inserts = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return inserts.length === 1 ? [] : [1]; } } });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', gate: { ok: true, lane: 'outreach' }, contact: { contact_email: 'a@b.example' } }]) };
+    const r = await recovery.queueLostDomains([{ ...loss, domain: 'race.example' }, { ...loss, domain: 'ok.example' }], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 1, skipped: 1 }));
+    expect(r.reasons).toEqual([{ domain: 'race.example', reason: 'already on board (concurrent insert)' }]);
+  });
+
+  test('a throwing row does not abort the rest of the batch', async () => {
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') { if (st.wheres[0][0].target_domain === 'boom.example') throw new Error('db down'); return null; } if (op === 'insert') return [1]; } });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', gate: { ok: true, lane: 'outreach' } }]) };
+    const r = await recovery.queueLostDomains([{ ...loss, domain: 'boom.example' }, { ...loss, domain: 'fine.example' }], { scorer });
+    expect(r.queued).toBe(1);
+    expect(r.reasons).toEqual([{ domain: 'boom.example', reason: 'error: db down' }]);
+  });
+
+  test('a lost signup-lane placement (citation) is not reopened into the outreach board', async () => {
+    const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-cit', status: 'lost', notes: null, link_type: 'citation' }; if (op === 'update') { updates.push(st.payload); return 1; } if (op === 'insert') throw new Error('must not insert'); } });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r).toEqual({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'lost citation placement — signup lane, not reopened' }] });
+    expect(updates).toHaveLength(0);
+  });
+
+  test('resolveRecoveredLink closes only un-pitched recovery prospects for that exact page', async () => {
+    const ops = [];
+    makeDb({ seo_link_prospects: (op, st) => { ops.push({ op, wheres: st.wheres, raws: st.raws, payload: st.payload }); return 2; } });
+    const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
+    expect(r).toEqual({ resolved: 2 });
+    expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/x/', status: 'prospect' });
+    expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', first_live_at: new Date('2026-09-06T08:00:00Z'), backlink_id: 'bl-1' }));
   });
 
   test('fail-soft fallback link_type is coerced to a worker-claimable type', async () => {
