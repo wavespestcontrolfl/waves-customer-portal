@@ -254,6 +254,62 @@ const SEASONAL_AUTONOMOUS_TOPICS = {
   ],
 };
 
+// "X vs Y" pest ID comparisons — the highest-repeat format across pest-industry
+// social template catalogs (side-by-side ID posts). Facts here are standard
+// entomology/turf diagnostics only: sizes, colors, nesting habits, visible
+// evidence. No safety, timing, or pricing language (the compliance regexes in
+// social-media.js reject those), and nothing framed as a field observation.
+const PEST_VERSUS_PAIRS = [
+  {
+    key: 'carpenter_ant_vs_ghost_ant',
+    service: 'general pest',
+    left: { name: 'Carpenter Ant', points: ['Large: 1/4 to 1/2 inch', 'Nests in damp or damaged wood', 'Can hollow out wood over time'] },
+    right: { name: 'Ghost Ant', points: ['Tiny, with pale legs', 'Dark head, see-through body', 'Trails to kitchens and baths'] },
+    verdict: 'One can weaken wood. One is a kitchen nuisance.',
+  },
+  {
+    key: 'subterranean_vs_drywood_termite',
+    service: 'termite',
+    left: { name: 'Subterranean Termite', points: ['Colonies live in the soil', 'Builds mud tubes up foundations', 'Needs ground moisture'] },
+    right: { name: 'Drywood Termite', points: ['Lives inside dry wood', 'No mud tubes', 'Pushes out tiny pellet piles'] },
+    verdict: 'Both eat wood. The clues they leave are different.',
+  },
+  {
+    key: 'termite_swarmer_vs_winged_ant',
+    service: 'termite',
+    left: { name: 'Termite Swarmer', points: ['Straight antennae', 'Both wing pairs equal length', 'Thick, straight waist'] },
+    right: { name: 'Winged Ant', points: ['Bent antennae', 'Front wings longer than back', 'Pinched waist'] },
+    verdict: 'Wings on the windowsill? Check the waist first.',
+  },
+  {
+    key: 'paper_wasp_vs_mud_dauber',
+    service: 'general pest',
+    left: { name: 'Paper Wasp', points: ['Open umbrella-shaped nest', 'Lives in small colonies', 'Nests under eaves and rails'] },
+    right: { name: 'Mud Dauber', points: ['Builds mud tube nests', 'Solitary and docile', 'Hunts spiders'] },
+    verdict: 'The nest shape tells you who built it.',
+  },
+  {
+    // Customer-facing diagnostics stay cautious and UF/IFAS-consistent: chinch
+    // bugs are confirmed by finding them (flotation test at the patch edge),
+    // never by turf lifting out (that signals root loss — a different
+    // problem); drought is a coverage/soil-moisture check, not a lawn-wide
+    // pattern (uneven sprinklers show as localized dry spots per the lawn
+    // report guidance). Neither side is presented as conclusive.
+    key: 'chinch_bug_vs_drought_stress',
+    service: 'lawn care',
+    left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches keep spreading outward', 'Float test at the edge finds the bugs'] },
+    right: { name: 'Drought Stress', points: ['Dry spots where sprinklers miss', 'Blades fold; footprints linger', 'Soil is dry at the patch edge'] },
+    verdict: 'Browning turf? Check sprinkler coverage first, then float-test the edge.',
+  },
+  {
+    key: 'roof_rat_vs_norway_rat',
+    service: 'rodent',
+    left: { name: 'Roof Rat', points: ['Sleek body, extra-long tail', 'Climber: attics and trees', 'The common rat in SWFL'] },
+    right: { name: 'Norway Rat', points: ['Heavier build, shorter tail', 'Burrows at ground level', 'Less common in Florida'] },
+    verdict: 'In Southwest Florida, think up, not down.',
+  },
+];
+
 function toJson(value, fallback) {
   if (value == null) return fallback;
   if (Array.isArray(value) || typeof value === 'object') return value;
@@ -356,6 +412,9 @@ const AUTONOMOUS_FLAGS = {
   // use never silently starts autonomous posting.
   get cronEnabled() { return boolEnv('SOCIAL_AUTONOMOUS_CRON_ENABLED', false); },
   get includeReviews() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_REVIEWS', true); },
+  // Dark-ship: the "pest showdown" X-vs-Y ID lane is OFF until explicitly
+  // enabled (kill switch = unset SOCIAL_AUTONOMOUS_INCLUDE_VERSUS).
+  get includeVersus() { return boolEnv('SOCIAL_AUTONOMOUS_INCLUDE_VERSUS', false); },
   // CLAMPED below the minimum gap between two daily 6:30 AM ET ticks. This is a
   // same-day DEDUPE guard, NOT the schedule (the fixed once-daily cron is). Two
   // consecutive ET ticks are normally 24h apart but only 23h across the
@@ -703,6 +762,17 @@ function buildCampaignCardInput(input = {}, preview = {}) {
   };
 }
 
+function buildVersusCardInput(pair = {}, input = {}) {
+  return {
+    variant: 'versus',
+    city: input.city,
+    service: titleCase(input.service || pair.service || 'Pest ID'),
+    left: pair.left,
+    right: pair.right,
+    verdict: pair.verdict,
+  };
+}
+
 function buildReviewCardInput(candidate = {}) {
   return {
     variant: 'review',
@@ -731,6 +801,14 @@ async function renderCampaignImageUrl(input, preview, platform) {
   return uploadSocialCard(
     buildCampaignCardInput(input, preview),
     `${preview?.inputs?.city || input.city}-${preview?.inputs?.topic || input.topic}`,
+    platform
+  );
+}
+
+async function renderVersusImageUrl(pair, input, platform) {
+  return uploadSocialCard(
+    buildVersusCardInput(pair, input),
+    `versus-${pair.key || 'pest-id'}-${input.city || 'swfl'}`,
     platform
   );
 }
@@ -924,9 +1002,69 @@ async function selectAutonomousReviewPlan(now = new Date()) {
   };
 }
 
+function buildVersusDrafts(pair, city) {
+  const leftName = pair.left.name;
+  const rightName = pair.right.name;
+  // Neutral comparison hook — never assert the two LOOK similar (some pairs
+  // differ visibly by the pair's own facts; an unconditional similarity claim
+  // would contradict the card copy).
+  const hook = `${leftName} or ${rightName}? Here is how ${city} homeowners can tell the difference.`;
+  const leftLine = `${leftName}: ${pair.left.points.map((p) => p.toLowerCase()).join('; ')}.`;
+  const rightLine = `${rightName}: ${pair.right.points.map((p) => p.toLowerCase()).join('; ')}.`;
+  return {
+    facebook: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Not sure which one you have? A quick inspection settles it.`,
+    instagram: `${hook}\n\n${leftLine}\n${rightLine}\n\n${pair.verdict} Which one have you seen around the house?\n\n${hashtags({ topic: `${leftName} vs ${rightName}`, city, service: pair.service })}`,
+    linkedin: `Correct pest ID changes the response. ${leftName} vs ${rightName}: ${pair.verdict} ${leftLine} ${rightLine} Waves turns local pest pressure and service data into practical homeowner guidance.`,
+    // Both pests' facts: GBP can publish text-only (media retry path), so the
+    // post must stand as a comparison without the card.
+    gbp: `${city} homeowners: ${leftName.toLowerCase()} or ${rightName.toLowerCase()}? ${pair.verdict} ${leftLine} ${rightLine} ${ctaText('book inspection')}.`,
+  };
+}
+
+// The "pest showdown" lane: a deterministic X-vs-Y pest ID comparison every 4th
+// ET day (offset 2, so it never collides with the review lane's offset 0).
+// Pure — no DB — so a selection failure can never block the campaign fallback.
+function selectAutonomousVersusPlan(now = new Date()) {
+  if (!AUTONOMOUS_FLAGS.includeVersus) return null;
+  const { month, day } = etParts(now); // Eastern business date (see selectAutonomousCampaign)
+  if (day % 4 !== 2) return null;
+
+  const pair = PEST_VERSUS_PAIRS[(month * 7 + day) % PEST_VERSUS_PAIRS.length];
+  const city = WAVES_LOCATIONS[day % WAVES_LOCATIONS.length]?.name || 'Sarasota';
+  const topic = `${pair.left.name} vs ${pair.right.name}`;
+  const drafts = buildVersusDrafts(pair, city);
+  const channels = AUTONOMOUS_FLAGS.channels;
+  return {
+    topic,
+    city,
+    service: pair.service,
+    angle: 'pest showdown',
+    cta: 'book inspection',
+    channels,
+    versusPair: pair,
+    preview: {
+      inputs: { topic, city, service: pair.service, angle: 'pest showdown', cta: 'book inspection', channels },
+      // CTA is "schedule an inspection" — the link (Facebook + GBP LEARN_MORE)
+      // must land on the booking flow, not the blog index.
+      suggestedLink: 'https://www.wavespestcontrol.com/book/',
+      drafts: Object.fromEntries(channels.map((channel) => [channel, drafts[channel]]).filter(([, text]) => text)),
+      validation: validateDrafts(drafts),
+      sources: [{
+        type: 'versus_pair',
+        label: topic,
+        detail: `${pair.verdict} ${pair.left.name}: ${pair.left.points.join('; ')}. ${pair.right.name}: ${pair.right.points.join('; ')}.`,
+      }],
+      fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
+    },
+  };
+}
+
 async function selectAutonomousPlan(now = new Date()) {
   const reviewPlan = await selectAutonomousReviewPlan(now);
   if (reviewPlan) return reviewPlan;
+
+  const versusPlan = selectAutonomousVersusPlan(now);
+  if (versusPlan) return versusPlan;
 
   const input = selectAutonomousCampaign(now);
   const preview = await previewCampaign(input);
@@ -1414,6 +1552,10 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // PERSISTED after a successful publish.
     const isReviewRun = !!plan.reviewGraphic?.googleReviewId;
     const canPersistGraphic = isReviewRun && await hasTable('review_graphics');
+    // Versus runs are the deterministic split-panel ID card by design — an AI
+    // photo scene can't render a two-pest comparison, so the creative engine is
+    // skipped entirely (same "never block, never substitute" posture as GBP).
+    const isVersusRun = !isReviewRun && !!plan.versusPair;
 
     // Creative engine first (AI photo scene + deterministic brand overlay,
     // gated by SOCIAL_CREATIVE_ENGINE_ENABLED). An empty result — engine off,
@@ -1431,7 +1573,7 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
     // approval queue's content and publish later, when readiness may differ.
     const hasNonGbpChannel = Array.isArray(plan.channels)
       && plan.channels.some((c) => c !== 'gbp');
-    let creativeEligible = hasNonGbpChannel;
+    let creativeEligible = hasNonGbpChannel && !isVersusRun;
     if (creativeEligible && effectiveMode !== 'draft') {
       creativeEligible = false;
       for (const ch of plan.channels) {
@@ -1478,6 +1620,15 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         gbpImageUrl,
         variant: 'review',
         templateKey: 'waves_clean_square',
+      });
+    } else if (isVersusRun) {
+      imageUrl = await renderVersusImageUrl(plan.versusPair, plan);
+      if (wantsGbp) gbpImageUrl = await renderVersusImageUrl(plan.versusPair, plan, 'gbp');
+      finalPreview = previewWithVisual(preview, {
+        imageUrl,
+        gbpImageUrl,
+        variant: 'versus',
+        templateKey: 'waves_versus_square',
       });
     } else {
       imageUrl = await renderCampaignImageUrl(plan, preview);
@@ -2639,7 +2790,11 @@ module.exports = {
   CHANNELS,
   DEFAULT_COMPETITOR_PATTERNS,
   FASTEST_RISER_PROFILES,
+  PEST_VERSUS_PAIRS,
   SEASONAL_AUTONOMOUS_TOPICS,
+  buildVersusCardInput,
+  buildVersusDrafts,
+  selectAutonomousVersusPlan,
   approveAutonomousRun,
   assessApprovalPublish,
   autonomousStatus,
