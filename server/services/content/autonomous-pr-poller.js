@@ -920,19 +920,20 @@ async function maybeAutoMerge(run, pr) {
           // in the loop below.
           const routeMatches = (name) => fileRoute(name) === expectedPath
             || (Boolean(leaf) && fileRoute(name) === `/${leaf}/`);
-          // Blog rows LEAVING the tree are legitimate only as the expected
-          // post's own same-route .md↔.mdx migration counterpart — a
-          // deletion of any OTHER blog file must not ride this PR's
-          // authorization (PR r4 P1). GitHub reports a RENAME as one row
-          // whose previous_filename is the deleted source (no separate
-          // 'removed' row) — treat every previous_filename as a removal too
-          // (PR r5 P1: renaming an unrelated post into the expected route
-          // would otherwise delete the source unevaluated).
+          // Content rows LEAVING the tree — ANY src/content markdown, not
+          // just the blog subtree (hook r7 P1: a services-page deletion must
+          // not ride this PR either) — are legitimate only as the expected
+          // post's own same-route .md↔.mdx migration counterpart (PR r4
+          // P1). GitHub reports a RENAME as one row whose previous_filename
+          // is the deleted source (no separate 'removed' row) — treat every
+          // previous_filename as a removal too (PR r5 P1: renaming an
+          // unrelated post into the expected route would otherwise delete
+          // the source unevaluated).
           const departing = [
             ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
             ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
-          ].filter((name) => /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(name || '')));
-          const departingOk = departing.every((name) => routeMatches(name));
+          ].filter((name) => /^src\/content\/.+\.(md|mdx)$/.test(String(name || '')));
+          const departingOk = departing.every((name) => /^src\/content\/blog\//.test(String(name || '')) && routeMatches(name));
           if (departingOk && routeMatches(blogFiles[0].filename)) {
             boundOk = true;
             boundExpectedPath = expectedPath;

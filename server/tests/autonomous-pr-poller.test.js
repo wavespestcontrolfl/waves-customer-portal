@@ -866,6 +866,21 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a new-blog PR DELETING a non-blog content file is withheld too (hook r7 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'removed' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('a flat file whose FRONTMATTER slug routes elsewhere is withheld — filename alone never binds (PR r2 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
