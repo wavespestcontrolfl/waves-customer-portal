@@ -78,7 +78,11 @@ exports.up = async function up(knex) {
     .whereIn('first_contact_channel', WEB_CHANNELS)
     .where((qb) => qb.whereNull('lead_source_id').orWhereIn('lead_source_id', otherGoogleAdsRows))
     .where((qb) => {
-      qb.whereNotNull('gclid').orWhereNotNull('wbraid').orWhereNotNull('gbraid')
+      // NULLIF(BTRIM()) — an empty / whitespace-only click id is not paid
+      // evidence (the live classifier tests truthiness, not presence).
+      qb.whereRaw("NULLIF(BTRIM(gclid), '') IS NOT NULL")
+        .orWhereRaw("NULLIF(BTRIM(wbraid), '') IS NOT NULL")
+        .orWhereRaw("NULLIF(BTRIM(gbraid), '') IS NOT NULL")
         .orWhereRaw("extracted_data->'attribution'->'leadSource'->>'source' = 'google_ads'");
       if (hasFunnelLeadId) {
         qb.orWhereExists(knex('ad_service_attribution as a')

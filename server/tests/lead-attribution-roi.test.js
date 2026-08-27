@@ -30,7 +30,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
-const { calculateSourceROI } = require('../services/lead-attribution');
+const { calculateSourceROI, allocatePooledChannelCost } = require('../services/lead-attribution');
 
 describe('calculateSourceROI — window- and conversion-bounded revenue', () => {
   const start = new Date('2026-06-01T00:00:00Z');
@@ -253,5 +253,55 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
       (c) => c[0] === 'service_records' && c[1] === 'status' && c[2] === 'completed',
     );
     expect(svcStatus).toBeDefined();
+  });
+});
+
+describe('allocatePooledChannelCost — Google Ads spend is one budget across its rows', () => {
+  const row = (name, totalLeads, conversions, totalRevenue, totalCost, source_type = 'google_ads') => ({
+    source: { name, source_type }, totalLeads, conversions, totalRevenue, totalCost,
+    costPerLead: totalLeads ? totalCost / totalLeads : 0,
+    costPerAcquisition: conversions ? totalCost / conversions : 0,
+    roi: totalCost > 0 ? ((totalRevenue - totalCost) / totalCost) * 100 : (totalRevenue > 0 ? 9999 : 0),
+  });
+
+  test('re-allocates the spend-bearing row cost across google_ads rows by lead share', () => {
+    const call = row('Google Ads — Pest (call-extension)', 2, 1, 400, 900);
+    const form = row('Google Ads — Web Form', 6, 3, 1200, 0);
+    const other = row('Main Site (wavespestcontrol.com)', 10, 2, 800, 0, 'main_site');
+    const out = allocatePooledChannelCost([call, form, other]);
+    expect(out).toHaveLength(3);
+    // 900 pooled, 8 leads → 112.5/lead: call 225, form 675
+    expect(call.totalCost).toBe(225);
+    expect(form.totalCost).toBe(675);
+    expect(call.totalCost + form.totalCost).toBe(900);
+    expect(form.roi).toBe(Math.round(((1200 - 675) / 675) * 1000) / 10);
+    expect(form.costPerLead).toBe(112.5);
+    expect(form.costPerAcquisition).toBe(225);
+    expect(call.pooledCostAllocation).toEqual({ pooledCost: 900, share: 0.25 });
+    // Non-pooled source types untouched.
+    expect(other.totalCost).toBe(0);
+    expect(other.pooledCostAllocation).toBeUndefined();
+  });
+
+  test('splits equally when the pool has spend but no leads; no-op when the pool has no spend', () => {
+    const a = row('Google Ads — Pest (call-extension)', 0, 0, 0, 300);
+    const b = row('Google Ads — Web Form', 0, 0, 0, 0);
+    allocatePooledChannelCost([a, b]);
+    expect(a.totalCost).toBe(150);
+    expect(b.totalCost).toBe(150);
+
+    const c = row('Google Ads — Pest (call-extension)', 3, 1, 500, 0);
+    const d = row('Google Ads — Web Form', 5, 2, 900, 0);
+    allocatePooledChannelCost([c, d]);
+    expect(c.totalCost).toBe(0);
+    expect(d.roi).toBe(9999);
+    expect(d.pooledCostAllocation).toBeUndefined();
+  });
+
+  test('a single google_ads row is left exactly as computed', () => {
+    const only = row('Google Ads — Web Form', 4, 1, 700, 200);
+    const before = { ...only };
+    allocatePooledChannelCost([only]);
+    expect(only).toEqual(before);
   });
 });

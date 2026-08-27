@@ -505,6 +505,54 @@ async function calculateAllSourceROI(startDate, endDate, { includeInactive = fal
     const roi = await calculateSourceROI(source.id, start, end, { revenueSourceByCustomer, excludeCustomerNames });
     if (roi) results.push(roi);
   }
+  return allocatePooledChannelCost(results);
+}
+
+// ---------------------------------------------------------------------------
+// 7b. allocatePooledChannelCost
+// ---------------------------------------------------------------------------
+// Google Ads is ONE budget surfaced through several lead_sources rows (the
+// call-extension number, the call-reporting bridge, the web form). Spend is
+// logged (lead_source_costs / monthly_cost) on whichever row the operator
+// picked, but conversions land on the row matching the surface. Left as-is,
+// the spend-bearing row looks artificially expensive and every other row
+// reports revenue at $0 cost (ROI 9999) — codex P1 on #3525.
+//
+// So: pool the rows' cost per pooled source_type and re-allocate it across
+// those rows in proportion to their lead counts (equal split when the pool
+// has no leads), then recompute the cost-derived fields. Sum of cost is
+// unchanged; rows stay separable by surface; no row is ever "free".
+// Pure — exported for its unit test.
+const POOLED_COST_SOURCE_TYPES = new Set(['google_ads']);
+
+function allocatePooledChannelCost(results) {
+  const groups = new Map();
+  for (const r of results) {
+    const type = r?.source?.source_type;
+    if (!POOLED_COST_SOURCE_TYPES.has(type)) continue;
+    if (!groups.has(type)) groups.set(type, []);
+    groups.get(type).push(r);
+  }
+  for (const rows of groups.values()) {
+    if (rows.length < 2) continue;
+    const pooledCost = rows.reduce((sum, r) => sum + (r.totalCost || 0), 0);
+    if (pooledCost <= 0) continue;
+    const pooledLeads = rows.reduce((sum, r) => sum + (r.totalLeads || 0), 0);
+    for (const r of rows) {
+      const share = pooledLeads > 0 ? (r.totalLeads || 0) / pooledLeads : 1 / rows.length;
+      const totalCost = pooledCost * share;
+      const costPerLead = r.totalLeads > 0 ? totalCost / r.totalLeads : 0;
+      const costPerAcquisition = r.conversions > 0 ? totalCost / r.conversions : 0;
+      const roi = totalCost > 0
+        ? ((r.totalRevenue - totalCost) / totalCost) * 100
+        : (r.totalRevenue > 0 ? Infinity : 0);
+      r.totalCost = Math.round(totalCost * 100) / 100;
+      r.costPerLead = Math.round(costPerLead * 100) / 100;
+      r.costPerAcquisition = Math.round(costPerAcquisition * 100) / 100;
+      r.roi = roi === Infinity ? 9999 : Math.round(roi * 10) / 10;
+      r.pooledCostAllocation = { pooledCost: Math.round(pooledCost * 100) / 100, share: Math.round(share * 10000) / 10000 };
+    }
+  }
   return results;
 }
 
@@ -517,4 +565,5 @@ module.exports = {
   logSourceTouch,
   calculateSourceROI,
   calculateAllSourceROI,
+  allocatePooledChannelCost,
 };
