@@ -30,6 +30,7 @@
 //   the preview side that could XSS the operator from a malformed
 //   template body.
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { Badge, Button, Card, Switch, cn } from "../../components/ui";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -392,14 +393,14 @@ function SendAutomationModal({ template, onClose, onSent }) {
     }
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-lg my-8"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-lg my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -601,7 +602,8 @@ function SendAutomationModal({ template, onClose, onSent }) {
           </div>
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -678,14 +680,14 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
   }
   if (!template) return null;
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-4"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-4xl my-8"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-4xl my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -771,7 +773,8 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
           {toast && <div className="text-12 text-ink-secondary">{toast}</div>}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1043,14 +1046,14 @@ function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
     a{color:#18181b;text-decoration:underline;}
   </style></head><body>${fill(htmlBody || "<p>(no body)</p>")}</body></html>`;
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 overflow-y-auto p-4"
+      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl my-8"
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full min-h-full sm:min-h-0 max-w-none sm:max-w-3xl my-0 sm:my-8 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1098,7 +1101,8 @@ function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
           style={{ height: "60vh", border: "none", background: "#fff" }}
         />{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

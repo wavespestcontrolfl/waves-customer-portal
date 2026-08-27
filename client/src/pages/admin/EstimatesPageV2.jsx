@@ -1052,7 +1052,7 @@ function EstimatePricingAuditModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-label="Estimate pricing audit"
@@ -1061,7 +1061,7 @@ function EstimatePricingAuditModal({
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-200 rounded-lg shadow-xl w-full max-w-5xl max-h-[88vh] overflow-hidden flex flex-col"
+        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-lg shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-5xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1548,7 +1548,7 @@ export function EngineReviewModal({ estimate, onClose }) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[1000] bg-black/45 flex items-center justify-center p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
       aria-label="AI draft review"
@@ -1556,7 +1556,7 @@ export function EngineReviewModal({ estimate, onClose }) {
       onClick={onClose}
     >
       <div
-        className="bg-white border-hairline border-zinc-200 rounded-lg shadow-xl w-full max-w-2xl max-h-[88vh] overflow-hidden flex flex-col"
+        className="bg-white border-hairline border-zinc-200 rounded-none sm:rounded-lg shadow-xl w-full h-full sm:h-auto max-w-none sm:max-w-2xl max-h-none sm:max-h-[88vh] overflow-hidden flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="p-5 border-b border-zinc-200 flex items-start justify-between gap-4">

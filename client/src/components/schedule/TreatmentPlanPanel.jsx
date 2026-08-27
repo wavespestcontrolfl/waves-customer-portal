@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
   Beaker,
@@ -183,9 +184,9 @@ export default function TreatmentPlanPanel({ service, onClose }) {
     ));
   }
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[1000] bg-zinc-900/35" role="dialog" aria-modal="true">
-      <div className="absolute inset-y-0 right-0 w-full md:w-[760px] bg-surface-page shadow-2xl flex flex-col">
+      <div className="absolute inset-y-0 right-0 w-full md:w-[760px] bg-surface-page shadow-2xl flex flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]">
         <div className="h-16 px-4 md:px-5 bg-white border-b-hairline border-zinc-200 flex items-center justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -343,6 +344,7 @@ export default function TreatmentPlanPanel({ service, onClose }) {
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

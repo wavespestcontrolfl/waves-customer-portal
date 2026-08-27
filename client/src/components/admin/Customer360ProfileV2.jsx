@@ -3772,13 +3772,13 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
     ? Math.round(Number(amount) * 1.07 * 100) / 100
     : Number(amount);
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={() => !saving && onClose?.()}
     >
       <div
-        className="bg-white w-full max-w-[540px] rounded-sm border-hairline border-zinc-300 my-4"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -3937,7 +3937,8 @@ function AnnualPrepayModal({ customer, activeTerm, prepaidPlans = [], annualPrep
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4172,13 +4173,13 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
     }
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 bg-black/70 z-[1120] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={() => !saving && onClose?.()}
     >
       <div
-        className="bg-white w-full max-w-[540px] rounded-sm border-hairline border-zinc-300 my-4"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[540px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4392,7 +4393,8 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
           </Button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4440,13 +4442,13 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
     setRunning(false);
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={() => !running && onClose()}
     >
       <div
-        className="bg-white w-full max-w-[560px] rounded-sm border-hairline border-zinc-300 my-4"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4566,7 +4568,8 @@ export function CancelSignupModal({ customer, onClose, onDone }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -4702,13 +4705,13 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
     setRunning(false);
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
       onClick={() => !running && onClose()}
     >
       <div
-        className="bg-white w-full max-w-[440px] rounded-sm border-hairline border-zinc-300 my-4"
+        className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[440px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-hairline border-zinc-200">
@@ -4824,7 +4827,8 @@ export function RefundPaymentModal({ customer, payment, onClose, onDone }) {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -7774,12 +7778,12 @@ export default function Customer360ProfileV2({
       )}
       {editOpen && (
         <div
-          className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-4 overflow-y-auto"
+          className="fixed inset-0 bg-black/70 z-[1100] flex items-start sm:items-center justify-center p-0 sm:p-4 overflow-y-auto"
           onClick={() => !savingEdit && setEditOpen(false)}
         >
           {" "}
           <div
-            className="bg-white w-full max-w-[560px] rounded-sm border-hairline border-zinc-300 my-4"
+            className="bg-white w-full min-h-full sm:min-h-0 max-w-none sm:max-w-[560px] rounded-none sm:rounded-sm border-hairline border-zinc-300 my-0 sm:my-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
             {" "}

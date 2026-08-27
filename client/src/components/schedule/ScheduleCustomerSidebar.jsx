@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { MoreHorizontal, X } from 'lucide-react';
 import { adminFetch } from '../../lib/adminFetch';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
@@ -238,10 +239,10 @@ export default function ScheduleCustomerSidebar({
 
   if (!service) return null;
 
-  return (
+  return createPortal(
     <div className="fixed inset-0 z-[1000] pointer-events-none font-sans">
       <aside
-        className="pointer-events-auto fixed right-0 top-0 h-screen w-full max-w-[430px] bg-white shadow-2xl border-l border-hairline border-zinc-200 overflow-y-auto"
+        className="pointer-events-auto fixed right-0 top-0 h-[100dvh] max-h-[100dvh] w-full max-w-[430px] bg-white shadow-2xl border-l border-hairline border-zinc-200 overflow-y-auto pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         aria-label="Appointment details"
       >
         <div className="sticky top-0 z-10 bg-white border-b border-hairline border-zinc-200 px-5 py-4 flex items-center justify-between gap-3">
@@ -468,12 +469,12 @@ export default function ScheduleCustomerSidebar({
       </aside>
 
       {showCancelModal && (
-        <div className="pointer-events-auto fixed inset-0 z-[1010] flex items-center justify-center bg-black/40 px-4">
+        <div className="pointer-events-auto fixed inset-0 z-[1010] flex items-center justify-center bg-black/40 px-0 sm:px-4">
           <div
             role="dialog"
             aria-modal="true"
             aria-labelledby="cancel-appointment-title"
-            className="w-full max-w-[520px] max-h-[calc(100vh-48px)] overflow-y-auto rounded-sm bg-white shadow-2xl"
+            className="w-full h-full sm:h-auto max-w-none sm:max-w-[520px] max-h-none sm:max-h-[calc(100vh-48px)] overflow-y-auto rounded-none sm:rounded-sm bg-white shadow-2xl pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
           >
             <div className="border-b border-hairline border-zinc-200 px-6 py-4 flex items-center justify-between gap-3">
               <h2 id="cancel-appointment-title" className="text-20 font-medium text-zinc-900">
@@ -590,6 +591,7 @@ export default function ScheduleCustomerSidebar({
           </div>
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
