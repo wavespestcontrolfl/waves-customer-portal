@@ -14,7 +14,7 @@
  * and the Field & Equipment "Lawn Assessment" page were two top-level areas
  * for the same subject — one canonical section removes the split.
  */
-import React, { Suspense } from "react";
+import React, { Suspense, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Camera, Leaf } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -55,6 +55,10 @@ export default function AssessmentsHubPage() {
   // (Codex #2961 r14).
   useRenderedTabBeacon("/admin/lawn-assessments", tab, [searchParams]);
 
+  // Header action registered by the embedded tab page (the Lead Magnets tab
+  // hands up "Add Assessment", the way Schedule's header owns Add Appointment).
+  const [secondary, setSecondary] = useState(null);
+
   return (
     <div className="max-w-[1200px]">
       <AdminCommandHeader
@@ -65,6 +69,7 @@ export default function AssessmentsHubPage() {
         onSectionChange={setTab}
         ariaLabel="Assessments section"
         navGridClassName="grid-cols-2"
+        actions={secondary?.actions}
       />
       {tab === TABS.FIELD ? (
         <Suspense
@@ -77,7 +82,7 @@ export default function AssessmentsHubPage() {
           <LawnAssessmentPanel embedded />
         </Suspense>
       ) : (
-        <PhotoAssessmentsPage embedded />
+        <PhotoAssessmentsPage embedded onSecondaryNav={setSecondary} />
       )}
     </div>
   );

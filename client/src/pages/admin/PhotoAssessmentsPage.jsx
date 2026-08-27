@@ -14,6 +14,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import { Plus } from "lucide-react";
 import {
   Button,
   Badge,
@@ -218,8 +219,10 @@ function NewAssessmentDialog({ open, onClose, onCreated }) {
 
 // `embedded` — rendered as the "Lead Magnets" tab inside AssessmentsHubPage:
 // the hub owns the page header + padding, so skip our own h1/padding and keep
-// the functional row (subtitle, gate badges, New assessment button).
-export default function PhotoAssessmentsPage({ embedded = false }) {
+// the functional row (subtitle, gate badges). With `onSecondaryNav` the hub
+// header also owns the Add Assessment button (same spot + look as Schedule's
+// Add Appointment); standalone keeps the inline button.
+export default function PhotoAssessmentsPage({ embedded = false, onSecondaryNav }) {
   const [assessments, setAssessments] = useState([]);
   const [gates, setGates] = useState(null);
   const [funnel, setFunnel] = useState(null);
@@ -253,6 +256,17 @@ export default function PhotoAssessmentsPage({ embedded = false }) {
 
   useEffect(() => { load(); }, [load]);
 
+  const hubOwnsHeader = embedded && Boolean(onSecondaryNav);
+  useEffect(() => {
+    if (!hubOwnsHeader) return undefined;
+    onSecondaryNav({
+      actions: [
+        { key: "new-assessment", label: "Add Assessment", icon: Plus, onClick: () => setShowNew(true) },
+      ],
+    });
+    return () => onSecondaryNav(null);
+  }, [hubOwnsHeader, onSecondaryNav]);
+
   return (
     <div className={embedded ? "max-w-[1200px]" : "p-4 md:p-6 max-w-[1200px]"}>
       <div className="flex items-start justify-between gap-3 flex-wrap mb-4">
@@ -270,7 +284,9 @@ export default function PhotoAssessmentsPage({ embedded = false }) {
             </div>
           ) : null}
         </div>
-        <Button onClick={() => setShowNew(true)}>New assessment</Button>
+        {!hubOwnsHeader && (
+          <Button onClick={() => setShowNew(true)}>New assessment</Button>
+        )}
       </div>
 
       <FunnelTiles funnel={funnel} />
