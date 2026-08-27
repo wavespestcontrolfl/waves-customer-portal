@@ -133,6 +133,35 @@ async function knownInspectionFaces(db) {
   return [...faces];
 }
 
+// Every recurring-customer one-time perk rate ever configured: today's
+// (constants, DB-overlaid), every value in the onetime_recurring_discount
+// audit trail, and the long-standing 15% as a seed. Read-only, fail-soft.
+const LEGACY_PERK_RATES = [0.15];
+async function knownPerkRates(db) {
+  const rates = new Set(LEGACY_PERK_RATES);
+  const add = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0 && n < 1) rates.add(n); };
+  try {
+    const { WAVEGUARD } = require('./pricing-engine/constants');
+    add(WAVEGUARD?.recurringCustomerOneTimePerk);
+  } catch { /* constants unavailable — seeds only */ }
+  try {
+    if (typeof db === 'function') {
+      const rows = await db('pricing_config_audit')
+        .where({ config_key: 'onetime_recurring_discount' })
+        .select('old_value', 'new_value');
+      for (const row of (Array.isArray(rows) ? rows : [])) {
+        for (const raw of [row?.old_value, row?.new_value]) {
+          try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            add(parsed?.discount);
+          } catch { /* unparseable audit value — skip */ }
+        }
+      }
+    }
+  } catch { /* no audit table / lookup error — seeds only */ }
+  return [...rates];
+}
+
 async function soldInspectionAmountForVisit(db, svc) {
   if (!svc || typeof svc !== 'object') return null;
   // FACE value, never net: a comped or line-discounted inspection still
@@ -202,8 +231,17 @@ async function soldInspectionAmountForVisit(db, svc) {
             // have been discounted from (≥ 50% of it) is the promise.
             const faces = await knownInspectionFaces(db);
             if (faces.some((f) => Math.abs(f - netFace) < 0.005)) return round2(netFace);
-            const candidates = faces.filter((f) => f > netFace && netFace / f >= 0.5).sort((a, b) => a - b);
-            return round2(candidates.length ? candidates[0] : netFace);
+            // PROVABLE only (uncapped audit P0 on #3521): a face counts when
+            // some perk rate that has ever been configured reproduces the
+            // stored net to the cent (face × (1 − rate) === net). "The
+            // smallest fee above the net" is not proof — an admin-edited
+            // $110 fee in the trail would have claimed a $125 promise. If
+            // more than one face proves out, the largest is honored (never
+            // short a promise); if none does, the net stands.
+            const rates = await knownPerkRates(db);
+            const proven = faces.filter((f) => f > netFace
+              && rates.some((r) => Math.abs(round2(f * (1 - r)) - netFace) < 0.005));
+            return round2(proven.length ? Math.max(...proven) : netFace);
           }
         }
       }
