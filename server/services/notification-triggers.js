@@ -791,27 +791,46 @@ async function triggerNotification(triggerKey, payload = {}) {
         // plus live dashboard alerts after this admin's dismissals
         // (admin-unread.js, shared with the route) — computed per recipient
         // because dismissal state is per admin, and AFTER the bell write
-        // above so the triggering notification is included. A failed count
-        // omits the badge (icon left untouched) rather than sending a wrong
-        // number. Lazy require: admin-unread pulls in dashboard-alerts-cron,
-        // which requires this module back — a top-level require would cycle.
+        // above so the triggering notification is included. The badge is
+        // garnish and the push is the product: the count runs the
+        // dashboard-alert aggregate battery (cold memo when the PWA is
+        // closed — exactly the inbound-SMS case), so it is raced against a
+        // hard timeout and any failure/timeout OMITS the badge (icon left
+        // untouched) rather than delaying delivery or sending a wrong
+        // number. badgeAt stamps when the snapshot resolved so the service
+        // worker can drop an older overlapping push's stale absolute count.
+        // Lazy require: admin-unread pulls in dashboard-alerts-cron, which
+        // requires this module back — a top-level require would cycle.
         const { getUnreadCountForAdmin } = require('./admin-unread');
+        const BADGE_COUNT_TIMEOUT_MS = 1500;
+        const BADGE_TIMED_OUT = Symbol('badge-timeout');
         const badgeByUser = new Map();
-        for (const user of activeAdmins) {
-          if (!enabledUserIds.includes(user.id)) continue;
-          try {
-            badgeByUser.set(user.id, await getUnreadCountForAdmin({ adminUserId: user.id, role: user.role }));
-          } catch (e) {
-            badgeByUser.set(user.id, null);
-            logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
-          }
-        }
+        await Promise.all(
+          activeAdmins
+            .filter((u) => enabledUserIds.includes(u.id))
+            .map(async (user) => {
+              let timer;
+              const count = await Promise.race([
+                getUnreadCountForAdmin({ adminUserId: user.id, role: user.role }).catch((e) => {
+                  logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
+                  return null;
+                }),
+                new Promise((resolve) => { timer = setTimeout(resolve, BADGE_COUNT_TIMEOUT_MS, BADGE_TIMED_OUT); }),
+              ]);
+              clearTimeout(timer);
+              if (count === BADGE_TIMED_OUT) {
+                logger.warn(`[notification-triggers] badge count timed out for admin ${user.id} — sending push without badge`);
+                return;
+              }
+              if (Number.isInteger(count)) badgeByUser.set(user.id, { count, at: Date.now() });
+            })
+        );
 
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
-            const badgeCount = badgeByUser.get(adminUserId);
+            const badgeInfo = badgeByUser.get(adminUserId);
             return {
               title: built.title,
               body: built.body,
@@ -821,7 +840,7 @@ async function triggerNotification(triggerKey, payload = {}) {
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
               renotify: triggerKey === 'sms_reply',
-              ...(Number.isInteger(badgeCount) ? { badge: badgeCount } : {}),
+              ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           }
         );

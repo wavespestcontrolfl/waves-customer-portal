@@ -141,19 +141,36 @@ self.addEventListener('fetch', event => {
   );
 });
 
+// Home-screen icon badge (Badging API — iOS 16.4+ installed PWAs):
+// data.badge is the server-computed unread count; data.badgeAt orders
+// overlapping pushes — counts are absolute snapshots, so a slower delivery
+// carrying an older (lower) snapshot must not overwrite a newer one. The
+// last-applied stamp lives in the Cache API (SW scope has no localStorage,
+// and worker globals don't survive termination); the cache name is outside
+// APP_CACHE_PREFIX so activate's old-cache sweep never clears it.
+// 0 clears the badge; a payload without a numeric badge leaves it alone.
+const BADGE_STATE_CACHE = 'waves-badge-state';
+const BADGE_SEQ_KEY = '/__badge-seq';
+async function applyAppBadge(count, seq) {
+  if (!('setAppBadge' in self.navigator)) return;
+  try {
+    if (Number.isFinite(seq)) {
+      const cache = await caches.open(BADGE_STATE_CACHE);
+      const prevRes = await cache.match(BADGE_SEQ_KEY);
+      const prev = prevRes ? Number(await prevRes.text()) : 0;
+      if (prev > seq) return; // an older overlapping push arrived late — ignore it
+      await cache.put(BADGE_SEQ_KEY, new Response(String(seq)));
+    }
+    if (count > 0) await self.navigator.setAppBadge(count);
+    else await self.navigator.clearAppBadge();
+  } catch { /* badge is garnish — never fail the push handler over it */ }
+}
+
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
   const requireInteraction = data.priority === 'urgent';
-  // Home-screen icon badge (Badging API — iOS 16.4+ installed PWAs):
-  // data.badge is the server-computed unread count. 0 clears the badge;
-  // absent (customer pushes, older payloads) leaves the icon untouched.
-  if (Number.isInteger(data.badge) && 'setAppBadge' in self.navigator) {
-    event.waitUntil(
-      (data.badge > 0
-        ? self.navigator.setAppBadge(data.badge)
-        : self.navigator.clearAppBadge()
-      ).catch(() => {})
-    );
+  if (Number.isInteger(data.badge)) {
+    event.waitUntil(applyAppBadge(data.badge, Number(data.badgeAt)));
   }
   let destination = '/';
   try {
