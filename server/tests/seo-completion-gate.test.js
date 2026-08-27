@@ -272,6 +272,37 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
+  test('mixed-service and wording-free imperative CTA anchors are flagged; prose reference anchors are not', () => {
+    // "Termite and Lawn" on a termite post: every named service must be allowed.
+    const mixed = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Act now. [Get a Termite and Lawn Quote](/pest-control-quote/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(mixed.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // An imperative CTA-shaped anchor with no estimate/quote wording is
+    // flagged even beside a valid CTA.
+    const generic = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Act. [Get My Free Pest Control Estimate](/pest-control-quote/) or [Schedule Service](/contact/).',
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(generic.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A prose reference anchor to a conversion path is not a CTA shape.
+    const prose = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Details live on [our contact page](/contact/). [Get My Free Pest Control Estimate](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(prose.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('blocks customer PII and unapproved hardcoded prices', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({

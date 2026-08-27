@@ -132,9 +132,9 @@ function evaluate(input = {}) {
     if (badAnchor) {
       findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badAnchor}" uses inspection-request wording — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording, e.g. "Get My Free Termite Estimate".'));
     }
-    const wrongService = wrongServiceCtaAnchor(body, brief);
-    if (wrongService) {
-      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${wrongService}" names a different service than this post's — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to this post\'s service, e.g. "Get My Free Termite Estimate" on a termite post.'));
+    const badCta = badCtaAnchor(body, brief);
+    if (badCta) {
+      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badCta}" violates the CTA-wording rule — owner rule 2026-08-27: every conversion CTA anchor uses estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording for this post\'s service, e.g. "Get My Free Termite Estimate" on a termite post.'));
     }
   }
   if (faqRequired(brief) && !contract.faq.length) {
@@ -302,8 +302,18 @@ function allowedAnchorServices(briefService) {
   for (const [svc, fam] of Object.entries(CTA_SERVICE_FAMILY)) {
     if (fam === briefService) allowed.add(svc);
   }
+  // "Pest control" is the company's generic term — "Get My Free Pest
+  // Control Estimate" is legitimate CTA wording on ANY service's post
+  // (every lane converts through the pest-control quote paths).
+  allowed.add('pest');
   return allowed;
 }
+
+// Imperative CTA-shaped anchors ("Schedule Service", "Click here",
+// "Book now") on conversion links must carry estimate/quote wording —
+// prose reference anchors ("our contact page") are not CTAs and stay out
+// of scope (P2_GENERIC_ANCHOR_TEXT already nudges those).
+const IMPERATIVE_CTA_ANCHOR_RE = /^(?:request|schedule|book|get|start|claim|call|click)\b/i;
 
 // Canonicalize a brief's service for CTA-anchor validation. Specialty
 // topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
@@ -354,19 +364,25 @@ function hasConversionCta(body, brief = {}) {
   const allowed = briefService ? allowedAnchorServices(briefService) : null;
   return conversionCtaLinks(body).some((link) =>
     link.hasEstimateWording
-    && (!allowed || link.named.length === 0 || link.named.some((svc) => allowed.has(svc))));
+    && (!allowed || link.named.every((svc) => allowed.has(svc))));
 }
 
-// EVERY conversion CTA anchor must comply — a wrong-service estimate/quote
-// anchor is a violation even when a valid CTA exists elsewhere in the body.
-function wrongServiceCtaAnchor(body, brief = {}) {
+// EVERY conversion CTA anchor must comply — violations are flagged even
+// when a valid CTA exists elsewhere in the body:
+//   - an estimate/quote anchor naming ANY service outside the brief's own
+//     (+ family + generic pest) — "Get a Termite and Lawn Quote" on a
+//     termite post is mixed wording, not a pass;
+//   - an imperative CTA-shaped anchor with no estimate/quote wording at
+//     all ("Schedule Service", "Click here").
+function badCtaAnchor(body, brief = {}) {
   const briefService = ctaBriefService(brief.service);
-  if (!briefService) return null;
-  const allowed = allowedAnchorServices(briefService);
-  const bad = conversionCtaLinks(body).find((link) =>
-    link.hasEstimateWording
-    && link.named.length > 0
-    && !link.named.some((svc) => allowed.has(svc)));
+  const allowed = briefService ? allowedAnchorServices(briefService) : null;
+  const bad = conversionCtaLinks(body).find((link) => {
+    if (link.hasEstimateWording) {
+      return allowed && link.named.length > 0 && !link.named.every((svc) => allowed.has(svc));
+    }
+    return IMPERATIVE_CTA_ANCHOR_RE.test(link.anchor.trim());
+  });
   return bad ? bad.anchor : null;
 }
 
