@@ -10316,8 +10316,16 @@ export function CompletionPanel({
         const prev = reentrySeedsRef.current;
         reentrySeedsRef.current = seeds;
         setReentrySeeds(seeds);
-        setReentryExtMinutes((cur) => (cur == null || cur === prev?.exteriorMinutes ? seeds.exteriorMinutes : cur));
-        setReentryIntMinutes((cur) => (cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur));
+        // A side whose seed drops to 0 hides its stepper — the value MUST
+        // follow to 0 too, or an earlier adjustment would submit invisibly
+        // and be persisted as reentry_adjusted on a visit with no treatment
+        // evidence (uncapped codex P1 r7).
+        setReentryExtMinutes((cur) => (
+          seeds.exteriorMinutes === 0 || cur == null || cur === prev?.exteriorMinutes ? seeds.exteriorMinutes : cur
+        ));
+        setReentryIntMinutes((cur) => (
+          seeds.interiorMinutes === 0 || cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur
+        ));
       })
       .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
     return () => { live = false; };
