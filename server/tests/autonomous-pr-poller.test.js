@@ -148,7 +148,10 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
           return Promise.resolve(queueRows.find((r) => r.id === q._filters.id) || null);
         }
         if (table === 'content_briefs') {
-          return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
+          if (q._filters.id !== undefined) return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
+          // latest-for-opportunity fallback lookup in _loadReviewedBrief
+          if (q._filters.opportunity_id !== undefined) return Promise.resolve(briefs.find((r) => r.opportunity_id === q._filters.opportunity_id) || null);
+          return Promise.resolve(null);
         }
         // by-id lookup (head gate's human-approval read) — defaults to an
         // unapproved row; the newer-sibling lookup in queueRowParkedState
@@ -847,6 +850,59 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
     expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test("a run with NO brief_id is never made eligible by the opportunity's LATEST intercept brief (PR r11 P1)", async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    try {
+      setupDb({
+        // No brief_id on the run — a later intercept brief for the SAME
+        // opportunity exists but must not authorize this PR.
+        pending: [makeRun()],
+        briefs: [{ id: 'brief-late', opportunity_id: 'opp-1', action_type: 'new_supporting_blog', gsc_signal: { intercept: true } }],
+      });
+      greenMergePath();
+
+      const res = await poller.pollPending();
+
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally {
+      fg.isEnabled.mockRestore();
+      gate.evaluate.mockRestore();
+    }
+  });
+
+  test('a changed refresh head ADDING a freshness field the base lacked is withheld (PR r11 P2)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Pest Control Venice FL\nupdated: "2026-08-27"\n---\n\nNew body text.' }
+      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nOld body text.' }));
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a changed refresh head moving an ALREADY-PRESENT freshness field forward merges (publisher contract)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-08-27"\n---\n\nNew body text.' }
+      : { content: '---\ntitle: Pest Control Venice FL\nmodified: "2026-05-01"\n---\n\nOld body text.' }));
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
   test('a refresh head rewriting a SERVICES-page metaTitle is withheld — frozen on non-blog targets (PR r10 P1)', async () => {

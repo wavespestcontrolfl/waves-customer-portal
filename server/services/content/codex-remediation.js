@@ -1180,8 +1180,17 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // Owner directive 2026-08-26: an opted-in TRUE-intercept run continues —
     // the same scoped eligibility the runner applies at its review-park
     // decision (fail-closed: no marker / gates off → park as before).
-    if (comparisonResult.requiresHumanReview === true && !namedCompetitorAutopublishEligible(brief)) {
-      return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+    // Eligibility binds to the run's EXACT brief (PR r11 P1): the fallback
+    // to the opportunity's latest brief must not let a newer intercept
+    // brief authorize a run it never produced.
+    if (comparisonResult.requiresHumanReview === true) {
+      let strictBrief = null;
+      try {
+        strictBrief = run.brief_id ? await runner._loadReviewedBrief({ ...run, opportunity_id: null }) : null;
+      } catch (_) { strictBrief = null; }
+      if (!namedCompetitorAutopublishEligible(strictBrief)) {
+        return { ok: false, reason: 'fix introduces named-competitor content under run context (requires human sign-off)' };
+      }
     }
 
     // 1. Blog-corpus dedup (same env default as the runner: on unless
@@ -2193,7 +2202,14 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
             ? runner._internals.operatorBriefTextForComparisonGate(opp, brief)
             : null,
         };
-        namedCompetitorAutopublish = namedCompetitorAutopublishEligible(brief);
+        // Eligibility binds to the run's EXACT brief (PR r11 P1) — the
+        // latest-for-opportunity fallback must not authorize this PR.
+        try {
+          const strictBrief = fullRun.brief_id
+            ? await runner._loadReviewedBrief({ ...fullRun, opportunity_id: null })
+            : null;
+          namedCompetitorAutopublish = namedCompetitorAutopublishEligible(strictBrief);
+        } catch (_) { namedCompetitorAutopublish = false; }
       }
     }
   } catch (e) {

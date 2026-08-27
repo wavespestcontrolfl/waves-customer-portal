@@ -691,7 +691,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
       (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
     try {
       const HEAD_SHA = 'abc1234def5678';
-      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1' };
+      const runRow = { id: 'run-1', action_type: 'new_supporting_blog', opportunity_id: 'opp-1', brief_id: 'brief-1' };
       const harness = (intercept) => {
         const db = makeDb({
           autonomous_runs: [runRow],
@@ -1160,6 +1160,7 @@ describe('validateAutonomousRunGates', () => {
     id: 'run-1',
     action_type: 'new_supporting_blog',
     opportunity_id: 'opp-1',
+    brief_id: 'brief-1',
     draft_payload: JSON.stringify({ body: 'original body', url: 'https://hub/blog/x/', title: 'T' }),
   };
   // Callers pass whatever their poll SELECT included — the validator must

@@ -1169,9 +1169,25 @@ async function maybeAutoMerge(run, pr) {
               if (k === 'modified' || k === 'updated') continue; // re-checked below
               if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
             }
-            if (!drift && !bodyChanged && !metaChanged) {
+            // Freshness fields mirror the publisher's ACTUAL mutation (PR
+            // r11 P2): with no body/meta change they must be untouched; with
+            // a change, only an ALREADY-PRESENT field may move (no
+            // additions, no deletions) and only forward to a real date no
+            // later than tomorrow — never an arbitrary or backdated stamp.
+            if (!drift) {
               for (const k of ['modified', 'updated']) {
-                if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
+                const want = boundTargetingWant[k];
+                const got = headFm[k];
+                if (!bodyChanged && !metaChanged) {
+                  if (canonVal(want) !== canonVal(got)) { drift = true; break; }
+                  continue;
+                }
+                if ((want === undefined) !== (got === undefined)) { drift = true; break; }
+                if (want !== undefined && canonVal(want) !== canonVal(got)) {
+                  const b = Date.parse(String(want));
+                  const h = Date.parse(String(got));
+                  if (!Number.isFinite(h) || (Number.isFinite(b) && h < b) || h > Date.now() + 86400000) { drift = true; break; }
+                }
               }
             }
           } else {
@@ -1229,7 +1245,15 @@ async function maybeAutoMerge(run, pr) {
       try {
         const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
         const runner = require('./autonomous-runner');
-        const brief = await runner._loadReviewedBrief(run);
+        // Bind to the run's EXACT brief (PR r11 P1): _loadReviewedBrief
+        // falls back to the opportunity's LATEST brief when brief_id is
+        // null/unresolvable (the FK is ON DELETE SET NULL), and a later
+        // true-intercept brief must not authorize an older PR it never
+        // produced. Nulling opportunity_id disables that fallback — a run
+        // without a resolvable brief_id is simply ineligible.
+        const brief = run.brief_id
+          ? await runner._loadReviewedBrief({ ...run, opportunity_id: null })
+          : null;
         eligible = namedCompetitorAutopublishEligible(brief) === true;
       } catch (_) { eligible = false; }
     }
