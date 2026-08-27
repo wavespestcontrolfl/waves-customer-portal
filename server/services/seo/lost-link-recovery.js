@@ -213,9 +213,10 @@ async function queueOne(loss, out, scoreMod) {
       source: 'lost_recovery',
       source_ref: loss.backlink_id || null,
       owner: 'backlink_monitor',
-    }).onConflict(['target_domain', 'target_page']).ignore();
-    const rowCount = Array.isArray(inserted) ? inserted.length : (inserted && inserted.rowCount != null ? inserted.rowCount : 1);
-    if (rowCount === 0) {
+    }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+    // pg resolves an insert without returning() to [] even when a row landed;
+    // with returning('id') an ON CONFLICT DO NOTHING is the only empty result.
+    if (!Array.isArray(inserted) || inserted.length === 0) {
       out.skipped++;
       out.reasons.push({ domain, reason: 'already on board (concurrent insert)' });
       return;

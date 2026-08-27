@@ -28,7 +28,7 @@ function makeDb(handlers) {
       orderBy: jest.fn(() => b), orderByRaw: jest.fn(() => b), limit: jest.fn(() => b),
       select: jest.fn((...cols) => { state.select = cols; return done('select'); }),
       first: jest.fn((...cols) => { state.select = cols; return done('first'); }),
-      insert: jest.fn((p) => { const pr = done('insert', p); pr.onConflict = jest.fn(() => ({ ignore: jest.fn(() => pr) })); return pr; }),
+      insert: jest.fn((p) => { const pr = done('insert', p); pr.returning = jest.fn(() => pr); pr.onConflict = jest.fn(() => ({ ignore: jest.fn(() => pr) })); return pr; }),
       update: jest.fn((p) => done('update', p)),
       increment: jest.fn((col, n) => done('increment', { col, n })),
     };
@@ -389,10 +389,14 @@ describe('lost-link recovery', () => {
 
   test('a concurrent insert of the same (domain, page) is ignored, counted as a skip, and does not abort the batch', async () => {
     const inserts = [];
-    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return inserts.length === 1 ? [] : [1]; } } });
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return null; if (op === 'insert') { inserts.push(st.payload); return inserts.length === 1 ? [] : [{ id: 'new-row' }]; } } });
     const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', gate: { ok: true, lane: 'outreach' }, contact: { contact_email: 'a@b.example' } }]) };
     const r = await recovery.queueLostDomains([{ ...loss, domain: 'race.example' }, { ...loss, domain: 'ok.example' }], { scorer });
     expect(r).toEqual(expect.objectContaining({ queued: 1, skipped: 1 }));
+    // pg semantics: returning('id') is chained after ignore() so a landed row is never mistaken for a conflict
+    const lastInsert = db.mock.results.filter(x => x.value && x.value.insert).at(-1).value;
+    expect(lastInsert.insert.mock.results[0].value.onConflict).toHaveBeenCalledWith(['target_domain', 'target_page']);
+    expect(lastInsert.insert.mock.results[0].value.returning).toHaveBeenCalledWith('id');
     expect(r.reasons).toEqual([{ domain: 'race.example', reason: 'already on board (concurrent insert)' }]);
   });
 
