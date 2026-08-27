@@ -412,7 +412,10 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
           credential_type: 'refresh-token',
           env_var_name: `GBP_REFRESH_TOKEN_${envKey}`,
         };
-        const client = gbpService._getClient(loc.id);
+        // _getClient is async (google-business.js) — without the await the
+        // Promise's missing getAccessToken threw and marked every GBP row
+        // expired (a false token-alert once these rows became canonical).
+        const client = await gbpService._getClient(loc.id);
         if (!client) {
           results.push({ ...credential, status: 'error', error: `Missing GBP_CLIENT_ID_${envKey}, GBP_CLIENT_SECRET_${envKey}, or GBP_REFRESH_TOKEN_${envKey}` });
           continue;
