@@ -943,6 +943,38 @@ async function maybeAutoMerge(run, pr) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR blog files (or removals) do not match the run's single expected draft route — PR left open for a human decision`);
         return { pending: true, reason: 'named_competitor_head_gate_failed' };
       }
+    } else if (run.action_type === 'refresh_existing_page') {
+      // A refresh PR is bound to its ONE reviewed target file (PR r6 P1):
+      // the live changed content set must be exactly the Astro source the
+      // brief's target resolves to, and no other content file may leave the
+      // tree — otherwise a changed head could delete/move the intended page
+      // or merge unrelated content under the refresh brief's authorization.
+      // Resolution or lookup failure fails closed (withheld; the 2-min tick
+      // retries transient hiccups).
+      let boundOk = false;
+      try {
+        const publisher = require('../content-astro/astro-publisher');
+        const runner = require('./autonomous-runner');
+        const brief = await runner._loadReviewedBrief(run);
+        const target = brief?.target_url || brief?.page_url || null;
+        const resolved = (target && typeof publisher.resolveExistingAstroFileForTarget === 'function')
+          ? await publisher.resolveExistingAstroFileForTarget(target)
+          : null;
+        const expected = resolved?.path || null;
+        if (expected) {
+          const departing = [
+            ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
+            ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
+          ].filter((name) => /^src\/content\/.+\.(md|mdx)$/.test(String(name || '')));
+          boundOk = contentFiles.length === 1
+            && contentFiles[0].filename === expected
+            && departing.every((name) => name === expected);
+        }
+      } catch (_) { boundOk = false; }
+      if (!boundOk) {
+        logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: refresh PR content files do not match the reviewed target's Astro source — PR left open for a human decision`);
+        return { pending: true, reason: 'named_competitor_head_gate_failed' };
+      }
     }
     if (contentFiles.length) {
       const fmMod = require('../content-astro/frontmatter');

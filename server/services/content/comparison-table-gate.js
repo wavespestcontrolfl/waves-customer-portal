@@ -2430,6 +2430,13 @@ function evaluate(draft, { namedCompetitorEnabled = false, operatorBriefText = '
 function namedCompetitorAutopublishEligible(brief) {
   try {
     if (brief?.gsc_signal?.intercept !== true) return false;
+    // Only the fully-automatable blog action qualifies (PR #3508 r6 P1):
+    // an intercept refresh_existing_page brief can carry deliberate MANUAL
+    // work — publishRefresh freezes schema, so a requested Article/FAQPage
+    // schema change rides to a human as refresh_schema_note — and merging
+    // it unreviewed would silently drop that work. Refresh (and any other
+    // action) keeps the named-competitor review path.
+    if (brief?.action_type !== 'new_supporting_blog') return false;
     const fg = require('../../config/feature-gates');
     return fg.isEnabled('namedCompetitorAutopublish') === true
       && fg.isEnabled('namedCompetitorComparison') === true;
