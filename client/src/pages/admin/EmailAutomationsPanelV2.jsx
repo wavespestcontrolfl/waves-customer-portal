@@ -395,7 +395,7 @@ function SendAutomationModal({ template, onClose, onSent }) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
@@ -682,7 +682,7 @@ function TemplateEditorModal({ templateKey, onClose, onSaved }) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
@@ -1048,7 +1048,7 @@ function StepPreviewModal({ subject, previewText, htmlBody, onClose }) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
+      className="fixed inset-0 z-[110] flex items-start justify-center bg-black/40 overflow-y-auto p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}

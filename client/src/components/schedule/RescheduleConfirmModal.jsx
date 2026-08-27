@@ -107,7 +107,7 @@ export default function RescheduleConfirmModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
     >

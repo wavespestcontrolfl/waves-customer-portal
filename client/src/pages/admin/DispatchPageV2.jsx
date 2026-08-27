@@ -2328,7 +2328,7 @@ export default function DispatchPageV2({
       {/* Mobile "More" bottom sheet */}
       {showMoreSheet && createPortal(
         <div
-          className="fixed inset-0 z-50 md:hidden"
+          className="fixed inset-0 z-[100] md:hidden"
           role="dialog"
           aria-modal="true"
         >
@@ -2715,7 +2715,7 @@ export default function DispatchPageV2({
       )}
       {continueProjectId && createPortal(
         <div
-          className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
+          className="fixed inset-0 z-[100] bg-black/40 overflow-y-auto"
           onClick={() => {
             // A stray scrim tap must not silently discard unsaved report
             // edits — the editor keeps them only in component state

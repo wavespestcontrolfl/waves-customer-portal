@@ -1730,7 +1730,7 @@ function SendConfirmDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-0 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
       onClick={onCancel}
     >
       {" "}
@@ -1843,7 +1843,7 @@ function SendConfirmDialog({
 function PreviewDialog({ html, loading, onClose }) {
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-0 sm:p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
