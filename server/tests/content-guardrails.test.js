@@ -2215,6 +2215,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Tables inside HTML/MDX comments render nothing.
     expect(guardrails.hasRawMarkdownTable('<!--\n| A | B |\n| --- | --- |\n-->\nText')).toBe(false);
     expect(guardrails.hasRawMarkdownTable('{/* <table><tr><td>x</td></tr></table> */}')).toBe(false);
+    // Inline code spans render literally, not as tables.
+    expect(guardrails.hasRawMarkdownTable('Use `<table><tr><td>x</td></tr></table>` sparingly.')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

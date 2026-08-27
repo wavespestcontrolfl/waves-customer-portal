@@ -415,6 +415,15 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('indented-code and inline-code CTA examples are not rendered CTAs', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nExample:\n\n    [Schedule Service](/contact/)\n\nOr inline \`[Request an Inspection](/contact/)\`.` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('links inside comments and fenced code are not rendered CTAs', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
