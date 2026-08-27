@@ -284,6 +284,9 @@ If this rate changes, it needs to be updated in EVERY pricing model simultaneous
       category: 'credentials',
       tags: ['facebook', 'meta', 'oauth', 'token', 'social-media', 'api'],
       confidence: 'high',
+      // Corrected 2026-08-27 (engagement-ingest scopes) — the seeder skips
+      // existing slugs unless forced, so the live row must be republished.
+      forceUpdate: true,
       metadata: { envVar: 'FACEBOOK_ACCESS_TOKEN', ttlDays: 60, platform: 'facebook' },
       content: `# Facebook Page Access Token — Refresh Procedure
 
@@ -293,7 +296,7 @@ Facebook long-lived page access tokens expire after ~60 days.
 ## Refresh Steps
 1. Go to https://developers.facebook.com/tools/explorer/
 2. Select the Waves Pest Control app
-3. Generate a User Access Token with permissions: pages_manage_posts, pages_read_engagement, pages_show_list, instagram_basic, instagram_manage_insights (the last two are required by the social engagement ingest — Instagram share counts come from Media Insights; without them the sweep logs "synced WITHOUT shares")
+3. Generate a User Access Token with permissions: pages_manage_posts, pages_read_engagement, pages_read_user_content, pages_show_list, instagram_basic, instagram_manage_insights. The social engagement ingest needs pages_read_engagement + pages_read_user_content (Facebook post likes/comments — first live sweep 2026-08-27 got "(#10) requires pages_read_engagement / pages_read_user_content" on every Facebook post with a token missing pages_read_user_content) and instagram_manage_insights (Instagram share counts via Media Insights). If Meta still returns #10 with those granted, the app needs App Review approval for pages_read_engagement / pages_read_user_content (the Page Public Content Access feature is the alternative).
 4. Exchange for long-lived token: GET /oauth/access_token?grant_type=fb_exchange_token&client_id={APP_ID}&client_secret={APP_SECRET}&fb_exchange_token={SHORT_TOKEN}
 5. Get Page Access Token: GET /me/accounts?access_token={LONG_LIVED_USER_TOKEN}
 6. Copy the page access token for page ID 110336442031847
