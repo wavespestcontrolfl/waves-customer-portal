@@ -394,3 +394,133 @@ describe('processPaymentRetries — billing_mode resolution guard', () => {
     expect(PaymentRouter.getServiceForCustomer).toHaveBeenCalledWith('cust-1');
   });
 });
+
+// Characterization of the remaining dispositions BEFORE the collectibility
+// verdict is extracted into retry-collectibility.js: every branch below must
+// keep producing the same payment writes and autopay-log events once the
+// sweep consumes the shared verdict.
+describe('processPaymentRetries — parked, held, and missing-customer dispositions', () => {
+  test('ambiguous no-PI failure is PARKED: self-superseded, health alert raised, no charge', async () => {
+    mockFailedPayments = [monthlyFailedPayment({
+      stripe_payment_intent_id: null,
+      failure_reason: 'ECONNRESET before intent',
+      metadata: JSON.stringify({ base_amount: 33, billed_month: '2026-06', ambiguous_outcome: true }),
+    })];
+    const db = require('../models/db');
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(1);
+    const parked = mockPaymentUpdates[0];
+    expect(parked.next_retry_at).toBeNull();
+    expect(parked.superseded_by_payment_id).toBe('pay-failed-1');
+    expect(parked.failure_reason).toContain('parked: ambiguous Stripe outcome');
+    expect(db).toHaveBeenCalledWith('customer_health_alerts');
+    // The park is not one of the guard skips — no skipped_* event.
+    for (const call of logAutopay.mock.calls) {
+      expect(call[1]).not.toMatch(/^skipped_/);
+    }
+  });
+
+  test('deterministic no-PI failure (not flagged ambiguous) still retries normally', async () => {
+    mockFailedPayments = [monthlyFailedPayment({
+      stripe_payment_intent_id: null,
+      metadata: JSON.stringify({ base_amount: 33, billed_month: '2026-06', ambiguous_outcome: false }),
+    })];
+    const charge = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ charge });
+
+    await BillingCron.processPaymentRetries();
+
+    expect(charge).toHaveBeenCalled();
+  });
+
+  test('pending annual-prepay commitment HOLDS a monthly ladder: skipped, stays armed, no disarm write', async () => {
+    pendingSpy.mockResolvedValue(new Set(['cust-1']));
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    // The hold is evaluated as of the sweep day (no explicit as-of argument).
+    expect(pendingSpy).toHaveBeenCalledWith();
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(0);
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_annual_prepay_pending',
+      expect.objectContaining({ paymentId: 'pay-failed-1', details: expect.objectContaining({ source: 'autopay_retry' }) }));
+  });
+
+  test('pending prepay commitment does NOT hold a one-time obligation — it still retries', async () => {
+    pendingSpy.mockResolvedValue(new Set(['cust-1']));
+    mockFailedPayments = [monthlyFailedPayment({
+      description: 'Flea treatment add-on — FAILED',
+      metadata: JSON.stringify({ base_amount: 33 }),
+    })];
+    const chargeOneTime = jest.fn(() => Promise.resolve({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' }));
+    PaymentRouter.getServiceForCustomer.mockResolvedValue({ chargeOneTime });
+
+    await BillingCron.processPaymentRetries();
+
+    expect(chargeOneTime).toHaveBeenCalled();
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_annual_prepay_pending', expect.anything());
+  });
+
+  test('soft-deleted customer: row skipped untouched — no write, no event, no charge', async () => {
+    mockCustomer.deleted_at = '2026-06-01T00:00:00Z';
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(0);
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
+  test('missing customer row: skipped untouched', async () => {
+    mockCustomer = null;
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(PaymentRouter.getServiceForCustomer).not.toHaveBeenCalled();
+    expect(mockPaymentUpdates).toHaveLength(0);
+    expect(logAutopay).not.toHaveBeenCalled();
+  });
+
+  test('guard ORDER: absorbed-by-prepay resolution beats the paused state guard — row superseded, not merely skipped', async () => {
+    coveredSpy.mockResolvedValue(new Set(['cust-1']));
+    mockCustomer.autopay_paused_until = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+    mockFailedPayments = [monthlyFailedPayment()];
+
+    await BillingCron.processPaymentRetries();
+
+    expect(mockPaymentUpdates).toHaveLength(1);
+    expect(mockPaymentUpdates[0].superseded_by_payment_id).toBe('pay-failed-1');
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_annual_prepay', expect.anything());
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_paused', expect.anything());
+  });
+
+  test('guard ORDER: lane disarm runs before the disabled guard — skipped_billing_mode, not skipped_disabled', async () => {
+    mockCustomer.billing_mode = 'per_application';
+    mockCustomer.autopay_enabled = false;
+    mockFailedPayments = [monthlyFailedPayment()];
+    mockCollectedRow = null;
+
+    await BillingCron.processPaymentRetries();
+
+    expect(mockPaymentUpdates).toHaveLength(1);
+    expect(mockPaymentUpdates[0].superseded_by_payment_id).toBeUndefined();
+    expect(logAutopay).toHaveBeenCalledWith('cust-1', 'skipped_billing_mode', expect.anything());
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-1', 'skipped_disabled', expect.anything());
+  });
+
+  test('the sweep never consults payment_methods while classifying rows (the processor picks the card)', async () => {
+    mockCustomer.autopay_enabled = false;
+    mockFailedPayments = [monthlyFailedPayment()];
+    const db = require('../models/db');
+
+    await BillingCron.processPaymentRetries();
+
+    expect(db).not.toHaveBeenCalledWith('payment_methods');
+  });
+});

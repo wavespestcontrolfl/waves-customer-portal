@@ -3681,115 +3681,52 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
   }
   if (!covered.size) return covered;
   try {
-    // (a) armed retries, classified like the sweep — bounded to the
-    // horizon: the sweep only fires rows with next_retry_at <= now, so a
-    // retry armed for AFTER the horizon cannot charge inside this warning
-    // window (ET end of the horizon day, exclusive next-midnight bound).
-    const retryQuery = conn('payments')
-      .whereIn('customer_id', [...covered])
-      .where({ status: 'failed' })
-      .whereNull('superseded_by_payment_id')
-      .where('retry_count', '<', 3)
-      .whereNotNull('next_retry_at');
+    // (a) armed retries, classified by the SAME verdict the sweep acts on
+    // (retry-collectibility.js — one implementation, so the two cannot
+    // drift), bounded to the horizon: the sweep only fires rows with
+    // next_retry_at <= now, so a retry armed for AFTER the horizon cannot
+    // charge inside this warning window (ET end of the horizon day,
+    // exclusive next-midnight bound). The context evaluates the pause, the
+    // pending-prepay hold, and prepay coverage as of the HORIZON: a pause or
+    // hold that lapses inside the window lets the retry fire before the
+    // horizon, so only one covering the whole window suppresses the
+    // warning.
+    const {
+      loadRetryContext, armedRetryQuery, classifyFailedPaymentRetry,
+    } = require('./retry-collectibility');
     const horizonNextMidnight = dayAfter(dateOnly(horizon));
-    if (horizonNextMidnight) {
-      retryQuery.where('next_retry_at', '<', parseETDateTime(`${horizonNextMidnight}T00:00:00`));
-    }
-    const retrying = await retryQuery
-      .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id', 'next_retry_at');
-    // The sweep's state guards (billing-cron retryFailedPayments /
-    // autopay-eligibility.isPaused): disabled Auto Pay permanently DISARMS
-    // the ladder without charging; a paused customer's retries are skipped
-    // daily WITHOUT disarming, and the pause is date-INCLUSIVE (paused
-    // while paused_until >= today, resumes the day after).
-    let retryStateByCustomer = new Map();
+    const retrying = await armedRetryQuery(conn, {
+      customerIds: [...covered],
+      dueBefore: horizonNextMidnight ? parseETDateTime(`${horizonNextMidnight}T00:00:00`) : null,
+    }).select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id', 'next_retry_at');
+    let retryCustomerById = new Map();
     if ((retrying || []).length) {
       const stateRows = await conn('customers')
         .whereIn('id', [...new Set(retrying.map((row) => row.customer_id))])
         .select('id', 'autopay_enabled', 'autopay_paused_until', 'billing_mode', 'waveguard_tier', 'monthly_rate');
-      retryStateByCustomer = new Map((stateRows || []).map((row) => [String(row.id), row]));
+      retryCustomerById = new Map((stateRows || []).map((row) => [String(row.id), row]));
     }
-    const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
-    const coveredOn = new Map();
-    let pendingHoldIds = null;
+    const retryCtx = loadRetryContext({ asOf: horizon, conn });
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
-      const state = retryStateByCustomer.get(customerId) || {};
-      // Auto Pay disabled → the sweep disarms the ladder without charging;
-      // the armed row is not a forthcoming card charge.
-      if (state.autopay_enabled === false) continue;
-      // Paused through the horizon → the sweep skips this retry on every
-      // day of [today, horizon]; nothing charges the card inside the
-      // window, so the retry does not revoke the exemption. A pause
-      // lapsing INSIDE the window keeps the warning — the retry resumes
-      // and can charge before the horizon.
-      const pausedUntil = dateOnly(state.autopay_paused_until);
-      if (pausedUntil && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil >= horizon) continue;
-      let meta = {};
-      try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
-      // Ambiguous Stripe outcome (no PaymentIntent id): the sweep PARKS the
-      // row — supersedes it and raises a health alert, never re-charges — so
-      // it is not a forthcoming card charge.
-      if (!row.stripe_payment_intent_id && meta.ambiguous_outcome) continue;
-      const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
-      if (isMonthly) {
-        // GUARD 5 mirror: a pending annual-prepay commitment holds the
-        // monthly ladder (skip, stay armed) until it activates or cancels.
-        // The sweep selects past-due rows on EVERY later run and its
-        // pending guard stops the moment term_end passes — a still-armed
-        // retry fires the day the hold lapses — so the hold suppresses the
-        // warning only when the commitment covers the ENTIRE horizon.
-        if (pendingHoldIds == null) pendingHoldIds = await getPaymentPendingCustomerIds(horizon, conn);
-        if (pendingHoldIds.has(customerId)) continue;
-        // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
-        // obligation row for a customer whose lane is no longer monthly
-        // (explicit per_application/per_visit/one_time, or a NULL mode the
-        // resolver classifies non-monthly), with NO successfully paid
-        // monthly charge on file, is DISARMED without charging (likely
-        // mis-created; left for manual triage) — not a forthcoming card
-        // charge. A missing customer row skips the guard (keep the
-        // warning).
-        if (state.id != null) {
-          const laneNotMonthly = ['per_application', 'per_visit', 'one_time'].includes(state.billing_mode)
-            || (!state.billing_mode && resolveRetryLane(state).mode !== 'monthly_membership');
-          if (laneNotMonthly) {
-            const paidMonthly = await conn('payments')
-              .where({ customer_id: row.customer_id, status: 'paid' })
-              .where('description', 'like', '%WaveGuard Monthly%')
-              .whereNot({ id: row.id })
-              .first('id');
-            if (!paidMonthly) continue;
-          }
-        }
-        const paidDate = dateOnly(row.payment_date);
-        const obligationMonth = meta.billed_month || (paidDate ? paidDate.slice(0, 7) : null);
-        if (obligationMonth) {
-          // already collected → the sweep disarms without charging
-          const [obYear, obMonth] = obligationMonth.split('-').map(Number);
-          const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
-          const collected = await conn('payments')
-            .where({ customer_id: row.customer_id })
-            .whereNot({ id: row.id })
-            .whereIn('status', ['paid', 'processing'])
-            .where(function alreadyCollected() {
-              this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
-                .orWhere(function legacyRow() {
-                  this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
-                    .andWhere('payment_date', '>=', `${obligationMonth}-01`)
-                    .andWhere('payment_date', '<=', `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`)
-                    .andWhere('description', 'like', '%WaveGuard Monthly%');
-                });
-            })
-            .first('id');
-          if (collected) continue;
-          // absorbed → the sweep self-supersedes without charging
-          const obligationDate = (paidDate && paidDate.slice(0, 7) === obligationMonth) ? paidDate : `${obligationMonth}-01`;
-          if (!coveredOn.has(obligationDate)) coveredOn.set(obligationDate, await getActivelyCoveredCustomerIds(obligationDate, conn));
-          if (coveredOn.get(obligationDate).has(customerId)) continue;
-        }
-      }
-      covered.delete(customerId);
+      // A missing customer row is unreadable state, not proof the sweep
+      // would skip: only the row-level guards may exempt then (the
+      // verdict's customer_missing skip is the sweep's own posture).
+      const verdict = await classifyFailedPaymentRetry({
+        payment: row,
+        customer: retryCustomerById.get(customerId) || null,
+        ctx: retryCtx,
+        conn,
+        allowMissingCustomer: true,
+      });
+      if (verdict.collectible) covered.delete(customerId);
+    }
+    // The verdict's prepay lookups fail OPEN for the sweep (collect rather
+    // than stall); this surface must fail the other way — a lookup failure
+    // exempts nobody (the outer catch keeps every warning).
+    if (retryCtx.lookupWarnings.length) {
+      throw new Error(`retry-collectibility lookup failed: ${retryCtx.lookupWarnings.map((w) => w.message).join('; ')}`);
     }
     if (!covered.size) return covered;
 
