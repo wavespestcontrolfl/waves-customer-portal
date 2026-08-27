@@ -3542,6 +3542,12 @@ const StripeService = {
             // an anchor-only PI the homeowner could still confirm (codex
             // r13 P1).
             throwOnPayerAnchor: true,
+            // A sibling bound to an ABANDONED pay session (unconfirmed PI,
+            // no payment row, >1h old) is released here — its dead PI is
+            // canceled and unstamped — so it can ride this combined charge
+            // instead of staying invisible forever (the GET preview already
+            // lists it under the same verdict).
+            releaseAbandonedPaymentIntents: true,
           });
           if (siblings?.length) {
             combinedAllocation = PayCombined.buildAllocation(lockedInvoice, siblings);
