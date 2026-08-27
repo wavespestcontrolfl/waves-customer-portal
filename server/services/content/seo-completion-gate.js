@@ -419,7 +419,17 @@ function conversionCtaLinks(body) {
     // to and including the estimate/quote keyword. Trailing context ("…for
     // Your Lawn", "…on your property") is not a service declaration.
     const kw = anchor.match(/(estimat|quot)\w*/i);
-    const subject = kw ? anchor.slice(0, kw.index + kw[0].length) : anchor;
+    let subject = anchor;
+    if (kw) {
+      const end = kw.index + kw[0].length;
+      subject = anchor.slice(0, end);
+      // Inverse phrasing names the service AFTER the keyword — "Get an
+      // Estimate for Termite Control". Keep a "for/on <service>" phrase
+      // unless it is environmental (a determiner/possessive follows: "for
+      // your lawn", "on the property").
+      const after = anchor.slice(end).match(/^\s+(?:for|on)\s+(?!(?:your|my|our|the|a|an|this|that)\b)((?:[a-z&-]+\s?){1,4})/i);
+      if (after) subject += ` ${after[1]}`;
+    }
     let named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
       .filter(([, re]) => re.test(subject))
       .map(([svc]) => svc);
