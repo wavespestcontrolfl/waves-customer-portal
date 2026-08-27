@@ -2338,9 +2338,22 @@ function coveredTermsAsOf(conn, coverageDate = null) {
 async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnError = false } = {}) {
   if (!scheduledService) return false;
   if (scheduledService.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD) return false;
-  if (!(Number(scheduledService.prepaid_amount) > 0)) return false;
+  // Strict callers (the extended-completion charging guard): a STAMPED
+  // visit whose linkage is incomplete (no amount, no term id, or the terms
+  // table itself missing) is UNVERIFIABLE, not validated-stale — billing
+  // suppression treats these as uncovered, but the charging side must
+  // refuse rather than charge a possibly-prepaid visit (pre-push P0
+  // round 11). Only a successful coverage-authority query may return
+  // uncovered in strict mode.
+  if (!(Number(scheduledService.prepaid_amount) > 0)) {
+    if (throwOnError) throw new Error('stamped visit carries no prepaid_amount — coverage unverifiable');
+    return false;
+  }
   const termId = scheduledService.annual_prepay_term_id;
-  if (!termId) return false;
+  if (!termId) {
+    if (throwOnError) throw new Error('stamped visit carries no annual_prepay_term_id — coverage unverifiable');
+    return false;
+  }
   // Strict callers (the extended-completion charging guard) must see a
   // schema-probe failure as UNVERIFIABLE, not as "no table → not covered"
   // (manual-audit P0): annualPrepayTableExists catches probe errors and
@@ -2348,7 +2361,9 @@ async function annualPrepayCoversVisit(scheduledService, conn = db, { throwOnErr
   // coverage on the charging side. Probe directly so the error propagates;
   // a genuinely absent table (fresh env) still returns false.
   if (throwOnError) {
-    if (!(await conn.schema.hasTable('annual_prepay_terms'))) return false;
+    if (!(await conn.schema.hasTable('annual_prepay_terms'))) {
+      throw new Error('annual_prepay_terms table missing for a stamped visit — coverage unverifiable');
+    }
   } else if (!(await annualPrepayTableExists())) return false;
   try {
     const term = await coveredTermsAsOf(conn, null)

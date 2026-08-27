@@ -2725,7 +2725,27 @@ const ZONE_COORDS = {
 // existingCompletionInvoice) — so when one exists, the sheet's prediction
 // must mirror it, not recompute from the visit price/fee, or the card
 // quotes an amount (or a paying party) completion will ignore (Codex r7).
-function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, visitPayerBilled = false } = {}) {
+// The two remaining deterministic charge-guard states the sheet must not
+// promise past (pre-push P1 round 11): a stopped-dunning instruction and a
+// competing appointment_card_requests consent row. Read-only; any failure
+// reads as NOT clear (conservative — demotes the promise, never invents
+// one). Skipped entirely when the gate/autopay can't label auto_charge
+// anyway, so the sheets add no queries while the lane is dark.
+async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayActive) {
+  if (!invoice || !autopayActive) return false;
+  if (require('../config/feature-gates').gates.completionAutopayCharge !== true) return false;
+  try {
+    const [dunningRow, consentRow] = await Promise.all([
+      db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first('status'),
+      db('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId }).first('id'),
+    ]);
+    return !consentRow && String(dunningRow?.status || '').toLowerCase() !== 'stopped';
+  } catch {
+    return false;
+  }
+}
+
+function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, chargeGuardsClear = false, visitPayerBilled = false } = {}) {
   if (!invoice || invoice.status === 'void') return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
@@ -2752,6 +2772,7 @@ function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeL
   // it; the invoice label stays (the payer flows own the bill from there).
   const autoCharge = autopayActive
     && chargeLikely
+    && chargeGuardsClear
     && !visitPayerBilled
     && require('../config/feature-gates').gates.completionAutopayCharge === true
     && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status);
@@ -3073,6 +3094,7 @@ router.get('/', async (req, res, next) => {
         servicePausedAt: s.service_paused_at || null,
         prediction: predictionFromAttachedInvoice(checkoutInvoice, {
           autopayActive,
+          chargeGuardsClear: await extendedChargeGuardsClear(checkoutInvoice, s.id, autopayActive),
           visitPayerBilled: !!s.billed_to_payer_id,
           chargeLikely: attachedInvoiceAutoChargeLikely({
             invoice: checkoutInvoice,
@@ -3608,6 +3630,7 @@ router.get('/week', async (req, res, next) => {
           servicePausedAt: s.service_paused_at || null,
           prediction: predictionFromAttachedInvoice(attachedInvoice, {
             autopayActive,
+            chargeGuardsClear: await extendedChargeGuardsClear(attachedInvoice, s.id, autopayActive),
             visitPayerBilled: !!s.billed_to_payer_id,
             chargeLikely: attachedInvoiceAutoChargeLikely({
               invoice: attachedInvoice,
