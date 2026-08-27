@@ -3840,7 +3840,23 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         annualCoverageValidated,
         completionAutopayChargeEnabled,
       });
-      if (prediction.kind !== 'auto_charge') continue;
+      // Estimate card holds are NEVER Auto-Pay-gated: completion charges a
+      // live ('held') hold against the visit's collectible completion
+      // invoice (chargeCardHoldOnCompletion — the same predicate as
+      // heldCardForScheduledService), whatever the pause or method
+      // eligibility says. So a visit that will produce a priced completion
+      // invoice — kind 'auto_charge' OR pay-link 'invoice' — with a live
+      // hold keeps the warning even when Auto Pay cannot charge; kinds
+      // that mint no invoice (covered_*, prepaid, no_charge) leave the
+      // hold nothing to charge, and a payer-billed invoice refuses the
+      // hold's self-pay binding.
+      let liveHold = null;
+      if (['auto_charge', 'invoice'].includes(prediction.kind)) {
+        liveHold = await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id, status: 'held' })
+          .first('id');
+      }
+      if (prediction.kind !== 'auto_charge' && !liveHold) continue;
       // Completion's invoice state machine (admin-dispatch; route-module
       // helpers, mirrored here with the same status sets):
       //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
@@ -3882,7 +3898,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         // An OPEN reused invoice charges only within completion's cap —
         // over the accepted amount it routes to office review instead.
         if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
-        if (await dunningStopped(reused)) continue;
+        if (!liveHold && await dunningStopped(reused)) continue;
       } else {
         // No direct invoice on the visit → completion consults the SIBLING
         // first-application invoice of the same estimate/date
@@ -3901,7 +3917,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         if (!sibling.invoice && sibling.canceledSetupFee) continue;
         if (sibling.invoice && sibling.invoice.payer_id) continue;
         if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
-        if (sibling.invoice && await dunningStopped(sibling.invoice)) continue;
+        if (sibling.invoice && !liveHold && await dunningStopped(sibling.invoice)) continue;
       }
       // The unminted setup-fee completion hold (owner ruling 2026-08-24,
       // GATE_UNMINTED_SETUP_FEE_PARK): a Mark Won estimate's plan visit

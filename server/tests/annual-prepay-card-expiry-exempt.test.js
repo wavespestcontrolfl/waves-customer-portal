@@ -48,7 +48,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -68,6 +68,7 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     if (table === 'notifications') return chain(notifications, []);
+    if (table === 'estimate_card_holds') return chain(cardHolds, []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -359,6 +360,21 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
 
   test('a covered customer with no chargeable Auto Pay method cannot be auto-charged at completion → stays exempt', async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], paymentMethods: [] });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('a live estimate card hold charges the captured card regardless of Auto Pay → keeps the warning', async () => {
+    // paused through the horizon would exempt, but the hold rail is never
+    // Auto-Pay-gated and charges the collectible completion invoice
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held' }] });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // a validly covered visit mints no completion invoice — the hold has
+    // nothing to charge → exempt
+    route({
+      terms: [{ customer_id: 'c-prepaid', id: 'term-1', status: 'active', term_start: '2020-01-01', term_end: '2099-01-01' }],
+      visits: [baseVisit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '84.00', annual_prepay_term_id: 'term-1' })],
+      cardHolds: [{ id: 'hold-1', status: 'held' }],
+    });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
