@@ -123,8 +123,13 @@ describe('every admin-schedule generator consults the preference (source pins)',
     expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const prefNoWeekends = await customerPrefersNoWeekends(conn, before.customer_id);');
-    expect(src).toContain(": (!!parent.skip_weekends || await customerPrefersNoWeekends(trx, parent.customer_id));");
-    expect((src.match(/\|\| await customerPrefersNoWeekends\(trx, parent\.customer_id\)/g) || []).length).toBe(4);
+    // Edit paths: the preference ORs over the form's routinely-submitted
+    // false — an "explicit" checkbox value must not bypass the ruling.
+    expect(src).toContain('|| rewritePrefNoWeekends;');
+    expect(src).toContain('|| spawnPrefNoWeekends;');
+    expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;');
+    expect(src).toContain('const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;');
+    expect((src.match(/\|\| await customerPrefersNoWeekends\(trx, parent\.customer_id\)/g) || []).length).toBe(2);
     expect(src).toContain('|| await customerPrefersNoWeekends(conn, parent.customer_id)');
   });
 });

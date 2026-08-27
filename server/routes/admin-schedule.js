@@ -917,7 +917,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!shouldSpawn && recurringPattern && before.is_recurring && !before.recurring_parent_id
     && shouldRewritePendingRecurringRows(before, after)) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
-    const skip = skipWeekends !== undefined ? !!skipWeekends : (!!after.skip_weekends || prefNoWeekends);
+    // The edit UI submits skipWeekends:false whenever recurring controls
+    // are active, so a submitted false is the form default, NOT operator
+    // intent — the saved preference ORs over it (hook B6 P1). Overriding
+    // for one customer = clear their preference.
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : after.weekend_shift) === 'back' ? 'back' : 'forward';
     const pendingChildren = await conn('scheduled_services')
       .where({ recurring_parent_id: before.id, is_recurring: true })
@@ -965,7 +969,9 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
     const skipParent = (after.skip_weekends != null ? !!after.skip_weekends : false) || prefNoWeekends;
     const dirParent = after.weekend_shift === 'back' ? 'back' : 'forward';
-    const skip = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+    // Same rule as the rewrite branch: the preference ORs over the form's
+    // routinely-submitted false (hook B6 P1).
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
     const seen = new Set();
     seen.add(dateOnly(baseDateStr) || '');
@@ -7698,11 +7704,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          // B6: the customer's saved weekday preference backs the parent
-          // flag (mirrors planUpdateDetailsRecurrenceDates — the pre-locked
-          // slot plan and this write must land the same dates).
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends
-            : (!!parent.skip_weekends || await customerPrefersNoWeekends(trx, parent.customer_id));
+          // B6: the customer's saved weekday preference ORs over both the
+          // parent flag and the form's routinely-submitted false (hook P1 —
+          // the edit UI always sends the checkbox), mirroring
+          // planUpdateDetailsRecurrenceDates so the pre-locked slot plan
+          // and this write land the same dates.
+          const rewritePrefNoWeekends = await customerPrefersNoWeekends(trx, parent.customer_id);
+          const skipChild = (skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends)
+            || rewritePrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
           // track_state + lifecycle stamps ride along as rewind evidence: a
           // pending child can still carry a live tracker or stale stamps
@@ -8038,11 +8047,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          // B6: preference-backed, mirroring the plan helper (see above).
+          // B6: preference-backed, mirroring the plan helper (see above) —
+          // the preference also ORs over the form's routinely-submitted
+          // false (hook P1).
+          const spawnPrefNoWeekends = await customerPrefersNoWeekends(trx, parent.customer_id);
           const skipParent = (parent.skip_weekends != null ? !!parent.skip_weekends : false)
-            || await customerPrefersNoWeekends(trx, parent.customer_id);
+            || spawnPrefNoWeekends;
           const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+          const skipChild = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || spawnPrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
           // Pull parent's existing add-on lines once so we can mirror them
           // onto each spawned child below.
