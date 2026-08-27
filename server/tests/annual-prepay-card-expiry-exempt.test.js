@@ -49,7 +49,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -70,7 +70,7 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     if (table === 'notifications') return chain(notifications, []);
     if (table === 'estimate_card_holds') return chain(cardHolds, calls.cardHolds);
-    if (table === 'service_records') return chain([], []);
+    if (table === 'service_records') return chain(serviceRecords, []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -368,16 +368,61 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
   test('a live estimate card hold charges the captured card regardless of Auto Pay → keeps the warning', async () => {
     // paused through the horizon would exempt, but the hold rail is never
     // Auto-Pay-gated and charges the collectible completion invoice
-    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held' }] });
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
     // a validly covered visit mints no completion invoice — the hold has
     // nothing to charge → exempt
     route({
       terms: [{ customer_id: 'c-prepaid', id: 'term-1', status: 'active', term_start: '2020-01-01', term_end: '2099-01-01' }],
       visits: [baseVisit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '84.00', annual_prepay_term_id: 'term-1' })],
-      cardHolds: [{ id: 'hold-1', status: 'held' }],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test("the hold rail's frozen cap withholds: no accepted amount, or a bill above it → stays exempt", async () => {
+    // no frozen accepted amount → the rail fails closed, nothing charged
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })], cardHolds: [{ id: 'hold-1', status: 'held' }] });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // reused invoice net-above the frozen amount → withheld for review
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ customer_autopay_paused_until: HORIZON })],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '100.00' }],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '200.00' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // within the frozen amount → the hold charges → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ customer_autopay_paused_until: HORIZON })],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '120.00' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('a completed visit resumed in FROZEN BACKFILL mode never auto-charges → stays exempt; record-linked invoices take precedence', async () => {
+    // frozen backfill: the resume skips the whole auto-charge rail
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ status: 'completed' })],
+      serviceRecords: [{ id: 'rec-1', structured_notes: JSON.stringify({ backfill: true }) }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // record-linked precedence: an older OPEN invoice on the record wins
+    // over a newer PAID one linked only by scheduled_service_id —
+    // completion charges the open one → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ status: 'completed' })],
+      serviceRecords: [{ id: 'rec-1', structured_notes: null }],
+      invoices: [
+        { id: 'inv-new', status: 'paid' },
+        { id: 'inv-old', status: 'sent', subtotal: '120.00', service_record_id: 'rec-1' },
+      ],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
   test('a PARKED or gate-off hold is untouchable by the charge rail → stays exempt', async () => {
@@ -418,10 +463,10 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
   });
 
   test('the visit invoice lookup resolves BOTH identifiers (scheduled_service_id and the service-record link)', async () => {
-    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})] });
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], serviceRecords: [{ id: 'rec-1', structured_notes: null }] });
     await getCardExpiryExemptCustomerIds(HORIZON);
     expect(calls.invoices).toEqual(expect.arrayContaining([
-      ['orWhereIn', 'service_record_id', expect.anything()],
+      ['orWhereIn', 'service_record_id', ['rec-1']],
     ]));
   });
 

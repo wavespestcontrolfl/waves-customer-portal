@@ -3775,7 +3775,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       })
       .where('ss.scheduled_date', '<=', horizon)
       .select(
-        'ss.id', 'ss.customer_id', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
+        'ss.id', 'ss.customer_id', 'ss.status', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
         'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
         'ss.source_estimate_id', 'ss.scheduled_date', 'ss.recurring_parent_id',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
@@ -3851,16 +3851,39 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // that mint no invoice (covered_*, prepaid, no_charge) leave the
       // hold nothing to charge, and a payer-billed invoice refuses the
       // hold's self-pay binding.
+      // The visit's service records: record-linked invoices take lookup
+      // precedence (below), and a COMPLETED visit resumed in FROZEN
+      // BACKFILL mode (structured_notes.backfill === true — the committed
+      // record's mode wins on resume) skips the entire auto-charge rail:
+      // its invoice is deliberately left for operator collection, so no
+      // card charge and no warning.
+      const serviceRecords = await conn('service_records')
+        .where({ scheduled_service_id: v.id })
+        .select('id', 'structured_notes');
+      if (String(v.status) === 'completed') {
+        const frozenBackfill = (serviceRecords || []).some((record) => {
+          let notes = record.structured_notes;
+          if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+          return notes?.backfill === true;
+        });
+        if (frozenBackfill) continue;
+      }
       let liveHold = null;
       if (['auto_charge', 'invoice'].includes(prediction.kind) && isCardHoldEnabled()) {
         // The charge rail's own admission: feature gate on, newest 'held'
-        // row, and NOT parked (a parked hold is untouchable by every
-        // charge path — chargeCardHoldOnCompletion returns 'parked'
-        // without charging).
-        liveHold = await conn('estimate_card_holds')
+        // row, NOT parked (a parked hold is untouchable by every charge
+        // path), and a positive FROZEN accepted amount — the rail
+        // withholds fail-closed with no amount to cap against.
+        const holdRow = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id, status: 'held' })
           .whereNull('parked_at')
-          .first('id');
+          .first('id', 'accepted_amount');
+        if (holdRow) {
+          const acceptedRaw = Number(holdRow.accepted_amount);
+          liveHold = Number.isFinite(acceptedRaw) && acceptedRaw > 0
+            ? { id: holdRow.id, acceptedAmount: acceptedRaw }
+            : null;
+        }
       }
       // The appointment-card completion lane (GATE_APPT_CARD_COMPLETION_
       // CHARGE) auto-charges a consented one-time visit's card even while
@@ -3894,16 +3917,24 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         // completed visit's invoice may be linked only through its
         // service record.
         .where(function ownedByVisit() {
-          this.where({ scheduled_service_id: v.id })
-            .orWhereIn('service_record_id', conn('service_records')
-              .where({ scheduled_service_id: v.id })
-              .select('id'));
+          this.where({ scheduled_service_id: v.id });
+          if ((serviceRecords || []).length) {
+            this.orWhereIn('service_record_id', serviceRecords.map((record) => record.id));
+          }
         })
         .orderBy('created_at', 'desc')
-        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id');
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
+      // The refunded (terminal) check spans BOTH identifiers, like
+      // completionTerminalInvoiceLookup.
       if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
-      const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
+      // Reuse PRECEDENCE mirrors the completion suppressor chain: the
+      // service-record link is checked first, and the scheduled_service_id
+      // rows are consulted only when no live record-linked row stands.
+      const recordIdSet = new Set((serviceRecords || []).map((record) => String(record.id)));
+      const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && recordIdSet.has(String(inv.service_record_id)));
+      const reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
+        || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
       if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
       // An explicit "stop collecting this invoice" instruction (disputed
       // bill, check in the mail): the EXTENDED completion charge — the
@@ -3950,6 +3981,19 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         if (sibling.invoice && sibling.invoice.payer_id) continue;
         if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
         if (sibling.invoice && !liveHold && await dunningStopped(sibling.invoice)) continue;
+      }
+      // The hold rail's frozen cap (its own pre-check): a reused invoice
+      // net-above the hold's accepted amount — or a mint that would price
+      // above it — is WITHHELD with a review alert, nothing charged. When
+      // the hold is the ONLY charge vector (Auto Pay cannot charge and the
+      // appointment-card lane is not live), a withheld hold leaves nothing
+      // to touch the card.
+      if (liveHold && prediction.kind !== 'auto_charge' && !apptCardCharge) {
+        const holdChargeBasis = reused
+          ? Math.round(((reused.subtotal != null ? Number(reused.subtotal) : Number(reused.total || 0))
+            - Math.max(0, Number(reused.discount_amount) || 0)) * 100) / 100
+          : (v.estimated_price != null ? Number(v.estimated_price) : null);
+        if (holdChargeBasis != null && holdChargeBasis > liveHold.acceptedAmount + 0.005) continue;
       }
       // The unminted setup-fee completion hold (owner ruling 2026-08-24,
       // GATE_UNMINTED_SETUP_FEE_PARK): a Mark Won estimate's plan visit
