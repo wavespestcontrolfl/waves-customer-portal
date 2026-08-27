@@ -3396,46 +3396,48 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
   return new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
 }
 
+// Visit statuses that can no longer complete (and so can no longer charge).
+// Mirrors job-status ONE_WAY_FROM_STATUSES + the no-show/reschedule forms the
+// coverage set excludes; everything else (pending, confirmed, en_route,
+// on_site, …) is still completable and therefore still chargeable.
+const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled'];
+
 /**
  * Customer IDs that every CARD-EXPIRY surface (dashboard cards_expiring_7d,
  * Monday sendCardExpiryWarnings, daily workflows/payment-expiry) must leave
- * alone: prepay coverage still active at the surface's HORIZON date (no
- * covered-visit charge inside the window — the billing cron suppresses them
- * via the same covered set) MINUS customers who still have a card charge
- * coming inside the window anyway:
+ * alone: prepay coverage active across the WHOLE window (today AND horizon —
+ * terms are contiguous, and a paid term starting inside the window does not
+ * cover today, so the monthly run before term_start still charges) MINUS
+ * customers who still have a card charge coming inside the window anyway.
+ * Both subtractions DELEGATE to the billing authorities rather than
+ * re-deriving them:
  *
- *   (a) a genuinely collectible retry — a failed payment the retry sweep
- *       (billing-cron retryFailedPayments) will push through the current
- *       method: not superseded, retry_count < 3, next_retry_at set, AND —
- *       for a WaveGuard Monthly row — its obligation date NOT itself covered
- *       by the term. The sweep checks coverage on the ORIGINAL obligation
- *       date and self-supersedes an absorbed row without charging, so a
- *       covered-month retry is not a charge (codex P2); a one-time retry
- *       always is.
- *   (b) a collectible UNCOVERED visit inside the window: a pending/confirmed
- *       scheduled_services row with no annual_prepay_term_id stamp and a
- *       price above its prepaid amount — completion bills that through the
- *       saved method when completion auto-charge is on (billing-lane
- *       'auto_charge'), and invoices it otherwise; either way the card is
- *       live for it, so keep the warning (codex P1).
+ *   (a) a genuinely collectible retry — classified exactly as the retry sweep
+ *       (billing-cron retryFailedPayments) would: armed (failed, not
+ *       superseded, retry_count < 3, next_retry_at set) AND, for a WaveGuard
+ *       Monthly row, neither "already collected" (a paid/processing sibling
+ *       for the same billed month — the sweep disarms it without charging)
+ *       nor "absorbed" (the obligation date itself is prepay-covered — the
+ *       sweep self-supersedes it). One-time retries are always collectible.
+ *   (b) a visit completion will bill: every still-completable visit in
+ *       [today, horizon] run through predictCompletionBilling (billing-lane,
+ *       the shared completion predicate) with the same inputs the schedule
+ *       sheet feeds it — lane, payer, callback / always-free service type,
+ *       the live annual_prepay_invoice stamp validated by
+ *       annualPrepayCoversVisit (a bare annual_prepay_term_id link is NOT
+ *       per-application fee, completion-auto-charge gate. Only kind
+ *       'auto_charge' keeps the warning — that is the one outcome that
+ *       charges the saved card at completion; 'invoice' (pay-link),
+ *       'payer', 'covered_*', 'prepaid' and 'no_charge' do not.
  *
- * Coverage must hold at BOTH ends of the window (today and horizon — terms
- * are contiguous): a term ending inside the window is not covered at the
- * horizon and stays flagged (that card is needed to renew); a paid term
- * starting inside the window does not cover today and stays flagged (the
- * next monthly run before term_start still charges). Fails toward the
- * warning: any lookup error → empty set (nobody exempt).
+ * A term ending inside the window is not covered at the horizon and stays
+ * flagged (that card is needed to renew). Fails toward the warning: any
+ * lookup error → empty set (nobody exempt).
  */
 async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
   const today = etDateString();
   let covered;
   try {
-    // Coverage must span the WHOLE window, not just its far end: a paid
-    // term that starts after today (future terms are first-class here and
-    // do not cover today) would otherwise exempt a customer whose next
-    // monthly run — before the term starts — still charges the card. A term
-    // is contiguous, so covered-today ∩ covered-at-horizon = covered
-    // throughout (codex hook P1).
     const atHorizon = await getActivelyCoveredCustomerIds(horizon, conn);
     covered = atHorizon.size
       ? new Set([...(await getActivelyCoveredCustomerIds(today, conn))].filter((id) => atHorizon.has(id)))
@@ -3446,46 +3448,98 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
   }
   if (!covered.size) return covered;
   try {
-    // (a) armed retries — classify by obligation-date coverage like the sweep.
+    // (a) armed retries, classified like the sweep.
     const retrying = await conn('payments')
       .whereIn('customer_id', [...covered])
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
       .whereNotNull('next_retry_at')
-      .select('customer_id', 'description', 'payment_date', 'metadata');
+      .select('id', 'customer_id', 'description', 'payment_date', 'metadata');
     const coveredOn = new Map();
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
       const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
-      let obligationDate = null;
       if (isMonthly) {
         let meta = {};
         try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
         const paidDate = dateOnly(row.payment_date);
         const obligationMonth = meta.billed_month || (paidDate ? paidDate.slice(0, 7) : null);
-        obligationDate = obligationMonth
-          ? ((paidDate && paidDate.slice(0, 7) === obligationMonth) ? paidDate : `${obligationMonth}-01`)
-          : null;
-      }
-      if (isMonthly && obligationDate) {
-        if (!coveredOn.has(obligationDate)) coveredOn.set(obligationDate, await getActivelyCoveredCustomerIds(obligationDate, conn));
-        if (coveredOn.get(obligationDate).has(customerId)) continue; // absorbed by the term, never charged
+        if (obligationMonth) {
+          // already collected → the sweep disarms without charging
+          const [obYear, obMonth] = obligationMonth.split('-').map(Number);
+          const obLastDay = new Date(Date.UTC(obYear, obMonth, 0)).getUTCDate();
+          const collected = await conn('payments')
+            .where({ customer_id: row.customer_id })
+            .whereNot({ id: row.id })
+            .whereIn('status', ['paid', 'processing'])
+            .where(function alreadyCollected() {
+              this.whereRaw("metadata->>'billed_month' = ?", [obligationMonth])
+                .orWhere(function legacyRow() {
+                  this.whereRaw("(metadata IS NULL OR metadata->>'billed_month' IS NULL)")
+                    .andWhere('payment_date', '>=', `${obligationMonth}-01`)
+                    .andWhere('payment_date', '<=', `${obligationMonth}-${String(obLastDay).padStart(2, '0')}`)
+                    .andWhere('description', 'like', '%WaveGuard Monthly%');
+                });
+            })
+            .first('id');
+          if (collected) continue;
+          // absorbed → the sweep self-supersedes without charging
+          const obligationDate = (paidDate && paidDate.slice(0, 7) === obligationMonth) ? paidDate : `${obligationMonth}-01`;
+          if (!coveredOn.has(obligationDate)) coveredOn.set(obligationDate, await getActivelyCoveredCustomerIds(obligationDate, conn));
+          if (coveredOn.get(obligationDate).has(customerId)) continue;
+        }
       }
       covered.delete(customerId);
     }
     if (!covered.size) return covered;
-    // (b) uncovered, priced visits inside the window.
-    const uncovered = await conn('scheduled_services')
-      .whereIn('customer_id', [...covered])
-      .whereIn('status', ['pending', 'confirmed'])
-      .whereNull('annual_prepay_term_id')
-      .where('scheduled_date', '>=', today)
-      .where('scheduled_date', '<=', horizon)
-      .whereRaw('COALESCE(estimated_price, 0) > COALESCE(prepaid_amount, 0)')
-      .distinct('customer_id');
-    for (const row of uncovered || []) covered.delete(String(row.customer_id));
+
+    // (b) still-completable visits inside the window, judged by the shared
+    // completion predicate with the schedule sheet's inputs.
+    const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
+    const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
+    const visits = await conn('scheduled_services as ss')
+      .join('customers as c', 'c.id', 'ss.customer_id')
+      .whereIn('ss.customer_id', [...covered])
+      .whereNotIn('ss.status', CARD_EXPIRY_TERMINAL_VISIT_STATUSES)
+      .where('ss.scheduled_date', '>=', today)
+      .where('ss.scheduled_date', '<=', horizon)
+      .select(
+        'ss.id', 'ss.customer_id', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
+        'ss.billed_to_payer_id', 'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id',
+        'ss.per_application_fee', 'ss.is_recurring',
+        'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
+      );
+    for (const v of visits || []) {
+      const customerId = String(v.customer_id);
+      if (!covered.has(customerId)) continue;
+      let annualCoverageValidated = null;
+      if (v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
+        try { annualCoverageValidated = await annualPrepayCoversVisit(v, conn, { throwOnError: true }); } catch (e) { annualCoverageValidated = null; }
+      }
+      const lane = resolveBillingLane({ billing_mode: v.billing_mode, waveguard_tier: v.waveguard_tier, monthly_rate: v.monthly_rate });
+      const prediction = predictCompletionBilling({
+        lane: lane.mode,
+        billingMode: v.billing_mode || null,
+        autopayActive: v.autopay_enabled === true,
+        estimatedPrice: v.estimated_price != null ? Number(v.estimated_price) : null,
+        monthlyRate: v.monthly_rate,
+        perApplicationFee: v.per_application_fee,
+        isRecurring: !!v.is_recurring,
+        isCallback: !!v.is_callback,
+        serviceType: v.service_type,
+        payerBilled: !!v.billed_to_payer_id,
+        prepaidAmount: v.prepaid_amount,
+        prepaidMethod: v.prepaid_method || null,
+        annualCoverageValidated,
+        completionAutopayChargeEnabled,
+      });
+      // Only an auto_charge touches the saved card at completion. 'invoice'
+      // (gate off, or a priced callback) goes out as a pay-link — no
+      // card-on-file charge, so the expiring card is not what breaks.
+      if (prediction.kind === 'auto_charge') covered.delete(customerId);
+    }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
     return new Set();
