@@ -33,7 +33,7 @@ function seedDb() {
       id: 'pc-trap',
       config_key: 'rodent_trapping',
       name: 'Adam Trapping (custom name)',
-      data: { base: 350, standard_price: 375, unlimited_price: 450, upgrade_to_unlimited_price: 125, additional_followup_rate: 125, included_followups: 2, home_size_adjustments: [{ max_sqft: 1200, adjustment: 0 }], lot_adjustments: [{ max_lot_sqft: 10000, adjustment: 0 }], pressure_adjustments: { light: 0 } },
+      data: { base: 350, floor: 350, ceiling_before_custom: 795, active_window_days: null, standard_price: 375, unlimited_price: 450, upgrade_to_unlimited_price: 125, additional_followup_rate: 125, included_followups: 2, home_size_adjustments: [{ max_sqft: 1200, adjustment: 0 }], lot_adjustments: [{ max_lot_sqft: 10000, adjustment: 0 }], pressure_adjustments: { light: 0 } },
     }],
     pricing_config_audit: [],
     pricing_changelog: [],
@@ -56,6 +56,9 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(data.home_size_adjustments).toBeUndefined();
     expect(data.lot_adjustments).toBeUndefined();
     expect(data.pressure_adjustments).toBeUndefined();
+    expect(data.base).toBeUndefined();
+    expect(data.floor).toBeUndefined();
+    expect(data.ceiling_before_custom).toBeUndefined();
     expect(trapSvc(db).description).toMatch(/unlimited callbacks\/checks for the same active trapping job/);
     expect(db.pricing_config_audit).toHaveLength(1);
 
@@ -68,6 +71,8 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(trapCfg(db).name).toBe('Adam Trapping (custom name)');
     expect(restored.home_size_adjustments).toEqual([{ max_sqft: 1200, adjustment: 0 }]);
     expect(restored.pressure_adjustments).toEqual({ light: 0 });
+    expect(restored.base).toBe(350);
+    expect(restored.ceiling_before_custom).toBe(795);
     // Not the constant guess — the copy the row really had.
     expect(trapSvc(db).description).toBe(PRIOR_DESCRIPTION);
     expect(db.pricing_changelog).toHaveLength(0);
@@ -100,9 +105,9 @@ describe('20260826000001 rodent trapping Standard-only', () => {
 
   test('a pricing row already at target STILL aligns the catalog copy, and down() restores it', async () => {
     const db = seedDb();
-    trapCfg(db).data = { base: 350, standard_price: 350, included_followups: 'unlimited' };
+    trapCfg(db).data = { standard_price: 350, included_followups: 'unlimited' };
     await migration.up(fakeKnex(db));
-    expect(JSON.parse(trapCfg(db).data)).toEqual({ base: 350, standard_price: 350, included_followups: 'unlimited' });
+    expect(JSON.parse(trapCfg(db).data)).toEqual({ standard_price: 350, included_followups: 'unlimited' });
     expect(trapSvc(db).description).toMatch(/unlimited callbacks\/checks for the same active trapping job/);
     expect(db.pricing_config_audit).toHaveLength(1);
     // Description-only up() never renamed the pricing row …
@@ -115,7 +120,7 @@ describe('20260826000001 rodent trapping Standard-only', () => {
 
   test('everything already at target is a true no-op', async () => {
     const db = seedDb();
-    trapCfg(db).data = { base: 350, standard_price: 350, included_followups: 'unlimited' };
+    trapCfg(db).data = { standard_price: 350, included_followups: 'unlimited' };
     trapSvc(db).description = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
     await migration.up(fakeKnex(db));
     expect(db.pricing_config_audit).toHaveLength(0);

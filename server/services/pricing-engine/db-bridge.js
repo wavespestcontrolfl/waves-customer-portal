@@ -1251,16 +1251,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       // unlimited_price / upgrade_to_unlimited_price / unlimited_floor are
       // retired (Standard is the only plan, owner 2026-08-26) — stale rows
       // may still carry them; they are deliberately not mapped.
-      if (t.base != null) constants.RODENT.trapping.base = r(t.base);
-      if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
-      if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
       if (t.included_followups != null) {
         constants.RODENT.trapping.includedFollowUps =
           String(t.included_followups).toLowerCase() === 'unlimited'
             ? 'unlimited'
             : Number(t.included_followups);
       }
-      if (t.active_window_days != null) constants.RODENT.trapping.activeWindowDays = Number(t.active_window_days);
       // additional_followup_rate is retired (callbacks are unlimited on the
       // Standard plan, owner 2026-08-26) — deliberately not mapped.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);

@@ -23,6 +23,9 @@ const UP_REASON = 'Rodent trapping Standard-only — $350 flat, unlimited callba
 const RETIRED_KEYS = [
   'unlimited_price', 'upgrade_to_unlimited_price', 'unlimited_floor', 'additional_followup_rate',
   'home_size_adjustments', 'lot_adjustments', 'pressure_adjustments',
+  // priceRodentTrapping reads only standard_price + the emergency surcharge
+  // settings — these were the bracketed-pricing scaffolding (codex #3521 r17).
+  'base', 'floor', 'ceiling_before_custom', 'active_window_days',
 ];
 const STANDARD_ROW_NAME = 'Rodent Trapping (Standard — flat $350, unlimited callbacks)';
 const STANDARD_SERVICE_DESCRIPTION = 'Interior snap trap and glue board placement for active rodent activity. Includes initial setup plus unlimited callbacks/checks for the same active trapping job.';
