@@ -794,11 +794,13 @@ async function triggerNotification(triggerKey, payload = {}) {
         // above so the triggering notification is included. The badge is
         // garnish and the push is the product: the count runs the
         // dashboard-alert aggregate battery (cold memo when the PWA is
-        // closed — exactly the inbound-SMS case), so it is raced against a
-        // hard timeout and any failure/timeout OMITS the badge (icon left
-        // untouched) rather than delaying delivery or sending a wrong
-        // number. badgeAt stamps when the snapshot resolved so the service
-        // worker can drop an older overlapping push's stale absolute count.
+        // closed — exactly the inbound-SMS case) plus a per-admin ordering
+        // lock, so it is raced against a hard timeout and any
+        // failure/timeout OMITS the badge (icon left untouched) rather
+        // than delaying delivery or sending a wrong number. The snapshot's
+        // `at` stamp comes from the DB clock inside that lock (see
+        // admin-unread.js) so overlapping snapshots can't hand the older
+        // count the newer stamp — the service worker keeps the highest.
         // Lazy require: admin-unread pulls in dashboard-alerts-cron, which
         // requires this module back — a top-level require would cycle.
         const { getUnreadCountForAdmin } = require('./admin-unread');
@@ -813,7 +815,7 @@ async function triggerNotification(triggerKey, payload = {}) {
             .filter((u) => u.role === 'admin' && enabledUserIds.includes(u.id))
             .map(async (user) => {
               let timer;
-              const count = await Promise.race([
+              const snapshot = await Promise.race([
                 getUnreadCountForAdmin({ adminUserId: user.id, role: user.role }).catch((e) => {
                   logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
                   return null;
@@ -821,11 +823,13 @@ async function triggerNotification(triggerKey, payload = {}) {
                 new Promise((resolve) => { timer = setTimeout(resolve, BADGE_COUNT_TIMEOUT_MS, BADGE_TIMED_OUT); }),
               ]);
               clearTimeout(timer);
-              if (count === BADGE_TIMED_OUT) {
+              if (snapshot === BADGE_TIMED_OUT) {
                 logger.warn(`[notification-triggers] badge count timed out for admin ${user.id} — sending push without badge`);
                 return;
               }
-              if (Number.isInteger(count)) badgeByUser.set(user.id, { count, at: Date.now() });
+              if (snapshot && Number.isInteger(snapshot.count) && Number.isFinite(snapshot.at)) {
+                badgeByUser.set(user.id, { count: snapshot.count, at: snapshot.at });
+              }
             })
         );
 

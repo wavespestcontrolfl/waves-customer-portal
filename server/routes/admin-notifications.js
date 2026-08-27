@@ -10,7 +10,7 @@ const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
 // Live-overlay math (per-admin dismissals, cron-row dedup, the combined
 // unread count) lives in services/admin-unread.js — shared with the push
 // app-icon badge in notification-triggers so the two counts can't drift.
-const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
+const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin, badgeOrderingStamp } = require('../services/admin-unread');
 
 router.use(adminAuthenticate);
 
@@ -91,11 +91,12 @@ router.get('/issues', requireAdmin, async (req, res, next) => {
 // badge doesn't double-count.
 router.get('/unread-count', async (req, res, next) => {
   try {
-    const count = await getUnreadCountForAdmin({ adminUserId: req.technicianId, role: req.techRole });
-    // `at` is the badge-ordering stamp: the SERVER clock, same domain as
-    // the push payload's badgeAt (notification-triggers), so the client
-    // never compares its own wall clock against the server's.
-    res.json({ count, at: Date.now() });
+    // `at` is the badge-ordering stamp: read from the DB clock inside the
+    // same per-admin serialized section that computed the count
+    // (admin-unread.js), so every ordering token — this, the read routes',
+    // the push payload's badgeAt — shares one clock and one total order.
+    const { count, at } = await getUnreadCountForAdmin({ adminUserId: req.technicianId, role: req.techRole });
+    res.json({ count, at });
   } catch (err) { next(err); }
 });
 
@@ -187,8 +188,8 @@ router.put('/read-all', async (req, res, next) => {
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
     if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
-    // Server-clock badge-ordering stamp — see /unread-count.
-    res.json({ success: true, at: Date.now() });
+    // Serialized DB-clock badge-ordering stamp — see /unread-count.
+    res.json({ success: true, at: await badgeOrderingStamp(req.technicianId) });
   } catch (err) { next(err); }
 });
 
@@ -310,12 +311,12 @@ router.put('/:id/read', async (req, res, next) => {
       }
       const alertId = id.slice('live:'.length);
       const recorded = await dismissLiveAlerts(req.technicianId, alertId);
-      return res.json({ success: true, live: true, dismissed: recorded > 0, at: Date.now() });
+      return res.json({ success: true, live: true, dismissed: recorded > 0, at: await badgeOrderingStamp(req.technicianId) });
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
     const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
-    // Server-clock badge-ordering stamp — see /unread-count.
-    res.json({ success: true, updated, at: Date.now() });
+    // Serialized DB-clock badge-ordering stamp — see /unread-count.
+    res.json({ success: true, updated, at: await badgeOrderingStamp(req.technicianId) });
   } catch (err) { next(err); }
 });
 

@@ -148,7 +148,7 @@ function isLiveDuplicate(persisted, liveKeys) {
 // on, or a non-admin role, excludes the live overlay entirely (owner-only
 // finance alerts are hidden from scoped feeds, so their persisted rows
 // must not be re-subtracted either).
-async function getUnreadCountForAdmin({ adminUserId, role } = {}) {
+async function computeUnreadCount({ adminUserId, role } = {}) {
   const liveCtx = isBellPolicyEnabled() || role !== 'admin'
     ? { live: [], liveKeys: new Set() }
     : await liveAlertNotifications(adminUserId);
@@ -167,4 +167,64 @@ async function getUnreadCountForAdmin({ adminUserId, role } = {}) {
   return persistedCount + liveCtx.live.length;
 }
 
-module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin };
+// Badge-ordering stamps. Every badge-ordering token (push badgeAt, the
+// bell routes' `at`) must come from ONE clock and be monotonic in
+// snapshot order: two overlapping count computations for the same admin
+// must not hand the OLDER count the NEWER stamp — the client keeps
+// whichever stamp is higher (codex #3541 round 6). A per-admin Postgres
+// advisory lock serializes the whole critical section across every
+// replica (same pattern as dashboard-alerts-cron), and the stamp is the
+// DB clock read inside the locked section AFTER the payload work, so
+// stamps order exactly as the serialized sections do. Environments
+// without transaction/advisory support (unit mocks) fall back to the
+// previous unserialized app-clock stamp — the badge is garnish and must
+// never break on infrastructure.
+const BADGE_LOCK_NS = 'waves-badge:';
+
+async function withBadgeOrderingStamp(adminUserId, fn) {
+  try {
+    if (typeof db.transaction !== 'function') throw new Error('transactions unavailable');
+    return await db.transaction(async (trx) => {
+      // pg_advisory_xact_lock blocks until acquired and releases on
+      // commit/rollback — no leak risk. Scoped per admin so different
+      // admins' snapshots never contend.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${adminUserId ?? ''}`]);
+      let result;
+      try {
+        result = await fn();
+      } catch (err) {
+        err.badgeComputeError = true; // fn's own failure — never retried below
+        throw err;
+      }
+      const { rows } = await trx.raw(
+        'SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS ms',
+      );
+      const ms = Number(rows?.[0]?.ms);
+      return { ...result, at: Number.isFinite(ms) ? ms : Date.now() };
+    });
+  } catch (err) {
+    if (err && err.badgeComputeError) throw err;
+    logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
+    return { ...(await fn()), at: Date.now() };
+  }
+}
+
+// Returns { count, at }: the unread snapshot plus its ordering stamp,
+// both produced inside the per-admin serialized section.
+async function getUnreadCountForAdmin({ adminUserId, role } = {}) {
+  return withBadgeOrderingStamp(adminUserId, async () => ({
+    count: await computeUnreadCount({ adminUserId, role }),
+  }));
+}
+
+// Stamp-only critical section for read mutations (mark-read/read-all).
+// The mutation committed before this is called, so any snapshot
+// serialized after it both observes the mutation and stamps later; a
+// snapshot still holding the lock stamps earlier and correctly loses to
+// this fresher token.
+async function badgeOrderingStamp(adminUserId) {
+  const { at } = await withBadgeOrderingStamp(adminUserId, async () => ({}));
+  return at;
+}
+
+module.exports = { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin, badgeOrderingStamp };
