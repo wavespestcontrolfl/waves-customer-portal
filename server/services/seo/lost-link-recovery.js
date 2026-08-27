@@ -231,10 +231,16 @@ async function queueOne(loss, out, scoreMod) {
 
 /**
  * resolveRecoveredLink(backlink, now) — the inbound link came back on its own.
- * Any un-pitched recovery prospect for it (queued by queueLostDomains or a
- * reopened lost row) is closed as live so the drafter never pitches for a
+ * Any un-pitched recovery prospect for the DOMAIN (queued by queueLostDomains
+ * or a reopened lost row) is closed as live so the drafter never pitches for a
  * link that already exists. Rows already contacted/negotiating are left to the
  * operator (a conversation is open); a parked draft is withdrawn.
+ *
+ * Domain scope, not target page: recovery rows are queued one-per-domain only
+ * after the domain has NO active link left (domainLevelLosses), represented by
+ * whichever lost row ranked highest — so a sibling link to a different Waves
+ * page reappearing is the same evidence ("the domain links to us again") and
+ * must close the same row, whatever target_page it was filed under.
  */
 async function resolveRecoveredLink(backlink, now = new Date()) {
   const domain = normalizeDomain(backlink.source_domain);
@@ -244,7 +250,6 @@ async function resolveRecoveredLink(backlink, now = new Date()) {
   // operator's reconciliation, not ours.
   const n = await db('seo_link_prospects')
     .where({ target_domain: domain, status: 'prospect' })
-    .whereIn('target_page', targetPageVariants(backlink.target_url))
     .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
     .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
     .whereNull('outreach_sent_at')

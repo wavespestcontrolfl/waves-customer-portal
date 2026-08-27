@@ -447,13 +447,16 @@ describe('lost-link recovery', () => {
     expect(updates).toHaveLength(0);
   });
 
-  test('resolveRecoveredLink closes only un-pitched recovery prospects for that exact page', async () => {
+  test('resolveRecoveredLink closes un-pitched recovery prospects at DOMAIN scope (any sibling link returning counts)', async () => {
     const ops = [];
     makeDb({ seo_link_prospects: (op, st) => { ops.push({ op, wheres: st.wheres, ins: st.ins, nulls: st.nulls, raws: st.raws, payload: st.payload }); return 2; } });
+    // The returning link targets /x/ — the recovery row may have been filed under a
+    // sibling target page (domainLevelLosses queues ONE representative per domain).
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
     expect(r).toEqual({ resolved: 2 });
     expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
-    expect(ops[0].ins[0]).toEqual(['target_page', expect.arrayContaining(['https://wavespestcontrol.com/x/', 'https://www.wavespestcontrol.com/x', 'https://www.wavespestcontrol.com/x/'])]);
+    expect(ops[0].ins).toEqual([]); // no target_page predicate — domain scope, same as the queue side
+    expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/); // still only recovery rows, never a cold prospect
     // only unsent rows: none/drafted and outreach_sent_at IS NULL — sending/sent are left for reconciliation
     expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
     expect(ops[0].nulls).toContain('outreach_sent_at');

@@ -423,9 +423,24 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   return 'live';
 }
 
+// Same rule as backlink-monitor's verifyLoss: only a page that is gone (404/410)
+// or that rendered a COMPLETE HTML body without our link (2xx, not truncated,
+// not a challenge/non-HTML/empty body) proves the link is absent. 403/429/5xx,
+// redirect budget, truncation past the body cap, DNS/TLS/timeouts and
+// SSRF-blocked hosts prove nothing.
+function crawlProvesAbsence(crawl) {
+  if (!crawl || crawl.found) return false;
+  const status = Number(crawl.status) || 0;
+  if (status === 404 || status === 410) return true;
+  return status >= 200 && status < 300 && !crawl.truncated && !crawl.blocked && !crawl.unverifiable && !crawl.error;
+}
+
 async function verifyOne(prospect) {
   const now = new Date();
   const wasLive = ['live', 'indexed'].includes(prospect.status);
+  // A live/indexed row is demoted only on definitive evidence. With no live_url
+  // there is no page to crawl, so the domain reconcile alone decides (as before).
+  let crawlDefinitive = !prospect.live_url;
 
   // 1 & 2 need a known live_url. Pending placements (null live_url) skip straight
   // to the domain reconcile below.
@@ -441,12 +456,15 @@ async function verifyOne(prospect) {
 
     // 2. Crawl fallback — fresh links, or a moved/false-lost page. The crawl parses
     // the real rel attribute, so its dofollow verdict is authoritative.
-    const crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect));
+    let crawl;
+    try { crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect)); }
+    catch (err) { crawl = { found: false, status: 0, error: err.message }; }
     if (crawl.found) {
       return markLive(prospect, {
         isDofollow: crawl.isDofollow, anchorText: crawl.anchorText, dofollowConfirmed: true,
       }, now);
     }
+    crawlDefinitive = crawlProvesAbsence(crawl);
   }
 
   // 3. Domain reconcile — covers pending placements with no known live_url, a
@@ -460,15 +478,18 @@ async function verifyOne(prospect) {
     }, now);
   }
 
-  // Not found active anywhere. Regression if it used to be live; otherwise touch.
-  if (wasLive) {
+  // Not found active anywhere. Regression if it used to be live AND the crawl
+  // was definitive; an unverifiable crawl (blocked, truncated, non-HTML, error)
+  // keeps the row as it was — a temporary DataForSEO absence plus a crawl that
+  // could not read the page is not a loss.
+  if (wasLive && crawlDefinitive) {
     await db('seo_link_prospects').where({ id: prospect.id }).update({
       status: 'lost', last_live_check: now, updated_at: now,
     });
     return 'lost';
   }
   await db('seo_link_prospects').where({ id: prospect.id }).update({ last_live_check: now, updated_at: now });
-  return 'pending';
+  return wasLive ? 'unverified' : 'pending';
 }
 
 async function run({ limit = 200 } = {}) {
@@ -481,22 +502,23 @@ async function run({ limit = 200 } = {}) {
     .orderByRaw('last_live_check NULLS FIRST')
     .limit(limit);
 
-  let live = 0, lost = 0, pending = 0;
+  let live = 0, lost = 0, pending = 0, unverified = 0;
   for (const p of prospects) {
     try {
       const r = await verifyOne(p);
       if (r === 'live') live++;
       else if (r === 'lost') lost++;
+      else if (r === 'unverified') unverified++;
       else pending++;
     } catch (err) {
       logger.error(`[link-verifier] ${p.id} (${p.target_domain}) failed: ${err.message}`);
     }
   }
-  logger.info(`[link-verifier] checked ${prospects.length}: ${live} live, ${lost} lost, ${pending} pending`);
-  return { checked: prospects.length, live, lost, pending };
+  logger.info(`[link-verifier] checked ${prospects.length}: ${live} live, ${lost} lost, ${pending} pending, ${unverified} unverified`);
+  return { checked: prospects.length, live, lost, pending, unverified };
 }
 
-module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
   backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
   comparableDomain, parseQuality, expectedTargetUrl,
