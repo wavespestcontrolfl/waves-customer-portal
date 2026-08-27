@@ -28,13 +28,28 @@ const MARKERS = ['Exif', 'exif', 'x:xmpmeta', 'XMP', 'c2pa', 'C2PA', 'jumb', 'ju
 // segments the same way — sharp's decode/re-encode drops any it doesn't
 // re-emit. Building the segment by hand keeps the fixture independent of
 // which metadata kinds this sharp version's .withMetadata() can author.
-function spliceApp1(jpeg, payload) {
-  const marker = Buffer.from([0xff, 0xe1]);
+function spliceApp(jpeg, payload, markerByte) {
+  const marker = Buffer.from([0xff, markerByte]);
   const length = Buffer.alloc(2);
   length.writeUInt16BE(payload.length + 2);
   // SOI (2 bytes) | APP1 marker | length | payload | rest of the JPEG.
   return Buffer.concat([jpeg.subarray(0, 2), marker, length, payload, jpeg.subarray(2)]);
 }
+const spliceApp1 = (jpeg, payload) => spliceApp(jpeg, payload, 0xe1);
+// APP11 (0xffeb) is the segment real C2PA manifests ride in: a JUMBF
+// superbox ("jumb") wrapping a description box ("jumd") with the c2pa
+// manifest-store label — built here as raw bytes to mirror the container
+// an actual gpt-image PNG/JPEG carries.
+function jumbfPayload() {
+  const label = Buffer.from('c2pa\0', 'latin1');
+  const jumd = Buffer.concat([Buffer.alloc(4), Buffer.from('jumd', 'latin1'), Buffer.alloc(16), Buffer.from([0x03]), label]);
+  jumd.writeUInt32BE(jumd.length, 0);
+  const jumb = Buffer.concat([Buffer.alloc(4), Buffer.from('jumb', 'latin1'), jumd]);
+  jumb.writeUInt32BE(jumb.length, 0);
+  // "JP\0\0" common identifier + box instance/sequence numbers precede the box.
+  return Buffer.concat([Buffer.from('JP\0\0', 'latin1'), Buffer.from([0x00, 0x01, 0x00, 0x00, 0x00, 0x01]), jumb]);
+}
+const spliceApp11 = (jpeg) => spliceApp(jpeg, jumbfPayload(), 0xeb);
 
 const XMP_PACKET = Buffer.from(
   'http://ns.adobe.com/xap/1.0/\0<?xpacket begin=""?><x:xmpmeta xmlns:x="adobe:ns:meta/">'
@@ -55,7 +70,7 @@ async function buildTaggedJpeg() {
     })
     .jpeg()
     .toBuffer();
-  return spliceApp1(withExif, XMP_PACKET);
+  return spliceApp11(spliceApp1(withExif, XMP_PACKET));
 }
 
 describe('compressToWebp provenance strip', () => {
@@ -66,6 +81,9 @@ describe('compressToWebp provenance strip', () => {
     expect(s).toContain('x:xmpmeta');
     expect(s).toContain('c2pa');
     expect(s).toContain('urn:uuid');
+    // Real C2PA container bytes: JUMBF superbox + description box in APP11.
+    expect(s).toContain('jumb');
+    expect(s).toContain('jumd');
     // And it is still a decodable JPEG despite the hand-spliced segment.
     const meta = await sharp(tagged).metadata();
     expect(meta.format).toBe('jpeg');

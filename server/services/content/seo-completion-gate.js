@@ -273,7 +273,7 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   rodent: /\brodent|\brats?\b|\bmice\b|\bmouse\b/i,
   'tree-shrub': /\btree\b|\bshrub/i,
   'bed-bug': /\bbed[ -]?bug/i,
-  cockroach: /roach/i,
+  cockroach: /\b(?:cock)?roach(?:es)?\b/i,
   ant: /\bants?\b/i,
   spider: /\bspider/i,
   flea: /\bfleas?\b/i,
@@ -353,16 +353,29 @@ function ctaBriefService(rawService) {
 
 // All conversion-path links in the body, with anchor + estimate/quote flag
 // + the services the anchor names.
-function conversionCtaLinks(body) {
+const CONVERSION_PATH_RE = /^\/(?:contact|[^\s)"']*quote|[^\s)"']*estimate|pest-control-calculator)/i;
+
+// Markdown links AND literal HTML anchors (the passive-HTML allowlist admits
+// <a>, so a forbidden CTA could otherwise hide in one).
+function extractLinks(body) {
   const s = String(body || '');
-  const out = [];
-  const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
+  const links = [];
+  const md = /\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
-  while ((m = conversionLink.exec(s)) !== null) {
+  while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: m[2] });
+  const html = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = html.exec(s)) !== null) links.push({ anchor: m[2].replace(/<[^>]+>/g, ''), href: m[1] });
+  return links;
+}
+
+function conversionCtaLinks(body) {
+  const out = [];
+  for (const link of extractLinks(body)) {
+    if (!CONVERSION_PATH_RE.test(link.href)) continue;
     // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.
-    const anchor = m[1].replace(/[*_~`]/g, '').trim();
+    const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
     let named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
       .filter(([, re]) => re.test(anchor))
       .map(([svc]) => svc);
@@ -420,12 +433,15 @@ function badCtaAnchor(body, brief = {}) {
 // Deterministic backstop to the writer prompt's CTA-wording rule (owner
 // 2026-08-27): a markdown link whose ANCHOR TEXT is inspection-request
 // wording is the forbidden CTA shape, wherever it points.
-const FORBIDDEN_CTA_ANCHOR_RE = /\[((?:request|book|schedule|get)[^\]]{0,40}?inspection[^\]]{0,20})\]\(/i;
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:request|book|schedule|get)\b.{0,40}?\binspection\b/i;
 function forbiddenCtaAnchor(body) {
-  // Bold/italic/code decoration inside the anchor must not hide the
-  // wording — strip it before matching.
-  const m = String(body || '').replace(/[*_~`]/g, '').match(FORBIDDEN_CTA_ANCHOR_RE);
-  return m ? m[1].trim() : null;
+  // Any link (markdown or HTML, any destination) whose decoration-stripped
+  // anchor is inspection-request wording.
+  for (const link of extractLinks(body)) {
+    const anchor = link.anchor.replace(/[*_~`]/g, '').replace(/\s+/g, ' ').trim();
+    if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;
+  }
+  return null;
 }
 
 function faqRequired(brief = {}) {

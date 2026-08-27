@@ -2199,6 +2199,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Single-dash GFM delimiters count; 4-space-indented examples are code.
     expect(guardrails.hasRawMarkdownTable('A | B\n- | -\n1 | 2')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('Example:\n\n    | A | B |\n    | --- | --- |\n')).toBe(false);
+    // Raw HTML tables are tables too.
+    expect(guardrails.hasRawMarkdownTable('Intro <table><tr><th>Method</th></tr><tr><td>DIY</td></tr></table>')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

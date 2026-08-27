@@ -1837,6 +1837,13 @@ function extractRawMarkdownTables(text) {
     return l.replace(/^\s*(?:>\s*)+/, '');
   });
   const tables = [];
+  // Raw HTML tables are the other non-component table representation —
+  // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
+  // too (fence-blanked text, whitespace-normalized block).
+  const htmlTable = /<table\b[\s\S]*?<\/table>/gi;
+  const blanked = lines.join('\n');
+  let hm;
+  while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
     // GFM delimiter cells are 1+ dashes (":-|-:" is valid), pipes/colons/spaces around them.
     const delimiter = /^\s*\|?[\s:|-]*-+[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');

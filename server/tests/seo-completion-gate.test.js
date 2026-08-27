@@ -347,6 +347,29 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
+  test('raw HTML anchors are validated like markdown links', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n<a href="/contact/">Request an Inspection</a>`,
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+  });
+
+  test('"approach" does not read as the cockroach service', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Swarm season. [Get a Termite Quote and See Our Approach](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
   test('an inspection-request anchor emits exactly one forbidden-wording finding', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
