@@ -44,11 +44,21 @@ curl -sS -X POST https://portal.wavespestcontrol.com/api/admin/auth/register \
 
 ## Hand off
 
+**The registered email must be a real mailbox the hire can open at
+handoff** — the forced password change on the admin login surface is
+completed through an emailed reset link.
+
 1. Give the hire the email + temporary password **out-of-band** (in person
    or by voice — not SMS/email that persists next to the address).
-2. First login forces a password change: every API call except the
-   change-password flow returns 403 until they set their own. The portal
-   redirects them into the change screen automatically.
+2. First login forces them to set their own password before anything else
+   works (the middleware 403s every API call until they do). The exact flow
+   depends on where they log in:
+   - **Admin login page** (`/admin/login`): the portal discards the session
+     and routes them to the reset screen, which emails a reset link to
+     their registered address. They set their own password from that link.
+     This is the deliberate flow for forced resets — do not hand-edit it.
+   - **Tech portal** (`/tech`): the session is kept and they are redirected
+     straight into the in-app change-password screen.
 3. Have them open the tech portal at `/tech` and add it to their home screen
    (the install hint shows on first visit). Push notifications are opt-in
    from the portal once logged in.
