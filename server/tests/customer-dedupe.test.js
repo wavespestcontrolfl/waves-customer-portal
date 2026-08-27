@@ -1084,6 +1084,26 @@ describe('executeMerge', () => {
       .rejects.toThrow(/not a shell \(billing_mode\)/);
   });
 
+  it('contact_role backfills from a loser-only role and never overrides an explicit winner role', async () => {
+    // A property-manager duplicate merged into a NULL-role winner must not
+    // revert the surviving profile to assumed-owner semantics.
+    const winnerNoRole = { id: WINNER, first_name: 'Fay', last_name: 'Manager', email: 'fay@example.com', phone: '+16124074763', contact_role: null };
+    const loserManager = { id: LOSER, first_name: 'Fay', last_name: null, email: null, phone: '6124074763', contact_role: 'property_manager' };
+    let built = buildTrx({ winner: winnerNoRole, loser: loserManager, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    let result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.contact_role).toBe('property_manager');
+    expect(built.state.backfilled.contact_role).toBe('property_manager');
+
+    // Explicit winner role wins over a differing loser role (backfill only where empty).
+    const winnerOwner = { ...winnerNoRole, contact_role: 'owner' };
+    const loserTenant = { ...loserManager, contact_role: 'tenant' };
+    built = buildTrx({ winner: winnerOwner, loser: loserTenant, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.contact_role).toBeUndefined();
+  });
+
   it('service contacts backfill SLOT-wise — never mixing fields across customers', async () => {
     const winner = {
       id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',

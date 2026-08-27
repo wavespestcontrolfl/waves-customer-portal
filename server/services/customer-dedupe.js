@@ -751,9 +751,14 @@ async function customerFkColumns(database) {
 // is empty. Deliberately excludes money/tier fields (waveguard_tier,
 // monthly_rate) and property measurements — those are business decisions, not
 // contact data.
+// contact_role (owner / property_manager / tenant) is a contact fact, not a
+// business decision: a loser-only role survives the merge; a winner that
+// already carries an explicit role keeps it (NULL reads as owner, so a
+// loser's 'owner' never has anything to fill).
 const BACKFILL_FIELDS = [
   'first_name', 'last_name', 'email', 'address_line1', 'address_line2',
   'city', 'state', 'zip', 'lead_source', 'lead_source_detail', 'preferred_language',
+  'contact_role',
 ];
 
 function isEmptyValue(v) {
