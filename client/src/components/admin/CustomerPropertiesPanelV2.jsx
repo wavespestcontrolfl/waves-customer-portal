@@ -3,6 +3,9 @@ import { Button, Card, CardBody } from "../ui";
 import { OCCUPANCY_OPTIONS } from "../../lib/contact-roles";
 import { adminFetch } from "../../utils/admin-fetch";
 
+// customer_properties.label is varchar(100); the server 400s past this too.
+const PROPERTY_LABEL_MAX = 100;
+
 const EMPTY_FORM = {
   address_line1: "",
   address_line2: "",
@@ -194,7 +197,7 @@ export default function CustomerPropertiesPanelV2({
                       aria-label={`Label for ${p.address_line1}`}
                       autoFocus
                       value={labelEdit.value}
-                      maxLength={120}
+                      maxLength={PROPERTY_LABEL_MAX}
                       onChange={(e) =>
                         setLabelEdit((le) => (le ? { ...le, value: e.target.value } : le))
                       }
@@ -339,6 +342,7 @@ export default function CustomerPropertiesPanelV2({
               <input
                 id="cp-label"
                 className={inputCls}
+                maxLength={PROPERTY_LABEL_MAX}
                 value={form.label}
                 onChange={(e) => setForm((f) => ({ ...f, label: e.target.value }))}
               />

@@ -2368,6 +2368,12 @@ router.get('/:id/cards', async (req, res, next) => {
 });
 
 // GET /api/admin/customers/:id/properties — multi-property list (Phase 1).
+// customer_properties.label is varchar(100) (migration 20260629000001).
+const PROPERTY_LABEL_MAX = 100;
+function propertyLabelFits(label) {
+  return label === undefined || label === null || String(label).length <= PROPERTY_LABEL_MAX;
+}
+
 // Lazily backfills a primary property for customers created after the migration.
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
@@ -2401,6 +2407,10 @@ router.post('/:id/properties', requireAdmin, async (req, res, next) => {
     const stateCode = String(state || '').trim().toUpperCase();
     if (stateCode && !/^[A-Z]{2}$/.test(stateCode)) {
       return res.status(400).json({ error: 'state must be a two-letter code' });
+    }
+    // customer_properties.label is varchar(100) — same reasoning as state.
+    if (!propertyLabelFits(label)) {
+      return res.status(400).json({ error: `label must be ${PROPERTY_LABEL_MAX} characters or fewer` });
     }
     // If this address is the customer's OWN primary that's only PARTIAL on file
     // (same street, missing city/ZIP), complete that primary first — otherwise its
@@ -2440,7 +2450,12 @@ router.patch('/:id/properties/:propertyId', requireAdmin, async (req, res, next)
       }
       updates.occupancy_type = req.body.occupancy_type;
     }
-    if (req.body && req.body.label !== undefined) updates.label = req.body.label || null;
+    if (req.body && req.body.label !== undefined) {
+      if (!propertyLabelFits(req.body.label)) {
+        return res.status(400).json({ error: `label must be ${PROPERTY_LABEL_MAX} characters or fewer` });
+      }
+      updates.label = req.body.label || null;
+    }
     if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'nothing to update' });
     updates.updated_at = new Date();
     const n = await db('customer_properties')

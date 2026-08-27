@@ -79,6 +79,22 @@ describe('POST /admin/customers/:id/properties', () => {
     expect(mockProps.recordCallProperty.mock.calls[0][0].state).toBeNull();
   });
 
+  test('label longer than varchar(100) is a 400 on POST and PATCH, never a DB error', async () => {
+    const long = 'x'.repeat(101);
+    await withServer(async (baseUrl) => {
+      const created = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', label: long });
+      expect(created.status).toBe(400);
+      await expect(created.json()).resolves.toEqual({ error: 'label must be 100 characters or fewer' });
+      const patched = await fetch(`${baseUrl}/admin/customers/cust-1/properties/p1`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label: long }),
+      });
+      expect(patched.status).toBe(400);
+      const exact = await post(baseUrl, { address_line1: '20 Oak St', city: 'Naples', state: 'FL', zip: '34103', label: 'y'.repeat(100) });
+      expect(exact.status).toBe(201);
+    });
+    expect(mockProps.recordCallProperty).toHaveBeenCalledTimes(1);
+  });
+
   test('duplicate street surfaces as 409', async () => {
     mockProps.recordCallProperty.mockResolvedValueOnce({ created: false, propertyId: null });
     await withServer(async (baseUrl) => {
