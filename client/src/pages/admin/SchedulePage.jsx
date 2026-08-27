@@ -6425,6 +6425,48 @@ const CP_EYEBROW = {
   marginBottom: 8,
 };
 
+// Desktop closeout mirrors the mobile sheet (owner directive 2026-08-27):
+// the same monochrome tokens and Roboto chrome, expressed on the D-palette
+// KEYS the desktop render already reads so the 2,000-line desktop copy
+// needs no per-site edits. Shadowed inside CompletionPanel's desktop block
+// — the same "shadow D locally" pattern ProtocolPanel uses. Success/error
+// semantics keep the mobile status colors; every accent (teal/blue/purple)
+// resolves to ink like the mobile action buttons.
+const CP_DESKTOP = {
+  bg: "#FAFAFA",
+  card: "#FFFFFF",
+  input: "#FFFFFF",
+  border: "#E5E5E5",
+  text: "#111111",
+  heading: "#111111",
+  muted: "#737373",
+  teal: "#111111",
+  blue: "#111111",
+  purple: "#111111",
+  // No colors on the closeout (owner 2026-08-27): success/warn accents
+  // resolve to ink/muted; red stays ONLY for genuine error states per the
+  // admin design rule.
+  green: "#111111",
+  amber: "#737373",
+  red: "#C2410C",
+  white: "#FFFFFF",
+  gray: "#A3A3A3",
+  inputBorder: "#E5E5E5",
+};
+const CP_DESKTOP_LABEL = { ...CP_EYEBROW };
+const CP_DESKTOP_INPUT = {
+  width: "100%",
+  background: CP_DESKTOP.input,
+  color: CP_DESKTOP.text,
+  border: `1px solid ${CP_DESKTOP.border}`,
+  borderRadius: 10,
+  padding: "10px 12px",
+  fontSize: 14,
+  fontFamily: CP_FONT,
+  boxSizing: "border-box",
+  marginBottom: 8,
+};
+
 function CPField({ label, children }) {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -6773,7 +6815,10 @@ export function TypedFindingsSection({
   pesticideProductPresent = true,
   frozen = false,
 }) {
-  const mobile = variant === "mobile";
+  // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
+  // sheet — same monochrome tokens and Roboto chrome on both variants.
+  // `variant` is kept on the API; both resolve to the CP_M token set.
+  const mobile = variant === "mobile" || variant === "desktop";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
   const textColor = mobile ? CP_M.ink : D.text;
   const mutedColor = mobile ? CP_M.ink4 : D.muted;
@@ -6817,7 +6862,14 @@ export function TypedFindingsSection({
     <div key={field.key} style={{ marginBottom: 12 }}>
       {/* Sectioned schemas (rodent trapping): header above the first
           field of each section so the checklist scans in groups. */}
-      {field.section && field.section !== list[index - 1]?.section && (
+      {/* A section whose name is the same as its first field's label
+          ("Entry points" / "Entry points addressed") would print twice —
+          the field label carries it alone in that case (owner 2026-08-27). */}
+      {field.section
+        && field.section !== list[index - 1]?.section
+        && !String(typedFieldLabel(schema.type, field, values) || "")
+          .toLowerCase()
+          .startsWith(String(field.section).toLowerCase()) && (
         <div style={sectionHeaderStyle}>{field.section}</div>
       )}
       <div style={fieldLabelStyle}>
@@ -14390,7 +14442,7 @@ export function CompletionPanel({
                       marginTop: i === 0 ? 0 : 6,
                     }}
                   >
-                    ⚠️ {text}
+                    {text}
                   </div>
                 ))}
               </div>
@@ -16099,8 +16151,18 @@ export function CompletionPanel({
   }
 
   // ────────────────────────────────────────────────────────────────────
-  // Desktop render (legacy D dark palette) — unchanged
+  // Desktop render — mirrors the mobile sheet's monochrome tokens + Roboto
+  // (owner directive 2026-08-27). The D-keyed shadows below resolve every
+  // palette read in this block to the CP_DESKTOP set; block-scoped so the
+  // earlier mobile branch and the module-level styles are untouched.
   // ────────────────────────────────────────────────────────────────────
+  {
+   
+  const D = CP_DESKTOP;
+   
+  const labelStyle = CP_DESKTOP_LABEL;
+   
+  const inputStyle = CP_DESKTOP_INPUT;
   return createPortal(
     <>
       {" "}
@@ -16132,6 +16194,7 @@ export function CompletionPanel({
           display: "flex",
           flexDirection: "column",
           animation: "slideIn 0.25s ease",
+          fontFamily: CP_FONT,
         }}
       >
         {success && (
@@ -16598,7 +16661,7 @@ export function CompletionPanel({
                     marginTop: i === 0 ? 0 : 6,
                   }}
                 >
-                  ⚠️ {text}
+                  {text}
                 </div>
               ))}
             </div>
@@ -16875,15 +16938,15 @@ export function CompletionPanel({
                   && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
                 || zeroStateCompanionOnly}
               style={{
+                // Same outlined ink pill as the mobile GENERATE AI REPORT
+                // button (owner 2026-08-27) — no gradient accent.
                 width: "100%",
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "none",
-                background: generating
-                  ? D.card
-                  : "linear-gradient(135deg, #8b5cf6, #6366f1)",
-                color: D.heading,
-                fontSize: 13,
+                padding: "12px 16px",
+                borderRadius: 999,
+                border: `1px solid ${D.teal}`,
+                background: D.card,
+                color: D.teal,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: generating ? "wait" : "pointer",
                 marginTop: 8,
@@ -16933,7 +16996,7 @@ export function CompletionPanel({
                 }}
               >
                 {" "}
-                <span style={{ fontSize: 16 }}>&#128247;</span>Add Photos (
+                Add Photos (
                 {servicePhotos.length}/5)
               </button>
               {servicePhotos.length > 0 && (
@@ -17212,7 +17275,7 @@ export function CompletionPanel({
                       border: `1px solid ${isSelected ? D.teal : D.border}`,
                     }}
                   >
-                    {isSelected ? "\u2713 " : ""}
+                    {""}
                     {p.display_name || p.name}
                   </button>
                 );
@@ -17414,7 +17477,7 @@ export function CompletionPanel({
                                 transition: "all 0.15s",
                               }}
                             >
-                              {selected ? "✓ " : ""}
+                              {""}
                               {area}
                             </button>
                           );
@@ -18059,8 +18122,11 @@ export function CompletionPanel({
             style={{
               ...btnBase,
               width: "100%",
-              background: D.green,
+              // Ink action pill like the mobile COMPLETE button (owner
+              // 2026-08-27); green stays for the saved-state overlay.
+              background: D.teal,
               color: "#fff",
+              borderRadius: 999,
               fontSize: 14,
               height: 52,
               opacity:
@@ -18097,6 +18163,7 @@ export function CompletionPanel({
     </>,
     document.body,
   );
+  }
 }
 
 const labelStyle = {
@@ -18106,18 +18173,6 @@ const labelStyle = {
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
-  marginBottom: 8,
-};
-const subLabelStyle = { fontSize: 11, color: D.muted, marginBottom: 4 };
-const inputStyle = {
-  width: "100%",
-  background: D.input,
-  color: D.text,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  padding: "10px 12px",
-  fontSize: 13,
-  boxSizing: "border-box",
   marginBottom: 8,
 };
 const checkboxRow = {

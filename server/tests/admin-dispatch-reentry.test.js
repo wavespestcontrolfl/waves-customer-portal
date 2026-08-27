@@ -67,7 +67,7 @@ const router = require('../routes/admin-dispatch');
 const { reentryEditPlan, completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
 const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
-const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
+const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults, isSprayApplicationMethod } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
@@ -163,6 +163,17 @@ describe('service-line advisory defaults', () => {
         interior_reentry_min: 0,
       });
     }
+  });
+
+  test('bait/station/injection methods are never spray evidence; spray-class methods are', () => {
+    expect(isSprayApplicationMethod('bait_placement')).toBe(false);
+    expect(isSprayApplicationMethod('station_check')).toBe(false);
+    expect(isSprayApplicationMethod('trunk_injection')).toBe(false);
+    expect(isSprayApplicationMethod(null)).toBe(false);
+    expect(isSprayApplicationMethod('')).toBe(false);
+    expect(isSprayApplicationMethod('perimeter_spray')).toBe(true);
+    expect(isSprayApplicationMethod('spot_treatment')).toBe(true);
+    expect(isSprayApplicationMethod('Foam Application')).toBe(true);
   });
 
   test('a no-spray termite identity keeps 30/120 when the completion recorded applications', () => {

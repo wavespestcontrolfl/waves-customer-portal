@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -7011,8 +7011,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // line's 30 — see getAdvisoryDefaults. Recorded applications are
             // passed as evidence so a no-spray termite identity never zeroes
             // a visit that actually applied product.
+            // Evidence = a label re-entry interval on any applied product, or
+            // an explicitly spray-class application method — bait cartridges
+            // and station checks are not evidence (uncapped codex P1).
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
-              applicationsRecorded: Array.isArray(products) && products.length > 0,
+              applicationsRecorded: productReentryMin != null
+                || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
+                  p?.applicationMethod || p?.method || p?.application_method,
+                ))),
             });
             let advisoryDefaultsForVisit = productReentryMin != null
               ? {

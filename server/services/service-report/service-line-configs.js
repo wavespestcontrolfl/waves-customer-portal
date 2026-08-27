@@ -259,13 +259,27 @@ function isTermiteNoReentryServiceType(serviceType) {
     && !TERMITE_TREATMENT_SERVICE_TYPE_RE.test(text);
 }
 
+// Application methods that are NOT spray/liquid evidence: bait and
+// station work (Trelona/Advance cartridges, station checks) and trunk
+// injection carry no dry-down concept. A termite bait visit legitimately
+// records these products, so product PRESENCE is never re-entry evidence
+// — only a spray-class method (or an actual label REI, checked by the
+// caller) is (uncapped codex P1 on #3516).
+const NON_SPRAY_APPLICATION_METHODS = new Set(['bait_placement', 'station_check', 'trunk_injection']);
+function isSprayApplicationMethod(method) {
+  const key = String(method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return !!key && key !== 'null' && !NON_SPRAY_APPLICATION_METHODS.has(key);
+}
+
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
 // line id) so the cockroach and termite-station overrides can fire. Other
 // types return their line's defaults unchanged. `applicationsRecorded`
-// is completion evidence: a station visit that recorded a supplemental
-// product application keeps the line's re-entry defaults regardless of
-// its name (codex inline on #3516) — the name alone never zeroes a
-// chemically treated visit.
+// is completion evidence of a SPRAY-class application (see
+// isSprayApplicationMethod) or a label re-entry interval: a station visit
+// that recorded a supplemental liquid application keeps the line's
+// re-entry defaults regardless of its name (codex inline on #3516) — the
+// name alone never zeroes a chemically treated visit, and bait/station
+// products alone never un-zero one.
 function getAdvisoryDefaults(serviceType, { applicationsRecorded = false } = {}) {
   const config = getServiceLineConfig(serviceType);
   if (config.id === 'pest' && isCockroachServiceType(serviceType)) {
@@ -305,6 +319,7 @@ module.exports = {
   SERVICE_LINE_CONFIGS,
   isRodentAdjacentServiceType,
   isCockroachServiceType,
+  isSprayApplicationMethod,
   getAdvisoryDefaults,
   detectServiceLine,
   getServiceLineConfig,
