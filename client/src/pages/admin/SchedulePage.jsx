@@ -1536,10 +1536,15 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
       try {
         const r = await adminFetch("/admin/discounts");
         const list = Array.isArray(r) ? r : [];
+        // Same invoice-visibility contract as CreateAppointmentModal: the
+        // save posts the preset id and the server loads it with
+        // show_in_invoices=true, so an invoice-hidden preset must not be
+        // offered here (it would 400 the whole save).
         const filtered = list.filter(
           (d) =>
             d.is_active &&
             !d.is_auto_apply &&
+            d.show_in_invoices &&
             (d.discount_type === "percentage" ||
               d.discount_type === "fixed_amount"),
         );
