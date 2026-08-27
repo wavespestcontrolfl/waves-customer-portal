@@ -804,10 +804,13 @@ async function triggerNotification(triggerKey, payload = {}) {
         const { getUnreadCountForAdmin } = require('./admin-unread');
         const BADGE_COUNT_TIMEOUT_MS = 1500;
         const BADGE_TIMED_OUT = Symbol('badge-timeout');
+        // Admin-role recipients only: techVisible triggers (sms_reply) also
+        // push to technicians, but the app-icon badge is scoped to the
+        // installed Waves Admin PWA — techs keep the banner, no badge field.
         const badgeByUser = new Map();
         await Promise.all(
           activeAdmins
-            .filter((u) => enabledUserIds.includes(u.id))
+            .filter((u) => u.role === 'admin' && enabledUserIds.includes(u.id))
             .map(async (user) => {
               let timer;
               const count = await Promise.race([
