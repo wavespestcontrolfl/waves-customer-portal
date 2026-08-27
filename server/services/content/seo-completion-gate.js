@@ -363,13 +363,12 @@ const CONVERSION_PATH_RE = /^\/(?:contact|[^\s)"']*quote|[^\s)"']*estimate|pest-
 
 // Markdown links AND literal HTML anchors (the passive-HTML allowlist admits
 // <a>, so a forbidden CTA could otherwise hide in one).
-// Non-rendered regions never reach a reader — strip HTML/MDX comments and
-// fenced code before extracting links so the gate judges rendered CTAs only.
+// Non-rendered regions never reach a reader — reuse the guardrails'
+// fence/comment-aware stripper (single Markdown scanner, no parallel parser)
+// so the gate judges rendered CTAs only.
 function renderedText(body) {
-  return String(body || '')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
-    .replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n[\s\S]*?^ {0,3}\1\s*$/gm, '');
+  const { blankNonRenderedMarkdown } = require('./content-guardrails');
+  return blankNonRenderedMarkdown(body);
 }
 
 function extractLinks(body) {
@@ -377,11 +376,14 @@ function extractLinks(body) {
   const links = [];
   const md = /\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
-  while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: m[2] });
+  // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
+  // [ref]: </contact/> — strip the brackets before classifying.
+  const dest = (h) => String(h || '').replace(/^<|>$/g, '');
+  while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[2]) });
   // Reference-style links: [text][ref] / [text][] with a [ref]: /url definition.
   const defs = new Map();
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
-  while ((m = def.exec(s)) !== null) defs.set(m[1].toLowerCase(), m[2]);
+  while ((m = def.exec(s)) !== null) defs.set(m[1].toLowerCase(), dest(m[2]));
   if (defs.size) {
     const ref = /\[([^\]]+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {

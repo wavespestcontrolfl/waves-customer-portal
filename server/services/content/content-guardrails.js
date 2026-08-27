@@ -1823,51 +1823,53 @@ function tenureClaimFinding(text) {
 // at least one pipe) directly under a pipe header row; blockquote prefixes
 // are stripped first so quoted tables still count. Prose pipes and plain
 // --- dividers never form the pair.
-function extractRawMarkdownTables(text) {
-  // Fenced code (``` / ~~~) is not rendered markdown — a table shown inside
-  // a code example is documentation, not a live table. Blank those lines
-  // out (keeping line count) before scanning.
-  // HTML/MDX comments render nothing — blank them (newlines preserved so
-  // line-based fence/list tracking stays aligned) before scanning.
+// Blank everything Markdown never renders — HTML/MDX comments and fenced
+// code (CommonMark fences: ≤3 leading spaces, same marker char, closing run
+// at least as long as the opener, marker-only close) — preserving newlines
+// so line-based scanners stay aligned. Single source for the table scanner
+// below AND the completion gate's CTA-link extraction.
+function blankNonRenderedMarkdown(text) {
   const raw = String(text || '')
     .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}/g, (c) => c.replace(/[^\n]/g, ''))
     .split('\n');
-  // CommonMark fences: a fence closes only on the SAME marker character with
-  // at least the opening run length — a ``` inside a ~~~ block is content.
   let fence = null; // { ch, len }
-  // List context: a 4-space-indented line is an indented CODE block only at
-  // top level — under a list item ("1. Comparison:" then indented `| … |`
-  // rows) it is the item's child block and a table there is a live table.
-  // Context ends at a blank line followed by a non-indented, non-list line.
+  return raw.map((l) => {
+    const stripped = l.replace(/^\s*(?:>\s*)+/, '');
+    if (!fence) {
+      if (/^(?: {4}|\t)/.test(stripped)) return l; // indented code handled by callers (list context)
+      const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
+      return l;
+    }
+    const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+    if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+    return '';
+  }).join('\n');
+}
+
+function extractRawMarkdownTables(text) {
+  const raw = blankNonRenderedMarkdown(text).split('\n');
   let listContext = false;
   let listContentIndent = 0; // column where a list item's child blocks start
   let prevBlank = true;
   const lines = raw.map((l) => {
-    // Strip blockquote prefixes first so fences/tables inside quotes are seen.
+    // Strip blockquote prefixes so tables inside quotes are seen.
     const stripped = l.replace(/^\s*(?:>\s*)+/, '');
-    if (!fence) {
-      const blank = stripped.trim() === '';
-      const indented = /^(?: {4}|\t)/.test(stripped);
-      const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
-      if (listItem) { listContext = true; listContentIndent = listItem[1].length; }
-      else if (!blank && !indented && prevBlank) listContext = false;
-      prevBlank = blank;
-      if (indented && !listContext) return '';
-      // Inside a list item, content indented 4+ columns PAST the item's
-      // content column is an indented code block nested in the item.
-      if (indented && listContext) {
-        const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
-        if (indent >= listContentIndent + 4) return '';
-      }
-      const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-      if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
-      return stripped.replace(/^\s+/, '');
+    const blank = stripped.trim() === '';
+    const indented = /^(?: {4}|\t)/.test(stripped);
+    const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
+    if (listItem) { listContext = true; listContentIndent = listItem[1].length; }
+    else if (!blank && !indented && prevBlank) listContext = false;
+    prevBlank = blank;
+    // Top-level 4-space indent is an indented code block; under a list item
+    // it is the item's child block unless indented 4+ past the content column
+    // (code nested in the item).
+    if (indented && !listContext) return '';
+    if (indented && listContext) {
+      const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
+      if (indent >= listContentIndent + 4) return '';
     }
-    // Inside a fence: closes only on the same marker char, >= opening length,
-    // <=3 leading spaces, and NOTHING but trailing whitespace after it.
-    const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
-    if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
-    return '';
+    return stripped.replace(/^\s+/, '');
   });
   const tables = [];
   // Raw HTML tables are the other non-component table representation —
@@ -4069,6 +4071,7 @@ module.exports = {
   hasRawMarkdownTable,
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
+  blankNonRenderedMarkdown,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,
