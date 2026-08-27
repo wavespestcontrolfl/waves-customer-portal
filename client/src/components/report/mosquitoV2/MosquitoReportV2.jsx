@@ -102,7 +102,7 @@ function TrendArrow({ trend }) {
 }
 
 // ── Hero: protection status first ───────────────────────────────────────────────
-export function MosquitoStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live' }) {
+export function MosquitoStatusHero({ status, statusSummary, supportingMetric, aiSummary, token = null, mode = 'live', pressureTrendSlot = null }) {
   // The rating POST returns a recalculated pestPressure (possibly turning an
   // insufficient reading into a real score) — hold the displayed metric in
   // state so a successful submit can refresh it without a full reload
@@ -110,6 +110,10 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
   // suppressed when the dashboard renders).
   const [metric, setMetric] = useState(supportingMetric);
   useEffect(() => { setMetric(supportingMetric); }, [supportingMetric]);
+  // The embedded trend chart's current point is pre-recalc once a rating
+  // submits — hide it rather than show a stale marker (pest hero parity).
+  const [trendStale, setTrendStale] = useState(false);
+  useEffect(() => { setTrendStale(false); }, [token]);
   if (!status) return null;
   const t = tone(status.tone);
   const refreshFromPestPressure = (pestPressure) => {
@@ -143,11 +147,19 @@ export function MosquitoStatusHero({ status, statusSummary, supportingMetric, ai
       {metric && (metric.score != null || metric.label)
         ? <SupportingMetric metric={metric} />
         : null}
+      {/* Cross-visit pressure trend rides inside the hero (owner 2026-08-27:
+          "combine Yard protected and Your first pressure marker" — status +
+          reading + trend + narrative = ONE block, same as the pest hero; the
+          standalone trend card below is suppressed when this fills). */}
+      {pressureTrendSlot && !trendStale ? (
+        <div style={{ marginTop: 12 }}>{pressureTrendSlot}</div>
+      ) : null}
       <MosquitoPressureRating
         metric={supportingMetric}
         token={token}
         live={mode === 'live'}
         onRefreshed={refreshFromPestPressure}
+        onSettled={() => setTrendStale(true)}
       />
       {aiSummary?.body ? (
         <p style={{ fontSize: 14, color: MUTED, lineHeight: 1.5, margin: '12px 0 0' }}>{aiSummary.body}</p>
@@ -176,7 +188,7 @@ function SupportingMetric({ metric }) {
 
 // One-shot customer calibration — same token route the pest hero uses; the
 // server only offers `rating` when this line's pressure tracking allows it.
-function MosquitoPressureRating({ metric, token, live, onRefreshed }) {
+function MosquitoPressureRating({ metric, token, live, onRefreshed, onSettled }) {
   const [submitted, setSubmitted] = useState(Boolean(metric && metric.submittedRating != null));
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -204,6 +216,7 @@ function MosquitoPressureRating({ metric, token, live, onRefreshed }) {
       });
       if (res.ok || res.status === 409) {
         setSubmitted(true);
+        if (onSettled) onSettled();
         // The route recalculates the score with the new signal and returns
         // the updated pestPressure — surface it (legacy card parity).
         if (res.ok && onRefreshed) {
