@@ -176,3 +176,11 @@ describe('customer-credit computeApplication', () => {
       .toMatchObject({ applyAmt: 60, fullyCovered: true });
   });
 });
+
+describe('customer-credit reverseCreditAndStampPayer', () => {
+  test('refuses a missing payerId before any DB work', async () => {
+    await expect(
+      CustomerCredit.reverseCreditAndStampPayer({ invoiceId: 'inv1', payerId: null }),
+    ).rejects.toThrow('requires a payerId');
+  });
+});

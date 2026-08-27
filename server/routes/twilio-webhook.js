@@ -449,48 +449,154 @@ router.post('/sms', async (req, res) => {
 
     if (optCommand.action === 'opt_in') {
       const normalizedFrom = normalizeE164(From);
-      await clearSuppression({
-        phone: normalizedFrom || From,
-        source: `twilio_webhook_${optCommand.detectionMethod}`,
-      });
-      // Recipient double opt-in: YES from a pending third-party recipient
-      // confirms them (no-op when no recipient row exists).
-      try {
-        await require('../services/recipient-optin').markRecipientOptin(normalizedFrom || From, 'confirmed');
-      } catch { /* never block the opt-in path */ }
-      try {
+      // The inbound log lands BEFORE the clear (codex #3495 P1): a late
+      // 21610 callback's post-write recheck discovers a concurrent START by
+      // this row. With clear-first, a START against a not-yet-existing
+      // suppression row no-opped AND left no marker, so a redelivered 21610
+      // interleaving there could re-suppress an opted-in recipient with
+      // nothing to find. Log-then-clear closes the ordering: either the
+      // 21610 wrote first (this clear removes it) or the 21610 runs later
+      // (its recheck sees this logged START and undoes itself).
+      // Marker + clear are ATOMIC under the same per-phone advisory lock
+      // the 21610 recorders take (hook P1): with the lock, a concurrent
+      // callback either commits first (this clear removes its row and the
+      // tombstone timestamps the opt-in) or blocks until this commits and
+      // then finds the START row/tombstone in its recheck. A failed log
+      // insert no longer strands the ordering — the clearance TOMBSTONE
+      // clearSuppression upserts is itself the durable marker, written in
+      // the same transaction. The opt-in itself must never fail: any
+      // transaction error falls back to the plain (unlocked) clear.
+      const optInPhone = normalizedFrom || From;
+      // Derived consent state (recipient confirm + prefs restore) applies
+      // INSIDE the same advisory-locked transaction as the clear (hook P1):
+      // written afterwards unlocked, a newer 21610 could take the lock,
+      // suppress, decline the recipient, and flip prefs off — and these
+      // stale START writes would then overwrite that newer verdict. In-trx
+      // fail-loud: markRecipientOptin returns FALSE on a swallowed SQL
+      // error that has already aborted the transaction (hook r12 trap).
+      const applyStartDerivedState = async (dbh, { failLoud }) => {
+        const confirmed = await require('../services/recipient-optin')
+          .markRecipientOptin(optInPhone, 'confirmed', { dbh });
+        if (failLoud && confirmed === false) {
+          throw Object.assign(new Error('recipient confirm write reported failure'), { code: 'recipient_confirm_failed' });
+        }
         if (customer) {
-          await db('notification_prefs')
+          await dbh('notification_prefs')
             .insert({ customer_id: customer.id, sms_enabled: true })
             .onConflict('customer_id')
             .merge({ sms_enabled: true });
         }
+      };
+      let optInLanded = true;
+      try {
+        await db.transaction(async (trx) => {
+          await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
+          await trx('sms_log').insert({
+            customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
+            message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
+            metadata: JSON.stringify({
+              detection_method: optCommand.detectionMethod,
+              source_keyword: optCommand.sourceKeyword,
+            }),
+          });
+          // NO swallowed catch inside the transaction — a failed insert has
+          // already ABORTED it (the trap this PR hit twice); let it throw
+          // into the fallback below, where the plain clear still lands the
+          // opt-in and the tombstone still timestamps it.
+          const cleared = await clearSuppression({
+            phone: optInPhone,
+            source: `twilio_webhook_${optCommand.detectionMethod}`,
+            dbh: trx,
+          });
+          if (cleared?.ok === false) {
+            throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+          }
+          await applyStartDerivedState(trx, { failLoud: true });
+        });
+      } catch (optInErr) {
+        // Retry UNDER THE SAME LOCK without the marker insert (hook P1: an
+        // unlocked fallback clear can interleave with a 21610 transaction
+        // that read before this tombstone lands, re-suppressing an
+        // explicitly opted-in recipient). The common abort cause is the
+        // sms_log insert; the clearance tombstone alone is the durable
+        // marker, so the retry drops the insert but keeps the serialization.
+        logger.error(`[sms-optin] locked clear failed (${optInErr.code || optInErr.message}) — retrying under the lock without the marker insert`);
+        try {
+          await db.transaction(async (trx) => {
+            await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optInPhone]);
+            const cleared = await clearSuppression({
+              phone: optInPhone,
+              source: `twilio_webhook_${optCommand.detectionMethod}`,
+              dbh: trx,
+            });
+            if (cleared?.ok === false) {
+              throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+            }
+            await applyStartDerivedState(trx, { failLoud: true });
+          });
+        } catch (retryErr) {
+          // Both locked attempts failed — the DB itself is misbehaving (a
+          // concurrent 21610 writer is in the same storm). The opt-in must
+          // never be dropped: land the plain clear as the last resort,
+          // with the derived state best-effort behind it.
+          logger.error(`[sms-optin] locked retry also failed (${retryErr.code || retryErr.message}) — last-resort plain clear`);
+          const lastResort = await clearSuppression({
+            phone: optInPhone,
+            source: `twilio_webhook_${optCommand.detectionMethod}`,
+          });
+          // clearSuppression swallows DB errors to { ok: false } — the
+          // last resort must not report success on top of a failed clear
+          // (hook #3495 r17): suppression would stay ACTIVE while the
+          // customer is told START worked and nothing alerts anyone.
+          // Fail LOUD to the admin bell (the compliance backstop rings
+          // even when the bell policy would mute 'system'), skip the
+          // derived consent restore (it must not outrank a standing
+          // suppression), and leave the failure in the log.
+          if (lastResort?.ok === false) {
+            optInLanded = false;
+            logger.error(`[sms-optin] LAST-RESORT clear also failed for ${maskPhone(From)} — suppression may still be active after an explicit START`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'START opt-in could not be recorded',
+                `An explicit START from ${maskPhone(From)} could not clear the SMS suppression after three attempts (DB errors). The number may still be blocked — clear the suppression by hand from the do-not-text list.`,
+                { bell: true, metadata: { source: `twilio_webhook_${optCommand.detectionMethod}` } },
+              );
+            } catch (notifyErr) {
+              logger.error(`[sms-optin] opt-in failure notify also failed: ${notifyErr.message}`);
+            }
+          } else {
+            try {
+              await applyStartDerivedState(db, { failLoud: false });
+            } catch (e) { logger.error(`[sms-optin] derived-state fallback failed: ${e.message}`); }
+          }
+        }
+      }
+      // Success reporting is gated on the clear actually landing (hook
+      // #3495 r17): after a failed last-resort clear the suppression may
+      // still be ACTIVE — logging, timeline-stamping, and replying
+      // "re-subscribed" would all misreport it, and nothing else would
+      // surface the miss (the admin bell above owns that). The reply then
+      // stays factual: the request was received, not honored yet.
+      if (optInLanded) {
         logger.info(`[sms-optin] ${customer ? `Customer ${customer.id}` : `Unknown sender ${maskPhone(From)}`} re-subscribed to SMS`);
-      } catch (e) { logger.error(`[sms-optin] Failed to update prefs: ${e.message}`); }
-
-      await db('sms_log').insert({
-        customer_id: customer?.id || null, direction: 'inbound', from_phone: From, to_phone: To,
-        message_body: Body, twilio_sid: MessageSid, status: 'received', message_type: 'opt_in',
-        metadata: JSON.stringify({
-          detection_method: optCommand.detectionMethod,
-          source_keyword: optCommand.sourceKeyword,
-        }),
-      }).catch(() => {});
-
-      if (customer) {
-        await db('activity_log').insert({
-          customer_id: customer.id, action: 'sms_opt_in',
-          description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
-        }).catch(() => {});
+        // (inbound sms_log row inserted above, BEFORE the clear — see the
+        // ordering comment at the top of this branch.)
+        if (customer) {
+          await db('activity_log').insert({
+            customer_id: customer.id, action: 'sms_opt_in',
+            description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
+          }).catch(() => {});
+        }
       }
 
       // A START/opt-in can still CONTAIN a correction ("START. My email
       // changed to …") — enqueue like the other consumed branches (r35).
       await fireContactCorrection(null);
 
-      return res.type('text/xml').send(
-        `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
-      );
+      return res.type('text/xml').send(optInLanded
+        ? `<Response><Message>You've been re-subscribed to Waves Pest Control SMS.</Message></Response>`
+        : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
     if (smsReaction) {
@@ -1222,6 +1328,248 @@ router.post('/status', async (req, res) => {
           to: To,
           link: '/admin/communications',
         });
+
+        // Error 21610 — the RECIPIENT's carrier-level opt-out verdict for a
+        // STOP we never saw inbound (sent to a different number on the
+        // Messaging Service, a pre-portal opt-out, a carrier block). Without
+        // this branch the number stays textable on every surface and every
+        // lane keeps burning sends against it forever. Feed the canonical
+        // suppression store + flip prefs, mirroring the inbound STOP handler
+        // above; fail LOUD — a swallowed write means other workflows keep
+        // texting an opted-out number.
+        //
+        // CONCURRENCY (codex #3495 rounds 1-10): the whole flow runs in ONE
+        // transaction under a per-phone advisory lock, so competing 21610
+        // callbacks (older send A vs newer send B) fully serialize — every
+        // callback runs THIS code, so the lock closes A-vs-B. The START
+        // handler orders via log-then-clear: its inbound sms_log row lands
+        // before its clearSuppression, so either our upsert precedes the
+        // clear (START removes it) or our post-write recheck sees the
+        // logged START and undoes inside the same transaction. Ordering
+        // between callbacks uses the source token twilio_status_21610:<sid>
+        // — an older callback defers when the standing row's author has the
+        // newer send. All bells/logs fire post-commit.
+        if (String(ErrorCode) === '21610') {
+          const optOutPhone = normalizeE164(To) || To;
+          const suppressionSource = `twilio_status_21610:${MessageSid}`;
+          const outcome = {};
+          try {
+            await db.transaction(async (trx) => {
+              await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [optOutPhone]);
+              let logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
+              // Retry the SID association briefly (codex #3495 r16): a fast
+              // callback can race a LEGACY writer's post-handoff log insert
+              // (the primary path logs pre-handoff, so its row is always
+              // visible). A few short waits usually see the racing insert
+              // commit and give this callback its real send time.
+              for (let attempt = 0; !logRow && attempt < 3; attempt++) {
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                logRow = await trx('sms_log').where({ twilio_sid: MessageSid }).first('customer_id', 'created_at', 'metadata');
+              }
+              const sentAt = logRow?.created_at || null;
+              // The primary send path stamps created_at PRE-handoff and
+              // marks the row (metadata.pre_handoff_stamp) — those rows
+              // need NO grace, and backdating them misorders a START at T
+              // against a genuinely-later send at T+3s (hook P1). Legacy
+              // writers still log after messages.create() returns, so
+              // UNSTAMPED rows keep the seconds-scale shave: a clearance
+              // inside that window keeps winning, and the recheck below
+              // scans the same widened window so a raced START is seen.
+              // Self-healing either way: the next send bounces with a
+              // clearly-newer sentAt, and the d18 reconciler backstops.
+              const SEND_RACE_GRACE_MS = 5 * 1000;
+              const { hasPreHandoffStamp } = require('../services/messaging/suppression-ownership');
+              const sentAtFloor = sentAt
+                ? new Date(new Date(sentAt).getTime() - (hasPreHandoffStamp(logRow) ? 0 : SEND_RACE_GRACE_MS))
+                : null;
+              const optOutCustomerId = logRow?.customer_id || null;
+              const supRow = await trx('messaging_suppression')
+                .where({ phone: optOutPhone }).forUpdate().first('active', 'cleared_at', 'source');
+              // A clearance newer than this send wins (late/redelivered
+              // callback after a START). A callback STILL undated after the
+              // retries (racing writer never committed) defers only to a
+              // RECENT clearance — one inside the same 10-minute window the
+              // recheck below assumes for a raced send, which could
+              // genuinely postdate it. An OLDER tombstone provably predates
+              // this near-real-time callback's send: deferring to it would
+              // discard the carrier's CURRENT opt-out and leave the phone
+              // textable on every lane (codex #3495 r16). A late-redelivered
+              // callback for a genuinely old send has a long-committed log
+              // row and never reaches this fallback. With no clearance at
+              // all, an undated callback still applies the opt-out (fail
+              // toward not texting).
+              const undatedSendFloor = new Date(Date.now() - 10 * 60 * 1000);
+              if (supRow && supRow.active === false && supRow.cleared_at
+                  && new Date(supRow.cleared_at) > (sentAtFloor || undatedSendFloor)) {
+                outcome.deferred = 'cleared-after-send'; return;
+              }
+              // A standing row authored by a NEWER attempt owns the verdict
+              // — an older callback must not overwrite it. The shared
+              // reader also orders against SYNC-authored rows (codex #3495
+              // r14: 'twilio_send_21610:<iso>' embeds the attempt time).
+              const ownerAt = await require('../services/messaging/suppression-ownership')
+                .standingVerdictTime(supRow, { dbh: trx, excludeSid: MessageSid });
+              // An UNDATED callback (no sms_log row) cannot supersede a
+              // TIMESTAMPED standing owner either (hook P1) — same rule as
+              // the clearance check above: without its own send time this
+              // callback cannot prove it is newer, and proceeding would let
+              // its recheck clear the newer verdict via an intervening
+              // START. Defer keeps the phone suppressed — the safe side.
+              // Ordered against the ADJUSTED send time (hook #3495 r16):
+              // an unstamped legacy row logged AFTER a newer send's verdict
+              // must not read as newer than that owner — comparing raw
+              // sentAt would let the older attempt overwrite the newest
+              // carrier verdict and its recheck clear it via a raced START.
+              if (ownerAt && (!sentAtFloor || ownerAt > sentAtFloor)) {
+                outcome.deferred = 'newer-callback-owns-row'; return;
+              }
+              // recordSuppression resolves { ok: false } on a swallowed DB
+              // error — check the result; a throw here rolls everything back.
+              const result = await recordSuppression({
+                phone: optOutPhone, reason: 'opt_out', source: suppressionSource, dbh: trx,
+              });
+              if (result?.ok === false) {
+                throw Object.assign(new Error('suppression write reported failure'), { code: 'suppression_write_failed' });
+              }
+              // Post-write recheck: the NEWEST post-send opt command wins.
+              // No SQL vocabulary mirror (codex #3495: a hand-built regex
+              // superset drifts from detectSmsOptCommand's patterns — it
+              // already missed phrase forms like "please take me off").
+              // The detector is the SOLE authority: scan the newest 200
+              // post-send inbound rows and classify in JS. If no command
+              // appears among them, the suppression STANDS — an opt-in
+              // older than 200 newer messages cannot be trusted to be the
+              // newest verdict, and failing toward not texting is the safe
+              // side of that uncertainty.
+              let laterOptIn = false;
+              {
+                // Runs even when the callback raced the outbound log insert
+                // (no sms_log row yet ⇒ sentAt null): the send happened
+                // seconds ago, so scan the last few minutes — a concurrent
+                // START that logged-and-cleared before this upsert is seen
+                // and undone in this same transaction instead of being
+                // overwritten (codex r7 P1). An older START outside that
+                // window still cannot resurrect over the carrier's verdict.
+                const scanFloor = sentAtFloor || new Date(Date.now() - 10 * 60 * 1000);
+                const inbound = await trx('sms_log')
+                  .where({ from_phone: optOutPhone })
+                  .where('created_at', '>', scanFloor)
+                  .orderBy('created_at', 'desc')
+                  .limit(200)
+                  .select('message_body');
+                const newestCommand = inbound
+                  .map((r) => detectSmsOptCommand(r.message_body || '').action)
+                  .find((a) => a === 'opt_in' || a === 'opt_out');
+                laterOptIn = newestCommand === 'opt_in';
+              }
+              if (laterOptIn) {
+                // Undo our own write in the same transaction; a failed clear
+                // throws so the upsert rolls back too — never commit a
+                // suppression the recipient has already opted back out of.
+                const cleared = await clearSuppression({
+                  phone: optOutPhone, source: 'twilio_status_21610_late_callback_undo', dbh: trx,
+                });
+                if (cleared?.ok === false) {
+                  throw Object.assign(new Error('clearSuppression reported failure'), { code: 'suppression_clear_failed' });
+                }
+                outcome.undone = true; return;
+              }
+              // Verdicts. A 21610 on the opt-in ask records the recipient as
+              // DECLINED (same as inbound STOP) — the generic ask_failed
+              // state is one markRecipientOptin('confirmed') ignores, which
+              // would leave fanout blocked after a later START cleared the
+              // suppression. Returns a row count on success (0 = no
+              // recipient asks, the common case) and FALSE on a swallowed
+              // DB error.
+              // markRecipientOptin swallows SQL errors and returns FALSE —
+              // but a swallowed SQL error has already ABORTED this Postgres
+              // transaction, and Knex can resolve the eventual COMMIT that
+              // Postgres converts to ROLLBACK, reporting success while the
+              // suppression vanished (hook r12 P1). The phone is valid here
+              // (normalized above), so FALSE ≡ SQL error: throw, roll back
+              // cleanly, and let the generic failure bell fire. The normal
+              // no-recipient-rows case returns the number 0 and proceeds.
+              const declined = await require('../services/recipient-optin').markRecipientOptin(optOutPhone, 'declined', { dbh: trx });
+              if (declined === false) {
+                throw Object.assign(new Error('recipient decline write reported failure'), { code: 'recipient_decline_failed' });
+              }
+              // Prefs flip — the suppression row is the enforcement;
+              // sms_enabled keeps the admin UI honest (same split as STOP).
+              // Guarded to the ACCOUNT HOLDER's own phone (codex #3495): an
+              // appointment SMS to a spouse/tenant/service contact carries
+              // the property's customer_id in sms_log, and that contact's
+              // carrier opt-out must not flip the account holder's prefs —
+              // the phone-keyed suppression row already blocks the contact.
+              if (optOutCustomerId) {
+                const owner = await trx('customers').where({ id: optOutCustomerId }).first('phone');
+                const ownerPhone = normalizeE164(owner?.phone || '');
+                if (ownerPhone && ownerPhone === optOutPhone) {
+                  await trx('notification_prefs')
+                    .insert({ customer_id: optOutCustomerId, sms_enabled: false })
+                    .onConflict('customer_id')
+                    .merge({ sms_enabled: false });
+                }
+              } else {
+                // Early callback raced the sms_log insert (Twilio can reject
+                // at send time, before our row commits) — the SID lookup
+                // found nothing, so resolve the holder by primary-phone
+                // OWNERSHIP instead (codex r5 P2). Same guard semantics: a
+                // customer whose OWN phone carrier-opted-out gets an honest
+                // sms_enabled=false; a contact's number that isn't anyone's
+                // primary phone flips nothing (the phone-keyed suppression
+                // row above already blocks it either way).
+                const ownDigits = String(optOutPhone).replace(/\D/g, '').slice(-10);
+                if (ownDigits.length === 10) {
+                  const holders = await trx('customers')
+                    .whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') LIKE ?", [`%${ownDigits}`])
+                    .whereNull('deleted_at')
+                    .select('id');
+                  // UNIQUE ownership only (codex r8 P2): a later START's
+                  // prefs restore goes through findSingleCustomerByPhone,
+                  // which refuses ambiguous numbers — flipping every
+                  // sharer here would be irreversible for all of them.
+                  // Ambiguous ⇒ skip the flip; the phone-keyed suppression
+                  // row still blocks sends, and the d18 daily reconciler
+                  // surfaces the prefs-vs-suppression drift.
+                  if (holders.length === 1) {
+                    await trx('notification_prefs')
+                      .insert({ customer_id: holders[0].id, sms_enabled: false })
+                      .onConflict('customer_id')
+                      .merge({ sms_enabled: false });
+                  }
+                }
+              }
+              outcome.applied = true;
+            });
+          } catch (suppressErr) {
+            outcome.failed = suppressErr.code || suppressErr.name || 'db_error';
+          }
+          // ── Post-commit reporting (never inside the transaction) ──
+          // failed wins over any flag set inside the callback: a COMMIT
+          // rejection lands in the catch AFTER applied/undone were set, and
+          // nothing persisted (hook r11 P1).
+          if (outcome.failed) {
+            logger.warn(`[twilio-status] 21610 opt-out handling FAILED for ${maskPhone(optOutPhone)}: ${outcome.failed}`);
+            try {
+              await require('../services/notification-service').notifyAdmin(
+                'system',
+                'Opt-out suppression write failed',
+                `A Twilio 21610 opt-out for ${maskPhone(optOutPhone)} could not be recorded (delivery status callback; ${outcome.failed}). Add this number to the do-not-text list manually — other SMS workflows cannot see the opt-out until it is recorded.`,
+                { bell: true, metadata: { source: 'twilio_status_21610', error: outcome.failed } },
+              );
+            } catch (notifyErr) {
+              logger.error(`[twilio-status] 21610 failure notify also failed: ${notifyErr.message}`);
+            }
+          } else if (outcome.applied) {
+            logger.info(`[twilio-status] 21610 provider opt-out recorded for ${maskPhone(optOutPhone)}`);
+          } else if (outcome.undone) {
+            // Best-effort line-type cache drop mirrors clearSuppression's
+            // follow-up (it ran with dbh=trx; the cache del is idempotent).
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} superseded by a later inbound opt-in — suppression not kept`);
+          } else if (outcome.deferred) {
+            logger.info(`[twilio-status] 21610 for ${maskPhone(optOutPhone)} deferred (${outcome.deferred})`);
+          }
+        }
 
         // Appointment-text fallback: if this undelivered message was an appointment
         // notification (confirmation / 72h / 24h / en-route), learn the landline on

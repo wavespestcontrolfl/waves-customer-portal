@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SocialMediaService = require('../services/social-media');
 const { SOCIAL_FLAGS, isPausedByAdmin, normalizeUrl } = require('../services/social-media');
 const linkedin = require('../services/linkedin');
@@ -9,7 +9,7 @@ const SocialContentStudio = require('../services/social-content-studio');
 const logger = require('../services/logger');
 const { runExclusive } = require('../utils/cron-lock');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // The Social Content Studio kill switch (SOCIAL_AUTONOMOUS_STUDIO_ENABLED) must
 // disable the WHOLE feature, not just the autonomous cron. Guard every studio

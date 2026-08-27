@@ -2,11 +2,15 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const gbpService = require('../services/google-business');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const logger = require('../services/logger');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: the GBP workspace is owner-only end to end.
+// (The Settings GbpConnectSection consumer only mounts behind the
+// IntegrationsTab admin gate, so no technician workflow reads this API —
+// no exemption needed.)
+router.use(adminAuthenticate, requireAdmin);
 
 const GOOGLE_MAPS_API_KEY = process.env.GOOGLE_MAPS_API_KEY || '';
 

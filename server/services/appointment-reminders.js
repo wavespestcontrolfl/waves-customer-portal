@@ -2567,8 +2567,56 @@ const AppointmentReminders = {
       // phone only) so future appointment texts skip SMS and go straight to email
       // at send time.
       if (String(errorCode) === '30006' && primaryDigits && primaryDigits === targetDigits && customer.line_type !== 'landline') {
-        await db('customers').where({ id: customerId }).update({ line_type: 'landline' });
-        logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
+        // Freshness gate (codex #3495): a delayed 30006 whose send predates
+        // a newer clearance (START) is stale evidence — same rule as the
+        // suppression store. Undatable bounces defer to any standing
+        // clearance; only a provably fresh verdict may cache the landline.
+        // Unreadable freshness FAILS CLOSED: a newer START has already run,
+        // so a landline cached after it has no clearing event left — the
+        // customer would stay email-only indefinitely on a guess.
+        // Send time uses the same canonical adjustment as the suppression
+        // store (codex #3495 r15): pre-handoff-stamped rows are trusted
+        // as-is; UNSTAMPED legacy rows log after messages.create() returns,
+        // so they get the seconds-scale shave — a START whose clearance
+        // raced the log insert must still read as newer than the send.
+        // Check and cache-write run in ONE transaction under the SAME
+        // per-phone advisory lock the START handler and 21610 recorders
+        // take (hook P1): checked unlocked, a concurrent START could NULL
+        // line_type on its own connection while its tombstone was still
+        // uncommitted — this handler would then read the pre-START
+        // suppression state and re-cache the landline AFTER the clear,
+        // blocking appointment SMS despite the explicit opt-in. Under the
+        // lock we either commit before START (whose clear then NULLs our
+        // write) or wait and see its committed tombstone (stale ⇒ no write).
+        let cacheVerdict = 'fresh';
+        try {
+          const { hasPreHandoffStamp } = require('./messaging/suppression-ownership');
+          const { _internals: { normalizeE164: normalizeSuppressionPhone } } = require('./messaging/landline-suppression');
+          const SEND_RACE_GRACE_MS = 5 * 1000;
+          // Lock key must match the START handler's (normalizeE164(From) || From).
+          const supPhone = normalizeSuppressionPhone(to) || String(to || '');
+          await db.transaction(async (trx) => {
+            await trx.raw("SELECT pg_advisory_xact_lock(hashtext('twilio_21610'), hashtext(?::text))", [supPhone]);
+            const bounceLog = sid ? await trx('sms_log').where({ twilio_sid: sid }).first('created_at', 'metadata') : null;
+            const sentAtFloor = bounceLog?.created_at
+              ? new Date(new Date(bounceLog.created_at).getTime() - (hasPreHandoffStamp(bounceLog) ? 0 : SEND_RACE_GRACE_MS))
+              : null;
+            const supRow = supPhone
+              ? await trx('messaging_suppression').where({ phone: supPhone }).first('active', 'cleared_at')
+              : null;
+            const stale = !!(supRow && supRow.active === false && supRow.cleared_at
+              && (!sentAtFloor || new Date(supRow.cleared_at) > sentAtFloor));
+            if (stale) { cacheVerdict = 'stale'; return; }
+            await trx('customers').where({ id: customerId }).update({ line_type: 'landline' });
+          });
+        } catch { cacheVerdict = 'unknown'; }
+        if (cacheVerdict === 'fresh') {
+          logger.info(`[appt-remind] Cached customer ${customerId} primary phone as landline (Twilio 30006)`);
+        } else {
+          logger.info(`[appt-remind] 30006 for customer ${customerId} ${cacheVerdict === 'stale' ? 'predates a newer opt-in clearance' : 'has unreadable callback freshness'} — line_type cache untouched`);
+        }
+        // Either way fall through: the SMS itself was still undelivered, so
+        // the covered kinds below still owe the customer the email version.
       }
 
       if (kind === 'en_route') {

@@ -363,6 +363,10 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
 
   const shiftDir = opts.weekendShift === 'back' || parent.weekend_shift === 'back' ? 'back' : DEFAULT_WEEKEND_SHIFT;
   const skipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  // B6: rows are stamped with caller/operator intent only; skipWeekends
+  // above may additionally carry the customer's live weekday preference
+  // (resolved by seedFollowUpsForParent) and drives just the date walk.
+  const stampSkipWeekends = opts.stampSkipWeekends !== undefined ? !!opts.stampSkipWeekends : skipWeekends;
   const rOpts = recurrenceOrdinalOptions(baseDate, {
     nth: opts.recurringNth ?? parent.recurring_nth,
     weekday: opts.recurringWeekday ?? parent.recurring_weekday,
@@ -420,7 +424,7 @@ function buildRecurringFollowUpRows(parent = {}, opts = {}) {
       recurring_ongoing: opts.recurringOngoing !== false,
       customer_confirmed: false,
       confirmed_at: null,
-      skip_weekends: skipWeekends,
+      skip_weekends: stampSkipWeekends,
       weekend_shift: shiftDir,
     };
     if (rOpts.nth != null) row.recurring_nth = rOpts.nth;
@@ -976,6 +980,39 @@ async function syncCustomerTierAfterSeeding(conn, customerId) {
   }
 }
 
+// B6 (owner ruling 2026-08-27): property_preferences.preferred_day has no
+// weekend values in its enum — a customer with ANY weekday preference has
+// said "not weekends", so series generators treat that as skip_weekends
+// unless the caller resolved it explicitly.
+//
+// Fail-OPEN is DELIBERATE policy, not an oversight: on a lookup error the
+// caller keeps its pre-B6 behavior. Failing closed would block booking,
+// estimate acceptance, series edits, and auto-extends — customer-facing
+// availability — because an OPTIONAL preference read blipped; a missed
+// weekend shift merely places a visit the customer can move. The miss is
+// not silent either: the external e22 schedule-integrity cron flags every
+// future visit whose weekday contradicts the stored preferred_day in its
+// next daily run (ACT email), so a preference missed during an outage
+// surfaces for repair within a day.
+const WEEKDAY_PREF_VALUES = new Set(['monday', 'tuesday', 'wednesday', 'thursday', 'friday']);
+async function customerPrefersNoWeekends(conn, customerId) {
+  if (!conn || !customerId) return false;
+  try {
+    const read = (dbh) => dbh('property_preferences').where({ customer_id: customerId }).first('preferred_day');
+    // SAVEPOINT (nested trx) when the caller handed us a transaction: a
+    // failed optional lookup would leave that trx ABORTED in Postgres
+    // despite this catch (try/catch in a trx ≠ fail-open) and every
+    // scheduling write after it would 25P02. Rolling back to the
+    // savepoint keeps the caller's transaction healthy.
+    const row = conn.isTransaction && typeof conn.transaction === 'function'
+      ? await conn.transaction((sp) => read(sp))
+      : await read(conn);
+    return WEEKDAY_PREF_VALUES.has(String(row?.preferred_day || '').toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 // Blackout set over the whole seeding horizon (generous 15 months covers
 // every planned-count/pattern combination) — the sync builder nudges any
 // follow-up off a blocked date. Fail-open helper.
@@ -996,15 +1033,20 @@ async function seedingBlackoutDates(parent, opts = {}) {
 // the scheduling/occupancy.js ordering contract) BEFORE its comms/row
 // locks; the caller must re-verify the actual seeded dates stayed inside
 // this plan (a concurrent series write between plan and seed can shift
-// them) and fail closed on drift (codex #3504 r3 hook).
+// them) and fail closed on drift (codex #3504 r3 hook). Mirrors the seed
+// call's B6 weekday-preference resolution so the planned dates match what
+// the seeder will actually place.
 async function planFollowUpSeedDates(conn, parent, opts = {}) {
   const pattern = normalizeRecurringPattern(opts.pattern || parent?.recurring_pattern);
   if (!conn || !parent?.id || !parent?.customer_id || !parent?.scheduled_date || !pattern) return [];
   const columns = opts.columns || await scheduledServiceColumns(conn);
+  const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  const skipWeekends = stampSkipWeekends
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
   const existingDates = await existingSeriesDates(conn, parent, columns);
   const blackoutDates = await seedingBlackoutDates(parent, opts);
   return [...new Set(
-    buildRecurringFollowUpRows(parent, { ...opts, pattern, existingDates, blackoutDates })
+    buildRecurringFollowUpRows(parent, { ...opts, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
       .map((row) => dateOnly(row.scheduled_date))
       .filter(Boolean),
   )];
@@ -1016,8 +1058,17 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
     return { pattern, plannedCount: 0, insertedCount: 0, insertedRows: [] };
   }
   const columns = opts.columns || await scheduledServiceColumns(conn);
+  // B6: seeded DATES honor the customer's live weekday preference, but
+  // the STAMPED flag (parent + children) carries only caller/operator
+  // intent — the preference is consulted live by every generator and the
+  // rebooker, never persisted, so removing it restores weekend
+  // eligibility without touching series rows.
+  const stampSkipWeekends = opts.skipWeekends !== undefined ? !!opts.skipWeekends : !!parent.skip_weekends;
+  const skipWeekends = stampSkipWeekends
+    || await customerPrefersNoWeekends(conn, parent.customer_id);
   await markParentRecurring(conn, parent, pattern, {
     ...opts,
+    skipWeekends: stampSkipWeekends,
     columns,
   });
 
@@ -1026,6 +1077,8 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
+    skipWeekends,
+    stampSkipWeekends,
     existingDates,
     blackoutDates,
   });
@@ -1087,6 +1140,7 @@ module.exports = {
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,
+  customerPrefersNoWeekends,
   findActiveRecurringSeries,
   seriesCreateLockKeys,
   inferRecurringPattern,

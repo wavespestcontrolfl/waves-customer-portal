@@ -40,7 +40,7 @@ const {
   INTERNAL_TEST_CUSTOMERS,
 } = require('../services/intelligence-bar/dashboard-tools');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // Reuse the SAME advisory lock the scheduled-service invoice-mint path uses
 // (services/scheduled-invoice-mint) so a recovery Bill serializes not just

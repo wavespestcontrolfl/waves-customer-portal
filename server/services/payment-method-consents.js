@@ -30,12 +30,16 @@ async function recordConsent({
   methodType = 'card',
   ip = null,
   userAgent = null,
+  // 'prepay_card' snapshots the annual-prepay authorization (immediate
+  // charge + future invoices) instead of the base card text — the UI must
+  // have rendered the SAME variant at the checkbox (GATE_PREPAY_CARD_AND_CHARGE).
+  consentVariant = null,
 }) {
   if (!customerId) throw new Error('recordConsent: customerId required');
   if (!stripePaymentMethodId) throw new Error('recordConsent: stripePaymentMethodId required');
   if (!VALID_SOURCES.has(source)) throw new Error(`recordConsent: invalid source "${source}"`);
 
-  const consentText = getConsentText(methodType);
+  const consentText = getConsentText(methodType, { variant: consentVariant });
 
   const [row] = await db('payment_method_consents').insert({
     customer_id: customerId,
@@ -105,6 +109,29 @@ async function hasEnrollmentScopedConsent(customerId, stripePaymentMethodId, { d
     .select('consent_text_version', 'source');
   return rows.some((r) => consentVersionQualifiesForEnrollment(r.consent_text_version)
     && !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source));
+}
+
+// Whether a consent row already snapshots EXACTLY this variant's current
+// text for this method — the idempotency check for variant-specific
+// recording (Codex r5 P1: a prepay accept must always land the
+// immediate-charge authorization in the ledger even when an older
+// future-invoice consent exists, while webhook-backstop retries must not
+// stack duplicate rows).
+async function hasConsentSnapshotForVariant(customerId, stripePaymentMethodId, { methodType = 'card', variant = null, since = null, dbh = db } = {}) {
+  if (!customerId || !stripePaymentMethodId) return false;
+  const text = getConsentText(methodType, { variant });
+  const q = dbh('payment_method_consents')
+    .where({ customer_id: customerId, stripe_payment_method_id: stripePaymentMethodId, consent_text_snapshot: text });
+  // `since` scopes the idempotency to ONE authorization event (Codex #3492
+  // r22): each opt-in is its own ledger row — a snapshot recorded for a
+  // PRIOR plan's acceptance must not satisfy a NEW acceptance's record
+  // (one-row-per-opt-in contract), while retries of the SAME acceptance
+  // (rows at/after its authorization moment) stay deduped.
+  if (since instanceof Date && !Number.isNaN(since.getTime())) {
+    q.where('created_at', '>=', since);
+  }
+  const row = await q.first('id');
+  return !!row;
 }
 
 // dbh: callers holding an OPEN transaction must pass it (Codex #3395 r12
@@ -197,6 +224,7 @@ async function sweepOrphanConsents({ olderThanHours = 24, staleAfterDays = 30 } 
 
 module.exports = {
   recordConsent,
+  hasConsentSnapshotForVariant,
   hasConsentFor,
   hasEnrollmentScopedConsent,
   consentVersionQualifiesForEnrollment,

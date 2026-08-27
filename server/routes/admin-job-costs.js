@@ -8,9 +8,12 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+// 2026-08-25 role lockdown: per-job revenue/cost/profit/margin data and
+// expense records are owner-only (only live consumer is the owner-only
+// Equipment Costs tab; JobCostCard/ExpenseCapture components are unmounted).
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /api/admin/job-costs?customer_id=&from=&to=&service_type=
 router.get('/', async (req, res, next) => {

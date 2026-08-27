@@ -365,7 +365,7 @@ async function cancelVisitForOffboarding(visit, { actorId }) {
   // the refund, not just log. {handled:false, reason:'no_hold'} is the
   // normal non-card-hold case; a waived release reports {released:true}.
   const CardHolds = require('./estimate-card-holds');
-  const holdOutcome = await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true });
+  const holdOutcome = await CardHolds.handleCardHoldCancellation({ scheduledServiceId: visit.id, waiveFee: true, intent: 'offboard' });
   const holdClear = holdOutcome
     && (holdOutcome.reason === 'no_hold' || holdOutcome.released === true);
   if (!holdClear) {

@@ -1,4 +1,4 @@
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, Navigate, useNavigate, useOutletContext } from "react-router-dom";
 import {
   LogOut,
   ExternalLink,
@@ -15,12 +15,11 @@ export default function MorePage() {
   // on desktop it rendered a blank page). Desktop uses the full sidebar — send
   // it to the dashboard instead. Reactive: resizing to desktop redirects too.
   const isMobile = useIsMobile();
-  let currentRole = null;
-  try {
-    currentRole = JSON.parse(localStorage.getItem("waves_admin_user") || "null")?.role || null;
-  } catch {
-    currentRole = null;
-  }
+  // Role comes from the shell's Outlet context — the SERVER-verified
+  // /admin/auth/me profile — never the spoofable localStorage copy (codex
+  // P1). Missing context fails closed: owner-only items stay hidden.
+  const outletContext = useOutletContext();
+  const currentRole = outletContext?.user?.role || null;
   const agentEstimateEnabled = useFeatureFlag("agent_estimate", false);
 
   if (!isMobile) return <Navigate to="/admin" replace />;
@@ -44,17 +43,21 @@ export default function MorePage() {
           Everything beyond the five tabs.
         </p>{" "}
       </div>
-      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => (
+      {ADMIN_MOBILE_MORE_SECTIONS.map(({ section, items }) => {
+        const visibleItems = items
+          .filter((item) => !item.adminOnly || currentRole === "admin")
+          .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled));
+        // Role/flag filtering can empty a whole section (e.g. Marketing for
+        // a technician) — skip the orphaned heading.
+        if (visibleItems.length === 0) return null;
+        return (
         <section key={section} className="mt-2">
           {" "}
           <div className="px-4 py-2 text-[10px] font-medium uppercase tracking-label text-zinc-500">
             {section}
           </div>{" "}
           <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">
-            {items
-              .filter((item) => !item.adminOnly || currentRole === "admin")
-              .filter((item) => !item.flag || (item.flag === "agent_estimate" && agentEstimateEnabled))
-              .map(({ path, icon: Icon, label }) => (
+            {visibleItems.map(({ path, icon: Icon, label }) => (
               <li key={path}>
                 {" "}
                 <Link
@@ -80,7 +83,8 @@ export default function MorePage() {
             ))}
           </ul>{" "}
         </section>
-      ))}
+        );
+      })}
       <section className="mt-6">
         {" "}
         <ul className="list-none pl-0 my-0 bg-white border-y border-hairline border-zinc-200 divide-y divide-zinc-200/70">

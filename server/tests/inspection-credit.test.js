@@ -345,7 +345,10 @@ describe('redeemInspectionCreditForBooking — exactly-once minting', () => {
     mockEvents = [{ created_at: new Date('2026-08-10') }];
     mockPostCreditMovement.mockRejectedValueOnce(new Error('ledger down'));
     const res = await redeemInspectionCreditForBooking({ customerId: 'cust-1', scheduledServiceId: 'svc-2' });
-    expect(res).toEqual({ redeemed: 0, amount: 0 });
+    // A genuine ledger FAILURE names itself (Codex #3492 r19) so money
+    // callers defer-and-retry instead of reading it as "no offer" — while
+    // conclusive skips (claim lost, non-live booking) stay reason-less.
+    expect(res).toEqual({ redeemed: 0, amount: 0, reason: 'redemption_incomplete' });
   });
 
   it('a graduated hold redeems by its BOOKING moment, never the reservation instant', async () => {

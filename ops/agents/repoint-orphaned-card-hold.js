@@ -86,6 +86,7 @@ async function main() {
 async function scan(client) {
   const { rows } = await client.query(
     `SELECT h.id AS hold_id, h.estimate_id, h.customer_id, h.accepted_amount, h.held_at,
+            h.parked_at, h.park_reason,
             h.scheduled_service_id AS linked_visit_id, s.status AS linked_visit_status,
             s.scheduled_date AS linked_date, s.service_type AS linked_service_type
      FROM estimate_card_holds h
@@ -136,7 +137,7 @@ async function repoint(client) {
   let committed = false;
   try {
     const { rows: [hold] } = await client.query(
-      `SELECT id, status, estimate_id, customer_id, scheduled_service_id, accepted_amount
+      `SELECT id, status, estimate_id, customer_id, scheduled_service_id, accepted_amount, stripe_payment_method_id
        FROM estimate_card_holds WHERE id = $1 FOR UPDATE`, [HOLD_ID]);
     if (!hold) throw new Error('hold not found');
     if (hold.status !== 'held') throw new Error(`hold status is '${hold.status}', not 'held' — refusing`);
@@ -189,6 +190,28 @@ async function repoint(client) {
       throw new Error('target visit has recurring lineage — the hold rail is one-time only, refusing');
     }
     if (!LIVE_TARGET.includes(visit.status)) throw new Error(`target visit is '${visit.status}' — not a live/completed target, refusing`);
+
+    // Card removal = REVOCATION (pre-push r9/r10 P0): a customer who
+    // removed the saved card while the hold sat parked/stranded has
+    // withdrawn the consent — repointing would make the hold chargeable
+    // again, and the charge leg's payment-method self-heal could
+    // re-attach the removed card and collect. A missing local
+    // payment_methods row refuses the repoint (locked, so a concurrent
+    // removal serializes); the operator releases the hold instead.
+    const { rows: [pmRow] } = await client.query(
+      `SELECT id FROM payment_methods
+       WHERE customer_id = $1 AND stripe_payment_method_id = $2
+       FOR UPDATE`,
+      [hold.customer_id, hold.stripe_payment_method_id]);
+    if (!pmRow) {
+      // No local row = the card is not chargeably on file, whichever story
+      // explains it (failed initial attach vs customer removal) — and the
+      // runtime self-heal deliberately never re-attaches a customerless pm
+      // (fail-closed, pre-push r16 P0). The operator resolves the card
+      // first (re-attach through the portal flows, or release the hold);
+      // only then is a repoint meaningful.
+      throw new Error("the hold's saved payment method is not on file — resolve the card first (re-attach or release the hold); refusing to repoint");
+    }
 
     // No OTHER active hold may already sit on the target (pre-push r11
     // P0): scheduled_service_id has no uniqueness constraint, and the
@@ -278,7 +301,8 @@ async function repoint(client) {
       console.log('already repointed — no update needed.');
     } else {
       const { rowCount } = await client.query(
-        `UPDATE estimate_card_holds SET scheduled_service_id = $1, updated_at = NOW()
+        `UPDATE estimate_card_holds
+         SET scheduled_service_id = $1, parked_at = NULL, park_reason = NULL, updated_at = NOW()
          WHERE id = $2 AND status = 'held'`, [TO_VISIT, HOLD_ID]);
       if (rowCount !== 1) throw new Error('CAS repoint did not land — refusing');
       // Durable record of the operator's decision in the SAME transaction

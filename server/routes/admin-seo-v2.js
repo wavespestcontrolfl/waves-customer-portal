@@ -1,13 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SearchConsole = require('../services/seo/search-console-v2');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 function normalizeDomain(value) {
   if (!value) return null;

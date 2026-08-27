@@ -15,6 +15,36 @@ const CUSTOMER_PREFERENCE_KEYS = new Set([
   'weather_alerts',
 ]);
 
+// Admin-feed role scoping, FAIL CLOSED: the persisted admin bell is shared
+// (one recipient-less row) and carries owner-only content — estimate and
+// finance alerts with customer names and amounts, plus adminRoleOnly
+// triggers linking to requireAdmin surfaces. A NON-ADMIN reader therefore
+// sees ONLY rows whose triggerKey is explicitly marked techVisible in the
+// registry; everything else — including legacy rows with no metadata — is
+// hidden and its read state untouchable. Lazy require avoids the
+// notification-triggers ↔ notification-service cycle. A caller that passes
+// no role (internal jobs, tests) sees the full feed, unchanged.
+function scopeAdminFeedToRole(query, role) {
+  if (!role || role === 'admin') return query;
+  let keys = [];
+  try {
+    const { TRIGGER_REGISTRY } = require('./notification-triggers');
+    keys = Object.entries(TRIGGER_REGISTRY)
+      .filter(([, trigger]) => trigger.techVisible)
+      .map(([key]) => key);
+  } catch (err) {
+    logger.warn(`[notifications] role-scope registry load failed: ${err.message}`);
+  }
+  if (!keys.length) {
+    // No tech-visible triggers resolvable → non-admin sees nothing.
+    return query.whereRaw('1 = 0');
+  }
+  return query.whereRaw(
+    `COALESCE(metadata->>'triggerKey', '') IN (${keys.map(() => '?').join(', ')})`,
+    keys,
+  );
+}
+
 async function customerPreferenceEnabled(customerId, preferenceKey) {
   if (!preferenceKey) return true;
   if (!CUSTOMER_PREFERENCE_KEYS.has(preferenceKey)) {
@@ -238,17 +268,21 @@ const NotificationService = {
   },
 
   // Get notifications for admin
-  async getAdminNotifications(limit = 50, offset = 0) {
-    return db('notifications')
-      .where({ recipient_type: 'admin' })
+  async getAdminNotifications(limit = 50, offset = 0, { role } = {}) {
+    return scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    )
       .orderBy('created_at', 'desc')
       .limit(limit).offset(offset);
   },
 
   // Get unread count for admin
-  async getAdminUnreadCount() {
-    const [{ count }] = await db('notifications')
-      .where({ recipient_type: 'admin' })
+  async getAdminUnreadCount({ role } = {}) {
+    const [{ count }] = await scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    )
       .whereNull('read_at')
       .count('* as count');
     return parseInt(count);
@@ -282,16 +316,22 @@ const NotificationService = {
   // Mark a single admin notification read — scoped to recipient_type 'admin' so
   // the admin endpoint can't clear a customer's notification by supplying its id
   // (admin notifications are the shared admin queue; customer rows are off-limits).
-  async markReadAdmin(notificationId) {
-    const updated = await db('notifications')
-      .where({ id: notificationId, recipient_type: 'admin' })
-      .update({ read_at: new Date() });
+  async markReadAdmin(notificationId, { role } = {}) {
+    // Same role predicate as the reads: a technician must not be able to
+    // mark a hidden adminRoleOnly row read before the owner sees it.
+    const updated = await scopeAdminFeedToRole(
+      db('notifications').where({ id: notificationId, recipient_type: 'admin' }),
+      role,
+    ).update({ read_at: new Date() });
     return updated > 0;
   },
 
   // Mark all read for admin
-  async markAllReadAdmin() {
-    await db('notifications').where({ recipient_type: 'admin' }).whereNull('read_at').update({ read_at: new Date() });
+  async markAllReadAdmin({ role } = {}) {
+    await scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin' }),
+      role,
+    ).whereNull('read_at').update({ read_at: new Date() });
   },
 
   // Mark all read for customer

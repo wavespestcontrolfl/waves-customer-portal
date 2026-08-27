@@ -319,6 +319,10 @@ const TwilioService = {
    * options: { customerId, customerLocationId, fromNumber, messageType, adminUserId }
    */
   async sendSMS(to, body, options = {}) {
+    // Re-anchored immediately before messages.create below; the entry-time
+    // value only covers early-exit throws. The sync-21610 recorder orders a
+    // concurrent START against this instant (messaging/sync-optout.js).
+    let smsAttemptAt = new Date();
     let attemptedFrom = options.fromNumber || null;
     try {
       const internalRedirect = await redirectInternalAdminSmsToNotification(to, body, options);
@@ -585,6 +589,18 @@ const TwilioService = {
         const postPushBlocked = await runPreSendCheck();
         if (postPushBlocked) return postPushBlocked;
       }
+      // Captured BEFORE the provider handoff and stamped as created_at
+      // below: the delayed-callback paths (21610 / 30006) compare a START
+      // clearance's cleared_at against this row to decide whether the
+      // clearance outranks the bounced send — an insert-time default is
+      // post-handoff and can postdate a START that raced the log write,
+      // wrongly re-suppressing an opted-in recipient (hook P1 ×2).
+      const handoffAt = new Date();
+      // Re-anchor the 21610 ordering timestamp at the ACTUAL provider
+      // handoff (codex #3495): entry-time capture predates template/
+      // customer lookups and the push-first attempt, so a START received
+      // during that preparation wrongly outranked the rejection.
+      smsAttemptAt = new Date();
       const message = await c.messages.create(msgPayload);
       logger.info(
         `SMS sent to ${maskPhone(to)} from ${maskPhone(fromNumber)}: ${message.sid}`,
@@ -613,6 +629,7 @@ const TwilioService = {
           message_body: body,
           twilio_sid: message.sid,
           status: "sent",
+          created_at: handoffAt,
           message_type: options.messageType || "manual",
           admin_user_id: options.adminUserId || null,
           // Decision linkage makes the sent row recoverable: if the process
@@ -624,16 +641,21 @@ const TwilioService = {
           // scheduled_sms_log_id ties this provider row back to the queued
           // row that dispatched it, so stale-claim recovery can prove the
           // send happened instead of retrying (double-send) or reopening.
-          metadata: (options.media || options.agentDecisionId || options.scheduledSmsLogId || (Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length))
-            ? JSON.stringify({
-              ...(options.media ? { media: options.media } : {}),
-              ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
-              ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
-                ? { parked_decision_ids: options.parkedDecisionIds }
-                : {}),
-              ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
-            })
-            : null,
+          // pre_handoff_stamp marks created_at as the PRE-handoff capture
+          // above — the delayed-callback readers (21610/30006 ordering)
+          // apply their race grace only to rows WITHOUT it (hook P1: the
+          // grace exists for legacy post-handoff writers; backdating a
+          // pre-stamped row misorders a START received between handoff and
+          // the carrier verdict).
+          metadata: JSON.stringify({
+            pre_handoff_stamp: true,
+            ...(options.media ? { media: options.media } : {}),
+            ...(options.agentDecisionId ? { agent_decision_id: options.agentDecisionId } : {}),
+            ...(Array.isArray(options.parkedDecisionIds) && options.parkedDecisionIds.length
+              ? { parked_decision_ids: options.parkedDecisionIds }
+              : {}),
+            ...(options.scheduledSmsLogId ? { scheduled_sms_log_id: options.scheduledSmsLogId } : {}),
+          }),
         });
       } catch (logErr) {
         logger.error(`SMS log failed: ${logErr.message}`);
@@ -688,6 +710,19 @@ const TwilioService = {
             `[twilio-alerts] async notification failed: ${alertErr.message}`,
           );
         });
+      // Send-time 21610 = the recipient's carrier opt-out verdict with no
+      // SID and no delivery callback to ever record it — persist it HERE,
+      // the choke point every sender passes through (codex #3495; the
+      // provider wrapper and all direct callers funnel into sendSMS).
+      if (String(err.code) === '21610') {
+        try {
+          await require('./messaging/sync-optout').recordSyncProviderOptOut({
+            phone: to, attemptAt: smsAttemptAt, source: 'twilio_send_21610',
+          });
+        } catch (optoutErr) {
+          logger.error(`[twilio] sync-optout recording threw: ${optoutErr.message}`);
+        }
+      }
       const wrapped = new Error(`Failed to send SMS: ${providerError}`);
       wrapped.providerError = providerError;
       wrapped.code = err.code;

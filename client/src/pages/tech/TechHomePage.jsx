@@ -196,7 +196,9 @@ const ON_SITE_ELIGIBLE = new Set(['en_route']);
 // surfaces actually exist (matches the /tech/messages drop in #355).
 const QUICK_ACTIONS = [
   { icon: '📅', label: "Today's Route", path: '/tech' },
-  { icon: '📋', label: 'Field Estimator', path: '/tech/estimate' },
+  // Estimator routes into the admin pipeline builder — owner-only under the
+  // 2026-08-25 role lockdown, hidden for technician logins.
+  { icon: '📋', label: 'Field Estimator', path: '/tech/estimate', adminOnly: true },
   { icon: '🌱', label: 'Lawn Diagnostic', path: '/tech/lawn-diagnostic' },
   { icon: '📸', label: 'Social Post', path: '/tech/social-post' },
   { icon: '📖', label: 'Protocols & SOPs', path: '/tech/protocols' },
@@ -232,6 +234,10 @@ export default function TechHomePage() {
   // guard nextStop could land on another tech's job and the En Route
   // POST would 403 server-side (tech-track.js ownership guard).
   const currentTechId = getAdminUser()?.id || null;
+  // TechLayout refreshes this from /admin/auth/me on every load, so the
+  // stored role tracks the server; hiding is UX only — the estimate APIs
+  // enforce owner-only server-side regardless.
+  const currentRole = getAdminUser()?.role || null;
 
   const fetchSchedule = useCallback(async () => {
     try {
@@ -515,7 +521,10 @@ export default function TechHomePage() {
         gap: 10,
         marginBottom: 20,
       }}>
-        {QUICK_ACTIONS.filter((action) => action.path !== '/tech/social-post' || socialPostEnabled).map((action) => (
+        {QUICK_ACTIONS
+          .filter((action) => action.path !== '/tech/social-post' || socialPostEnabled)
+          .filter((action) => !action.adminOnly || currentRole === 'admin')
+          .map((action) => (
           <button
             key={action.label}
             onClick={() => {

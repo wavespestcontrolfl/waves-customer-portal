@@ -10215,6 +10215,24 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .whereRaw('line_items::text ILIKE ?', ['%one-time setup fee%'])
               .first('id');
             if (lineExists) {
+              // Backfill the immutable claim record before healing: a
+              // worker that died between the mint commit and the record
+              // insert left the invoice recordless, and healing without
+              // one would strand the resumed Auto Pay in manual review
+              // (Codex #3503). The clearing claim's own amount is the
+              // server-side truth.
+              try {
+                await db('setup_fee_claims')
+                  .insert({
+                    invoice_id: lineExists.id,
+                    scheduled_service_id: setupParentId,
+                    amount,
+                  })
+                  .onConflict('invoice_id')
+                  .ignore();
+              } catch (recErr) {
+                logger.warn(`[dispatch] setup-fee claim record backfill failed for invoice ${lineExists.id} (resume stays manual-review): ${recErr.message}`);
+              }
               await db('scheduled_services')
                 .where({ id: setupParentId, pending_setup_fee: parentRow.pending_setup_fee })
                 .update({ pending_setup_fee: null, updated_at: new Date() });
@@ -10538,6 +10556,27 @@ router.post('/:serviceId/complete', async (req, res, next) => {
         if (secureSetupFee) {
           const feeRode = JSON.stringify(invoice?.line_items || '')
             .toLowerCase().includes('one-time setup fee');
+          // Immutable claim record FIRST (before the retire below): if the
+          // process dies after the retire commits but before the saved-card
+          // rail runs, this row is the authorization evidence the resumed
+          // request recovers — server-written only, matched on invoice_id +
+          // exact cents at read time. Insert failure degrades to the old
+          // behavior (resume routes to manual review), never blocks the
+          // mint or the retire.
+          if (feeRode && invoice?.id) {
+            try {
+              await db('setup_fee_claims')
+                .insert({
+                  invoice_id: invoice.id,
+                  scheduled_service_id: secureSetupFee.parentId,
+                  amount: secureSetupFee.amount,
+                })
+                .onConflict('invoice_id')
+                .ignore();
+            } catch (recErr) {
+              logger.warn(`[dispatch] setup-fee claim record insert failed for invoice ${invoice.id} (crash-resume will route to review): ${recErr.message}`);
+            }
+          }
           try {
             await db('scheduled_services')
               .where({ id: secureSetupFee.parentId, pending_setup_fee: -secureSetupFee.amount })
@@ -11081,16 +11120,30 @@ router.post('/:serviceId/complete', async (req, res, next) => {
           /one-time setup fee/i.test(String(li?.description || ''))
           && Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0))) > 0
         ));
-        // The secure_claim marker on the mint's own line is PROVENANCE
-        // ONLY (forensics + a future immutable-claim fix) and is
-        // deliberately NOT consumed for authorization: invoice line JSON
-        // is editable through the admin update path (unknown fields
-        // survive), so ANY authorization derived from it — predicate or
-        // ceiling — could be widened by an edited line once the frozen
-        // estimate evidence is gone. A crash between the claim retirement
-        // and this rail therefore routes the resumed charge to MANUAL
-        // REVIEW (bounded, money-safe); auto-pay across that window needs
-        // immutable server-side claim storage, a scoped follow-up.
+        // The secure_claim marker on the mint's own line stays PROVENANCE
+        // ONLY — editable line JSON never authorizes (predicate or
+        // ceiling). Crash-resume authorization comes from the IMMUTABLE
+        // setup_fee_claims record the mint wrote (server-only writes),
+        // matched on this invoice's id AND exact cents against the line:
+        // an edited line mismatches and the charge routes to manual
+        // review; a matching record restores both the predicate and the
+        // ceiling at the recorded amount.
+        if (!wizardFrozenFeeLinked && setupLine) {
+          try {
+            const claimRecord = await db('setup_fee_claims')
+              .where({ invoice_id: invoice.id })
+              .first('amount');
+            if (claimRecord) {
+              const lineCents = Math.round((Number(setupLine.amount
+                ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0) * 100);
+              const recordCents = Math.round(Number(claimRecord.amount) * 100);
+              if (recordCents > 0 && recordCents === lineCents) {
+                wizardFrozenFeeLinked = true;
+                WAVEGUARD_SETUP_FEE_ALLOWANCE = recordCents / 100;
+              }
+            }
+          } catch (e) { /* record unreadable -> fail toward review */ }
+        }
         if (perApplicationBilling
           && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)
           && setupLine) {

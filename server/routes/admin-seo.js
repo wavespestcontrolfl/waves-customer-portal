@@ -1,14 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SearchConsole = require('../services/seo/search-console');
 const SEOAdvisor = require('../services/seo/seo-advisor');
 const logger = require('../services/logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { extractDomain } = require('../utils/normalize-url');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // =========================================================================
 // GSC DASHBOARD — sitewide metrics

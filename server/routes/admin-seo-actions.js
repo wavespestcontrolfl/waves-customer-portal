@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const SeoActionGenerator = require('../services/seo/seo-action-generator');
 const logger = require('../services/logger');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // GET / — list actions with filters
 router.get('/', async (req, res) => {

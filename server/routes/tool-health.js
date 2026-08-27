@@ -10,9 +10,11 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
-const { adminAuthenticate } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 
-router.use(adminAuthenticate);
+// 2026-08-25 role lockdown: Tool Health is an owner-only system surface —
+// responses expose internal tool statistics and raw error messages.
+router.use(adminAuthenticate, requireAdmin);
 
 const AGENT_SOURCES = [
   { source: 'intelligence-bar', label: 'Admin Intelligence Bar', critical: true },

@@ -342,7 +342,7 @@ function sanitizeServiceType(serviceType) {
 
 // Seasonal mosquito cadence lives in the seeder — single source of truth for
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
-const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason } = require('../services/recurring-appointment-seeder');
+const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('../services/recurring-appointment-seeder');
 const { getBlackoutLayers } = require('../services/scheduling/blackout-dates');
 const { clearOfBlackout } = require('../services/scheduling/blackout-nudge');
 
@@ -895,6 +895,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   id, updates, isRecurring, recurringPattern, spawnRecurringChildren, recurringCount, recurringOngoing,
   recurringOngoingBaseline, recurringIntervalDays, skipWeekends, weekendShift, editMonthAnchorOpts,
   wantsVisitCountReconcile, parsedPlannedCount,
+  prefNoWeekends: prefNoWeekendsSnapshot,
 }) {
   const dates = new Set();
   if (!isRecurring) return dates;
@@ -902,6 +903,13 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!before) return dates;
   const cols = await conn('scheduled_services').columnInfo();
   const after = { ...before, ...updates };
+  // B6: the same weekday preference the trx write paths consult — the plan
+  // must mirror it or the pre-locked slot dates diverge from the writes.
+  // The update-details route passes its per-edit snapshot; other callers
+  // resolve fresh.
+  const prefNoWeekends = prefNoWeekendsSnapshot !== undefined
+    ? !!prefNoWeekendsSnapshot
+    : await customerPrefersNoWeekends(conn, before.customer_id);
   const blackoutDates = await loadSeriesBlackoutDates(conn, dateOnly(after.scheduled_date));
   const shouldSpawn = spawnRecurringChildren !== false;
   const editOpts = (parent) => ({
@@ -914,7 +922,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   if (!shouldSpawn && recurringPattern && before.is_recurring && !before.recurring_parent_id
     && shouldRewritePendingRecurringRows(before, after)) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
-    const skip = skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends;
+    // The edit UI submits skipWeekends:false whenever recurring controls
+    // are active, so a submitted false is the form default, NOT operator
+    // intent — the saved preference ORs over it (hook B6 P1). Overriding
+    // for one customer = clear their preference.
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : !!after.skip_weekends) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : after.weekend_shift) === 'back' ? 'back' : 'forward';
     const pendingChildren = await conn('scheduled_services')
       .where({ recurring_parent_id: before.id, is_recurring: true })
@@ -960,9 +972,11 @@ async function planUpdateDetailsRecurrenceDates(conn, {
   const spawnCount = shouldSpawn ? (recurringOngoing ? 4 : (recurringCount || 0)) : 0;
   if (recurringPattern && spawnCount > 1 && !before.recurring_parent_id) {
     const baseDateStr = dateOnly(after.scheduled_date) || etDateString();
-    const skipParent = after.skip_weekends != null ? !!after.skip_weekends : false;
+    const skipParent = (after.skip_weekends != null ? !!after.skip_weekends : false) || prefNoWeekends;
     const dirParent = after.weekend_shift === 'back' ? 'back' : 'forward';
-    const skip = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+    // Same rule as the rewrite branch: the preference ORs over the form's
+    // routinely-submitted false (hook B6 P1).
+    const skip = (skipWeekends !== undefined ? !!skipWeekends : skipParent) || prefNoWeekends;
     const dir = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
     const seen = new Set();
     seen.add(dateOnly(baseDateStr) || '');
@@ -1022,7 +1036,10 @@ async function planUpdateDetailsRecurrenceDates(conn, {
             }),
             intervalDays: parent.recurring_interval_days,
           };
-          const skip = cols.skip_weekends ? !!parent.skip_weekends : false;
+          // B6: mirrors the reconcile WRITER's live-preference OR — a
+          // divergent plan locks the weekend slot while the writer shifts
+          // to a weekday and SERIES_CHANGED_RETRY loops forever (hook P1).
+          const skip = (cols.skip_weekends ? !!parent.skip_weekends : false) || prefNoWeekends;
           const dir = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
           const latest = await latestLiveSeriesVisit(conn, parentId);
           const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
@@ -1986,7 +2003,7 @@ async function insertScheduledServiceAddons(trx, scheduledServiceId, addonLines,
 // a visit nudged off a closure (Oct 15 → Oct 16) still owes the add-ons due
 // on that occurrence, so the add-on walk applies the same nudge before the
 // exact-date match.
-function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null) {
+function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   const pattern = line?.recurringPattern || line?.recurring_pattern || null;
   if (!pattern) return true;
   if (pattern === 'one_time') return false;
@@ -1999,7 +2016,11 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
     nth: line.recurringNth ?? line.recurring_nth,
     weekday: line.recurringWeekday ?? line.recurring_weekday,
   };
-  const skip = line.skipWeekends ?? line.skip_weekends;
+  // B6: the caller's EFFECTIVE weekend rule (operator flag OR the live
+  // customer preference) ORs in — the child date was generated with it, so
+  // the add-on's projected due date must shift identically or the sold
+  // add-on silently drops off the shifted visit (codex #3509).
+  const skip = (line.skipWeekends ?? line.skip_weekends) || skipWeekendsOverride;
   const dir = (line.weekendShift || line.weekend_shift) === 'back' ? 'back' : 'forward';
   for (let i = 1; i <= 120; i++) {
     const raw = nextRecurringDate(base, pattern, i, opts);
@@ -2011,9 +2032,9 @@ function lineDueOnRecurringDate(line, baseDateStr, targetDateStr, blackoutDates 
   return false;
 }
 
-function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null) {
+function filterAddonLinesForDate(addons, baseDateStr, targetDateStr, blackoutDates = null, skipWeekendsOverride = false) {
   return (Array.isArray(addons) ? addons : [])
-    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates));
+    .filter((addon) => lineDueOnRecurringDate(addon, baseDateStr, targetDateStr, blackoutDates, skipWeekendsOverride));
 }
 
 function calculateAppointmentDiscountDollars(discount, subtotal) {
@@ -2108,6 +2129,19 @@ function applyStoredVisitFinancials(target, cols, parent, addonRows, allParentAd
   if (!target || !cols) return;
   const financials = calculateStoredVisitFinancials(parent, addonRows, allParentAddonRows, discountScope);
   if (cols.estimated_price && financials.price != null) target.estimated_price = financials.price;
+  // An operator-scoped $0 series must stay an explicit $0 on spawned rows
+  // too (Codex #3505 r2 P1): the zero-subtotal → NULL contract above is
+  // shared by every spawn path and stays unchanged for ordinary parents,
+  // but when the series template OVERRIDES carry an explicit zero (only
+  // the price/service scope lane writes them), NULL would let non-callback
+  // billing fall back to the customer's monthly rate on the very visits
+  // the operator just made free. Gate-guarded like the overlay itself, so
+  // the kill switch restores today's behavior byte-for-byte.
+  if (cols.estimated_price && financials.price == null
+    && isEnabled('editApptPriceServiceScope')) {
+    const scopedOverrides = parseTemplateOverrides(parent?.recurring_template_overrides);
+    if (scopedOverrides && scopedOverrides.estimated_price === 0) target.estimated_price = 0;
+  }
   if (cols.discount_dollars && parent?.discount_type) target.discount_dollars = financials.appointmentDiscountDollars;
   // Re-service callbacks must stay flagged on every cloned visit (ongoing
   // roll-forward, recurring-alert extend/convert, following-reschedule). The
@@ -2181,6 +2215,313 @@ async function resolveSeriesCreateInvoiceOnComplete(conn, parentId, parent) {
   return parent?.create_invoice_on_complete != null
     ? !!parent.create_invoice_on_complete
     : undefined;
+}
+
+// ——— Edit-appointment price/service series scope ———
+// Dark behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE. "This and following"
+// rewrites the primary line's price/service on the still-upcoming BASE
+// siblings AND stamps the change into the series parent's
+// recurring_template_overrides jsonb, which every extension writer
+// (auto-extend, visit-count top-up, alert extend/convert, edit-spawn)
+// overlays over the parent row — the parent is usually a COMPLETED visit,
+// so its own columns must stay the first visit's record. The allowlists
+// below are the whole contract: nothing outside them is ever propagated or
+// overlaid, so a corrupted jsonb value can't rewrite dates, status, or
+// ownership on spawned rows.
+const PRICE_SERVICE_SERVICE_KEYS = [
+  'service_type', 'service_id', 'service_key_snapshot', 'service_category_snapshot', 'is_callback',
+];
+const PRICE_SERVICE_PRICE_KEYS = [
+  'estimated_price', 'primary_line_price',
+  'discount_type', 'discount_amount', 'discount_dollars',
+  'discount_id', 'discount_name',
+  'discount_service_key_filter', 'discount_service_category_filter',
+  'line_discount_id', 'line_discount_name', 'line_discount_type',
+  'line_discount_amount', 'line_discount_dollars',
+];
+const PRICE_SERVICE_OVERRIDE_KEYS = new Set([...PRICE_SERVICE_SERVICE_KEYS, ...PRICE_SERVICE_PRICE_KEYS]);
+
+function normalizePriceServiceScope(scope) {
+  return scope === 'following' ? 'following' : 'this_only';
+}
+
+function moneyValuesDiffer(a, b) {
+  const an = (a == null || a === '') ? null : Number(a);
+  const bn = (b == null || b === '') ? null : Number(b);
+  if (an == null || bn == null) return (an == null) !== (bn == null);
+  return Math.abs(an - bn) >= 0.005;
+}
+
+// Which propagatable groups this save actually CHANGED on the edited row,
+// value-by-value against the locked before-image. Presence is not change:
+// the modal echoes the price fields on every save once an appointment has
+// add-ons, so an untouched save must never restamp a series.
+//
+// A service change additionally requires an explicit catalog pick
+// (serviceId posted) — the same trust-serviceId-when-present doctrine as
+// the re-service reclassification above. The modal echoes a NORMALIZED
+// service_type label ("Lawn Care") on every save while rows store the
+// booked label ("Lawn Care Visit"), so a label-only delta is
+// indistinguishable from that no-op echo and must never rewrite siblings.
+function computePriceServiceGroupChanges(before, updates) {
+  const serviceChanged = updates.service_id !== undefined
+    && (String(updates.service_id ?? '') !== String(before?.service_id ?? '')
+      || (updates.service_type !== undefined
+        && String(updates.service_type) !== String(before?.service_type || '')));
+  const priceChanged = (updates.primary_line_price !== undefined
+    && moneyValuesDiffer(updates.primary_line_price, before?.primary_line_price))
+    || (updates.discount_type !== undefined
+      && (updates.discount_type || null) !== (before?.discount_type || null))
+    || (updates.discount_amount !== undefined
+      && moneyValuesDiffer(updates.discount_amount, before?.discount_amount))
+    || (updates.line_discount_dollars !== undefined
+      && moneyValuesDiffer(updates.line_discount_dollars, before?.line_discount_dollars));
+  const fields = {};
+  if (serviceChanged) {
+    for (const key of PRICE_SERVICE_SERVICE_KEYS) {
+      if (updates[key] !== undefined) fields[key] = updates[key];
+    }
+  }
+  if (priceChanged) {
+    for (const key of PRICE_SERVICE_PRICE_KEYS) {
+      if (updates[key] !== undefined) fields[key] = updates[key];
+    }
+  }
+  return { serviceChanged, priceChanged, changed: serviceChanged || priceChanged, fields };
+}
+
+function parseTemplateOverrides(raw) {
+  let value = raw;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const filtered = {};
+  for (const [key, val] of Object.entries(value)) {
+    if (PRICE_SERVICE_OVERRIDE_KEYS.has(key)) filtered[key] = val;
+  }
+  return Object.keys(filtered).length > 0 ? filtered : null;
+}
+
+// The row every extension writer should COPY from: the parent overlaid with
+// its stamped template overrides. Gate off = the parent verbatim, so the
+// kill switch restores today's copy-the-parent behavior byte-for-byte.
+function overlayRecurringTemplateOverrides(parent, cols) {
+  if (!parent || !cols?.recurring_template_overrides) return parent;
+  if (!isEnabled('editApptPriceServiceScope')) return parent;
+  const overrides = parseTemplateOverrides(parent.recurring_template_overrides);
+  if (!overrides) return parent;
+  return { ...parent, ...overrides };
+}
+
+// Merge (never replace wholesale) so a later price-only edit keeps an
+// earlier service override. Same-value merges skip the write so untouched
+// saves don't churn the parent row.
+async function stampRecurringTemplateOverrides(conn, parentId, fields, cols) {
+  if (!cols?.recurring_template_overrides) return false;
+  const entries = Object.entries(fields || {}).filter(([key]) => PRICE_SERVICE_OVERRIDE_KEYS.has(key));
+  if (entries.length === 0) return false;
+  const row = await conn('scheduled_services').where({ id: parentId }).first('recurring_template_overrides');
+  if (!row) return false;
+  const existing = parseTemplateOverrides(row.recurring_template_overrides) || {};
+  const merged = { ...existing };
+  for (const [key, value] of entries) merged[key] = value === undefined ? null : value;
+  if (JSON.stringify(merged) === JSON.stringify(existing)) return false;
+  await conn('scheduled_services').where({ id: parentId }).update({
+    recurring_template_overrides: JSON.stringify(merged),
+    updated_at: new Date(),
+  });
+  return true;
+}
+
+// Which changed groups a parent-only ('this_only') edit still needs to PIN
+// on the template. A group counts as already stamped when ANY of its keys
+// is present — earlier stamps write a whole group's posted keys together,
+// and mixing a group's old values with its previously stamped new ones
+// would manufacture a hybrid template nobody chose (Codex #3505 r1 P1:
+// the pin decision is per group, never for the JSON object as a whole —
+// a price-only stamp must not stop a later service pin, and vice versa).
+function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow) {
+  const existing = existingOverrides || {};
+  const pinned = {};
+  const groupsToPin = [];
+  if (groups.serviceChanged && !PRICE_SERVICE_SERVICE_KEYS.some((key) => key in existing)) {
+    groupsToPin.push(PRICE_SERVICE_SERVICE_KEYS);
+  }
+  if (groups.priceChanged && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
+    groupsToPin.push(PRICE_SERVICE_PRICE_KEYS);
+  }
+  for (const keys of groupsToPin) {
+    for (const key of keys) {
+      if (key in groups.fields) {
+        pinned[key] = beforeRow?.[key] === undefined ? null : beforeRow[key];
+      }
+    }
+  }
+  return pinned;
+}
+
+// Rewrite the still-upcoming BASE-series visits of the series — on/after
+// `fromDateStr` when the edit came from a mid-series visit, or ALL of them
+// when it came from the series parent (fromDateStr null): the parent is
+// the series start, so "following" means the whole remaining plan, and a
+// date threshold there would race the cadence rewrite that re-dates
+// pending children AFTER this block runs (Codex #3505 r1 P1). Boosters
+// (is_recurring=false) keep their own pricing and are never touched; each
+// sibling's estimated_price/discount_dollars are re-derived from its OWN
+// add-on rows through the same calculateStoredVisitFinancials math the
+// spawn paths use — a flat copy of the edited visit's total would stomp
+// siblings whose add-on lines fall on a different cadence.
+//
+// Money safety (Codex #3505 r1 P1): a repricing refuses outright (409,
+// trx rolls back) when a target visit already holds money — prepaid,
+// annual-term, card-hold, or a money-bearing/statement-accrued invoice —
+// and voids the remaining safe open invoices so completion re-mints at
+// the new price instead of collecting a stale amount (completion reuses a
+// non-void invoice by scheduled_service_id).
+async function propagatePriceServiceToFollowingSiblings(conn, {
+  editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
+}) {
+  const targetQuery = conn('scheduled_services')
+    .where(function () { this.where({ id: parentId }).orWhere({ recurring_parent_id: parentId }); })
+    .where('is_recurring', true)
+    .whereIn('status', UPCOMING_VISIT_STATUSES)
+    .whereNot({ id: editedId })
+    .orderBy('scheduled_date', 'asc')
+    // Row locks up front, not implicitly at each final UPDATE (Codex #3505
+    // r3 P1): the canonical mint chain serializes mint-vs-reprice on the
+    // VISIT row lock, so a concurrent mint could otherwise lock a sibling
+    // and mint from its old price/service after this reconcile's probes
+    // found nothing — the later UPDATE would just wait, then leave that
+    // fresh invoice live and stale. Advisory locks (maintenance + comms)
+    // are already held, keeping the advisory-then-rows order.
+    .forUpdate();
+  if (fromDateStr) targetQuery.where('scheduled_date', '>=', fromDateStr);
+  const targets = await targetQuery;
+  // A SERVICE change is billing-relevant too (Codex #3505 r2 P1): linked
+  // invoices describe the old service by line item, and a service-scoped
+  // appointment discount keys off the service identity — so the invoice
+  // reconciliation and the per-sibling financial re-derive both run for
+  // either changed group.
+  const billingRelevant = priceChanged || serviceChanged;
+  // The edited visit is excluded from the sibling UPDATE loop (the main save
+  // path writes its row), but NOT from the billing guards (Codex #3505 r8
+  // P1): a 'following' save that repriced every sibling while the edited
+  // visit's own live invoice kept the old amount is the same stale-collect
+  // bug the refusal exists for — completion/Charge Now reuse that invoice by
+  // scheduled_service_id before the new price is considered.
+  const guardRows = editedRow ? [editedRow, ...targets] : targets;
+  let invoiceLinkColumn = false;
+  if (billingRelevant && guardRows.length > 0) {
+    // Same refusal contract as the plan trim (findBillingCoveredVisits
+    // rationale): a partially applied reprice would leave the office
+    // believing a series was repriced while paid visits kept old numbers.
+    const covered = await findBillingCoveredVisits(conn, guardRows);
+    if (covered.size > 0) {
+      const [firstId, reason] = [...covered.entries()][0];
+      const when = guardRows.find((visit) => visit.id === firstId);
+      const label = firstId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
+      throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
+    }
+    invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
+    if (invoiceLinkColumn) {
+      for (const visit of guardRows) {
+        // NO voiding here, ever (Codex #3505 r7, owner decision): the earlier
+        // rounds voided still-collectable drafts and grew three layers of race
+        // hardening (mint visit-row locks, send-claim re-checks under invoice
+        // row locks, void-completeness) while the dunning touch-claim window
+        // stayed open — a claimed follow-up touch releases its row lock before
+        // sending, so no in-transaction status check can see it. Refusing the
+        // series change while ANY live invoice exists on a target visit removes
+        // the entire race family: the operator settles or voids that invoice
+        // through the normal billing flow first, then re-applies the change.
+        // The visit-row locks taken up front keep this sound — a concurrent
+        // mint serializes on the visit row, so it either mints before this
+        // probe (probe refuses) or after commit (mints at the new price).
+        const live = await conn('invoices')
+          .where({ scheduled_service_id: visit.id })
+          .whereNotIn('status', ['void', 'refunded', 'canceled', 'cancelled'])
+          .first('id', 'status', 'payer_statement_id');
+        if (!live) continue;
+        const label = visit.id === editedId ? 'this appointment' : `the ${dateOnly(visit.scheduled_date) || 'later'} visit`;
+        if (live.payer_statement_id) {
+          // Statement-accrued lines belong to a third-party payer's monthly
+          // statement — the remedy is the payer flow, so name it.
+          throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is already accrued to a payer statement. Handle that statement first, or set the change to this appointment only.`);
+        }
+        throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} already has an invoice. Settle or void that invoice first, or set the change to this appointment only.`);
+      }
+    }
+  }
+  // Missing-table compat probe, ONCE — inside the loop the add-on reads run
+  // bare so an operational failure aborts the save (see below).
+  const addonTableExists = billingRelevant && targets.length > 0
+    ? await conn.schema.hasTable('scheduled_service_addons')
+    : false;
+  const updatedIds = [];
+  for (const sibling of targets) {
+    const siblingUpdates = { updated_at: new Date() };
+    for (const [key, value] of Object.entries(fields)) {
+      if (!cols[key]) continue;
+      // Re-derived per sibling below — never copied from the edited visit.
+      if (key === 'estimated_price' || key === 'discount_dollars') continue;
+      siblingUpdates[key] = value;
+    }
+    if (serviceChanged && fields.service_type !== undefined) {
+      if (cols.appointment_type) siblingUpdates.appointment_type = classifyAppointmentTag(fields.service_type);
+      // A stored pre-service brief describes the OLD service — same clearing
+      // rule the edited row runs so the tech never opens a stale brief.
+      const { briefClearOnReclassification } = require('../services/previsit-brief');
+      const briefClear = briefClearOnReclassification(
+        classifyAppointmentTag(fields.service_type),
+        sibling.pre_service_brief_type,
+      );
+      if (briefClear) Object.assign(siblingUpdates, briefClear);
+      // Reminder labels are deliberately NOT touched (Codex #3505 r4/r5):
+      // the 72h/24h senders re-resolve the customer-facing label LIVE from
+      // scheduled_services at send time (liveReminderServiceLabel in
+      // appointment-reminders.js — shipped for the 08-14 stale-label
+      // incident, merging same-slot siblings via buildMergedServiceLabel),
+      // so the service_type this update writes is exactly what the next
+      // text renders. Writing appointment_reminders.service_type directly
+      // would corrupt the owner/suppressed merged-slot labels the fallback
+      // path depends on.
+    }
+    // Re-derived for a service change too, not just a price change: a
+    // sibling whose stored appointment discount is SERVICE-SCOPED
+    // (discount_service_*_filter) keys off the identity this update just
+    // rewrote, so its estimated_price/discount_dollars must be recomputed
+    // from the new snapshots (Codex #3505 r2 P1). With an unscoped
+    // discount the recompute reproduces the stored numbers.
+    if (billingRelevant) {
+      // Fail CLOSED on the read (Codex #3505 r4 P1): recomputing a priced
+      // sibling from an empty add-on list would silently strip its add-on
+      // charges, so an operational query failure must abort the scoped
+      // save — only the missing-table compat case (probed once above)
+      // proceeds add-on-less.
+      let siblingAddons = [];
+      if (addonTableExists) {
+        siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
+      }
+      const overlaid = { ...sibling, ...fields };
+      const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
+      const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
+      // calculateStoredVisitFinancials returns NULL for a zero subtotal,
+      // and a NULL estimate lets non-callback billing fall back to the
+      // customer's monthly rate — an explicitly free series must stay an
+      // explicit $0 on every propagated row (Codex #3505 r1 P1). The
+      // caller normalizes fields.estimated_price to 0 for that case.
+      if (cols.estimated_price) {
+        siblingUpdates.estimated_price = financials.price != null
+          ? financials.price
+          : (fields.estimated_price === 0 ? 0 : financials.price);
+      }
+      if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
+    }
+    await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
+    updatedIds.push(sibling.id);
+  }
+  return updatedIds;
 }
 
 function formatServiceDisplay(primaryType, addons = []) {
@@ -4126,6 +4467,16 @@ router.post('/', requireAdmin, async (req, res, next) => {
       : 0;
     const rOpts = { ...monthAnchorOpts, intervalDays: recurringIntervalDays };
     const shiftDir = weekendShift === 'back' ? 'back' : 'forward';
+    // B6 (owner ruling 2026-08-27): a customer whose saved property
+    // preference names a weekday has said "not weekends" — generated
+    // children/booster DATES honor it even when the operator left the
+    // skip-weekends box unticked. The STAMPED flag stays the operator's
+    // raw value: every generator and the rebooker consult the preference
+    // LIVE, so removing it restores weekend eligibility without touching
+    // series rows. The ANCHOR date itself never moves — the operator
+    // picked it deliberately.
+    const skipWeekendsEffective = !!skipWeekends
+      || (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false);
     // Blackout days (one-off + weekly days off) over the series horizon —
     // every generated child/booster date runs through the shared nudge.
     const seriesBlackoutDates = (isRecurring && recurringPattern)
@@ -4142,7 +4493,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       while (plannedChildDates.length < plannedCount - 1 && attempt < maxAttempts) {
         const rawNext = nextRecurringDate(scheduledDate, recurringPattern, attempt, rOpts);
         attempt++;
-        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, !!skipWeekends, shiftDir, seriesBlackoutDates);
+        const nextDateStr = seasonalSafeShift(rawNext, recurringPattern, skipWeekendsEffective, shiftDir, seriesBlackoutDates);
         if (!nextDateStr) continue;
         if (recurringCandidateTooCloseToAnchor(scheduledDate, recurringPattern, nextDateStr)) continue;
         if (seriesDates.has(nextDateStr)) continue;
@@ -4168,7 +4519,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
       const dates = computeBoosterDates(scheduledDate, cleaned, 12);
       let droppedBoosters = 0;
       for (const rawDate of dates) {
-        const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, !!skipWeekends, shiftDir), seriesBlackoutDates, { skipWeekends: !!skipWeekends });
+        const boosterDate = clearOfBlackout(shiftPastWeekend(rawDate, skipWeekendsEffective, shiftDir), seriesBlackoutDates, { skipWeekends: skipWeekendsEffective });
         // A null nudge = the blackout walk exhausted — that booster is a
         // SOLD billable visit that would otherwise vanish silently while
         // the create still returns 201. Count it and warn below (the
@@ -4333,7 +4684,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_weekday && monthAnchorOpts.weekday != null && monthAnchorOpts.weekday !== '' && !isNaN(parseInt(monthAnchorOpts.weekday))) insertData.recurring_weekday = parseInt(monthAnchorOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) insertData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) insertData.skip_weekends = !!skipWeekends;
-        if (cols.weekend_shift && skipWeekends) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
+        if (cols.weekend_shift && skipWeekendsEffective) insertData.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.booster_months && Array.isArray(boosterMonths) && boosterMonths.length > 0) {
           const cleaned = Array.from(new Set(boosterMonths.map((m) => parseInt(m)).filter((m) => m >= 1 && m <= 12))).sort((a, b) => a - b);
           if (cleaned.length > 0) insertData.booster_months = JSON.stringify(cleaned);
@@ -4406,9 +4757,9 @@ router.post('/', requireAdmin, async (req, res, next) => {
         if (cols.recurring_weekday && rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) childData.recurring_weekday = parseInt(rOpts.weekday);
         if (cols.recurring_interval_days && recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) childData.recurring_interval_days = parseInt(recurringIntervalDays);
         if (cols.skip_weekends) childData.skip_weekends = !!skipWeekends;
-        if (cols.weekend_shift && skipWeekends) childData.weekend_shift = shiftDir;
+        if (cols.weekend_shift && skipWeekendsEffective) childData.weekend_shift = shiftDir;
         if (cols.source_estimate_id && insertLinkId) childData.source_estimate_id = insertLinkId;
-        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates);
+        const childAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, nextDateStr, seriesBlackoutDates, skipWeekendsEffective);
         const childFinancials = calculateVisitFinancialsForAddons(pricing, childAddonLines);
         // Carry callback status + suppression onto recurring children: if an
         // operator turns a re-service into a repeating cadence, every future
@@ -4476,7 +4827,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.service_id && serviceId) boosterData.service_id = serviceId;
           if (cols.service_key_snapshot) boosterData.service_key_snapshot = pricing.primaryServiceKey || null;
           if (cols.service_category_snapshot) boosterData.service_category_snapshot = pricing.primaryServiceCategory || null;
-          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates);
+          const boosterAddonLines = filterAddonLinesForDate(pricing.addonLines, scheduledDate, boosterDate, seriesBlackoutDates, skipWeekendsEffective);
           const boosterFinancials = calculateVisitFinancialsForAddons(pricing, boosterAddonLines);
           // Boosters off a re-service line inherit the same callback suppression.
           if (cols.is_callback) boosterData.is_callback = resolvedIsCallback || false;
@@ -4494,7 +4845,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
           if (cols.urgency) boosterData.urgency = urgency || 'routine';
           if (cols.internal_notes && internalNotes) boosterData.internal_notes = internalNotes;
           if (cols.skip_weekends) boosterData.skip_weekends = !!skipWeekends;
-          if (cols.weekend_shift && skipWeekends) boosterData.weekend_shift = shiftDir;
+          if (cols.weekend_shift && skipWeekendsEffective) boosterData.weekend_shift = shiftDir;
           if (cols.source_estimate_id && insertLinkId) boosterData.source_estimate_id = insertLinkId;
           if (pricing.appointmentDiscount && cols.discount_id && pricing.appointmentDiscount.discountId) boosterData.discount_id = pricing.appointmentDiscount.discountId;
           if (pricing.appointmentDiscount && cols.discount_name && pricing.appointmentDiscount.discountName) boosterData.discount_name = String(pricing.appointmentDiscount.discountName).slice(0, 200);
@@ -5017,6 +5368,7 @@ router.get('/list', async (req, res, next) => {
         'scheduled_services.prepaid_amount', 'scheduled_services.prepaid_method', 'scheduled_services.prepaid_at',
         'scheduled_services.technician_id', 'scheduled_services.zone', 'scheduled_services.route_order',
         'scheduled_services.is_recurring', 'scheduled_services.recurring_pattern',
+        'scheduled_services.recurring_parent_id',
         'scheduled_services.source_estimate_id',
         // Per-job Bill-To: the Edit-appointment modal opened from the list echoes
         // these on save, so they must come back here — otherwise a save posts
@@ -5072,6 +5424,11 @@ router.get('/list', async (req, res, next) => {
       city: s.city || null,
       isRecurring: s.is_recurring,
       recurringPattern: s.recurring_pattern || null,
+      // Without this the Edit modal can't tell a series CHILD from the
+      // template when opened from the list view (Codex #3505 r8 P2) —
+      // template-only behaviors (plan-length seeding, the add-on inheritance
+      // disclosure) would silently mis-apply to children.
+      recurringParentId: s.recurring_parent_id || null,
       sourceEstimateId: s.source_estimate_id || null,
       payerId: s.payer_id || null,
       poNumber: s.po_number || null,
@@ -5757,6 +6114,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
       assignmentScope,
+      // Apply this save's PRICE / primary-SERVICE change to the rest of the
+      // series ('following') or keep it per-visit ('this_only', the default).
+      // Only honored behind GATE_EDIT_APPT_PRICE_SERVICE_SCOPE — see the
+      // refusal below and the propagation block after the main row update.
+      priceServiceScope,
       isRecurring, recurringPattern, recurringCount, recurringOngoing,
       spawnRecurringChildren,
       // Exact plan length for a series that ALREADY exists — the Edit
@@ -5823,7 +6185,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // non-re-service label without serviceId can't tell "changed to regular"
     // from "no-op save of a normalized re-service", so we leave it alone).
     let reServiceConversionZeroPrice = false;
-    let reServiceConversion = false; // a switch INTO a re-service this edit
+    let reServiceConversion = false; // the posted service IS a re-service (echoes included)
+    // TRUE only when the row wasn't already a re-service — an actual switch.
+    // A price-only save of an EXISTING re-service echoes its serviceId, which
+    // sets reServiceConversion above; the series-scope block must not stand
+    // down for that echo or a 'following' reprice of a re-service series
+    // silently skips its siblings (Codex #3505 r9 P1).
+    let reServiceTransition = false;
     if (serviceId !== undefined || serviceType !== undefined) {
       try {
         const cols = await db('scheduled_services').columnInfo();
@@ -5862,7 +6230,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (incomingIsReService === true) {
           reServiceConversion = true;
           const existingRow = await db('scheduled_services').where({ id: req.params.id })
-            .first('estimated_price', 'customer_id');
+            .first('estimated_price', 'customer_id', ...(cols.is_callback ? ['is_callback'] : []));
+          // No is_callback column (pre-migration env) → prior state unknowable;
+          // treat as a transition, which preserves today's behavior.
+          reServiceTransition = !cols.is_callback || !existingRow?.is_callback;
           const customerRow = await db('customers').where({ id: existingRow?.customer_id })
             .first('waveguard_tier', 'monthly_rate').catch(() => null);
           // The payload carries over the PRIOR service's pre-filled price AND its
@@ -6108,6 +6479,10 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.recurring_nth) updates.recurring_nth = (editMonthAnchorOpts.nth != null && editMonthAnchorOpts.nth !== '' && !isNaN(parseInt(editMonthAnchorOpts.nth))) ? parseInt(editMonthAnchorOpts.nth) : null;
         if (cols.recurring_weekday) updates.recurring_weekday = (editMonthAnchorOpts.weekday != null && editMonthAnchorOpts.weekday !== '' && !isNaN(parseInt(editMonthAnchorOpts.weekday))) ? parseInt(editMonthAnchorOpts.weekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
+        // B6: the stored flag is OPERATOR intent only — the customer's
+        // weekday preference is consulted LIVE by every generator and the
+        // rebooker, never persisted (removing the preference must restore
+        // weekend eligibility without touching series rows).
         if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
@@ -6399,6 +6774,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     }
     const addonsReplaced = Array.isArray(replaceAddons);
     const detailsChanged = Object.keys(updates).length > 0;
+    // Set by the series-scope propagation block below when a 'following'
+    // save actually rewrote sibling visits — reported back so the modal can
+    // say what moved.
+    let priceServicePropagatedCount = null;
+    let priceServiceBeforeRow = null;
     let assignmentChanged = false;
     let assignmentUpdatedJobIds = [];
     let recurringCreated = 0;
@@ -6418,6 +6798,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (recurringPlannedCount !== undefined && !isEnabled('editApptVisitCount')) {
       throw httpError(409, 'Setting a plan length from Edit appointment is turned off (GATE_EDIT_APPT_VISIT_COUNT). Nothing was changed.');
     }
+    // Same refuse-don't-drop contract as the plan-length gate above: a scope
+    // silently applied per-visit reads to the office as a series they just
+    // repriced, and they'd find out when the next visit billed at the old
+    // number.
+    if (priceServiceScope !== undefined && !isEnabled('editApptPriceServiceScope')) {
+      throw httpError(409, 'Applying a price or service change to the rest of a series is turned off (GATE_EDIT_APPT_PRICE_SERVICE_SCOPE). Nothing was changed.');
+    }
+    if (priceServiceScope !== undefined && !['this_only', 'following'].includes(priceServiceScope)) {
+      throw httpError(400, "priceServiceScope must be 'this_only' or 'following'");
+    }
+    const wantsPriceServiceScope = priceServiceScope !== undefined;
     const wantsVisitCountReconcile = Number.isInteger(parsedPlannedCount) && parsedPlannedCount > 0;
     let visitCountResult = null;
     const visitCountClaimToken = wantsVisitCountReconcile
@@ -6450,9 +6841,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // generators those paths run inside the trx — re-verified under the
     // lock at each write (guardRecurrenceDestination). Empty for a save that
     // writes no other date.
+    // B6 (codex #3509 P2): ONE preference snapshot for the whole edit — the
+    // plan and every write path read this same value, so a transient
+    // lookup failure can't make the plan lock unshifted dates while the
+    // writer shifts (SERIES_CHANGED_RETRY), or vice versa.
+    const editPrefRow = await db('scheduled_services')
+      .where({ id: req.params.id }).first('customer_id').catch(() => null);
+    const editPrefNoWeekends = await customerPrefersNoWeekends(db, editPrefRow?.customer_id);
     const plannedRecurrenceDates = await planUpdateDetailsRecurrenceDates(db, {
       id: req.params.id,
       updates,
+      prefNoWeekends: editPrefNoWeekends,
       isRecurring,
       recurringPattern,
       spawnRecurringChildren,
@@ -6527,8 +6926,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // acquires maintenance→comms, and the reverse order here would let an
       // alert action and an edit save on one customer deadlock on each other's
       // held key.
+      // A posted price/service scope joins the same per-parent lock: the
+      // 'following' propagation rewrites sibling rows and the template
+      // overrides that auto-extend / top-up / alert-extend read, so it must
+      // serialize against those writers (and against a concurrent scoped
+      // save merging the same override JSON) — Codex #3505 r1 P1.
       const wantsExistingPlanMutation = wantsVisitCountReconcile
-        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false);
+        || (isRecurring && recurringOngoing !== undefined && spawnRecurringChildren === false)
+        || wantsPriceServiceScope
+        // The no-scope override-coherence refresh (and the conversion
+        // override stamp) write the template too, from legacy surfaces
+        // that post no scope — EVERY template writer must serialize with
+        // the extension readers on this same lock (Codex #3505 r4 P1).
+        || (isEnabled('editApptPriceServiceScope')
+          && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key)));
       if (wantsExistingPlanMutation && commsPeek) {
         await acquireRecurringSeriesMaintenanceLock(trx, commsPeek.recurring_parent_id || req.params.id);
       }
@@ -6868,6 +7279,24 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             );
           }
         }
+        // Locked before-image for the price/service series-scope blocks
+        // below: group changes are detected value-by-value against this
+        // row, so it must be read before this save's updates land. Also
+        // captured for NO-scope saves that touch propagatable fields while
+        // the gate is on — the override-coherence branch must compare
+        // VALUES against this image too, because legacy surfaces echo
+        // service/price fields on every save and a presence-based merge
+        // would let a notes-only save restamp a deliberate this_only pin
+        // (Codex #3505 r3 P1). Reuses the tuple lock's row when that path
+        // already took it (same row, same trx — the re-acquire is
+        // reentrant).
+        if (!priceServiceBeforeRow
+          && (wantsPriceServiceScope
+            || (isEnabled('editApptPriceServiceScope')
+              && Object.keys(updates).some((key) => PRICE_SERVICE_OVERRIDE_KEYS.has(key))))) {
+          priceServiceBeforeRow = preTupleRow
+            || await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first();
+        }
         await trx('scheduled_services').where({ id: req.params.id }).update(updates);
         // Rebooker-parity live-move bookkeeping (same split as the bulk
         // board move): the job_status_history audit row is atomic with the
@@ -7017,11 +7446,90 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           ? await trx('scheduled_services').where({ id: req.params.id }).first('recurring_parent_id')
           : null;
         // ONLY a parent/template edit converts the whole series. Service edits
-        // expose no apply-scope and the cadence rewrite below is parent-only, so
-        // converting a single child occurrence must not flip its siblings and
-        // stop billing the rest of the regular series.
+        // historically exposed no apply-scope and the cadence rewrite below is
+        // parent-only, so converting a single child occurrence must not flip
+        // its siblings and stop billing the rest of the regular series.
+        //
+        // A POSTED scope must still be honored, not silently ignored (Codex
+        // #3505 r1 P1) — this conversion is billing-relevant (invoice voiding,
+        // $0 stamps), so doing a different scope than selected is worse than
+        // refusing:
+        //   • child + 'following' — the conversion has no child-driven series
+        //     propagation; refuse (trx rolls back) and point the operator at
+        //     the series' first appointment or 'this appointment only'.
+        //   • template + explicit 'this_only' — skip the series-wide
+        //     propagation entirely: only the edited template visit converts.
+        // No posted scope keeps today's behavior byte-for-byte.
+        // TRANSITIONS only (Codex #3505 r9 P1): a price-only save of an
+        // already-re-service child echoes its serviceId into this block, and
+        // that reprice belongs to the generic 'following' propagation below —
+        // refusing it here would block repricing a re-service series from any
+        // mid-series visit.
+        if (wantsPriceServiceScope && reServiceTransition && self?.recurring_parent_id
+          && normalizePriceServiceScope(priceServiceScope) === 'following') {
+          throw httpError(409, "Converting to a re-service can't be applied to following visits from a mid-series appointment — open the series' first appointment to convert the whole plan, or set the change to this appointment only.");
+        }
+        const conversionScopedThisOnly = wantsPriceServiceScope
+          && normalizePriceServiceScope(priceServiceScope) === 'this_only';
         const isTemplateEdit = !!seriesCols.recurring_parent_id && !self?.recurring_parent_id;
-        if (isTemplateEdit) {
+        // A this_only conversion on the TEMPLATE must also pin the template
+        // overrides at their pre-edit values (Codex #3505 r2 P1): the parent
+        // row's own columns now say re-service/$0, and without the pin the
+        // next auto-extension copies them — the supposedly one-appointment
+        // conversion would keep minting free callback visits. The generic
+        // scope block below stands down for conversions, so the pin lives
+        // here. Same per-group decision as the generic pin.
+        // The pin can preserve the template's PRIMARY fields, but a free
+        // conversion also zeroes the parent's ADD-ON rows — and extensions
+        // reload their add-on lines (and totals) from those rows, which no
+        // override mechanism covers. A this_only free conversion of a
+        // template that carries priced add-ons would silently strip the
+        // add-on charges from every future visit, so refuse it (Codex
+        // #3505 r3 P1); templates without priced add-ons pin cleanly below.
+        if (conversionScopedThisOnly && isTemplateEdit && reServiceConversionZeroPrice) {
+          // Fail CLOSED on the read (Codex #3505 r4 P1): an unreadable
+          // add-on table must block the conversion rather than waving it
+          // through as "no priced add-ons". Only the missing-table compat
+          // case (pre-migration env) proceeds add-on-less.
+          let templateAddons = [];
+          if (await trx.schema.hasTable('scheduled_service_addons')) {
+            templateAddons = await trx('scheduled_service_addons').where({ scheduled_service_id: req.params.id });
+          }
+          const hasPricedAddon = templateAddons.some((addon) =>
+            Number(addon.estimated_price) > 0 || Number(addon.base_price) > 0);
+          if (hasPricedAddon) {
+            throw httpError(409, "Converting just this appointment to a free re-service would also zero this template visit's add-on lines, and future visits copy their add-on pricing from it. Convert a later visit in the plan instead, or apply the conversion to the whole series.");
+          }
+        }
+        if (conversionScopedThisOnly && isTemplateEdit && priceServiceBeforeRow
+          && seriesCols.recurring_template_overrides) {
+          const conversionGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+          const conversionPin = pickUnpinnedGroupFields(
+            parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
+            conversionGroups,
+            priceServiceBeforeRow,
+          );
+          if (Object.keys(conversionPin).length > 0) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, conversionPin, seriesCols);
+          }
+        }
+        if (isTemplateEdit && !conversionScopedThisOnly) {
+          // Keep the template overrides coherent with a series-wide
+          // conversion (Codex #3505 r4 P1): a parent already stamped or
+          // pinned by an earlier scoped edit would otherwise hand the NEXT
+          // auto-extension the stale regular-service/priced values —
+          // minting a billable visit on a series the office just converted
+          // to free callbacks. Stamp when overrides already exist or the
+          // operator posted the scope; a legacy no-overrides conversion
+          // keeps today's behavior (extensions copy the parent columns).
+          if (seriesCols.recurring_template_overrides && priceServiceBeforeRow
+            && (wantsPriceServiceScope
+              || parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides))) {
+            const conversionGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+            if (conversionGroups.changed) {
+              await stampRecurringTemplateOverrides(trx, req.params.id, conversionGroups.fields, seriesCols);
+            }
+          }
           const seriesUpdates = {};
           if (seriesCols.is_callback && updates.is_callback !== undefined) seriesUpdates.is_callback = updates.is_callback;
           if (seriesCols.service_id && updates.service_id !== undefined) seriesUpdates.service_id = updates.service_id;
@@ -7095,6 +7603,117 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         }
       }
 
+      // Apply a changed primary price / primary service to the rest of the
+      // series (Edit appointment "Apply to" — dark behind
+      // GATE_EDIT_APPT_PRICE_SERVICE_SCOPE, refused above while off). Both
+      // writes are allowlisted to the primary-line fields this save actually
+      // CHANGED (computePriceServiceGroupChanges — presence is not change):
+      //   • 'following' — rewrite the still-upcoming BASE siblings on/after
+      //     the edited visit's date, then stamp the new values into the
+      //     parent's recurring_template_overrides so auto-extend / top-up /
+      //     alert-extend rows inherit them (the parent row is usually a
+      //     COMPLETED visit whose columns must stay the first visit's
+      //     record — never rewritten to carry the series forward).
+      //   • 'this_only' on a series PARENT with no overrides yet — pin the
+      //     template at the parent's PRE-edit values, so a deliberate
+      //     one-off edit of the template visit stops leaking into future
+      //     extension rows (which copy the parent).
+      // Re-service TRANSITIONS keep their own bespoke series propagation
+      // above — this block stands down rather than double-writing. A save
+      // whose row is ALREADY a re-service (the modal echoes its serviceId on
+      // every save) is not a transition: its price changes propagate here
+      // like any other series row's (Codex #3505 r9 P1). Add-on lines and
+      // visit durations stay per-visit by design.
+      // Boosters share recurring_parent_id but deliberately carry
+      // is_recurring=false and their OWN pricing — a booster edit must never
+      // rewrite the base series or stamp booster values into the template
+      // (Codex #3505 r1 P1). Refuse rather than silently applying per-visit;
+      // the modal hides the selector on boosters, so this only stops a
+      // hand-posted scope.
+      if (wantsPriceServiceScope && priceServiceBeforeRow
+        && !priceServiceBeforeRow.is_recurring && priceServiceBeforeRow.recurring_parent_id
+        && normalizePriceServiceScope(priceServiceScope) === 'following') {
+        throw httpError(400, 'Booster visits keep their own pricing — a price/service change can only be applied to following visits from a base series appointment.');
+      }
+      if (wantsPriceServiceScope && !reServiceTransition && priceServiceBeforeRow
+        && priceServiceBeforeRow.is_recurring) {
+        const scopeCols = await trx('scheduled_services').columnInfo();
+        const groups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+        const scopeParentId = priceServiceBeforeRow.recurring_parent_id || req.params.id;
+        const editedIsParent = !priceServiceBeforeRow.recurring_parent_id;
+        // Explicit $0: the price handlers store NULL for a zero-subtotal
+        // visit, and a NULL estimate lets non-callback billing fall back to
+        // the customer's monthly rate — keep the operator's zero explicit on
+        // everything this scope writes (Codex #3505 r1 P1).
+        if (groups.priceChanged && updates.primary_line_price !== undefined
+          && Number(updates.primary_line_price) === 0 && updates.estimated_price == null) {
+          groups.fields.estimated_price = 0;
+        }
+        if (groups.changed && normalizePriceServiceScope(priceServiceScope) === 'following') {
+          const propagatedIds = await propagatePriceServiceToFollowingSiblings(trx, {
+            editedId: req.params.id,
+            // The LOCKED pre-edit row joins the billing guards (never the
+            // sibling update loop): the edited visit's own live invoice
+            // refuses a 'following' save exactly like a sibling's would
+            // (Codex #3505 r8 P1).
+            editedRow: priceServiceBeforeRow,
+            parentId: scopeParentId,
+            // A parent edit covers the WHOLE remaining plan — a date
+            // threshold there would race the cadence rewrite that re-dates
+            // pending children after this block (see the helper's contract).
+            // A child edit anchors "following" on the occurrence's LOCKED
+            // pre-edit date, never the date this same save moves it to
+            // (Codex #3505 r2 P1): the operator chose the scope looking at
+            // the visit in its old position, and the assignment-scope path
+            // reads the occurrence before updating it for the same reason.
+            fromDateStr: editedIsParent
+              ? null
+              : (dateOnly(priceServiceBeforeRow.scheduled_date) || etDateString()),
+            fields: groups.fields,
+            serviceChanged: groups.serviceChanged,
+            priceChanged: groups.priceChanged,
+            cols: scopeCols,
+          });
+          await stampRecurringTemplateOverrides(trx, scopeParentId, groups.fields, scopeCols);
+          priceServicePropagatedCount = propagatedIds.length;
+        } else if (groups.changed && editedIsParent && scopeCols.recurring_template_overrides) {
+          // this_only on the template: pin the CHANGED groups that no earlier
+          // stamp already covers at their pre-edit values, so a deliberate
+          // one-off template edit stops leaking into future extension rows.
+          const pinned = pickUnpinnedGroupFields(
+            parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides),
+            groups,
+            priceServiceBeforeRow,
+          );
+          if (Object.keys(pinned).length > 0) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, pinned, scopeCols);
+          }
+        }
+      } else if (!wantsPriceServiceScope && !reServiceConversion && detailsChanged
+        && isEnabled('editApptPriceServiceScope')
+        && priceServiceBeforeRow
+        && priceServiceBeforeRow.is_recurring && !priceServiceBeforeRow.recurring_parent_id
+        && parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides)) {
+        // Legacy surfaces (dispatch card edits, mobile saves) post no scope.
+        // If the edited row is a series PARENT whose template is already
+        // pinned by overrides, keep the pin fresh — but only for groups
+        // whose values this save actually CHANGED against the locked
+        // before-image: those surfaces echo service/price fields on every
+        // save, and a presence-based merge would let a notes- or
+        // duration-only save overwrite a deliberate this_only pin with the
+        // parent's one-off values (Codex #3505 r3 P1). Without the refresh,
+        // a genuine legacy edit of a pinned parent would let the next
+        // extension resurrect the pre-edit price/service the stale pin
+        // still holds.
+        const scopeCols = await trx('scheduled_services').columnInfo();
+        if (scopeCols.recurring_template_overrides) {
+          const legacyGroups = computePriceServiceGroupChanges(priceServiceBeforeRow, updates);
+          if (legacyGroups.changed) {
+            await stampRecurringTemplateOverrides(trx, req.params.id, legacyGroups.fields, scopeCols);
+          }
+        }
+      }
+
       if (isRecurring && spawnRecurringChildren === false && recurringPattern) {
         const parent = await trx('scheduled_services').where({ id: req.params.id }).first();
         if (
@@ -7111,7 +7730,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
+          // B6: DATES honor the live weekday preference (ORed over both the
+          // parent flag and the form's routinely-submitted false — the edit
+          // UI always sends the checkbox), mirroring
+          // planUpdateDetailsRecurrenceDates so the pre-locked slot plan
+          // and this write land the same dates. The STAMPED flag stays the
+          // operator's raw value: the preference is consulted live by every
+          // consumer, so preference removal restores weekends without
+          // touching series rows (hook P1 — provenance).
+          const skipChildStamp = skipWeekends !== undefined ? !!skipWeekends : !!parent.skip_weekends;
+          const skipChild = skipChildStamp || editPrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : parent.weekend_shift) === 'back' ? 'back' : 'forward';
           // track_state + lifecycle stamps ride along as rewind evidence: a
           // pending child can still carry a live tracker or stale stamps
@@ -7227,7 +7855,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (seriesCols.recurring_nth) childUpdates.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (seriesCols.recurring_weekday) childUpdates.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
               if (seriesCols.recurring_interval_days) childUpdates.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
-              if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChild;
+              if (seriesCols.skip_weekends) childUpdates.skip_weekends = skipChildStamp;
               if (seriesCols.weekend_shift && skipChild) childUpdates.weekend_shift = dirChild;
               // Keep existing future visits' Bill-To in lockstep with the
               // (freshly-updated) series parent so a payer change propagates.
@@ -7301,7 +7929,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 const boosterUpdates = { scheduled_date: nextDateStr };
                 // Fence-or-clear contract — same as the child rewrite above.
                 if (boosterDateChanged) boosterUpdates.route_order = null;
-                if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChild;
+                if (seriesCols.skip_weekends) boosterUpdates.skip_weekends = skipChildStamp;
                 if (seriesCols.weekend_shift && skipChild) boosterUpdates.weekend_shift = dirChild;
                 let boosterRewound = false;
                 if (boosterDateChanged) {
@@ -7430,6 +8058,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 && resolveBillingLane(memberCustomer).mode === 'monthly_membership';
             }
           } catch { memberSeriesCovered = false; }
+          // Make-this-recurring re-anchors the series on THIS row's current
+          // values — stale template overrides from an earlier series life
+          // must not shadow them for later extension writers. (Never
+          // overlaid here: the anchor row's columns carry this very save.)
+          const spawnScopeCols = await trx('scheduled_services').columnInfo();
+          if (spawnScopeCols.recurring_template_overrides && parent.recurring_template_overrides) {
+            await trx('scheduled_services')
+              .where({ id: parent.id })
+              .update({ recurring_template_overrides: null });
+          }
           const baseDateStr = dateOnly(parent.scheduled_date) || etDateString();
           const spawnBlackoutDates = await loadSeriesBlackoutDates(trx, baseDateStr);
           const rOpts = {
@@ -7437,9 +8075,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             weekday: editMonthAnchorOpts.weekday != null ? editMonthAnchorOpts.weekday : parent.recurring_weekday,
             intervalDays: recurringIntervalDays != null ? recurringIntervalDays : parent.recurring_interval_days,
           };
-          const skipParent = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+          // B6: DATES honor the live preference; the STAMPED flag stays the
+          // operator's raw value (see the rewrite branch above).
+          const spawnPrefNoWeekends = editPrefNoWeekends;
+          const skipParentStamp = parent.skip_weekends != null ? !!parent.skip_weekends : false;
+          const skipParent = skipParentStamp || spawnPrefNoWeekends;
           const dirParent = parent.weekend_shift === 'back' ? 'back' : 'forward';
-          const skipChild = skipWeekends !== undefined ? !!skipWeekends : skipParent;
+          const skipChildStamp = skipWeekends !== undefined ? !!skipWeekends : skipParentStamp;
+          const skipChild = skipChildStamp || spawnPrefNoWeekends;
           const dirChild = (weekendShift !== undefined ? weekendShift : dirParent) === 'back' ? 'back' : 'forward';
           // Pull parent's existing add-on lines once so we can mirror them
           // onto each spawned child below.
@@ -7525,7 +8168,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               if (cols.recurring_nth) childData.recurring_nth = (rOpts.nth != null && rOpts.nth !== '' && !isNaN(parseInt(rOpts.nth))) ? parseInt(rOpts.nth) : null;
               if (cols.recurring_weekday) childData.recurring_weekday = (rOpts.weekday != null && rOpts.weekday !== '' && !isNaN(parseInt(rOpts.weekday))) ? parseInt(rOpts.weekday) : null;
               if (cols.recurring_interval_days) childData.recurring_interval_days = (rOpts.intervalDays != null && rOpts.intervalDays !== '' && !isNaN(parseInt(rOpts.intervalDays))) ? parseInt(rOpts.intervalDays) : null;
-              if (cols.skip_weekends) childData.skip_weekends = skipChild;
+              if (cols.skip_weekends) childData.skip_weekends = skipChildStamp;
               if (cols.weekend_shift && skipChild) childData.weekend_shift = dirChild;
               const dType = discountType !== undefined ? discountType : parent.discount_type;
               const dAmt = discountAmount !== undefined ? discountAmount : parent.discount_amount;
@@ -7533,7 +8176,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               copyAppointmentDiscountFields(childData, parent, cols);
               if (cols.discount_type && dType) childData.discount_type = dType;
               if (cols.discount_amount && dAmt != null && dAmt !== '') childData.discount_amount = Number(dAmt);
-              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
+              const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates, skipChild);
               applyStoredVisitFinancials(childData, cols, { ...parent, discount_type: dType, discount_amount: dAmt }, dueAddons, parentAddons, storedDiscountScope);
               if (memberSeriesCovered && cols.estimated_price) {
                 // Dues cover the base visit — keep an ADD-ON-ONLY stamp when
@@ -7580,7 +8223,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             if (parentAddons.length > 0 && childRow?.id) {
               try {
                 const addonCols = await db('scheduled_service_addons').columnInfo();
-                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates);
+                const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextDateStr, spawnBlackoutDates, skipChild);
                 for (const addon of dueAddons) {
                   const addonData = {
                     scheduled_service_id: childRow.id,
@@ -7693,6 +8336,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               claimToken: visitCountClaimToken,
               protectedVisitId: req.params.id,
               ongoingSeries: true,
+              prefNoWeekends: editPrefNoWeekends,
               occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
             });
             // An EXHAUSTED plan (zero upcoming) flipped to ongoing with zero
@@ -7736,6 +8380,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             baselineCount: Number.isInteger(Number.parseInt(recurringPlannedCountBaseline, 10))
               ? Number.parseInt(recurringPlannedCountBaseline, 10)
               : null,
+            prefNoWeekends: editPrefNoWeekends,
             occupancyGuard: { lockedDates: lockedRecurrenceDates, excludeServiceIds: [parentId], warnings: editWarnings },
           });
           recurringCreated += visitCountResult.added.length;
@@ -7860,6 +8505,21 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           description: `${audited?.service_type || 'Recurring'} plan now has ${visitCountResult.achieved} upcoming visit(s) from Edit appointment — ${visitCountResult.added.length} added, ${visitCountResult.cancelledIds.length} cancelled (was ${visitCountResult.before})${visitCountResult.shortfall ? `; ${visitCountResult.target} requested, ${visitCountResult.shortfall} could not be placed on the cadence` : ''}`,
         });
       } catch (e) { logger.warn(`[schedule/visit-count] audit line failed (non-blocking): ${e.message}`); }
+    }
+
+    // Audit line for a price/service change applied across a series — the
+    // sibling rows carry the new values but nothing else records that one
+    // save rewrote them all.
+    if (priceServicePropagatedCount != null) {
+      try {
+        const audited = await db('scheduled_services').where({ id: req.params.id }).first('customer_id', 'service_type');
+        await db('activity_log').insert({
+          admin_user_id: req.technicianId || null,
+          customer_id: audited?.customer_id || null,
+          action: 'recurring_price_service_scope',
+          description: `${audited?.service_type || 'Recurring'} series updated from Edit appointment — price/service change applied to this and ${priceServicePropagatedCount} following upcoming visit(s), and stamped for future visits the plan adds`,
+        });
+      } catch (e) { logger.warn(`[schedule/price-service-scope] audit line failed (non-blocking): ${e.message}`); }
     }
 
     // Keep a call-created follow-up (visit 2) spaced from its parent when the
@@ -8038,6 +8698,11 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         },
       } : {}),
       ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
+      // Present only when a 'following' price/service scope actually rewrote
+      // sibling visits — lets the modal report how many future visits moved.
+      ...(priceServicePropagatedCount != null
+        ? { priceServiceScope: { scope: 'following', updatedVisits: priceServicePropagatedCount } }
+        : {}),
       // Advisory occupancy-overlap notes — present only when this save
       // stacked over an existing visit.
       ...(editWarnings.length ? { warnings: editWarnings } : {}),
@@ -9147,6 +9812,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // insert is verified against the caller's held rung-1 date keys and probed
   // for global occupancy right before the write (guardRecurrenceDestination).
   occupancyGuard = null,
+  // B6 (codex #3509 P2): update-details passes its per-edit preference
+  // snapshot so this writer and the pre-lock plan agree; other callers
+  // resolve fresh.
+  prefNoWeekends = undefined,
 }) {
   const target = Math.min(Math.max(parseInt(targetCount, 10) || 0, 1), MAX_SERIES_VISIT_COUNT);
   const live = await liveUpcomingSeriesVisits(trx, parentId);
@@ -9222,6 +9891,10 @@ async function reconcileRecurringSeriesVisitCount(trx, {
   // on the parent's own date instead would recompute the whole cadence from
   // the series start and, on a series whose early visits were cancelled, drop
   // fresh visits into the past.
+  // Series-scope price/service overrides beat the parent's own columns for
+  // everything the top-up copies (allowlisted keys only; no-op while the
+  // gate is off or nothing is stamped).
+  parent = overlayRecurringTemplateOverrides(parent, cols);
   const need = target - live.length;
   const rOpts = {
     ...recurrenceOrdinalOptions(parent.scheduled_date, {
@@ -9230,7 +9903,13 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     }),
     intervalDays: parent.recurring_interval_days,
   };
-  const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+  // B6: top-up DATES honor the customer's live weekday preference even on
+  // legacy series; the STAMPED flag stays the operator's raw value so
+  // preference removal restores weekends without touching rows.
+  const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+  const skipParent = skipParentStamp || (prefNoWeekends !== undefined
+    ? !!prefNoWeekends
+    : await customerPrefersNoWeekends(trx, parent.customer_id));
   const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
   const latest = await latestLiveSeriesVisit(trx, parentId);
   const baseDateStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
@@ -9279,7 +9958,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     if (cols.recurring_nth && parent.recurring_nth != null) data.recurring_nth = parent.recurring_nth;
     if (cols.recurring_weekday && parent.recurring_weekday != null) data.recurring_weekday = parent.recurring_weekday;
     if (cols.recurring_interval_days && parent.recurring_interval_days != null) data.recurring_interval_days = parent.recurring_interval_days;
-    if (cols.skip_weekends) data.skip_weekends = skipParent;
+    if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
     if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
     if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
     if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
@@ -9287,7 +9966,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
     copyAppointmentDiscountFields(data, parent, cols);
     copyBillToFields(data, parent, cols);
     copyStampedServiceAddressFields(data, parent, cols);
-    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates);
+    const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, extendBlackoutDates, skipParent);
     applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
     if (occupancyGuard) {
       await guardRecurrenceDestination(trx, {
@@ -9378,7 +10057,7 @@ async function reconcileRecurringSeriesVisitCount(trx, {
 // see a committed visit row) — same ordering the pre-lock code had.
 async function runRecurringSeriesMaintenance(conn, svc) {
   const parentId = svc.recurring_parent_id || svc.id;
-  const runLocked = async (trx) => {
+    const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the auto-extend
     // insert serializes against a concurrent merge-undo of this customer.
@@ -9468,6 +10147,10 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
     }
     parent = relocked;
   }
+  // Series-scope price/service overrides beat the parent's own columns for
+  // everything this extension copies (allowlisted keys only; no-op while
+  // the gate is off or nothing is stamped).
+  parent = overlayRecurringTemplateOverrides(parent, cols);
   if (parent && parent.is_recurring && parent.recurring_pattern) {
     // upcomingCount + latest must reflect the BASE recurring series
     // only — see countUpcomingSeriesVisits for the booster and
@@ -9490,7 +10173,11 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
           intervalDays: parent.recurring_interval_days,
         };
         const latestStr = seriesExtendAnchor(latest, parent.recurring_pattern, rOpts);
-        const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+        // B6: auto-extend DATES honor the customer's live weekday
+        // preference even on legacy series; the STAMPED flag stays the
+        // operator's raw value (provenance — see reconcile).
+        const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+        const skipParent = skipParentStamp || await customerPrefersNoWeekends(conn, parent.customer_id);
         const dirParent = cols.weekend_shift ? (parent.weekend_shift === 'back' ? 'back' : 'forward') : 'forward';
         // Pre-load every active date on this series so the auto-extend
         // insert dedupes against future booster rows — shared preload
@@ -9558,7 +10245,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
             recurring_parent_id: parentId,
           };
           if (cols.recurring_ongoing) nextData.recurring_ongoing = true;
-          if (cols.skip_weekends) nextData.skip_weekends = skipParent;
+          if (cols.skip_weekends) nextData.skip_weekends = skipParentStamp;
           if (cols.weekend_shift && skipParent) nextData.weekend_shift = dirParent;
           if (cols.service_id && parent.service_id) nextData.service_id = parent.service_id;
           if (cols.appointment_type) nextData.appointment_type = classifyAppointmentTag(parent.service_type);
@@ -9576,7 +10263,7 @@ async function runRecurringSeriesMaintenanceLocked(conn, svc, parentId) {
               sp('scheduled_service_addons').where({ scheduled_service_id: parentId }));
           } catch { parentAddons = []; }
           const storedDiscountScope = await loadStoredDiscountScope(conn, parent, parentAddons);
-          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates);
+          const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nextStr, autoExtendBlackoutDates, skipParent);
           applyStoredVisitFinancials(nextData, cols, parent, dueAddons, parentAddons, storedDiscountScope);
           // Extension rows keep invoice-on-complete stamping — sibling-
           // resolved so the freshest office billing intent wins (see
@@ -10544,6 +11231,8 @@ router.get('/:id/series-summary', async (req, res, next) => {
       // so with the gate off a series template shows exactly the panel it
       // showed before this lane existed.
       canSetCount: isEnabled('editApptVisitCount'),
+      // Same dark-ship contract for the price/service "Apply to" selector.
+      canScopePriceService: isEnabled('editApptPriceServiceScope'),
     });
   } catch (err) { next(err); }
 });
@@ -11184,7 +11873,12 @@ async function computeAnnualPrepayPreview(query, conn = db) {
     // knows nothing about skip_weekends, so a seeded tail can land on the
     // Sat/Sun the operator excluded. Only refuse when there IS a tail — a
     // fully pre-seeded year is adopted as booked, weekend rule included.
-    if (coverageSeedsTail && input.skipWeekends) {
+    // B6: the customer's LIVE weekday preference counts like the operator
+    // flag here — the preference is never persisted onto rows, and a
+    // pref customer's weekend-blind seeded tail would violate it the same
+    // way. Consulted only when a tail would actually seed.
+    if (coverageSeedsTail
+      && (input.skipWeekends || await customerPrefersNoWeekends(conn, customerId))) {
       return blocked(`isn’t available on an ongoing series that skips weekends — the ${visitsPerYear - ONGOING_PRESEEDED_VISITS} visits seeded after the booked ones ignore that rule. Enter ${visitsPerYear} in Visits to book the whole year`);
     }
 
@@ -14017,6 +14711,9 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
   let alertBlackoutDates = null;
   const spawned = []; // committed inserts → post-commit addon/reminder steps
 
+  // B6: effective weekend rule captured out of the locked closure for the
+  // post-commit add-on mirror.
+  let alertSkipEffective = false;
   const runLocked = async (trx) => {
     await acquireRecurringSeriesMaintenanceLock(trx, parentId);
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): the spawn inserts
@@ -14062,6 +14759,10 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
       outcome = { status: 409, body: { error: 'series has been cancelled' } };
       return;
     }
+    // Series-scope price/service overrides beat the parent's own columns for
+    // everything the extend/convert spawn loops copy (allowlisted keys only;
+    // no-op while the gate is off or nothing is stamped).
+    parent = overlayRecurringTemplateOverrides(parent, cols);
     const parentOngoing = cols.recurring_ongoing ? !!parent.recurring_ongoing : false;
     if (!alert) {
       // Derived alerts have no row to claim, so recompute the derived-scan
@@ -14087,8 +14788,14 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
 
     // Honor skip-weekends preference set on the parent (POST + PUT + auto-
     // extend already do; the alert action endpoint must too or weekend
-    // visits reappear on plans configured to skip them).
-    const skipParent = cols.skip_weekends ? !!parent.skip_weekends : false;
+    // visits reappear on plans configured to skip them). B6: extend DATES
+    // also honor the customer's live weekday preference; the STAMPED flag
+    // stays the operator's raw value (provenance — see reconcile).
+    const skipParentStamp = cols.skip_weekends ? !!parent.skip_weekends : false;
+    const skipParent = skipParentStamp || await customerPrefersNoWeekends(trx, parent.customer_id);
+    // Captured for the post-commit add-on mirror, which runs OUTSIDE this
+    // locked closure but must match the dates it generated.
+    alertSkipEffective = skipParent;
     const dirParent = (cols.weekend_shift && parent.weekend_shift === 'back') ? 'back' : 'forward';
 
     // Pull parent's add-on lines once so we can mirror them onto each new
@@ -14162,11 +14869,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd });
@@ -14235,11 +14942,11 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
         copyAppointmentDiscountFields(data, parent, cols);
         copyBillToFields(data, parent, cols);
         copyStampedServiceAddressFields(data, parent, cols);
-        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates);
+        const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, nd, alertBlackoutDates, skipParent);
         applyStoredVisitFinancials(data, cols, parent, dueAddons, parentAddons, storedDiscountScope);
         if (cols.appointment_type) data.appointment_type = classifyAppointmentTag(parent.service_type);
         if (cols.create_invoice_on_complete && seriesCioc !== undefined) data.create_invoice_on_complete = seriesCioc;
-        if (cols.skip_weekends) data.skip_weekends = skipParent;
+        if (cols.skip_weekends) data.skip_weekends = skipParentStamp;
         if (cols.weekend_shift && skipParent) data.weekend_shift = dirParent;
         const [row] = await trx('scheduled_services').insert(data).returning('*');
         spawned.push({ id: row?.id, date: nd });
@@ -14329,7 +15036,7 @@ async function runRecurringAlertAction(conn, { idParam, action, count, adminUser
     if (!Array.isArray(parentAddons) || parentAddons.length === 0 || !childId) return;
     try {
       const addonCols = await conn('scheduled_service_addons').columnInfo();
-      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates);
+      const dueAddons = filterAddonLinesForDate(parentAddons, parent.scheduled_date, childDate, alertBlackoutDates, alertSkipEffective);
       for (const addon of dueAddons) {
         const addonData = {
           scheduled_service_id: childId,
@@ -14610,6 +15317,14 @@ router._test = {
   runRecurringSeriesMaintenance,
   runRecurringAlertAction,
   resolveSeriesCreateInvoiceOnComplete,
+  normalizePriceServiceScope,
+  computePriceServiceGroupChanges,
+  pickUnpinnedGroupFields,
+  parseTemplateOverrides,
+  overlayRecurringTemplateOverrides,
+  stampRecurringTemplateOverrides,
+  propagatePriceServiceToFollowingSiblings,
+  PRICE_SERVICE_OVERRIDE_KEYS,
 };
 
 module.exports = router;

@@ -521,9 +521,11 @@ async function provenBookingInWindow({ customerId, from, to, excludeIds = [] }) 
  *
  * Returns true only when money actually posted. Never throws.
  */
-async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, bookingCreatedAt, createdBy, now }) {
+async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, bookingCreatedAt, createdBy, now, dbh = db }) {
   try {
-    await db.transaction(async (trx) => {
+    // dbh.transaction on a caller transaction nests as a SAVEPOINT — the
+    // claim/mint stays atomic either way (Codex #3492 r17).
+    await dbh.transaction(async (trx) => {
       const claimed = await trx('inspection_credit_offers')
         .where({ id: offerId })
         // 'expired' is provisional, never money-terminal (pre-push P0):
@@ -593,18 +595,21 @@ async function redeemSpecificOffer({ offerId, customerId, amount, bookingId, boo
         .update({ credit_ledger_id: entry.id, updated_at: trx.fn.now() });
     });
     logger.info(`[inspection-credit] offer ${offerId} redeemed on booking ${bookingId}`);
-    return true;
+    return 'minted';
   } catch (err) {
-    if (err?.inspectionCreditSkip === 'claim_lost') return false;
+    // CONCLUSIVE skips ('skipped') vs genuine FAILURES ('failed') — money
+    // callers defer-and-retry only on failures (Codex #3492 r19): a lost
+    // claim race or a non-live booking is a settled outcome, not an error.
+    if (err?.inspectionCreditSkip === 'claim_lost') return 'skipped';
     if (err?.inspectionCreditSkip === 'booking_not_live') {
       // Not an error: the cancel won the race and the claim rolled back
       // untouched — the offer stays open for a real booking.
       logger.info(`[inspection-credit] offer ${offerId} not minted — booking ${bookingId} went non-live first`);
-      return false;
+      return 'skipped';
     }
     // Left 'offered' on purpose — the sweep retries it.
     logger.error(`[inspection-credit] redemption FAILED for offer ${offerId}: ${err.message}`);
-    return false;
+    return 'failed';
   }
 }
 
@@ -623,6 +628,12 @@ async function redeemInspectionCreditForBooking({
   bookingStatus = null,
   createdBy = 'system:inspection_credit_rebook',
   now = new Date(),
+  // In-transaction callers (the prepay accept redeems atomically with
+  // acceptance — Codex #3492 r17) pass their handle: the booking row and
+  // its evidence event were written on that same connection and are
+  // invisible elsewhere until commit; redeemSpecificOffer then nests as a
+  // savepoint.
+  dbh = db,
 }) {
   // NOT an early return on the gate (Codex #3178 r34 P0): standing-promise
   // offers (rodent — the estimator's $125-creditable pledge on already-sent
@@ -638,7 +649,7 @@ async function redeemInspectionCreditForBooking({
   }
   // The booking's live status, read from the row (Codex #3178 r6 P0).
   try {
-    const row = await db('scheduled_services')
+    const row = await dbh('scheduled_services')
       .where({ id: scheduledServiceId })
       .first('created_at', 'status');
     if (!row) return { redeemed: 0, reason: 'booking_not_found' };
@@ -660,7 +671,7 @@ async function redeemInspectionCreditForBooking({
   // fault — never mint on an unknown moment.
   let bookedAt;
   try {
-    const evt = await db('inspection_credit_booking_events')
+    const evt = await dbh('inspection_credit_booking_events')
       .where({ scheduled_service_id: scheduledServiceId })
       .first('created_at');
     if (!evt?.created_at) return { redeemed: 0, reason: 'no_booking_evidence' };
@@ -671,7 +682,7 @@ async function redeemInspectionCreditForBooking({
   }
 
   try {
-    const openQ = db('inspection_credit_offers')
+    const openQ = dbh('inspection_credit_offers')
       .where({ customer_id: customerId })
       // 'expired' included on purpose — provisional, and the time-window
       // guards below (re-validated under the claim) are the real arbiter.
@@ -694,8 +705,9 @@ async function redeemInspectionCreditForBooking({
 
     let redeemed = 0;
     let total = 0;
+    let failures = 0;
     for (const offer of open) {
-      const ok = await redeemSpecificOffer({
+      const outcome = await redeemSpecificOffer({
         offerId: offer.id,
         customerId,
         amount: offer.amount,
@@ -703,11 +715,23 @@ async function redeemInspectionCreditForBooking({
         bookingCreatedAt: bookedAt,
         createdBy,
         now,
+        dbh,
       });
-      if (ok) {
+      if (outcome === 'minted') {
         redeemed += 1;
         total = round2(total + round2(offer.amount));
+      } else if (outcome === 'failed') {
+        failures += 1;
       }
+    }
+    if (failures > 0) {
+      // ANY genuine db/ledger FAILURE leaves part of the promise open and
+      // unminted — even beside a successful mint (Codex #3492 r19/r20): a
+      // money caller that projected the SUM of the open offers would
+      // otherwise proceed on a partial credit and decline into a gross pay
+      // link. Name it so they defer and retry; the minted portion is
+      // already in the balance and the retry redeems only the remainder.
+      return { redeemed, amount: total, reason: 'redemption_incomplete' };
     }
     return { redeemed, amount: total };
   } catch (err) {
@@ -1080,7 +1104,7 @@ async function sweepInspectionCreditRedemptions({ now = new Date(), limit = 500 
           createdBy: 'system:inspection_credit_sweep',
           now,
         });
-        if (ok) redeemed += 1;
+        if (ok === 'minted') redeemed += 1;
       }
     } catch (redeemErr) {
       logger.error(`[inspection-credit] evidence-first redemption failed: ${redeemErr.message}`);
@@ -1716,9 +1740,39 @@ async function inspectionCreditReportNote(service) {
   return { note: inspectionCreditReceiptMemo({ amount: offer.amount, expiresAt: offer.expires_at }) || '' };
 }
 
+// Best-effort PROJECTION of what redeemInspectionCreditForBooking would
+// mint for a booking made right now — used by the prepay-at-accept charge
+// quote (GATE_PREPAY_CARD_AND_CHARGE) so the exact total shown to the
+// customer already reflects the promised credit (pre-push Codex P0 r5: the
+// credit must exist before the customer pays, and the quote must equal the
+// charge to the cent). Mirrors the redemption's open-offer selection with
+// "now" as the booking moment; a projection miss is safe — the charge's
+// expectedTotal equality check refuses and the pay-link fallback (which
+// auto-applies the real credit at delivery) takes over. Read-only; never
+// throws.
+async function projectRedeemableOfferAmount(customerId, { now = new Date(), dbh = db } = {}) {
+  if (!customerId) return 0;
+  // THROWS on a query failure (Codex #3492 r10 P0) — a swallowed error
+  // returning 0 is indistinguishable from "no offer", and the prepay quote
+  // (the only caller) uses that distinction as a money guard: an unknown
+  // offer state must reject the quote, never silently price the gross
+  // amount over an outstanding promised credit. dbh: in-transaction
+  // callers pass their handle (r17 — pool-deadlock guard).
+  const q = dbh('inspection_credit_offers')
+    .where({ customer_id: customerId })
+    .whereIn('status', ['offered', 'expired'])
+    .where('created_at', '<=', now)
+    .where('expires_at', '>=', now);
+  // Dark = STANDING-PROMISE offers only, matching redemption (r34 P0).
+  if (!gateOn()) q.where({ source_service_key: 'rodent_inspection' });
+  const open = await q.select('amount');
+  return round2(open.reduce((sum, offer) => sum + (Number(offer.amount) || 0), 0));
+}
+
 module.exports = {
   etDateOnlyToDate,
   etEndOfDayAfterDays,
+  projectRedeemableOfferAmount,
   markBookingForInspectionCredit,
   recordInspectionCreditOffer,
   reverseInspectionCreditForBooking,

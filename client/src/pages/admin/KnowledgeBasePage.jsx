@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { BookOpen, Brain, Gauge, Plus, ShieldCheck, Sprout } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -134,9 +134,15 @@ const KB_TAB_KEYS = new Set(["browse", "create", "field", "audit", "tokens"]);
 
 export default function KnowledgeBasePage({ embedded = false }) {
   const [searchParams, setSearchParams] = useSearchParams();
+  // Server-verified role from the shell's Outlet context (never localStorage).
+  const outletContext = useOutletContext();
+  const isAdminRole = outletContext?.user?.role === "admin";
   const queryKey = embedded ? "kbTab" : "tab";
   const requestedTab = searchParams.get(queryKey);
-  const tab = KB_TAB_KEYS.has(requestedTab) ? requestedTab : "browse";
+  // audit/tokens are owner-only — a deep link resolves to Browse for techs.
+  const allowedTab = KB_TAB_KEYS.has(requestedTab)
+    && (isAdminRole || !["audit", "tokens"].includes(requestedTab));
+  const tab = allowedTab ? requestedTab : "browse";
 
   // Usage beacon for the leaf that actually RENDERS — invalid or missing
   // ?kbTab= resolves to Browse without rewriting the URL. The Knowledge
@@ -177,8 +183,14 @@ export default function KnowledgeBasePage({ embedded = false }) {
       label: isMobile ? "Field Intel" : "Field Intelligence",
       Icon: Sprout,
     },
-    { key: "audit", label: "AI Audit", Icon: ShieldCheck },
-    { key: "tokens", label: isMobile ? "Tokens" : "Token Health", Icon: Gauge },
+    // AI Audit + Token Health are system-ops surfaces (2026-08-25 role
+    // lockdown) — owner-only; techs keep browse/create/field intel.
+    ...(isAdminRole
+      ? [
+          { key: "audit", label: "AI Audit", Icon: ShieldCheck },
+          { key: "tokens", label: isMobile ? "Tokens" : "Token Health", Icon: Gauge },
+        ]
+      : []),
   ];
 
   return (

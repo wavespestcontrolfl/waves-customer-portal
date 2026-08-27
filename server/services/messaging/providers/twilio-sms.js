@@ -205,6 +205,8 @@ async function sendViaTwilio(input, { preSendCheck } = {}) {
     };
   } catch (err) {
     const failure = classifyProviderFailure(err);
+    // A synchronous 21610 is recorded inside TwilioService.sendSMS (the
+    // choke point every sender passes through) — see messaging/sync-optout.js.
     return {
       sent: false,
       provider: 'twilio',

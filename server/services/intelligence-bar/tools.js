@@ -2042,14 +2042,46 @@ async function cancelAppointment(input) {
     }
     // The money seam runs on the REPLAY path too (Codex #3178 r22 P1): a
     // process exit between the committed cancellation and the post-commit
-    // call below leaves this early return as the only path a retry reaches,
-    // and the credited $75 would stay spendable until the hourly sweep.
-    // Idempotent — the void helper skips resolved invoices and the reversal
-    // finds no redeemed offer once it has already run.
+    // call below leaves this early return as the only path a retry reaches.
+    // The SHARED follow-through (PR #3496 audit: this tool was the one
+    // cancel surface with NO card-fee hook — a cancelled visit's hold
+    // stayed silently 'held' and in-window fees never charged) bundles
+    // both card rails + the invoice void/credit reversal, and every step
+    // is idempotent, so the replay re-runs it safely.
+    // The fee rails must judge their windows at the COMMITTED cancellation
+    // instant, not this retry's clock (pre-push r7 P0). The timestamp
+    // LOOKUP is isolated from the follow-through call (uncapped r19 P1):
+    // a failed lookup must degrade to the fail-free waived run, never
+    // skip the money obligations entirely. Real transitions only (r8 P0):
+    // a cancelled→cancelled audit row carries a LATER instant.
+    let cancelledAtReplay = null;
     try {
-      await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+      const hist = await db('job_status_history')
+        .where({ job_id: appointment_id, to_status: 'cancelled' })
+        .whereNot('from_status', 'cancelled')
+        .orderBy('transitioned_at', 'desc')
+        .first('transitioned_at');
+      cancelledAtReplay = hist?.transitioned_at || null;
+    } catch (lookupErr) {
+      logger.warn(`[intelligence-bar] cancel replay instant lookup failed for ${appointment_id}: ${lookupErr.message} — fee legs will be waived (fail free)`);
+    }
+    try {
+      const { runVisitCancellationFollowThrough } = require('../visit-cancellation-followthrough');
+      const { NO_SHOW_FEE_MAX_AGE_MS } = require('../estimate-card-holds');
+      // TWO clocks (uncapped r20 P0): the audited instant decides whether
+      // the cancel was originally in-window, but a replay of a STALE
+      // cancellation (older than the fee rails' own freshness bound,
+      // judged by the REAL clock) must never charge weeks later — waive.
+      const staleReplay = cancelledAtReplay
+        && (Date.now() - new Date(cancelledAtReplay).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
+      if (cancelledAtReplay && !staleReplay) {
+        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtReplay) });
+      } else {
+        logger.warn(`[intelligence-bar] cancel replay for ${appointment_id} is ${staleReplay ? 'stale' : 'missing an audited transition time'} — fee legs waived (fail free)`);
+        await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
+      }
     } catch (e) {
-      logger.error(`[intelligence-bar] cancel replay void sweep failed for ${appointment_id}: ${e.message}`);
+      logger.error(`[intelligence-bar] cancel replay follow-through failed for ${appointment_id}: ${e.message}`);
     }
     return {
       success: true,
@@ -2097,16 +2129,46 @@ async function cancelAppointment(input) {
     throw err;
   }
 
-  // Void any still-open pre-minted invoice and reverse the inspection
-  // credit IMMEDIATELY (Codex #3178 r21 P1) — the shared money seam every
-  // other cancel surface runs (the reversal rides the void helper's
-  // finally); without it a credited booking cancelled from the
-  // Intelligence Bar left the $75 spendable until the hourly sweep.
-  // Best-effort after the committed transition, same as the status routes.
+  // Run the SHARED cancellation follow-through every other cancel surface
+  // runs (PR #3496 audit closed this gap): both card fee rails — the
+  // one-time hold (charge in-window / release-or-park otherwise) and the
+  // /secure appointment-card fee — plus the invoice void + inspection-
+  // credit reversal (Codex #3178 r21 P1). Best-effort after the committed
+  // transition, same as the status routes; waiveFee is not offered by this
+  // tool, matching the admin routes' default (an operator who means to
+  // waive uses the dispatch UI's waive control).
   try {
-    await require('../invoice').voidOpenInvoicesForCancelledService(appointment_id);
+    // ONE authoritative instant for the fee rails on BOTH the initial and
+    // replay paths (pre-push r9 P0): the audited transition timestamp the
+    // transaction just committed. The lookup is ISOLATED (uncapped r19
+    // P1): its failure degrades to the fail-free waived run — the money
+    // obligations always run.
+    let cancelledAtCommit = null;
+    try {
+      const hist = await db('job_status_history')
+        .where({ job_id: appointment_id, to_status: 'cancelled' })
+        .whereNot('from_status', 'cancelled')
+        .orderBy('transitioned_at', 'desc')
+        .first('transitioned_at');
+      cancelledAtCommit = hist?.transitioned_at || null;
+    } catch (lookupErr) {
+      logger.warn(`[intelligence-bar] cancellation instant lookup failed for ${appointment_id}: ${lookupErr.message} — fee legs will be waived (fail free)`);
+    }
+    const { runVisitCancellationFollowThrough } = require('../visit-cancellation-followthrough');
+    const { NO_SHOW_FEE_MAX_AGE_MS } = require('../estimate-card-holds');
+    // Same two-clock guard as the replay path (uncapped r20 P0): should
+    // this post-commit call itself be delayed past the freshness bound,
+    // it must waive rather than charge stale.
+    const staleCommit = cancelledAtCommit
+      && (Date.now() - new Date(cancelledAtCommit).getTime()) > NO_SHOW_FEE_MAX_AGE_MS;
+    if (cancelledAtCommit && !staleCommit) {
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', now: new Date(cancelledAtCommit) });
+    } else {
+      logger.warn(`[intelligence-bar] cancellation instant for ${appointment_id} is ${staleCommit ? 'stale' : 'missing'} — fee legs waived (fail free)`);
+      await runVisitCancellationFollowThrough({ targetIds: [appointment_id], source: 'intelligence-bar', waiveFee: true });
+    }
   } catch (e) {
-    logger.error(`[intelligence-bar] cancel invoice void sweep failed for ${appointment_id}: ${e.message}`);
+    logger.error(`[intelligence-bar] cancel follow-through failed for ${appointment_id}: ${e.message}`);
   }
 
   const customer = await db('customers').where('id', appt.customer_id).first();

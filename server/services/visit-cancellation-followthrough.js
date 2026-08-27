@@ -31,7 +31,7 @@
  * MUST be called AFTER the cancelling transaction commits: every step reads
  * the visit's committed state on its own connection.
  */
-const logger = require('../utils/logger');
+const logger = require('./logger');
 const trackTransitions = require('./track-transitions');
 const {
   recordTrackTransitionFailure,
@@ -47,6 +47,13 @@ const {
  *   the role, it honors what it is told (same contract as the dispatch path).
  * @param {string}   [opts.reason]   Cancellation reason for the tracker stamp.
  * @param {string}   [opts.source]   Log prefix, e.g. 'admin-dispatch'.
+ * @param {Date}     [opts.now]      The CANCELLATION instant the fee rails
+ *   judge their windows against. Defaults to the wall clock — correct for
+ *   the immediate post-commit call — but a REPLAY (retrying a follow-through
+ *   that failed after the cancel committed) MUST pass the committed
+ *   transition time (job_status_history.transitioned_at): a retry clock
+ *   would re-decide the fee window at a different instant than the cancel
+ *   actually happened (PR pre-push r7 P0).
  */
 async function runVisitCancellationFollowThrough({
   targetIds,
@@ -54,6 +61,7 @@ async function runVisitCancellationFollowThrough({
   waiveFee = false,
   reason = null,
   source = 'cancellation',
+  now = new Date(),
 } = {}) {
   const ids = (Array.isArray(targetIds) ? targetIds : []).filter(Boolean);
   if (ids.length === 0) return { settled: 0 };
@@ -67,13 +75,33 @@ async function runVisitCancellationFollowThrough({
         const holdResult = await CardHolds.handleCardHoldCancellation({
           scheduledServiceId: id,
           waiveFee,
+          now,
         });
+        // Non-clean hold outcomes must ALERT, not just return (pre-push
+        // r16 P1): the rail reports charge_failed / charge_review /
+        // lane_check_failed / competing_consent_review as values, and a
+        // caller that only checks thrown errors would report a successful
+        // cancellation while the fee sits unresolved. Clean = charged,
+        // released, parked, or nothing to do.
+        const holdClean = holdResult?.charged === true
+          || holdResult?.released === true
+          || holdResult?.parked === true
+          || ['no_hold', 'park_gate_off'].includes(holdResult?.reason);
+        if (!holdClean) {
+          // Normalized shape (uncapped r17 P1): the alert helper keys on
+          // released === false, which the hold rail's failure returns omit.
+          await ApptCardRequests.alertUnresolvedCancellationFee({
+            scheduledServiceId: id,
+            outcome: { released: false, reason: holdResult?.reason || 'hold_unresolved' },
+          });
+        }
         // Visits with no hold row may still carry the /secure lane's agreed
         // fee (mutually exclusive rails — the rail itself re-checks).
         if (holdResult?.reason === 'no_hold') {
           const apptFeeOutcome = await ApptCardRequests.handleAppointmentCardCancellation({
             scheduledServiceId: id,
             waiveFee,
+            now,
           });
           await ApptCardRequests.alertUnresolvedCancellationFee({ scheduledServiceId: id, outcome: apptFeeOutcome });
         }
@@ -90,13 +118,18 @@ async function runVisitCancellationFollowThrough({
   }
 
   // ——— 2. Invoice void (idempotent; also reverses inspection credit) ———
-  try {
+  // Per-target isolation (uncapped r18 P1): one failing void must not
+  // strand every LATER target's invoice/credit/dunning state — the same
+  // isolation contract the fee step above keeps.
+  {
     const InvoiceService = require('./invoice');
     for (const id of ids) {
-      await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      try {
+        await InvoiceService.voidOpenInvoicesForCancelledService(id);
+      } catch (e) {
+        logger.error(`[${source}] cancellation invoice void failed (target ${id}): ${e.message}`);
+      }
     }
-  } catch (e) {
-    logger.error(`[${source}] cancellation invoice void sweep failed: ${e.message}`);
   }
 
   // ——— 3. Tracker state ———

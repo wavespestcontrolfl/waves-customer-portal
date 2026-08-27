@@ -20,7 +20,10 @@ const DARK = {
 // surface actually exists.
 const NAV_ITEMS = [
   { path: '/tech', icon: '📅', label: 'Route', exact: true },
-  { path: '/tech/estimate', icon: '📋', label: 'Estimate' },
+  // /tech/estimate redirects into the admin pipeline builder — quoting is
+  // owner-only under the 2026-08-25 role lockdown, so the entry is hidden
+  // for technician logins (the estimate APIs 403 them regardless).
+  { path: '/tech/estimate', icon: '📋', label: 'Estimate', adminOnly: true },
   { path: '/tech/protocols', icon: '📖', label: 'Protocols' },
 ];
 
@@ -28,6 +31,7 @@ export default function TechLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [techName, setTechName] = useState('Tech');
+  const [techRole, setTechRole] = useState(null);
   const [authStatus, setAuthStatus] = useState(() => (
     getAdminAuthToken() ? 'checking' : 'unauthenticated'
   ));
@@ -72,6 +76,7 @@ export default function TechLayout() {
 
         localStorage.setItem('waves_admin_user', JSON.stringify(profile));
         setTechName(profile.name || getAdminDisplayName('Tech'));
+        setTechRole(profile.role);
         if (profile.mustChangePassword) {
           navigate('/admin/change-password', { replace: true });
           return;
@@ -271,7 +276,7 @@ export default function TechLayout() {
         padding: '8px 0 env(safe-area-inset-bottom, 8px)',
         zIndex: 50,
       }}>
-        {NAV_ITEMS.map((item) => {
+        {NAV_ITEMS.filter((item) => !item.adminOnly || techRole === 'admin').map((item) => {
           const active = isActive(item);
           return (
             <Link

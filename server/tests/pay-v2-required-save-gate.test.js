@@ -17,10 +17,16 @@ const {
 // (or rejects) the configured value.
 function qb({ first = null, firstError = null } = {}) {
   const q = {};
-  ['where', 'whereNot', 'whereNotNull', 'whereIn'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNot', 'whereNotNull', 'whereIn', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => {
     if (firstError) throw firstError;
     return first;
+  });
+  // getChargeableAutopayMethod walks candidates via orderBy().select()
+  // since the multi-default fix — resolve the same configured row as a list.
+  q.select = jest.fn(async () => {
+    if (firstError) throw firstError;
+    return first ? [first] : [];
   });
   return q;
 }

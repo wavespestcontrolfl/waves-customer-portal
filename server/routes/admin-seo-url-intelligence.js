@@ -1,11 +1,11 @@
 const express = require('express');
 const router = express.Router();
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const UrlIntelligence = require('../services/seo/url-intelligence');
 const { dispatchSeoPipeline } = require('../services/seo/seo-pipeline-dispatcher');
 const logger = require('../services/logger');
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 // GET /dashboard — aggregate cards
 router.get('/dashboard', async (req, res) => {

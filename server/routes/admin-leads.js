@@ -9,7 +9,7 @@ const { lockCustomerComms, tryLockCustomerComms } = require('../utils/customer-c
 // + findConflictingVisits before insert) — one mechanism, see #3453; a hit
 // is advisory (warn, never block — owner ruling 2026-08-25, #3486).
 const { assertAdminAppointmentWindow, slotOverlapWarning } = require('../services/scheduling/window-rules');
-const { adminAuthenticate, requireTechOrAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const leadAttribution = require('../services/lead-attribution');
 const { linkLeadEstimatesToCustomer } = require('../services/lead-estimate-link');
 const { bridgeLeadFunnelStage } = require('../services/lead-funnel-bridge');
@@ -105,7 +105,7 @@ function medianMinutes(values) {
     : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
+router.use(adminAuthenticate, requireAdmin);
 
 const LEAD_STATUSES = [
   'new',

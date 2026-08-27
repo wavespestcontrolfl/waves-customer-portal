@@ -112,7 +112,9 @@ beforeEach(() => {
 
 describe('consent v10 (ACH revocation contact aligned to billing@)', () => {
   test('version bumped and ACH text names billing@, not contact@', () => {
-    expect(CONSENT_VERSION).toBe('v10_2026-07-13');
+    // v11 added the prepay-card variant (GATE_PREPAY_CARD_AND_CHARGE);
+    // the ACH and card texts this suite pins are unchanged since v10.
+    expect(CONSENT_VERSION).toBe('v11_2026-08-25');
     expect(ACH_CONSENT_TEXT).toContain('billing@wavespestcontrol.com');
     expect(ACH_CONSENT_TEXT).not.toContain('contact@wavespestcontrol.com');
     // Card text unchanged by the bump.

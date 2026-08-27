@@ -38,6 +38,7 @@
  *   GATE_STICKY_CANCEL_WINDOW=true (sticky cancel window — a customer reschedule inside the fee window keeps a later cancel chargeable)
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
+ *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
  *   GATE_CONTACT_CORRECTION=true (auto-apply customer-stated name/email/address corrections from inbound SMS and processed calls)
@@ -45,6 +46,13 @@
  *   GATE_REPORT_CLICK_TO_ESTIMATE=true (priced cross-sell tap mints a real estimate and redirects into it)
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_PREPAY_CARD_AND_CHARGE=true (annual-prepay accepts require the card-on-file capture like per-application AND auto-charge the prepay invoice at accept — read directly in server/services/recurring-card-on-file.js, same style as RECURRING_CARD_ON_FILE.
+ *     ⚠ PREREQUISITES: this gate is INERT unless RECURRING_CARD_ON_FILE=true
+ *     AND GATE_AUTO_APPLY_ACCOUNT_CREDIT=true are BOTH also set — the prod
+ *     default for the credit gate is false (see autoApplyAccountCredit
+ *     below), so flipping only this gate silently keeps the legacy
+ *     invoice-and-pay-link behavior. isPrepayCardAndChargeEnabled() enforces
+ *     the conjunction; the flip checklist is all three vars.)
  *
  * In development, most gates are OPEN by default so you can test locally.
  * Customer-facing auto-send gates still require explicit opt-in everywhere.
@@ -132,6 +140,21 @@ const gates = {
   // in EVERY environment. Gate off: completions are byte-identical to
   // today. Kill switch: unset or any non-'true' value.
   cardHoldRescheduleAdopt: process.env.GATE_CARD_HOLD_RESCHEDULE_ADOPT === 'true',
+
+  // Park-on-cancel for one-time card holds (owner ruling 2026-08-26:
+  // cancelling a visit with a live hold KEEPS the hold active so it can
+  // follow the rebooked visit, instead of releasing it). With this gate
+  // on, a cancel that would have released free (outside the fee window,
+  // past-start cleanup, or an admin waive that is NOT an offboarding)
+  // leaves the hold 'held' on the cancelled visit — the stranded-hold
+  // detection lane (cardHoldRescheduleAdopt) bells when the successor
+  // completes, and ops/agents/repoint-orphaned-card-hold.js is the mover.
+  // In-window late-cancel FEES are unchanged (disclosed policy), consent
+  // revocation still releases, and offboarding always releases. Money-
+  // adjacent surface — fail-closed ==='true' in EVERY environment. Gate
+  // off: cancels release exactly as today. Kill switch: unset or any
+  // non-'true' value.
+  cardHoldParkOnCancel: process.env.GATE_CARD_HOLD_PARK_ON_CANCEL === 'true',
 
   // Overdue-balance visibility (owner ruling 2026-08-08, Donovan case): the
   // invoice EMAIL carries a "previous balance" note when the customer has
@@ -279,6 +302,22 @@ const gates = {
   // or cancelled are not reversed when it flips.
   editApptVisitCount: process.env.GATE_EDIT_APPT_VISIT_COUNT === 'true',
 
+  // Applying a PRICE or primary-SERVICE change from Edit appointment to "this
+  // and following" visits of a recurring series (per-visit stays the default).
+  // "Following" rewrites the stored price/service on real future visits AND
+  // stamps the change into the series template's recurring_template_overrides
+  // so auto-extend / top-up / alert-extend rows inherit it (the series parent
+  // row is usually already completed, so its own columns can't be rewritten
+  // without falsifying the first visit's record) — which is why it ships dark.
+  // Gate off: /series-summary answers canScopePriceService:false so the modal
+  // never renders the selector, update-details refuses a posted
+  // priceServiceScope outright rather than silently applying it per-visit,
+  // and the extension writers ignore any stored overrides — extensions copy
+  // the parent row exactly as before this lane existed. Kill switch: unset or
+  // any non-'true' value; sibling rows already rewritten are not reversed
+  // when it flips.
+  editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY
@@ -306,6 +345,10 @@ const gates = {
   // 404s while off (same unobservable-when-dark contract as payerStatements).
   lawnAssessmentMagnet: process.env.GATE_LAWN_ASSESSMENT === 'true',
   pestIdentifier: process.env.GATE_PEST_IDENTIFIER === 'true',
+  // Public careers application funnel (POST /api/public/careers/apply).
+  // Dark until the owner turns hiring on; the admin recruiting queue works
+  // at any setting (it only reads/updates existing rows).
+  jobApplications: process.env.GATE_JOB_APPLICATIONS === 'true',
 
   // Route-aware estimate slot ranking (2026-07-20): when ON, the estimate
   // funnel's offered slots lead with the guaranteed soonest card, then

@@ -29,6 +29,7 @@ import {
   Sparkles,
   Star,
   Tags,
+  UserPlus,
   Users,
   Wrench,
   Bot,
@@ -37,6 +38,15 @@ import {
 // Canonical metadata for every destination currently rendered by the admin
 // shell. The desktop sidebar and mobile More page are derived from the same
 // taxonomy so a destination cannot silently disappear from one surface.
+//
+// `adminOnly: true` scopes a destination to role === 'admin' (the owner).
+// A technician-role login keeps only the day-to-day service surfaces:
+// dashboard, schedule, reports, customers, communications, assessments,
+// staff time-tracking, equipment, inventory, knowledge, settings. Sales,
+// marketing, finance, and system destinations are owner-only. The sidebar,
+// More page, and the shell's deep-link guard (isPathAdminOnly) all read
+// this flag — UI scoping only; the API's requireAdmin/requireTechOrAdmin
+// middleware stays the enforcement boundary.
 export const ADMIN_NAV_ITEMS = {
   dashboard: {
     id: "dashboard",
@@ -44,6 +54,9 @@ export const ADMIN_NAV_ITEMS = {
     label: "Dashboard",
     icon: LayoutDashboard,
     mobileTabIcon: Home,
+    // server/routes/admin-dashboard.js is requireAdmin — the page is a wall
+    // of 403s for any other role. Technicians land on /admin/schedule.
+    adminOnly: true,
   },
   customers: {
     id: "customers",
@@ -56,6 +69,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/pipeline",
     label: "Pipeline",
     icon: ClipboardList,
+    adminOnly: true,
   },
   schedule: {
     id: "schedule",
@@ -102,48 +116,56 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/reviews",
     label: "Reviews",
     icon: Star,
+    adminOnly: true,
   },
   referrals: {
     id: "referrals",
     path: "/admin/referrals",
     label: "Referrals",
     icon: Gift,
+    adminOnly: true,
   },
   email: {
     id: "email",
     path: "/admin/email",
     label: "Email",
     icon: Mail,
+    adminOnly: true,
   },
   ppc: {
     id: "ppc",
     path: "/admin/ppc",
     label: "PPC",
     icon: Megaphone,
+    adminOnly: true,
   },
   seo: {
     id: "seo",
     path: "/admin/seo",
     label: "SEO",
     icon: Search,
+    adminOnly: true,
   },
   social: {
     id: "social",
     path: "/admin/social-media",
     label: "Social Media",
     icon: Share2,
+    adminOnly: true,
   },
   blog: {
     id: "blog",
     path: "/admin/blog",
     label: "Blog",
     icon: Newspaper,
+    adminOnly: true,
   },
   newsletter: {
     id: "newsletter",
     path: "/admin/newsletter",
     label: "Newsletter",
     icon: Send,
+    adminOnly: true,
   },
   assessments: {
     id: "assessments",
@@ -152,11 +174,20 @@ export const ADMIN_NAV_ITEMS = {
     icon: Camera,
     morePath: "/admin/lawn-assessments?tab=field",
   },
+  recruiting: {
+    id: "recruiting",
+    path: "/admin/recruiting",
+    label: "Recruiting",
+    icon: UserPlus,
+    // server/routes/admin-careers.js is requireAdmin on every endpoint.
+    adminOnly: true,
+  },
   agents: {
     id: "agents",
     path: "/admin/agents",
     label: "Agent Ops",
     icon: Bot,
+    adminOnly: true,
   },
   agentEstimate: {
     id: "agentEstimate",
@@ -164,6 +195,7 @@ export const ADMIN_NAV_ITEMS = {
     label: "Agent Estimate",
     icon: Sparkles,
     flag: "agent_estimate",
+    adminOnly: true,
   },
   equipment: {
     id: "equipment",
@@ -182,12 +214,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/price-match",
     label: "Price Match",
     icon: Tags,
+    adminOnly: true,
   },
   compliance: {
     id: "compliance",
     path: "/admin/compliance",
     label: "Compliance",
     icon: ShieldCheck,
+    adminOnly: true,
   },
   knowledge: {
     id: "knowledge",
@@ -200,12 +234,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/invoices",
     label: "Invoices",
     icon: FileText,
+    adminOnly: true,
   },
   recovery: {
     id: "recovery",
     path: "/admin/billing-recovery",
     label: "Recovery",
     icon: Banknote,
+    adminOnly: true,
   },
   payers: {
     id: "payers",
@@ -220,12 +256,14 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/banking",
     label: "Banking",
     icon: Landmark,
+    adminOnly: true,
   },
   taxes: {
     id: "taxes",
     path: "/admin/tax",
     label: "Taxes",
     icon: Receipt,
+    adminOnly: true,
   },
   pricing: {
     id: "pricing",
@@ -239,6 +277,7 @@ export const ADMIN_NAV_ITEMS = {
     path: "/admin/tool-health",
     label: "Tool Health",
     icon: Activity,
+    adminOnly: true,
   },
   settings: {
     id: "settings",
@@ -283,7 +322,7 @@ const NAV_SECTION_DEFINITIONS = [
     section: "Marketing",
     itemIds: ["email", "ppc", "seo", "social", "blog", "newsletter"],
   },
-  { section: "Team & Automation", itemIds: ["staff", "agents", "agentEstimate"] },
+  { section: "Team & Automation", itemIds: ["staff", "recruiting", "agents", "agentEstimate"] },
   {
     section: "Billing & Finance",
     itemIds: [
@@ -361,6 +400,59 @@ export const ADMIN_MOBILE_TABS = MOBILE_TAB_IDS.map((itemId) =>
 
 function pathnameFor(path) {
   return String(path || "").split("?")[0];
+}
+
+// Deep-link guard, DEFAULT-DENY: nav filtering alone is not a boundary — a
+// non-admin can still type /admin/banking, and routes that never appear in
+// the nav taxonomy (/admin/estimates/:id/proposal, /admin/_design-system,
+// /admin/leads, …) would slip an adminOnly-flag check entirely (codex P1).
+// So the guard allowlists the technician day-to-day prefixes and treats
+// EVERY other /admin path — current or future — as owner-only. The API's
+// role middleware stays the real enforcement.
+const TECH_ALLOWED_PATH_PREFIXES = [
+  "/admin/schedule",
+  "/admin/dispatch",
+  "/admin/timetracking",
+  "/admin/projects", // Reports
+  "/admin/customers",
+  "/admin/communications",
+  "/admin/lawn-assessments",
+  "/admin/lawn-assessment",
+  "/admin/lawn-protocol",
+  "/admin/lawn-diagnostic",
+  "/admin/turf-height",
+  "/admin/protocols",
+  "/admin/equipment",
+  "/admin/equipment-calibration",
+  "/admin/fleet",
+  "/admin/inventory",
+  "/admin/knowledge",
+  "/admin/kb",
+  "/admin/settings",
+  "/admin/more",
+];
+
+// Owner-only pages that live UNDER a technician-allowed prefix — the prefix
+// match alone would admit them (codex P1). Both backend routers requireAdmin.
+const OWNER_ONLY_NESTED_PATHS = [
+  "/admin/customers/duplicates",
+  "/admin/settings/pest-pressure",
+];
+
+export function isPathAdminOnly(pathname) {
+  const p = String(pathname || "");
+  if (p === "/admin" || p === "/admin/") return false; // index redirects to dashboard
+  if (
+    OWNER_ONLY_NESTED_PATHS.some(
+      (nested) => p === nested || p.startsWith(`${nested}/`),
+    )
+  ) {
+    return true;
+  }
+  const allowed = TECH_ALLOWED_PATH_PREFIXES.some(
+    (prefix) => p === prefix || p.startsWith(`${prefix}/`),
+  );
+  return !allowed;
 }
 
 export function isAdminNavItemActive(item, pathname, search = "") {

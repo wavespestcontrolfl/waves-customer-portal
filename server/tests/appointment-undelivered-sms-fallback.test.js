@@ -39,6 +39,9 @@ function setDbQueues(queues) {
   });
   // db.raw is used for the "now() - interval" reconstruction branch.
   db.raw = jest.fn((sql) => sql);
+  // The 30006 cache gate runs its check + write in a transaction under the
+  // shared per-phone advisory lock; the mock trx is the db mock itself.
+  db.transaction = jest.fn(async (fn) => fn(db));
 }
 
 beforeEach(() => {
@@ -63,6 +66,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain],
       appointment_reminders: [reminderChain],
+      sms_log: [chain({ first: { created_at: '2026-06-19T13:00:00.000Z' } })],
+      messaging_suppression: [chain({ first: null })],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -94,6 +99,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
     setDbQueues({
       messaging_audit_log: [auditChain],
       customers: [custReadChain, custUpdateChain],
+      sms_log: [chain({ first: { created_at: '2026-06-19T13:00:00.000Z' } })],
+      messaging_suppression: [chain({ first: null })],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -183,6 +190,8 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
       appointment_reminders: [reminderChain],
       notifications: [notifExistsChain],
       notification_prefs: [prefsChain],
+      sms_log: [chain({ first: { created_at: '2026-06-21T13:00:00.000Z' } })],
+      messaging_suppression: [chain({ first: null })],
     });
 
     await AppointmentReminders.handleUndeliveredSms({
@@ -191,6 +200,125 @@ describe('AppointmentReminders.handleUndeliveredSms', () => {
 
     expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+  });
+
+  test('stale 30006 (newer START clearance): cache untouched, email fallback still sent', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c7',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss7' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c7', phone: '+19415551234', line_type: null } });
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      appointment_reminders: [reminderChain],
+      sms_log: [chain({ first: { created_at: '2026-06-19T13:00:00.000Z' } })],
+      // cleared AFTER the bounced send → the bounce is stale evidence
+      messaging_suppression: [chain({ first: { active: false, cleared_at: '2026-06-20T13:00:00.000Z' } })],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test7', status: 'undelivered', errorCode: '30006', to: '+19415551234',
+    });
+
+    // no customers UPDATE chain was queued — a write would throw "Unexpected db table"
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('raced legacy row (unstamped, logged just after a START clearance): send-race grace reads it stale, cache untouched', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c9',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss9' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c9', phone: '+19415551234', line_type: null } });
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      appointment_reminders: [reminderChain],
+      // UNSTAMPED legacy writer logged 2s AFTER the clearance — raw compare
+      // would call the bounce fresh; the 5s grace backdates it below cleared_at
+      sms_log: [chain({ first: { created_at: '2026-06-20T13:00:02.000Z', metadata: null } })],
+      messaging_suppression: [chain({ first: { active: false, cleared_at: '2026-06-20T13:00:00.000Z' } })],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test9', status: 'undelivered', errorCode: '30006', to: '+19415551234',
+    });
+
+    // no customers UPDATE chain was queued — a write would throw "Unexpected db table"
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('pre-handoff-stamped row gets NO grace: a send genuinely after the clearance still caches the landline', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c10',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss10' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c10', phone: '+19415551234', line_type: null } });
+    const custUpdateChain = chain({});
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain, custUpdateChain],
+      appointment_reminders: [reminderChain],
+      // same 2s-after-clearance timing, but the row is stamped pre-handoff —
+      // its created_at is trustworthy, so the send really postdates the START
+      sms_log: [chain({ first: { created_at: '2026-06-20T13:00:02.000Z', metadata: { pre_handoff_stamp: true } } })],
+      messaging_suppression: [chain({ first: { active: false, cleared_at: '2026-06-20T13:00:00.000Z' } })],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test10', status: 'undelivered', errorCode: '30006', to: '+19415551234',
+    });
+
+    expect(custUpdateChain.update).toHaveBeenCalledWith({ line_type: 'landline' });
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('unreadable callback freshness fails closed: cache untouched, email fallback still sent', async () => {
+    const auditChain = chain({
+      first: {
+        channel: 'sms',
+        purpose: 'appointment_confirmation',
+        customer_id: 'c8',
+        metadata: { original_message_type: 'confirmation', scheduled_service_id: 'ss8' },
+      },
+    });
+    const custReadChain = chain({ first: { id: 'c8', phone: '+19415551234', line_type: null } });
+    const reminderChain = chain({ first: { appointment_time: '2026-06-22T14:00:00.000Z', service_type: 'Quarterly Pest Control' } });
+    const brokenSmsLogChain = chain({});
+    brokenSmsLogChain.first = jest.fn(async () => { throw new Error('db down'); });
+
+    setDbQueues({
+      messaging_audit_log: [auditChain],
+      customers: [custReadChain],
+      appointment_reminders: [reminderChain],
+      sms_log: [brokenSmsLogChain],
+    });
+
+    await AppointmentReminders.handleUndeliveredSms({
+      sid: 'SM_test8', status: 'undelivered', errorCode: '30006', to: '+19415551234',
+    });
+
+    // no customers UPDATE chain was queued — a write would throw "Unexpected db table"
+    expect(AppointmentEmail.sendAppointmentConfirmationEmail).toHaveBeenCalledTimes(1);
   });
 
   test('non-appointment message is ignored (no landline change, no email)', async () => {
