@@ -960,6 +960,15 @@ async function maybeAutoMerge(run, pr) {
     }
   }
 
+  // 3.6 Repeat the queue-state re-check: step 3.5 added real network time
+  //    (listPrFiles/getFile + brief lookups), so an operator requeue/dismiss
+  //    landing during it must still block the merge — only the PR SHA is
+  //    pinned by the merge call itself, not the queue decision.
+  if (!(await queueRowStillParked(run))) {
+    logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during head-gate checks (operator action)`);
+    return { pending: true, reason: 'queue_row_moved_during_gating' };
+  }
+
   // 4. The merge itself is pinned to the head commit the gates above were
   //    checked against: GitHub rejects with 409 if the branch received
   //    another push while the merge call was in flight, so an unbuilt/
