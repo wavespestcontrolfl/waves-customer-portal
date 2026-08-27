@@ -12,7 +12,7 @@ jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeOblig
 
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
-const { getCardExpiryExemptCustomerIds } = require('../services/annual-prepay-renewals');
+const { getCardExpiryExemptCustomerIds, clearCardExpiryExemptCache } = require('../services/annual-prepay-renewals');
 
 const TODAY = etDateString();
 // Pure calendar math on date strings, mirroring the helper's dayAfter.
@@ -56,6 +56,7 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
   const termsRows = (own) => (own.some((c) => c[0] === 'join' && String(c[1]).startsWith('invoices'))
     ? pendingTerms
     : (typeof terms === 'function' ? terms(own) : terms));
+  clearCardExpiryExemptCache(); // each route() is a fresh world — never serve the previous scenario's memo
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
     if (String(table).startsWith('annual_prepay_terms')) return chain(termsRows, calls.terms);
@@ -474,6 +475,22 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
   test('a bare annual_prepay_term_id link without the completion stamp is NOT coverage — priced visit keeps the warning', async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ annual_prepay_term_id: 'term-1', prepaid_method: null })] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('the hot-path memo serves repeat calls for the same horizon without re-scanning, and never caches a failed lookup', async () => {
+    const calls = route({ terms: coveredAlways(['c-prepaid']) });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    const termsQueriesAfterFirst = calls.terms.length;
+    // second call (dashboard poll) → memo, no new terms query
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    expect(calls.terms.length).toBe(termsQueriesAfterFirst);
+    // a fail-toward-warning result is NOT pinned: after an error the next
+    // call recomputes and succeeds
+    const failedCalls = route({ terms: coveredAlways(['c-prepaid']), throwOn: 'payments' });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    const afterFailure = failedCalls.terms.length;
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual([]);
+    expect(failedCalls.terms.length).toBeGreaterThan(afterFailure);
   });
 
   test('lookup failures exempt nobody (fail toward the warning)', async () => {

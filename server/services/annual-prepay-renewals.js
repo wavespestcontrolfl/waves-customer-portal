@@ -3552,7 +3552,43 @@ function mergedRangesSpan(ranges, windowStart, windowEnd) {
  * flagged (that card is needed to renew). Fails toward the warning: any
  * lookup error → empty set (nobody exempt).
  */
+// HOT-PATH MEMO (Codex PR r13): the dashboard/bell generator polls its
+// cache every 30 seconds per process and the alert cron recomputes on a
+// five-minute cadence, while this classification runs a per-visit billing
+// audit (payer, eligibility, coverage, invoices, suppressors). Memoized
+// per horizon on the DEFAULT connection for a short TTL, sharing in-flight
+// computations so concurrent cache misses run ONE scan. A fail-toward-
+// warning result (lookup error → empty set) is never cached — a transient
+// error must not pin "nobody exempt" for the TTL. Explicit connections
+// (transactions) bypass the memo entirely. Freshness bound: an exemption
+// state change reaches the dashboard at most TTL late, well inside the
+// alert cron's own five-minute cadence; the daily/Monday jobs make one
+// call each and are unaffected.
+const CARD_EXPIRY_EXEMPT_TTL_MS = 2 * 60 * 1000;
+const cardExpiryExemptCache = new Map();
+
+function clearCardExpiryExemptCache() {
+  cardExpiryExemptCache.clear();
+}
+
 async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  if (conn !== db) return computeCardExpiryExemptCustomerIds(horizon, conn);
+  const hit = cardExpiryExemptCache.get(horizon);
+  if (hit && Date.now() - hit.at < CARD_EXPIRY_EXEMPT_TTL_MS) {
+    return new Set(await hit.promise);
+  }
+  const entry = { at: Date.now(), promise: computeCardExpiryExemptCustomerIds(horizon, conn) };
+  cardExpiryExemptCache.set(horizon, entry);
+  const result = await entry.promise;
+  if (result.lookupFailed && cardExpiryExemptCache.get(horizon) === entry) {
+    cardExpiryExemptCache.delete(horizon);
+  }
+  // callers get a plain copy — the cached set stays immutable and the
+  // lookupFailed marker never leaks
+  return new Set(result);
+}
+
+async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
   const today = etDateString();
   let covered;
   try {
@@ -3584,7 +3620,9 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
-    return new Set();
+    const failed = new Set();
+    failed.lookupFailed = true;
+    return failed;
   }
   if (!covered.size) return covered;
   try {
@@ -3903,7 +3941,9 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
-    return new Set();
+    const failed = new Set();
+    failed.lookupFailed = true;
+    return failed;
   }
   return covered;
 }
@@ -5091,6 +5131,7 @@ module.exports = {
   reconcileCoveredTermsSweep,
   getActivelyCoveredCustomerIds,
   getCardExpiryExemptCustomerIds,
+  clearCardExpiryExemptCache,
   getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,
   sendCustomerTermNotice,
