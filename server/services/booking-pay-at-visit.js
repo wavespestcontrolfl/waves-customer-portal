@@ -174,14 +174,19 @@ function resolveWizardSeriesPlan(estimate, serviceKey) {
   // every_6_weeks, never the generic bimonthly bucket; codex #3504 r1).
   const { explicitServiceCadence } = require('./estimate-converter');
   let pattern = explicitServiceCadence(picked.svc) || null;
-  if (serviceKey === 'mosquito' && (picked.visits === 9 || picked.visits === 12)) {
+  if (serviceKey === 'mosquito') {
     // Engine tier truth outranks the persisted label for mosquito
     // (MOSQUITO.tierVisits): 12 = monthly12; 9 = the seasonal9 Feb-Oct
     // program — the real wizard producer stamps seasonal9 rows with
     // frequency 'every_6_weeks' (estimate-public selectedMosquitoServiceRow),
     // an approximation that would seed billable treatments YEAR-ROUND and
-    // bypass the winter-start guard (codex #3504 P0). Off-tier mosquito
-    // visit counts still fail the promise check below.
+    // bypass the winter-start guard (codex #3504 P0). And ONLY those two
+    // programs exist: any other mosquito count fails closed HERE, never
+    // through the generic buckets — pricing_config.mosquito_visits is
+    // runtime-configurable, so a seasonal program tuned to e.g. 6 visits
+    // would otherwise read as 'bimonthly', pass the generic promise check,
+    // and seed billable treatments year-round (codex #3504 r6).
+    if (picked.visits !== 9 && picked.visits !== 12) return null;
     pattern = picked.visits === 12 ? 'monthly' : 'seasonal_feb_oct';
   }
   if (!pattern) return null;

@@ -3029,7 +3029,8 @@ async function createSelfBooking(payload = {}) {
             await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
             return { kept: matches[0] };
           }
-          if (RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'palm_injection') {
+          const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          if (activationFamilyKey === 'palm_injection') {
             // Recurring palm bills per-application against the RECURRING
             // catalog row: a name-only 'Palm Injections' visit resolves the
             // ONE-TIME palm_injection completion profile, whose typed
@@ -3059,6 +3060,37 @@ async function createSelfBooking(payload = {}) {
             }
             await trx('scheduled_services').where({ id: seriesParentRow.id }).update(palmPatch);
             seriesParentRow.service_id = palmCatalogRow.id;
+          } else {
+            // Cadence catalog identity for the other seedable families
+            // (codex #3504 r6): the coarse funnel labels ('Mosquito
+            // Control', 'Lawn Care', 'Tree & Shrub') cannot name a
+            // cadence-specific catalog row at completion —
+            // service-completion-profiles refuses ambiguous short-name
+            // matches, so unstamped series fall back to the generic
+            // profile. slot-reservation's exact-visit-count resolver is
+            // the single authority (never re-implement its table); an
+            // off-table combination stays unlinked, the documented
+            // fail-open contract — unlike palm, no wrong-money identity
+            // rides on it, so absence never aborts the activation.
+            const { cadenceCatalogKeyForProfile } = require('../services/slot-reservation');
+            const cadenceKey = cadenceCatalogKeyForProfile(
+              { service: activationFamilyKey, visitsPerYear: wizardSeriesPlan.visits },
+              false,
+            );
+            const catalogRow = cadenceKey
+              ? await trx('services').where({ service_key: cadenceKey }).first('id')
+              : null;
+            if (catalogRow?.id) {
+              const cadencePatch = { service_id: catalogRow.id, updated_at: trx.fn.now() };
+              if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+                cadencePatch.service_key_snapshot = cadenceKey;
+                seriesParentRow.service_key_snapshot = cadenceKey;
+              }
+              await trx('scheduled_services').where({ id: seriesParentRow.id }).update(cadencePatch);
+              seriesParentRow.service_id = catalogRow.id;
+            } else if (cadenceKey) {
+              logger.warn(`[booking:confirm] cadence catalog row ${cadenceKey} missing — series ${seriesParentRow.id} stays name-resolved (fail-open)`);
+            }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
             pattern: wizardSeriesPlan.pattern,
@@ -3214,6 +3246,51 @@ async function createSelfBooking(payload = {}) {
       }
     };
 
+    // Post-activation follow-through (codex #3504 r6) — everything here
+    // keys off state that only exists once the activation committed, and
+    // all of it is best-effort: a miss never voids the activated series.
+    const runWizardActivationFollowThrough = async (parentRowId) => {
+      // Secondary-property stamping — the SAME shared mechanism the
+      // estimate accept path runs post-commit. It stamps every visit
+      // correlated to the draft (parent + seeded children all carry
+      // source_estimate_id), no-ops when the quoted address IS the
+      // customer's primary, and never throws by contract; without it a
+      // second-property plan's whole year of visits dispatches to the
+      // primary address (estimate-property-linkage.js wrong-property
+      // doctrine).
+      try {
+        const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
+        await linkAcceptedEstimateProperty({ estimateId: pricing_estimate_id, customerId: custId });
+      } catch (err) {
+        logger.warn(`[booking:confirm] post-activation property linkage failed for ${parentRowId} (non-blocking): ${err.message}`);
+      }
+      // Tier sync BEFORE the tagger re-run: the welcome gate reads
+      // customers.waveguard_tier, and the seeder's own deferred sync is a
+      // post-commit race — the sync is idempotent/convergent, so running
+      // it inline only guarantees ordering.
+      try {
+        const { syncCustomerWaveGuardPlanFromScheduledServices } = require('../services/self-booking-plan-sync');
+        await db.transaction(async (trx) => {
+          await syncCustomerWaveGuardPlanFromScheduledServices({ database: trx, customerId: custId });
+        });
+      } catch (err) {
+        logger.warn(`[booking:confirm] post-activation tier sync failed for ${parentRowId} (non-blocking): ${err.message}`);
+      }
+      // Re-run the tagger now that the parent IS recurring and tiered: the
+      // booking-time run read is_recurring=false, so the shared
+      // new-recurring welcome gate could never pass for an activated
+      // wizard plan (codex #3504 r6). Tagging is an idempotent update,
+      // prep flows carry their own dedupe, and the welcome is the SAME
+      // deduplicated path every accept flow uses (idempotent via
+      // sendNewRecurringWelcome, still suppressed for label-only tiers).
+      try {
+        const AppointmentTagger = require('../services/appointment-tagger');
+        await AppointmentTagger.onServiceScheduled(parentRowId);
+      } catch (err) {
+        logger.warn(`[booking:confirm] post-activation tagger re-run failed for ${parentRowId} (non-blocking): ${err.message}`);
+      }
+    };
+
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
@@ -3314,6 +3391,12 @@ async function createSelfBooking(payload = {}) {
               }
             } catch (remErr) {
               logger.warn(`[booking:confirm] replay series reminder registration failed for ${txResult.existing.id} (self-heal sweep will recover): ${remErr.message}`);
+            }
+            // Same post-activation follow-through as the primary path
+            // (property stamping, tier sync, tagger/welcome re-run) — a
+            // replay-completed activation must not skip it (codex #3504 r6).
+            if (replayActivation?.seedResult) {
+              void runWizardActivationFollowThrough(replayParent.id);
             }
           }
         } catch (err) {
@@ -3544,7 +3627,12 @@ async function createSelfBooking(payload = {}) {
       // stays a single visit with the waiver-only disposition below.
       const seriesOutcome = await activateWizardSeries(serviceRow);
       if (seriesOutcome?.kept) duplicateSeriesKept = seriesOutcome.kept;
-      else if (seriesOutcome?.seedResult) followUpRows = seriesOutcome.seedResult.insertedRows || [];
+      else if (seriesOutcome?.seedResult) {
+        followUpRows = seriesOutcome.seedResult.insertedRows || [];
+        // Fire-and-forget: the booking response never waits on property
+        // stamping / tier sync / the tagger re-run (all best-effort).
+        void runWizardActivationFollowThrough(serviceRow.id);
+      }
 
     } else if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
       try {

@@ -50,6 +50,15 @@ describe('resolveWizardSeriesPlan', () => {
     expect(resolveWizardSeriesPlan(mosquitoEstimate({ visits: 10 }), 'mosquito')).toBeNull();
   });
 
+  test('an off-tier mosquito count NEVER falls through to the generic buckets (runtime-config drift)', () => {
+    // codex #3504 r6: pricing_config.mosquito_visits is configurable — a
+    // seasonal program tuned to 6 visits would read 'bimonthly', pass the
+    // generic promise check, and seed billable treatments year-round,
+    // bypassing the winter guard. Only the 9/12 programs exist.
+    expect(resolveWizardSeriesPlan(mosquitoEstimate({ visits: 6, frequency: 'bimonthly' }), 'mosquito')).toBeNull();
+    expect(resolveWizardSeriesPlan(mosquitoEstimate({ visits: 4, frequency: 'quarterly' }), 'mosquito')).toBeNull();
+  });
+
   test('an explicit seasonal cadence resolves at 9 visits', () => {
     const plan = resolveWizardSeriesPlan(
       mosquitoEstimate({ visits: 9, frequency: 'seasonal_feb_oct' }),
@@ -349,6 +358,45 @@ describe('booking route wiring (source contracts)', () => {
     // Children inherit the identity from the parent row (seeder contract).
     const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
     expect(seeder).toMatch(/copyIfPresent\(row, parent, \[\s*\n\s*'create_invoice_on_complete',[\s\S]{0,400}'service_id',/);
+  });
+
+  test('every seeded family stamps its cadence catalog identity (shared slot-reservation resolver)', () => {
+    // codex #3504 r6: the coarse funnel labels cannot name a
+    // cadence-specific catalog row at completion — unstamped series fall
+    // back to the generic completion profile.
+    expect(booking).toMatch(/cadenceCatalogKeyForProfile\(\s*\n\s*\{ service: activationFamilyKey, visitsPerYear: wizardSeriesPlan\.visits \},/);
+    expect(booking).toMatch(/cadence catalog row \$\{cadenceKey\} missing — series/);
+    const { cadenceCatalogKeyForProfile } = require('../services/slot-reservation');
+    expect(cadenceCatalogKeyForProfile({ service: 'mosquito', visitsPerYear: 12 }, false)).toBe('mosquito_monthly');
+    expect(cadenceCatalogKeyForProfile({ service: 'mosquito', visitsPerYear: 9 }, false)).toBe('mosquito_seasonal');
+    expect(cadenceCatalogKeyForProfile({ service: 'tree_shrub', visitsPerYear: 9 }, false)).toBe('tree_shrub_6week');
+    expect(cadenceCatalogKeyForProfile({ service: 'lawn_care', visitsPerYear: 9 }, false)).toBe('lawn_care_6week');
+  });
+
+  test('activation runs the shared post-activation follow-through (property stamp, tier sync, tagger/welcome re-run)', () => {
+    // codex #3504 r6: property_id/service_address stamping and the
+    // new-recurring welcome both key off post-activation state.
+    expect(booking).toMatch(/linkAcceptedEstimateProperty\(\{ estimateId: pricing_estimate_id, customerId: custId \}\)/);
+    expect(booking).toMatch(/syncCustomerWaveGuardPlanFromScheduledServices\(\{ database: trx, customerId: custId \}\)/);
+    expect(booking).toMatch(/runWizardActivationFollowThrough = async \(parentRowId\)[\s\S]{0,3000}AppointmentTagger\.onServiceScheduled\(parentRowId\)/);
+    // Both activation completions run it — primary and replay.
+    expect(booking).toMatch(/void runWizardActivationFollowThrough\(serviceRow\.id\);/);
+    expect(booking).toMatch(/void runWizardActivationFollowThrough\(replayParent\.id\);/);
+  });
+
+  test('a stranded activation (worker died between booking commit and activation) is recovered by the strip sweep', () => {
+    // codex #3504 r6: the stranded state is the durable claim; the sweep
+    // strips fail-safe (price-less single visit, office converts from the
+    // still-live draft) and rings a deduped admin bell.
+    const recovery = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recovery).toMatch(/whereNotNull\('ss\.self_booking_id'\)/);
+    expect(recovery).toMatch(/where\('e\.status', 'draft'\)/);
+    expect(recovery).toMatch(/lockCustomerComms\(trx, parent\.customer_id\)/);
+    expect(recovery).toMatch(/if \(!fresh \|\| fresh\.is_recurring \|\| fresh\.payment_method_preference !== 'pay_at_visit'\) return false;/);
+    expect(recovery).toMatch(/estimated_price: null,\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
+    const indexSrc = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    expect(indexSrc).toMatch(/sweepStrandedWizardActivations\(\{ limit: 10 \}\)/);
+    expect(typeof require('../services/wizard-series-activation-recovery').sweepStrandedWizardActivations).toBe('function');
   });
 
   test('a colliding seeded occurrence demotes to the WINDOWLESS placeholder (inert to occupancy), never a persisted overlap', () => {

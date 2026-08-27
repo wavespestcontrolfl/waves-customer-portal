@@ -1131,6 +1131,25 @@ httpServer.listen(PORT, () => {
       setInterval(runFirstTouchHoldSweep, 5 * 60 * 1000).unref();
     }
 
+    // Stranded wizard-series activation sweep (codex #3504 r6) — a worker
+    // dying between the booking commit and the post-commit series
+    // activation leaves a billable pay-at-visit parent with no follow-ups
+    // and a live quote draft. The sweep strips the stranded pricing
+    // (fail-safe: price-less single visit, office converts from the live
+    // draft) and rings an admin bell. No-op when nothing is stranded.
+    {
+      const runWizardActivationSweep = async () => {
+        try {
+          const { sweepStrandedWizardActivations } = require('./services/wizard-series-activation-recovery');
+          await sweepStrandedWizardActivations({ limit: 10 });
+        } catch (err) {
+          logger.error(`[wizard-series-recovery] sweep failed: ${err.message}`);
+        }
+      };
+      setTimeout(runWizardActivationSweep, 2 * 60 * 1000).unref();
+      setInterval(runWizardActivationSweep, 10 * 60 * 1000).unref();
+    }
+
     // WDO report attention sweep — exception-based bell for reports stalled
     // BEFORE send (inspection never closed out, signed-but-unsent drafts,
     // holds failing release). Quiet when clean; gated + cross-replica

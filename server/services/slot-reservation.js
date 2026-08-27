@@ -1560,6 +1560,11 @@ module.exports = {
   // it so identity has exactly one resolver — never re-implement the
   // engine-key containment lookup.
   catalogLinkForProfile,
+  // Cadence-family catalog-key authority (family + exact visit count →
+  // service_key). The wizard self-book activation reuses it to stamp
+  // seeded lawn/mosquito/tree series (codex #3504 r6) — never re-implement
+  // the visit-count table.
+  cadenceCatalogKeyForProfile,
   _internals: {
     parseSlotId,
     addMinutesToTime,
