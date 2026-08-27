@@ -3277,7 +3277,44 @@ async function createSelfBooking(payload = {}) {
             && replayParent.payment_method_preference === 'pay_at_visit'
             && draftStillLive
             && !hasChildren) {
-            await activateWizardSeries(replayParent);
+            const replayActivation = await activateWizardSeries(replayParent);
+            // Reminder rows for the replay-activated series (codex #3504
+            // r5 hook): this path returns before the main registration
+            // loop, so without this the parent (if the first request died
+            // before registering it) and every replay-seeded child would
+            // never enter appointment_reminders. registerAppointment is
+            // idempotent per scheduled_service_id (already_registered
+            // no-ops), a conflict-demoted child registers as the
+            // pre-closed windowless placeholder, and no confirmation is
+            // (re)sent from a replay.
+            try {
+              const replaySeeded = replayActivation?.seedResult?.insertedRows || [];
+              if (replaySeeded.length) {
+                const AppointmentReminders = require('../services/appointment-reminders');
+                for (const row of [replayParent, ...replaySeeded].filter((r) => r?.id)) {
+                  const rowDate = typeof row.scheduled_date === 'string'
+                    ? row.scheduled_date.slice(0, 10)
+                    : (row.scheduled_date instanceof Date
+                      ? row.scheduled_date.toISOString().slice(0, 10)
+                      : String(row.scheduled_date || '').slice(0, 10));
+                  const windowless = !row.window_start;
+                  const rowStart = windowless ? '08:00' : String(row.window_start).slice(0, 5);
+                  await AppointmentReminders.registerAppointment(
+                    row.id,
+                    custId,
+                    `${rowDate}T${rowStart}`,
+                    row.service_type || resolvedServiceType,
+                    'booking_followup',
+                    {
+                      sendConfirmation: false,
+                      ...(windowless ? { closeReminderWindows: true } : {}),
+                    },
+                  );
+                }
+              }
+            } catch (remErr) {
+              logger.warn(`[booking:confirm] replay series reminder registration failed for ${txResult.existing.id} (self-heal sweep will recover): ${remErr.message}`);
+            }
           }
         } catch (err) {
           logger.warn(`[booking:confirm] replay series activation skipped for ${txResult.existing.id}: ${err.message}`);

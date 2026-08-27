@@ -368,6 +368,15 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/isWindowlessFollowUp \? \{ closeReminderWindows: true \} : \{\}/);
   });
 
+  test('a replay-activated series registers its reminder rows before the early return', () => {
+    // codex #3504 r5 hook: the replay path returns before the main
+    // registration loop — without its own idempotent pass the whole
+    // replay-seeded series would never enter appointment_reminders.
+    expect(booking).toMatch(/const replayActivation = await activateWizardSeries\(replayParent\);/);
+    expect(booking).toMatch(/\[replayParent, \.\.\.replaySeeded\]/);
+    expect(booking).toMatch(/replaySeeded\.length[\s\S]{0,1500}sendConfirmation: false,\s*\n\s*\.\.\.\(windowless \? \{ closeReminderWindows: true \} : \{\}\)/);
+  });
+
   test('the duplicate-series skip log is cadence-neutral (non-pest plans are not quarterly)', () => {
     expect(booking).toMatch(/Skipped recurring follow-up seeding for booking/);
     expect(booking).toMatch(/no second recurring series was seeded/);
