@@ -10,11 +10,29 @@ const API_BASE = import.meta.env.VITE_API_URL || '/api';
 // Mirror a server-confirmed unread count onto the home-screen app icon
 // (Badging API — iOS 16.4+ installed PWAs; no-op elsewhere). Only called
 // with counts the server returned or accepted a read-write for, so an
-// offline session never wipes a real badge.
-function syncAppBadge(count) {
+// offline session never wipes a real badge. Also advances the service
+// worker's badge-ordering state under the same Web Lock (sw.js
+// applyAppBadge): a push issued before this count but delivered after —
+// the delayed-push case — must not resurrect a number the admin already
+// cleared by reading. Never rejects; callers fire-and-forget.
+async function syncAppBadge(count) {
   if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
-  const p = count > 0 ? navigator.setAppBadge(count) : navigator.clearAppBadge();
-  if (p && typeof p.catch === 'function') p.catch(() => {});
+  const apply = async () => {
+    try {
+      if (typeof caches !== 'undefined') {
+        const cache = await caches.open('waves-badge-state');
+        await cache.put('/__badge-seq', new Response(JSON.stringify({ seq: Date.now(), count })));
+      }
+    } catch { /* ordering state is best-effort */ }
+    try {
+      if (count > 0) await navigator.setAppBadge(count);
+      else await navigator.clearAppBadge();
+    } catch { /* platform without a visible badge surface */ }
+  };
+  try {
+    if (navigator.locks?.request) await navigator.locks.request('waves-badge', apply);
+    else await apply();
+  } catch { /* badge sync must never surface to the bell */ }
 }
 
 export default function NotificationBell({ type = 'admin', customerId }) {
