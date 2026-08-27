@@ -320,10 +320,13 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         // tracking-number row so form vs call conversions stay separable in
         // source ROI; the call row is the fallback so attribution never drops
         // to NULL. (Before this branch every gclid form lead was Unattributed.)
+        // Deliberately NOT filtered on is_active (same rationale as
+        // lead-source-resolver): a paused web-form row is still the true
+        // channel — filtering it out would route form leads onto the call
+        // row and contaminate call ROI. Active rows only break ties.
         sourceRecord = await db('lead_sources')
           .where('source_type', 'google_ads')
-          .where('is_active', true)
-          .orderByRaw('(twilio_phone_number IS NULL) DESC')
+          .orderByRaw('(twilio_phone_number IS NULL) DESC, is_active DESC')
           .first();
       }
       if (sourceRecord) leadSourceId = sourceRecord.id;
