@@ -1837,35 +1837,67 @@ function blankNonRenderedMarkdown(text) {
     .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
   // lines), masked BEFORE fences so a span opened after prose can close at a
-  // line-start run ("See ```\n…\n``` here"). A span never OPENS on a
-  // fence-candidate line (a ≤3-space-indented 3+ run at line start) — that
-  // line is left for the fence pass, which also keeps the "info string may
-  // not contain a backtick" rule intact. Length-preserving mask.
+  // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
+  // fence-opener line (a ≤3-space-indented 3+ run at line start) — that
+  // line is left for the fence pass. A REJECTED backtick-fence candidate
+  // (info string contains a backtick) is reprocessed by CommonMark as
+  // inline content, so its run CAN open a span. Length-preserving mask.
   const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
   const spanned = afterComments.replace(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g, (c, run, offset, whole) => {
     const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
     const lineEnd = whole.indexOf('\n', offset);
     const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
-    if (fenceLineRe.test(line)) return c;
+    if (fenceLineRe.test(line)) {
+      const open = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (!open || !(open[1][0] === '`' && open[2].includes('`'))) return c;
+    }
     return c.replace(/[^\n]/g, ' ');
   });
-  // Pass 3 — fenced code, per line, scoped to its blockquote container.
-  let fence = null; // { ch, len, depth }
-  const fenced = spanned.split('\n').map((l) => {
+  // Pass 3 — fenced code, per line, scoped to its blockquote AND list
+  // containers. Opener VALIDITY is judged on the pre-span-mask source line:
+  // a span mask can blank the info-string backtick that rejects a backtick
+  // fence (or the prose before a mid-line run), and a masked residue must
+  // not start reading as a fence.
+  const sourceLines = afterComments.split('\n');
+  let fence = null; // { ch, len, depth, listIndent }
+  let fenceListIndent = 0; // content column of the current list item (0 = top level)
+  let fencePrevBlank = true;
+  const fenced = spanned.split('\n').map((l, i) => {
     const prefix = l.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/);
     const depth = prefix ? (prefix[0].match(/>/g) || []).length : 0;
     const stripped = prefix ? l.slice(prefix[0].length) : l;
-    // A fence opened inside a blockquote ends with its container: a
-    // non-blank line at a shallower quote depth is outside the block.
-    if (fence && depth < fence.depth && stripped.trim() !== '') fence = null;
+    const blank = stripped.trim() === '';
+    const indent = stripped.match(/^ */)[0].length;
+    // A fence opened inside a container ends with its container: a
+    // non-blank line at a shallower quote depth — or dedented out of the
+    // fence's list item (code has no lazy continuation) — is outside the
+    // block and renders normally.
+    if (fence && !blank && (depth < fence.depth || indent < fence.listIndent)) {
+      if (indent < fence.listIndent) fenceListIndent = 0;
+      fence = null;
+    }
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
       return '';
     }
+    // List tracking (pass-4 posture): a marker sets the item's content
+    // column; a dedented non-blank line after a blank ends the list.
+    const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
+    if (listItem) fenceListIndent = listItem[1].length;
+    else if (!blank && fencePrevBlank && indent < fenceListIndent) fenceListIndent = 0;
+    fencePrevBlank = blank;
     if (/^(?: {4}|\t)/.test(stripped)) return l; // indented lines resolved in pass 4
     const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    if (open && !(open[1][0] === '`' && open[2].includes('`'))) { fence = { ch: open[1][0], len: open[1].length, depth }; return ''; }
+    if (open) {
+      const srcStripped = sourceLines[i].slice(prefix ? prefix[0].length : 0);
+      const srcOpen = srcStripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
+        if (indent < fenceListIndent) fenceListIndent = 0; // a dedented fence ends the list
+        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: fenceListIndent };
+        return '';
+      }
+    }
     return l;
   }).join('\n');
   // Pass 4 — blockquote prefixes, indented code (list-aware), per line.
@@ -1894,9 +1926,11 @@ function blankNonRenderedMarkdown(text) {
 
 // GFM: a table is recognized only when header and delimiter rows have the
 // same number of cells.
-// Escaped pipes ("\\|") are cell CONTENT, not separators.
+// Escaped pipes ("\\|") are cell CONTENT, not separators — but only under
+// an ODD backslash run: "\\\\|" escapes the backslash, leaving a real
+// separator.
 function splitCells(line) {
-  return line.trim().replace(/\\\|/g, '\u0000').replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.replace(/\u0000/g, '\\|'));
+  return line.trim().replace(/(\\+)\|/g, (m, bs) => (bs.length % 2 === 1 ? `${bs.slice(1)}\u0000` : m)).replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.replace(/\u0000/g, '\\|'));
 }
 function cellCount(line) {
   return splitCells(line).length;

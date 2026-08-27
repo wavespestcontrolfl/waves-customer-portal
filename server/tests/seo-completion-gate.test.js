@@ -457,6 +457,24 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
+  test('duplicate reference definitions resolve to the FIRST (CommonMark)', () => {
+    // First definition points at an informational page — the rendered anchor
+    // is not a conversion link, whatever the later duplicate says.
+    const informationalFirst = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate][cta] today.\n\n[cta]: /pest-library/\n[cta]: /contact/' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(informationalFirst.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    // First definition IS the conversion route — the duplicate is inert.
+    const conversionFirst = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate][cta] today.\n\n[cta]: /contact/\n[cta]: /pest-library/' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(conversionFirst.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+  });
+
   test('a fence closed by a longer run still hides its CTA example', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n\`\`\`\`md\n[Schedule Service](/contact/)\n\`\`\`\`\`` }),
@@ -628,6 +646,25 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(quotedFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // An unclosed fence nested in a list item ends when the list ends —
+    // dedented top-level content after it is rendered, not blanked.
+    const listFence = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n- item\n  \`\`\`\n  code\nAfter the list [Schedule Service](/contact/).` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(listFence.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A rejected backtick-fence candidate (backtick in the info string)
+    // reprocesses as a code SPAN when a matching run follows — a CTA inside
+    // that span renders as code, not a clickable link.
+    const rejectedFenceSpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants everywhere.\n\`\`\`md\`x\n[Get My Free Pest Control Estimate](/contact/)\nsee \`\`\` here' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(rejectedFenceSpan.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
 
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),

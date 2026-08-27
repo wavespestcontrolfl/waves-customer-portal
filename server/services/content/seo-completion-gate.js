@@ -418,9 +418,14 @@ function extractLinks(body) {
   // CommonMark label matching is case-insensitive with internal whitespace
   // collapsed — normalize both the definition and the reference the same way.
   const label = (l) => String(l || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // Duplicate definitions: CommonMark resolves references against the FIRST
+  // definition of a label; later repeats are inert.
   const defs = new Map();
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
-  while ((m = def.exec(s)) !== null) defs.set(label(m[1]), dest(m[2]));
+  while ((m = def.exec(s)) !== null) {
+    const key = label(m[1]);
+    if (!defs.has(key)) defs.set(key, dest(m[2]));
+  }
   if (defs.size) {
     const ref = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {

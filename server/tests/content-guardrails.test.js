@@ -2238,6 +2238,17 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('A \\| B | C\n- | -\n1 | 2')).toBe(true);
     // Inline code spans of 3+ backticks after prose are code.
     expect(guardrails.hasRawMarkdownTable('See ```\nA | B\n--- | ---\n``` here')).toBe(false);
+    // A rejected backtick-fence candidate (backtick in the info string) is
+    // reprocessed inline: with a later matching run it opens a code SPAN,
+    // hiding the table inside it.
+    expect(guardrails.hasRawMarkdownTable('```js`x\nA | B\n- | -\nsee ``` here')).toBe(false);
+    // A fence nested in a list item ends when the list ends — dedented
+    // top-level content after it is live.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  code\nA | B\n- | -\n1 | 2')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  A | B\n  - | -\n  ```')).toBe(false);
+    // Backslash PARITY before pipes: "\\\\|" escapes the backslash, the pipe
+    // is a real separator — three header cells match a three-cell delimiter.
+    expect(guardrails.hasRawMarkdownTable('A \\\\| B | C\n- | - | -\n1 | 2 | 3')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
