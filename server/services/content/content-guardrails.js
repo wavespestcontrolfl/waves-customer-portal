@@ -1832,18 +1832,21 @@ function extractRawMarkdownTables(text) {
   // at least the opening run length — a ``` inside a ~~~ block is content.
   let fence = null; // { ch, len }
   const lines = raw.map((l) => {
-    const fm = l.match(/^\s*(?:>\s*)*(`{3,}|~{3,})/);
-    if (fm) {
-      const ch = fm[1][0];
-      const len = fm[1].length;
-      if (!fence) { fence = { ch, len }; return ''; }
-      if (fence.ch === ch && len >= fence.len) { fence = null; return ''; }
-      return '';
+    // Strip blockquote prefixes first so fences/tables inside quotes are seen.
+    const stripped = l.replace(/^\s*(?:>\s*)+/, '');
+    if (!fence) {
+      // 4-space / tab indent is an indented code block (CommonMark) — never a
+      // fence and never a table row.
+      if (/^(?: {4}|\t)/.test(stripped)) return '';
+      const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (open) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
+      return stripped;
     }
-    if (fence) return '';
-    // 4-space / tab indent is an indented code block, not a table row.
-    if (/^(?: {4}|\t)/.test(l)) return '';
-    return l.replace(/^\s*(?:>\s*)+/, '');
+    // Inside a fence: closes only on the same marker char, >= opening length,
+    // <=3 leading spaces, and NOTHING but trailing whitespace after it.
+    const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+    if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
+    return '';
   });
   const tables = [];
   // Raw HTML tables are the other non-component table representation —

@@ -2204,6 +2204,10 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A ``` inside a ~~~ block does not close it; a table after the block still counts.
     expect(guardrails.hasRawMarkdownTable('~~~\n```\n| A | B |\n| --- | --- |\n~~~\n')).toBe(false);
     expect(guardrails.hasRawMarkdownTable('~~~\n```\n~~~\n| A | B |\n| --- | --- |\n')).toBe(true);
+    // A 4-space-indented ``` is indented code, not a fence — the later table is live.
+    expect(guardrails.hasRawMarkdownTable('    ```\n| A | B |\n| --- | --- |\n')).toBe(true);
+    // A same-marker line with trailing text does not close a fence.
+    expect(guardrails.hasRawMarkdownTable('```\n``` not a close\n| A | B |\n| --- | --- |\n```\n')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
