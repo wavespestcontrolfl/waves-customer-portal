@@ -397,35 +397,24 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
     }
 
     // ── GBP (per location) ──
+    // Delegated to TokenHealthService.checkSingle: it exchanges the refresh
+    // token on every check (catching invalid_grant after a revocation), whereas
+    // google-business's cached client can hand back a still-valid access token
+    // and report a revoked grant as healthy. Same canonical gbp_* keys the
+    // scheduled checker maintains; this loop only persists the result.
     try {
-      const gbpService = require('./google-business');
-      const { WAVES_LOCATIONS } = require('../config/locations');
-      const LOC_KEYS = { 'bradenton': 'LWR', 'parrish': 'PARRISH', 'sarasota': 'SARASOTA', 'venice': 'VENICE' };
-
-      for (const loc of WAVES_LOCATIONS) {
-        const envKey = LOC_KEYS[loc.id];
-        const credential = {
-          // Canonical key shared with TokenHealthService.KNOWN_PLATFORMS
-          // (gbp_lwr …) — the previous `gbp-${loc.id}` form minted duplicate
-          // rows the scheduled pruner then deleted, every admin check.
-          platform: `gbp_${envKey.toLowerCase()}`,
+      const TokenHealthService = require('./token-health');
+      const GBP_PLATFORMS = { gbp_lwr: 'LWR', gbp_parrish: 'PARRISH', gbp_sarasota: 'SARASOTA', gbp_venice: 'VENICE' };
+      for (const [platform, envKey] of Object.entries(GBP_PLATFORMS)) {
+        const res = await TokenHealthService.checkSingle(platform);
+        results.push({
+          platform,
           credential_type: 'refresh-token',
           env_var_name: `GBP_REFRESH_TOKEN_${envKey}`,
-        };
-        // _getClient is async (google-business.js) — without the await the
-        // Promise's missing getAccessToken threw and marked every GBP row
-        // expired (a false token-alert once these rows became canonical).
-        const client = await gbpService._getClient(loc.id);
-        if (!client) {
-          results.push({ ...credential, status: 'error', error: `Missing GBP_CLIENT_ID_${envKey}, GBP_CLIENT_SECRET_${envKey}, or GBP_REFRESH_TOKEN_${envKey}` });
-          continue;
-        }
-        try {
-          const { token } = await client.getAccessToken();
-          results.push({ ...credential, status: token ? 'healthy' : 'error', error: token ? null : 'No token returned' });
-        } catch (err) {
-          results.push({ ...credential, status: 'expired', error: err.message });
-        }
+          status: res.status,
+          error: res.lastError || null,
+          expires_at: res.expiresAt || null,
+        });
       }
     } catch (err) {
       logger.warn(`[token-health] GBP check skipped: ${err.message}`);
