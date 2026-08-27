@@ -30,6 +30,7 @@
 // must know this visit currently has no invoice behind it.
 
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import MobilePaymentSheet from './MobilePaymentSheet';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -104,12 +105,13 @@ function friendlyDate(ymd) {
 }
 
 function Shell({ children }) {
-  return (
-    <div className="fixed inset-0 z-[1200] flex items-center justify-center" style={{ background: 'rgba(15,23,42,0.55)', padding: 16 }}>
-      <div className="bg-white rounded-2xl w-full" style={{ maxWidth: 460, padding: 20 }}>
+  return createPortal(
+    <div className="fixed inset-0 z-[1200] flex items-center justify-center p-0 sm:p-4" style={{ background: 'rgba(15,23,42,0.55)' }}>
+      <div className="bg-white rounded-none sm:rounded-2xl w-full h-full sm:h-auto max-w-none sm:max-w-[460px] overflow-y-auto box-border p-5 pt-[calc(20px+env(safe-area-inset-top))] pb-[calc(20px+env(safe-area-inset-bottom))] sm:pt-5 sm:pb-5">
         {children}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

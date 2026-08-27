@@ -5,6 +5,7 @@
 // GET /admin/customers/:id/estimates-summary.
 
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import {
   Phone,
@@ -139,7 +140,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
       }).toString()}`
     : "/admin/estimates";
 
-  return (
+  return createPortal(
     <>
       {" "}
       <div
@@ -148,7 +149,7 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
         aria-hidden
       />{" "}
       <aside
-        className="fixed top-0 right-0 z-[110] h-full w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col"
+        className="fixed inset-y-0 right-0 z-[110] h-[100dvh] max-h-[100dvh] w-full sm:max-w-[480px] bg-white border-l border-hairline border-zinc-200 shadow-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         role="dialog"
         aria-label="Customer + estimate history"
         style={{ fontFamily: "'Roboto', Arial, sans-serif" }}
@@ -567,7 +568,8 @@ export default function CustomerEstimatesPanel({ customerId, onClose }) {
           </div>
         )}
       </aside>{" "}
-    </>
+    </>,
+    document.body,
   );
 }
 

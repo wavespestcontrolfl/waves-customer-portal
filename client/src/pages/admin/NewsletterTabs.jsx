@@ -7,6 +7,7 @@
 // EmailAutomationsPanelV2 — imported directly by NewsletterPage.
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
@@ -1727,15 +1728,14 @@ function SendConfirmDialog({
   // since the operator authored the HTML and may have pasted anything.
   const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><base target="_blank"><style>html,body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.55;color:#0F172A;}body{padding:14px;}h1,h2,h3,h4{line-height:1.25;}img{max-width:100%;height:auto;}*{box-sizing:border-box;}</style></head><body>${stripGreetingToken(htmlBody) || '<em style="color:#64748B">(empty body)</em>'}</body></html>`;
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
       onClick={onCancel}
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-2xl flex flex-col"
-        style={{ maxHeight: "90vh" }}
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-2xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1828,7 +1828,8 @@ function SendConfirmDialog({
           </div>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -1840,15 +1841,14 @@ function SendConfirmDialog({
 // operator-authored.
 
 function PreviewDialog({ html, loading, onClose }) {
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-0 sm:p-4"
       onClick={onClose}
     >
       {" "}
       <div
-        className="bg-white border-hairline border-zinc-300 rounded-sm shadow-xl w-full max-w-3xl flex flex-col"
-        style={{ maxHeight: "90vh" }}
+        className="bg-white border-hairline border-zinc-300 rounded-none sm:rounded-sm shadow-xl w-full h-full sm:h-auto sm:max-h-[90vh] max-w-none sm:max-w-3xl flex flex-col box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         onClick={(e) => e.stopPropagation()}
       >
         {" "}
@@ -1898,7 +1898,8 @@ function PreviewDialog({ html, loading, onClose }) {
           </Button>{" "}
         </div>{" "}
       </div>{" "}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

@@ -40,6 +40,7 @@ import {
   lazy,
   Suspense,
 } from "react";
+import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import { Plus } from "lucide-react";
 import {
@@ -2325,9 +2326,9 @@ export default function DispatchPageV2({
       )}
 
       {/* Mobile "More" bottom sheet */}
-      {showMoreSheet && (
+      {showMoreSheet && createPortal(
         <div
-          className="fixed inset-0 z-50 md:hidden"
+          className="fixed inset-0 z-[100] md:hidden"
           role="dialog"
           aria-modal="true"
         >
@@ -2379,7 +2380,8 @@ export default function DispatchPageV2({
               ))}
             </div>{" "}
           </div>{" "}
-        </div>
+        </div>,
+        document.body,
       )}
 
       {viewMode === "day" && <RecurringAlertsBannerV2 />}
@@ -2711,9 +2713,9 @@ export default function DispatchPageV2({
           }}
         />
       )}
-      {continueProjectId && (
+      {continueProjectId && createPortal(
         <div
-          className="fixed inset-0 z-50 bg-black/40 overflow-y-auto"
+          className="fixed inset-0 z-[100] bg-black/40 overflow-y-auto"
           onClick={() => {
             // A stray scrim tap must not silently discard unsaved report
             // edits — the editor keeps them only in component state
@@ -2730,7 +2732,7 @@ export default function DispatchPageV2({
           }}
         >
           <div
-            className="max-w-4xl mx-auto my-6 px-4"
+            className="max-w-4xl mx-auto min-h-full sm:min-h-0 bg-white sm:bg-transparent my-0 sm:my-6 px-0 sm:px-4 box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* cancelled/no_show retirements aren't "closed" to
@@ -2807,7 +2809,8 @@ export default function DispatchPageV2({
               canAdminActions={getAdminUser()?.role === "admin"}
             />
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
       {rescheduleService && (
         <RescheduleModal

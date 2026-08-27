@@ -8,6 +8,7 @@
 // (called with { notificationType, scope }), or tells the parent to
 // revert via onCancel.
 import { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Button } from '../ui';
 import { useSlotConflicts } from './useSlotConflicts';
 import SlotConflictNotice from './SlotConflictNotice';
@@ -104,9 +105,9 @@ export default function RescheduleConfirmModal({
   const toText = `${formatDateLong(toDate)} at ${formatTimeFromMinutes(toMinutes)}`;
   const who = customerName || 'this client';
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-4"
       role="dialog"
       aria-modal="true"
     >
@@ -115,7 +116,7 @@ export default function RescheduleConfirmModal({
         onClick={busy ? undefined : onCancel}
       />
       <div
-        className="relative w-full max-w-2xl bg-white rounded-md shadow-xl"
+        className="relative w-full h-full sm:h-auto max-w-none sm:max-w-2xl bg-white rounded-none sm:rounded-md shadow-xl overflow-y-auto box-border pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]"
         style={{ border: '1px solid #E4E4E7', fontFamily: "'Roboto', system-ui, sans-serif" }}
       >
         {/* Header */}
@@ -214,6 +215,7 @@ export default function RescheduleConfirmModal({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

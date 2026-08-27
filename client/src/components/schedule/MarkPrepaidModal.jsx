@@ -6,6 +6,7 @@
 // Mobile-first layout — stays inside the admin V2 system (Tailwind zinc ramp).
 
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useFeatureFlag } from '../../hooks/useFeatureFlag';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -196,7 +197,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
     }
   }
 
-  return (
+  return createPortal(
     <div
       onClick={dismiss}
       className="fixed inset-0 z-[1200] flex items-end md:items-center justify-center"
@@ -388,6 +389,7 @@ export default function MarkPrepaidModal({ service, onClose, onSaved }) {
           {saving ? 'Saving…' : savedWithNote ? 'Done' : isExistingPrepayment ? 'Save changes' : 'Save prepayment'}
         </button>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
