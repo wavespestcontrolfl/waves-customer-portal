@@ -429,9 +429,11 @@ router.get('/analytics', async (req, res, next) => {
     // (social-engagement.js), else the most recent published (the pre-ingest
     // behaviour — keeps the tab populated before the flag is on).
     const publishedPosts = posts.filter(p => p.status === 'published');
+    // engagementByPost already returns {} for a missing table; any other
+    // failure (schema drift, DB outage) propagates to the error handler
+    // rather than masquerading as "no engagement data".
     const engagement = await require('../services/social-engagement')
-      .engagementByPost(publishedPosts.map(p => p.id))
-      .catch(() => ({}));
+      .engagementByPost(publishedPosts.map(p => p.id));
     const withEngagement = Object.keys(engagement).length;
     const ranked = withEngagement
       ? publishedPosts.filter(p => engagement[p.id]).sort((a, b) => engagement[b.id].score - engagement[a.id].score)
