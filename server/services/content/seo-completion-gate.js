@@ -460,7 +460,9 @@ function extractLinks(body) {
   // The attribute region is QUOTE-AWARE — a quoted value may contain ">"
   // (`title="1 > 0"`), so quoted strings are consumed atomically and never
   // char-by-char (the bare class excludes quotes to prevent that).
-  const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a>/gi;
+  // (?<![\w-])href — the ATTRIBUTE named href, never the suffix of another
+  // attribute (`data-href="…"`).
+  const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?(?<![\w-])href\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a>/gi;
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
   return links;
 }

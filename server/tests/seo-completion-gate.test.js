@@ -692,6 +692,14 @@ describe('seo-completion-gate', () => {
     });
     expect(quotedGt.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // A data-href attribute never shadows the REAL href.
+    const dataHref = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a data-href="/pest-library/" href="/contact/">Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(dataHref.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     // Lawn specialty terms name the lawn family in CTA anchors.
     // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
     // it satisfies presence and is not forbidden wording.

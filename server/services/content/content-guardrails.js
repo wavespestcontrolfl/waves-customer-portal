@@ -1970,7 +1970,7 @@ function extractRawMarkdownTables(text) {
   // Raw HTML tables are the other non-component table representation —
   // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
   // too (fence-blanked text, whitespace-normalized block).
-  const htmlTable = /<table\b[\s\S]*?<\/table>/gi;
+  const htmlTable = /<table\b[\s\S]*?<\/table\s*>/gi;
   const blanked = lines.join('\n');
   let hm;
   while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
