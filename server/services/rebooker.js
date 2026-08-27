@@ -911,8 +911,12 @@ class SmartRebooker {
     const seriesSkipWeekends = !!parent.skip_weekends
       || await customerPrefersNoWeekends(db, parent.customer_id);
     const projectSeriesDate = (raw) => {
-      if (pattern !== SEASONAL_FEB_OCT) return raw;
       let out = String(raw).split('T')[0];
+      // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
+      // the old seasonal-only scoping predates the ruling): a weekend-
+      // averse customer re-anchoring a quarterly/monthly series must not
+      // get weekend siblings. The customer's picked anchor date itself is
+      // honored as-is; only projected siblings shift.
       if (seriesSkipWeekends) {
         const at = parseETDateTime(`${out}T12:00`);
         const { dayOfWeek } = etParts(at);
@@ -922,6 +926,7 @@ class SmartRebooker {
           out = etDateString(addETDays(at, delta));
         }
       }
+      if (pattern !== SEASONAL_FEB_OCT) return out;
       // No blackout layer is threaded here, so the clamp can only exhaust
       // on 75 straight in-season weekend days — impossible. The || keeps
       // this caller's legacy always-a-date contract if that ever changes

@@ -332,7 +332,7 @@ describe('live-status reschedule override (allowLive)', () => {
 
   // Wire db/trx mocks for a series reschedule pass. The anchor doubles as
   // the recurring parent (recurring_parent_id null, weekly pattern).
-  function wireSeriesMocks(anchorStatus, siblings) {
+  function wireSeriesMocks(anchorStatus, siblings, { preferredDay = null } = {}) {
     const anchor = {
       ...liveService(anchorStatus),
       recurring_parent_id: null,
@@ -370,11 +370,33 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // B6: rescheduleSeries consults the customer's live weekday preference.
+      if (table === 'property_preferences') {
+        return chain({ first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
+      }
       throw new Error(`Unexpected db table ${table}`);
     });
 
     return { updates, historyInsert, logInsert, siblingsQuery, escalationCount };
   }
+
+  test('non-seasonal series re-anchor shifts weekend siblings for a weekday-preference customer (B6)', async () => {
+    const SAT_TARGET = '2027-05-01'; // Saturday — customer-picked anchor, honored as-is
+    const MON_SIB_SHIFTED = '2027-05-10'; // raw +7d sibling lands Sat 05-08 → forward to Monday
+    const { updates } = wireSeriesMocks('confirmed', [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00' },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: SIB1, window_start: '09:00:00', window_end: '11:00:00' },
+    ], { preferredDay: 'tuesday' });
+
+    const result = await SmartRebooker.rescheduleSeries(
+      'svc-1', SAT_TARGET, { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
+      { allowLive: true },
+    );
+
+    expect(result.success).toBe(true);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: SAT_TARGET });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: MON_SIB_SHIFTED });
+  });
 
   test('rescheduleSeries with allowLive moves the live anchor with a lifecycle rewind and shifts confirmed siblings', async () => {
     const { updates, historyInsert } = wireSeriesMocks('on_site', [
