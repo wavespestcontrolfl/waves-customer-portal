@@ -15,12 +15,18 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     // being able to mint it.
     expect(booking).toMatch(/stampDisclosedSetupFee\(trx, \{ allowStamp: false, stampServiceRow: serviceRow \}\)/);
     expect(booking).toMatch(/if \(!allowStamp \|\| !stampServiceRow\?\.id\) return;/);
-    // Replays re-run the waiver disposition (never a stamp).
-    // Window widened 3500→8500 for the replay-parent estimate/family bind
-    // (codex #3504 r3), the replay-series reminder registration (r5 hook),
-    // and the committed-activation follow-through heal (r6 hook) inserted
-    // between them — the pinned ordering is unchanged.
-    expect(booking).toMatch(/Double-submit replay[\s\S]{0,8500}stampDisclosedSetupFee\(trx, \{ allowStamp: false \}\)/);
+    // Replays re-run the waiver disposition (never a stamp). Structural
+    // ordering assertion (codex #3504 r27 pre-push): the replay branch
+    // ("Double-submit replay") precedes its waiver-only call, and that call
+    // sits before the primary path's activation — no distance bound, so
+    // hardening inserted between them (r3 bind, r5 reminders, r6 heal,
+    // r21+ generation/extension work) never breaks the pin.
+    const replayAt = booking.indexOf('Double-submit replay');
+    const replayWaiverAt = booking.indexOf('stampDisclosedSetupFee(trx, { allowStamp: false })', replayAt);
+    const primaryActivationAt = booking.indexOf('const seriesOutcome = await activateWizardSeries(serviceRow);');
+    expect(replayAt).toBeGreaterThan(0);
+    expect(replayWaiverAt).toBeGreaterThan(replayAt);
+    expect(primaryActivationAt).toBeGreaterThan(replayWaiverAt);
     
     // ...and the pest seeding path still calls the same helper atomically.
     expect(booking).toMatch(/await stampDisclosedSetupFee\(trx, \{ stampServiceRow: serviceRow \}\)/);

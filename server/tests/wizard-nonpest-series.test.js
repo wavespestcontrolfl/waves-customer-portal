@@ -298,7 +298,7 @@ describe('booking route wiring (source contracts)', () => {
     // application. Any mismatch = stale, no seed, no write.
     // FOR UPDATE (codex #3504 r7): cancellation writers don't take the
     // comms lock, so the parent row lock is what serializes them.
-    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',\s*\n\s*'scheduled_date', 'window_start', 'window_end', 'technician_id',\s*\n\s*\.\.\.\(\(await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\)\)/);
+    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',\s*\n\s*'scheduled_date', 'window_start', 'window_end', 'technician_id',\s*\n\s*'service_type', 'service_id',\s*\n\s*\.\.\.\(\(await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\)\)/);
     expect(booking).toMatch(/lockedParent\.payment_method_preference !== 'pay_at_visit'\s*\n\s*\|\| lockedParent\.create_invoice_on_complete !== true\s*\n\s*\|\| Number\(lockedParent\.estimated_price\) !== Number\(visitPrice\)/);
     expect(booking).toMatch(/no longer matches its priced state under lock/);
     // The correlation is stamped SERVER-SIDE from the verified pricing
