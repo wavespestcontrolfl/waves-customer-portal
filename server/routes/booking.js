@@ -2116,6 +2116,12 @@ async function createSelfBooking(payload = {}) {
     let visitPrice = null;
     let followUpVisitPrice = null;
     let paymentPref = null;
+    // Quote GENERATION the trusted wizard pricing was read from (the
+    // draft's updated_at at pricing time) — stamped on the parent so the
+    // stranded-activation recovery has parent-owned, immutable proof of
+    // which generation of the reusable draft this visit was booked from
+    // (codex #3504 r22–r24 P0s; migration 20260827000001).
+    let sourceEstimateGeneration = null;
     // Non-pest wizard series plan (owner GO 2026-08-26): resolved from the
     // TRUSTED handoff estimate below; non-null drives series seeding + the
     // pricing divisor for e.g. a monthly-12 mosquito plan.
@@ -2252,6 +2258,7 @@ async function createSelfBooking(payload = {}) {
           visitPrice = priced.amount;
           followUpVisitPrice = priced.followUpAmount ?? priced.amount;
           paymentPref = 'pay_at_visit';
+          sourceEstimateGeneration = pricingTrusted && pricingEstimate?.updated_at ? pricingEstimate.updated_at : null;
           // Server-side correlation for TRUSTED wizard pricing (codex
           // #3504 r7 hook P0): the parent's source_estimate_id is the
           // binding every activation/recovery surface keys off (activation
@@ -2539,7 +2546,11 @@ async function createSelfBooking(payload = {}) {
         service_type: resolvedServiceType,
       }).returning('*');
 
+      const hasGenerationColumn = await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation');
       const [scheduledRow] = await trx('scheduled_services').insert({
+        ...(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration
+          ? { source_estimate_generation: sourceEstimateGeneration }
+          : {}),
         customer_id: custId,
         technician_id: technician_id || null,
         scheduled_date: slotDateStr,

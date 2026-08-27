@@ -748,11 +748,23 @@ describe('booking route wiring (source contracts)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     // P0: a reused draft (updated_at after the booking) is a NEWER quote —
     // never archived by an older parent's reconcile.
-    // r23 P0: ownership proof is CONTENT, not time — the live draft must
-    // reproduce the parent's kept first-visit price via the family plan.
-    expect(recoverySrc).toMatch(/return !!priced && Number\(priced\.amount\) === Number\(fresh\.estimated_price\);/);
-    expect(recoverySrc).toMatch(/String\(freshDraft\.customer_id \|\| ''\) !== String\(fresh\.customer_id \|\| ''\)\) return false;/);
-    expect(recoverySrc).not.toMatch(/updated_at\)\.getTime\(\)/);
+    // r24 P0: ownership proof is the PARENT-OWNED generation marker
+    // (migration 20260827000001) — exact equality with the live draft's
+    // updated_at; no window, no content inference, unstamped fails closed.
+    expect(recoverySrc).toMatch(/&& !!fresh\.source_estimate_generation\s*\n\s*&& !!freshDraft\.updated_at\s*\n\s*&& new Date\(freshDraft\.updated_at\)\.getTime\(\) === new Date\(fresh\.source_estimate_generation\)\.getTime\(\);/);
+    expect(recoverySrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
+    expect(recoverySrc).not.toMatch(/Number\(priced\.amount\) === Number\(fresh\.estimated_price\)/);
+    // The booking stamps the generation on the parent at INSERT, only for
+    // trusted wizard pricing, column-guarded.
+    expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);
+    expect(booking).toMatch(/const hasGenerationColumn = await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\);\s*\n\s*const \[scheduledRow\] = await trx\('scheduled_services'\)\.insert\(\{\s*\n\s*\.\.\.\(hasGenerationColumn && paymentPref === 'pay_at_visit' && sourceEstimateGeneration/);
+    const migration = require('../models/migrations/20260827000001_source_estimate_generation');
+    expect(typeof migration.up).toBe('function');
+    expect(typeof migration.down).toBe('function');
+    const migSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000001_source_estimate_generation.js'), 'utf8');
+    expect(migSrc).toMatch(/hasTable\('scheduled_services'\)/);
+    expect(migSrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
+    expect(migSrc).toMatch(/t\.timestamp\('source_estimate_generation', \{ useTz: true \}\)\.nullable\(\);/);
     expect(recoverySrc).toMatch(/its booking link was left intact/);
     expect((recoverySrc.match(/\$\{draftRepresentsParent \? "The quote draft has been ARCHIVED/g) || []).length).toBe(3);
     // replay response patch

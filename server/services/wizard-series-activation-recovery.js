@@ -137,6 +137,10 @@ const KEEP_PRICE_PATCH = (trx, noteTail) => ({
 
 async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, limit = 10 } = {}) {
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
+  // Column-guarded (migration 20260827000001): a pre-migration schema has
+  // no generation marker ⇒ no draft can ever be proven this parent's ⇒
+  // handoff retirement stays off (fail closed), everything else runs.
+  const hasGenerationColumn = await database.schema.hasColumn('scheduled_services', 'source_estimate_generation');
   let stripped = 0;
   for (const parent of stranded) {
     // The PEST funnel is OUT OF SCOPE (codex #3504 r12): its duplicate-kept
@@ -162,7 +166,8 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
           .forUpdate()
-          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id');
+          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id',
+            ...(hasGenerationColumn ? ['source_estimate_generation'] : []));
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
@@ -181,30 +186,23 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           .whereNull('archived_at')
           .first();
         const draftLive = !!freshDraft;
-        // The draft PROVABLY still represents THIS parent only when its
-        // CURRENT content reproduces the program this visit was priced
-        // under (codex #3504 r22 P0 + r23 P0): the shared row is revived
-        // and rewritten by every later /calculate, and neither archived_at
-        // nor updated_at is parent-scoped (a rerun inside any tolerance
-        // window still rewrites it). The parent's own kept estimated_price
-        // IS parent-scoped and immutable for a completed row: re-resolve
-        // the family plan + anchored first-visit amount from the live draft
-        // for the same customer — an exact match means the live quote is
-        // this program (retiring its link prevents the full-program
-        // rebook); anything else is a NEWER/different quote whose link
-        // must survive.
-        const draftRepresentsParent = (() => {
-          if (!draftLive || String(freshDraft.customer_id || '') !== String(fresh.customer_id || '')) return false;
-          try {
-            const { wizardPlanServiceKey, resolveWizardSeriesPlan, resolveBookingVisitPrice } = require('./booking-pay-at-visit');
-            const family = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: fresh.service_type });
-            const planKey = wizardPlanServiceKey(freshDraft, family);
-            const plan = resolveWizardSeriesPlan(freshDraft, planKey);
-            if (!plan) return false;
-            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: plan.visits });
-            return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
-          } catch { return false; }
-        })();
+        // The draft PROVABLY still represents THIS parent only by the
+        // parent-owned GENERATION marker (codex #3504 r22–r24 P0s;
+        // migration 20260827000001): the shared row is revived and
+        // rewritten by every later /calculate, so nothing on the draft —
+        // archived_at, updated_at within a window, or content (a rerun
+        // for the same family at the same price is still a NEW quote) —
+        // can prove ownership. The booking stamped the draft's updated_at
+        // it priced from onto the parent; every refresh rewrites the
+        // draft's updated_at, so exact equality means the live draft is
+        // that very generation (retiring its link prevents the
+        // full-program rebook), and anything else is a newer quote whose
+        // link must survive. Unstamped rows fail closed (never retire).
+        const draftRepresentsParent = draftLive
+          && String(freshDraft.customer_id || '') === String(fresh.customer_id || '')
+          && !!fresh.source_estimate_generation
+          && !!freshDraft.updated_at
+          && new Date(freshDraft.updated_at).getTime() === new Date(fresh.source_estimate_generation).getTime();
         const draftNote = !draftLive
           ? ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.'
           : (draftRepresentsParent
