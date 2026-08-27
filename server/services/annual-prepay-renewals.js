@@ -3459,81 +3459,6 @@ function dayAfter(ymd) {
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1)).toISOString().slice(0, 10);
 }
 
-// Completion's charge cap, mirrored CONSERVATIVELY for the card-expiry
-// exemption: the completion authority (admin-dispatch) compares the reused
-// invoice's subtotal net of discounts against the accepted amount for its
-// lane (visit price / per-application fee / membership dues anchor / the
-// appointment-card accepted amount) plus a BOUNDED setup-fee allowance,
-// and routes an over-cap invoice to office review WITHOUT charging. The
-// exemption only needs the safe direction: report over-cap (→ no card
-// charge → exempt) only when the invoice exceeds the MOST GENEROUS
-// ceiling completion could grant — the max of every anchor plus the full
-// setup-fee line (the real allowance is min(line, fee) ≤ the line, and
-// the real anchor is one of these candidates). Anything not clearly over
-// that bound is treated as chargeable and keeps the warning.
-async function openInvoiceClearlyOverCompletionCap(inv, visit, laneMode, conn) {
-  const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
-  const discount = Math.max(0, Number(inv.discount_amount) || 0);
-  const netSubtotal = Math.round((subtotal - discount) * 100) / 100;
-  const anchors = [visit.estimated_price, visit.per_application_fee, visit.monthly_rate]
-    .map(Number).filter((n) => Number.isFinite(n) && n > 0);
-  // Appointment-card one-time accepts cap against the series' accepted
-  // amount — search the whole series, like the completion allowance does.
-  const seriesParentId = visit.recurring_parent_id || visit.id;
-  const apptRows = await conn('appointment_card_requests')
-    .whereIn('scheduled_service_id', conn('scheduled_services').where(function series() {
-      this.where({ id: seriesParentId }).orWhere({ recurring_parent_id: seriesParentId });
-    }).select('id'))
-    .select('accepted_amount', 'selected_plan');
-  for (const row of apptRows || []) {
-    const amt = Number(row.accepted_amount);
-    if (Number.isFinite(amt) && amt > 0) anchors.push(amt);
-  }
-  // No accepted amount under ANY lane → completion never auto-charges
-  // uncapped: it routes to office review instead.
-  if (!anchors.length) return true;
-  // The setup-fee ALLOWANCE mirrors completion's AUTHORIZATION, not just
-  // the line text: completion widens the cap only for PER-APPLICATION
-  // billing whose line has real provenance — an accept-minted invoice, a
-  // durable plan-choice selection on the series, a frozen wizard fee on
-  // the linked estimate, or an immutable setup_fee_claims record matching
-  // the line to the cent. A stale/office-added setup line earns NO
-  // allowance and the over-cap invoice routes to office review without
-  // charging — so it must not keep the warning either. The authorized
-  // bound uses the full line amount (the real allowance is min(line, fee)
-  // ≤ the line — anything inside the bound keeps the warning).
-  let setupLineAllowance = 0;
-  let setupLineAmt = 0;
-  try {
-    const lines = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
-    for (const li of Array.isArray(lines) ? lines : []) {
-      if (!/one-time setup fee/i.test(String(li?.description || ''))) continue;
-      const amt = Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0)));
-      if (Number.isFinite(amt) && amt > 0) setupLineAmt = Math.max(setupLineAmt, amt);
-    }
-  } catch (e) { /* unparseable lines grant completion NO allowance — the bound stays valid */ }
-  // Provenance lookup errors PROPAGATE (→ the caller's fail-toward-warning
-  // catch): a transient read error must not shrink the bound and widen the
-  // exemption while completion could still grant the allowance and charge.
-  if (setupLineAmt > 0 && laneMode === 'per_application') {
-    let authorized = /Auto-generated from accepted estimate #/.test(String(inv.notes || ''));
-    if (!authorized) {
-      authorized = (apptRows || []).some((row) => row.selected_plan === 'per_application');
-    }
-    // Deliberately NOT the estimate JSON: completion treats the frozen
-    // wizard fee as an amount CAP only, never the allowance PREDICATE —
-    // every seeded child keeps source_estimate_id, so estimate-derived
-    // authorization would outlive the one-time obligation. The predicate
-    // comes from current consent (above) or the immutable claim (below).
-    if (!authorized) {
-      const claim = await conn('setup_fee_claims').where({ invoice_id: inv.id }).first('amount');
-      authorized = !!(claim && Math.round(Number(claim.amount) * 100) > 0
-        && Math.round(Number(claim.amount) * 100) === Math.round(setupLineAmt * 100));
-    }
-    if (authorized) setupLineAllowance = setupLineAmt;
-  }
-  return netSubtotal > Math.max(...anchors) + setupLineAllowance + 0.005;
-}
 
 // True when the union of [start, end] date ranges covers EVERY day of
 // [windowStart, windowEnd]. Terms are inclusive on both ends, so a term
@@ -3737,6 +3662,8 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     const { isCardHoldEnabled } = require('./estimate-card-holds');
     const { findFirstApplicationInvoiceForEstimateService } = require('./estimate-first-application-invoice');
     const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
+    const { splitTerminalCompletionInvoice, COMPLETION_TERMINAL_INVOICE_STATUSES } = require('./completion-invoice-candidate');
+    const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('./completion-charge-verdict');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
     // Real columns only: the payer is resolved by the payer authority
     // (scheduled_services.payer_id → self-pay override → customers.payer_id,
@@ -3869,100 +3796,13 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
           });
         if (allResumesFrozenBackfill) continue;
       }
-      // The hold rail's charge passes requireCompletedOneTimeVisit — a
-      // visit with recurring lineage (is_recurring, recurring_parent_id,
-      // or a recurring_pattern) is refused at the Stripe boundary, so a
-      // leftover hold on such a visit is no charge vector.
-      const oneTimeLineage = v.is_recurring !== true && !v.recurring_parent_id && !v.recurring_pattern;
-      let liveHold = null;
-      if (oneTimeLineage && isCardHoldEnabled()) {
-        // The charge rail's own resolution and admission: it selects the
-        // NEWEST 'held' row (heldCardForScheduledService orders by held_at
-        // DESC) and THEN refuses a parked row and a missing/non-positive
-        // frozen accepted amount (withheld fail-closed) — so the same row
-        // the rail would resolve decides here, not some other consent.
-        const holdRow = await conn('estimate_card_holds')
-          .where({ scheduled_service_id: v.id, status: 'held' })
-          .orderBy('held_at', 'desc')
-          .first('id', 'accepted_amount', 'parked_at');
-        if (holdRow && !holdRow.parked_at) {
-          const acceptedRaw = Number(holdRow.accepted_amount);
-          liveHold = Number.isFinite(acceptedRaw) && acceptedRaw > 0
-            ? { id: holdRow.id, acceptedAmount: acceptedRaw }
-            : null;
-        }
-      }
-      // Appointment-card consent state feeds TWO verdicts: the lane's own
-      // charge (GATE_APPT_CARD_COMPLETION_CHARGE — a completed/satisfied
-      // consent for the visit's CURRENT customer, no hold row, one-time
-      // visit — charges even while the generic completion gate is off),
-      // and the extended charge's exclusion (requireNoAppointmentCardLane
-      // refuses ANY consent row, matching or not). A visit whose consent
-      // rows block the extended charge while the lane itself cannot charge
-      // has nothing left to touch the card.
-      const consentRows = await conn('appointment_card_requests')
-        .where({ scheduled_service_id: v.id })
-        .select('id', 'customer_id', 'status', 'accepted_amount');
-      let apptCardCharge = false;
-      let apptLaneChargeable = false;
-      let apptAcceptedAmount = null;
-      if ((consentRows || []).length) {
-        // The hold rail itself passes requireNoAppointmentCardLane — ANY
-        // competing consent row refuses the hold charge, so a hold beside
-        // consent rows is not a charge vector (and the hold row already
-        // excludes the appointment and extended lanes).
-        liveHold = null;
-        const laneRow = (consentRows || []).find((row) => ['completed', 'satisfied'].includes(String(row.status)));
-        const anyHoldRow = await conn('estimate_card_holds')
-          .where({ scheduled_service_id: v.id })
-          .first('id');
-        // The lane's cap is the amount FROZEN at consent — a missing/
-        // non-positive accepted_amount routes to office review without
-        // charging, so the lane is not chargeable at all.
-        const acceptedRaw = laneRow ? Number(laneRow.accepted_amount) : NaN;
-        apptAcceptedAmount = Number.isFinite(acceptedRaw) && acceptedRaw > 0 ? acceptedRaw : null;
-        apptLaneChargeable = !!laneRow && !anyHoldRow && v.is_recurring !== true
-          && apptAcceptedAmount != null
-          && String(laneRow.customer_id) === String(v.customer_id)
-          && require('../config/feature-gates').isEnabled('apptCardCompletionCharge');
-        apptCardCharge = apptLaneChargeable && !liveHold && prediction.kind === 'invoice' && autopayActive;
-        if (prediction.kind === 'auto_charge' && lane.mode !== 'per_application' && !liveHold && !apptLaneChargeable) {
-          // stale/mismatched/pending/uncapped consent: the extended charge
-          // refuses any consent row and the lane cannot charge either →
-          // no card charge, no warning
-          continue;
-        }
-      }
-      // ANY non-terminal hold row (held/charging/charge_review/parked-held)
-      // closes the EXTENDED lane (extendedHoldExcluded — the customer
-      // consented to THAT card at THAT amount): on a non-per-application
-      // lane the hold rail is then the only remaining vector, so a hold
-      // row the rail refuses (parked, no frozen amount) leaves nothing to
-      // charge even when the predictor says auto_charge.
-      let holdClosesExtended = false;
-      if (lane.mode !== 'per_application') {
-        holdClosesExtended = !!(await conn('estimate_card_holds')
-          .where({ scheduled_service_id: v.id })
-          .whereNotIn('status', ['released', 'cancelled', 'failed'])
-          .first('id'));
-      }
-      if (holdClosesExtended && !liveHold && !apptCardCharge) continue;
-      if (prediction.kind !== 'auto_charge' && !liveHold && !apptCardCharge) continue;
+      // ── Invoice candidate: completion's own state machine ──────────────
       // Kinds that MINT no bill (covered_*, prepaid, no_charge — e.g. a
-      // callback) can still charge through a live hold, but only against
-      // an EXISTING collectible invoice: completion reuses any open
-      // invoice it finds and the hold rail does not reject callbacks or
-      // free service types. With no existing invoice there is nothing to
-      // charge — the invoice checks below decide.
+      // callback) can still charge through a live hold or the autopay
+      // lanes, but only against an EXISTING collectible invoice: completion
+      // reuses any open invoice it finds. With no existing invoice there is
+      // nothing to charge — the invoice checks below decide.
       const mintsNothing = !['auto_charge', 'invoice'].includes(prediction.kind);
-      // Completion's invoice state machine (admin-dispatch; route-module
-      // helpers, mirrored here with the same status sets):
-      //   - completionTerminalInvoiceLookup: a REFUNDED invoice for the visit
-      //     parks it — no charge;
-      //   - completionSuppressorInvoiceLookup: the most recent NON-cancelled
-      //     invoice is reused, and paid / prepaid / processing means already
-      //     settled — no second card charge.
-      // Either way the expiring card is not what breaks: no warning.
       const visitInvoices = await conn('invoices')
         // Both identifiers, like the completion lookups: a resumed
         // completed visit's invoice may be linked only through its
@@ -3976,113 +3816,141 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         .orderBy('created_at', 'desc')
         .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id', 'scheduled_service_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
-      // The refunded (terminal) check spans BOTH identifiers, like
-      // completionTerminalInvoiceLookup.
-      if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
+      // A REFUNDED invoice on the visit PARKS the completion (no mint, no
+      // reuse — completionTerminalInvoiceLookup / reconcileLiveVsRefunded):
+      // spans BOTH identifiers.
+      if ((visitInvoices || []).some((inv) => COMPLETION_TERMINAL_INVOICE_STATUSES.includes(statusOf(inv)))) continue;
       // Reuse PRECEDENCE mirrors the completion suppressor chain: the
       // service-record link is checked first, and the scheduled_service_id
       // rows are consulted only when no live record-linked row stands.
       const recordLinked = (visitInvoices || []).filter((inv) => inv.service_record_id != null && attemptRecordIds.has(String(inv.service_record_id)));
-      const reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
+      let reused = recordLinked.find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)))
         || (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
-      if (mintsNothing && !reused) continue;
-      if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
-      if (reused && lane.mode !== 'per_application' && String(reused.scheduled_service_id || '') !== String(v.id)) {
-        // An OPEN record-only invoice (no scheduled_service_id binding to
-        // THIS visit) cannot be card-charged: the extended money boundary
-        // returns invoice_unbound, and the hold/appointment rails re-prove
-        // the same binding under their own locks — it is reused as a
-        // pay-link only. Settled/refunded record-linked suppressors above
-        // still count.
-        continue;
-      }
-      // An explicit "stop collecting this invoice" instruction (disputed
-      // bill, check in the mail): the EXTENDED completion charge — the
-      // lane that charges existing reused invoices — passes
-      // refuseWhenDunningStopped and the Stripe transaction refuses the
-      // invoice, so no saved-card charge can occur. Scoped to non-
-      // per-application lanes because only the extended charge honors the
-      // stop (the per-application path does not pass the flag — keep that
-      // warning).
-      const dunningStopped = async (inv) => {
-        if (lane.mode === 'per_application') return false;
-        const seq = await conn('invoice_followup_sequences')
-          .where({ invoice_id: inv.id })
-          .first('status');
-        return !!(seq && String(seq.status || '').toLowerCase() === 'stopped');
-      };
-      if (reused) {
-        // A reused invoice with FROZEN payer ownership is owed by the
-        // payer's AP inbox — completion requires !invoice.payer_id before
-        // every saved-card charge, whatever the service/customer links
-        // currently resolve to (the invoice's stamp is authoritative for
-        // the invoice it reuses).
-        if (reused.payer_id) continue;
-        // An OPEN reused invoice charges only within completion's cap —
-        // over the accepted amount it routes to office review instead.
-        if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
-        // the appointment rail does NOT honor the dunning stop — when its
-        // lane can charge this visit, the stop does not make the bill safe
-        if (!liveHold && !apptLaneChargeable && await dunningStopped(reused)) continue;
-        // An ACTIVE payment plan owns this invoice's collection — the
-        // shared anchor verdict (verifyExtendedCompletionAnchor) refuses
-        // the completion charge with active_payment_plan. Scoped like the
-        // dunning stop (extended lanes; the hold rail does not run the
-        // anchor verdict, so a live hold keeps the warning).
-        // …and, like the dunning stop, never when the appointment lane
-        // can charge — that rail does not run the anchor verdict.
-        if (!liveHold && !apptLaneChargeable && lane.mode !== 'per_application') {
-          const activePlan = await conn('payment_plans')
-            .where({ invoice_id: reused.id, status: 'active' })
-            .first('id');
-          if (activePlan) continue;
-        }
-      } else {
+      if (!reused) {
         // No direct invoice on the visit → completion consults the SIBLING
         // first-application invoice of the same estimate/date
         // (findFirstApplicationInvoiceForEstimateService, the shared
         // service completion itself calls): a refunded match PARKS the
-        // completion (manual billing, no charge); a live match is REUSED —
-        // settled (paid/prepaid/processing) means no card charge; a
-        // canceled setup-fee acceptance invoice with no live replacement
-        // also parks (bill both charges by hand). Only "no suppressor at
-        // all" or a live OPEN sibling (which completion can still
-        // auto-charge, inside the same cap) keeps the warning.
+        // completion; a canceled setup-fee acceptance invoice with no live
+        // replacement also parks (bill both charges by hand); a live match
+        // is REUSED (splitTerminalCompletionInvoice).
         const sibling = await findFirstApplicationInvoiceForEstimateService(v, conn);
-        const siblingStatus = statusOf(sibling.invoice);
-        if (siblingStatus === 'refunded') continue;
-        if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
-        if (!sibling.invoice && sibling.canceledSetupFee) continue;
-        if (sibling.invoice && lane.mode !== 'per_application'
-          && String(sibling.invoice.scheduled_service_id || '') !== String(v.id)) {
-          // an OPEN invoice bound to a SIBLING visit cannot be charged for
-          // THIS one — the extended money boundary returns invoice_unbound
-          // and the hold/appointment rails re-prove the same binding; it
-          // is reused as a pay-link only
-          continue;
+        const split = splitTerminalCompletionInvoice(sibling.invoice);
+        if (split.terminal) continue;
+        if (!split.existing && sibling.canceledSetupFee) continue;
+        reused = split.existing || null;
+      }
+      if (mintsNothing && !reused) continue;
+      // Settled (paid/prepaid/processing) → no second card charge.
+      if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
+      // A reused invoice with FROZEN payer ownership is owed by the payer's
+      // AP inbox — every saved-card rail requires !invoice.payer_id.
+      if (reused && reused.payer_id) continue;
+      // The invoice completion will charge: the reused row, else the row it
+      // is about to MINT — priced by the same completionInvoiceAmount
+      // precedence the prediction reports (the setup-fee allowance rides
+      // the cap verdict, so a first-visit fee line cannot push it over).
+      const perApplicationBilling = v.billing_mode === 'per_application';
+      const annualPrepayBilling = v.billing_mode === 'annual_prepay';
+      const explicitMembershipLane = v.billing_mode === 'monthly_membership';
+      const invoiceForVerdict = reused || {
+        id: `pending-mint:${v.id}`, status: 'draft', subtotal: prediction.amount, total: prediction.amount,
+        discount_amount: 0, payer_id: null, notes: '', line_items: [], scheduled_service_id: v.id, service_record_id: null,
+      };
+      // An OPEN invoice not bound to THIS visit cannot be card-charged on
+      // the extended / hold / appointment rails (the money boundaries
+      // return invoice_unbound or re-prove the binding under their locks);
+      // it is reused as a pay-link only. Per-application keeps the warning.
+      const invoiceBoundToVisit = String(invoiceForVerdict.scheduled_service_id || '') === String(v.id);
+      if (!invoiceBoundToVisit && !perApplicationBilling) continue;
+
+      // ── Charge lanes: the completion route's OWN admission + cap ───────
+      // (services/completion-charge-verdict.js — the same functions the
+      // route runs, with the schedule row aliased to the route's cust_*
+      // projection). visitPerformed is unknown for a future visit; assume
+      // performed (fail toward the warning).
+      const svcLike = {
+        ...v,
+        cust_billing_mode: v.billing_mode,
+        cust_monthly_rate: v.monthly_rate,
+        cust_per_application_fee: v.per_application_fee,
+      };
+      const appt = await resolveAppointmentCardLane({
+        svc: svcLike, invoice: invoiceForVerdict, alreadyPaid: false, visitPerformed: true,
+        perApplicationBilling, annualPrepayBilling, explicitMembershipLane,
+      });
+      const ext = await resolveExtendedLane({
+        svc: svcLike, invoice: invoiceForVerdict, alreadyPaid: false, visitPerformed: true, perApplicationBilling,
+        apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved,
+        customerAutopayActive: autopayActive,
+      });
+      // The per-application and extended rails charge only when the shared
+      // prediction says 'auto_charge': dues / annual-prepay coverage the
+      // charge service refuses under its locks (verifyExtendedCompletionAnchor)
+      // reads as covered_* there and mints nothing. The appointment lane
+      // charges a priced bill ('invoice' — gate off — or 'auto_charge') for
+      // an Auto-Pay-active customer; the route gates every rail on
+      // customerAutopayActive.
+      const perApplicationCharge = perApplicationBilling && autopayActive && prediction.kind === 'auto_charge';
+      const apptLaneCharge = appt.apptCardOneTimeCharge && autopayActive && ['invoice', 'auto_charge'].includes(prediction.kind);
+      const extendedCharge = ext.extendedChargeCandidate && prediction.kind === 'auto_charge';
+      let autopayLaneCharges = perApplicationCharge || apptLaneCharge || extendedCharge;
+      if (autopayLaneCharges) {
+        const cap = await resolveCompletionChargeCap({
+          svc: svcLike, invoice: invoiceForVerdict, perApplicationBilling,
+          apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardAcceptedAmount: appt.apptCardAcceptedAmount,
+          extendedLaneAnchor: ext.extendedLaneAnchor, secureSetupFee: null,
+        });
+        // Over the cap / no accepted amount → office review, nothing charged.
+        if (cap.verdict !== 'ok') autopayLaneCharges = false;
+      }
+      // Lock-boundary refusals the charge service asserts for the EXTENDED
+      // lane (chargeInvoiceWithSavedCard; not part of the route's unlocked
+      // admission): any appointment-card consent row on the visit
+      // (requireNoAppointmentCardLane), an invoice not bound to THIS visit
+      // (requireInvoiceScheduledServiceBinding), an explicit stopped-dunning
+      // instruction (refuseWhenDunningStopped), and an ACTIVE payment plan
+      // owning the invoice (verifyExtendedCompletionAnchor).
+      const extendedIsVector = autopayLaneCharges && extendedCharge && !apptLaneCharge && !perApplicationBilling;
+      let anyConsentRow = null;
+      if (extendedIsVector || isCardHoldEnabled()) {
+        anyConsentRow = await conn('appointment_card_requests')
+          .where({ scheduled_service_id: v.id })
+          .first('id');
+      }
+      if (extendedIsVector) {
+        if (anyConsentRow) autopayLaneCharges = false;
+        else if (reused) {
+          const seq = await conn('invoice_followup_sequences').where({ invoice_id: reused.id }).first('status');
+          if (seq && String(seq.status || '').toLowerCase() === 'stopped') autopayLaneCharges = false;
+          else if (await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id')) autopayLaneCharges = false;
         }
-        if (sibling.invoice && sibling.invoice.payer_id) continue;
-        if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
-        if (sibling.invoice && !liveHold && !apptLaneChargeable && await dunningStopped(sibling.invoice)) continue;
       }
-      // Frozen-cap verdicts for the consent rails, applied whenever that
-      // rail is the ONLY charge vector: the hold rail withholds a bill
-      // net-above its accepted_amount (and the hold row itself closes the
-      // extended lane, so this holds even when the predictor says
-      // auto_charge); the appointment lane routes an over-cap bill to
-      // office review the same way. Nothing then touches the card.
-      const chargeBasis = reused
-        ? Math.round(((reused.subtotal != null ? Number(reused.subtotal) : Number(reused.total || 0))
-          - Math.max(0, Number(reused.discount_amount) || 0)) * 100) / 100
-        : (v.estimated_price != null ? Number(v.estimated_price) : null);
-      if (liveHold && !apptCardCharge
-        && (prediction.kind !== 'auto_charge' || holdClosesExtended)) {
-        if (chargeBasis != null && chargeBasis > liveHold.acceptedAmount + 0.005) continue;
+      // ── Hold rail (chargeCardHoldOnCompletion) ─────────────────────────
+      // Never Auto-Pay-gated: completion charges the NEWEST live ('held',
+      // not parked) hold against the visit's collectible invoice, capped at
+      // the accepted_amount FROZEN on the hold (withheld fail-closed with no
+      // frozen amount). Refused at the Stripe boundary for a visit with
+      // recurring lineage (requireCompletedOneTimeVisit), beside ANY
+      // appointment-card consent row (requireNoAppointmentCardLane), and for
+      // an invoice not bound to this visit.
+      let holdCharges = false;
+      const oneTimeLineage = v.is_recurring !== true && !v.recurring_parent_id && !v.recurring_pattern;
+      if (oneTimeLineage && isCardHoldEnabled() && !anyConsentRow) {
+        const holdRow = await conn('estimate_card_holds')
+          .where({ scheduled_service_id: v.id, status: 'held' })
+          .orderBy('held_at', 'desc')
+          .first('id', 'accepted_amount', 'parked_at');
+        if (holdRow && !holdRow.parked_at) {
+          const acceptedRaw = Number(holdRow.accepted_amount);
+          if (Number.isFinite(acceptedRaw) && acceptedRaw > 0) {
+            const basis = Math.round(((invoiceForVerdict.subtotal != null ? Number(invoiceForVerdict.subtotal) : Number(invoiceForVerdict.total || 0))
+              - Math.max(0, Number(invoiceForVerdict.discount_amount) || 0)) * 100) / 100;
+            holdCharges = !(basis > acceptedRaw + 0.005);
+          }
+        }
       }
-      const apptLaneIsVector = apptLaneChargeable && !liveHold
-        && (apptCardCharge || (prediction.kind === 'auto_charge' && lane.mode !== 'per_application'));
-      if (apptLaneIsVector && chargeBasis != null && apptAcceptedAmount != null
-        && chargeBasis > apptAcceptedAmount + 0.005) continue;
+      if (!autopayLaneCharges && !holdCharges) continue;
       // The unminted setup-fee completion hold (owner ruling 2026-08-24,
       // GATE_UNMINTED_SETUP_FEE_PARK): a Mark Won estimate's plan visit
       // that still owes the never-minted setup fee is PARKED for manual

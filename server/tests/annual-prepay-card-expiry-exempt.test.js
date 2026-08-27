@@ -29,7 +29,9 @@ function chain(rowsFor, calls) {
   ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereExists', 'from', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
     .forEach((m) => { q[m] = jest.fn((...a) => { own.push([m, ...a]); calls.push([m, ...a]); if (typeof a[0] === 'function') a[0].call(q, q); return q; }); });
   const resolve = async () => (typeof rowsFor === 'function' ? rowsFor(own) : rowsFor);
-  q.select = jest.fn(async (...a) => { own.push(['select', ...a]); calls.push(['select', ...a]); return resolve(); });
+  // Thenable builder (not a bare promise): completion's cap block chains
+  // `.select('id').where(...)` as a whereIn subquery.
+  q.select = jest.fn((...a) => { own.push(['select', ...a]); calls.push(['select', ...a]); return q; });
   q.distinct = jest.fn(async () => resolve());
   q.first = jest.fn(async () => (await resolve())[0] || null);
   q.then = (res, rej) => resolve().then(res, rej);
@@ -279,6 +281,27 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
 });
 
 describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionBilling', () => {
+  test('cap anchor precedence is completion\'s own: a $120 visit price outranks a $300 rate, so a $200 reused bill routes to review → stays exempt (#3533 held thread closed)', async () => {
+    // Before the shared verdict the exemption bounded the cap by the MAX of
+    // every anchor ($300 rate) and kept the warning; completion actually
+    // caps at estimated_price FIRST ($120) and sends the $200 invoice to
+    // office review without touching the card.
+    // (the suite's feature-gates mock has completionAutopayCharge ON)
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ status: 'en_route', billing_mode: 'per_visit', is_recurring: false, estimated_price: '120.00', monthly_rate: '300.00', prepaid_method: null, annual_prepay_term_id: null })],
+      invoices: [{ id: 'inv-open', status: 'sent', subtotal: '200.00', total: '200.00', discount_amount: 0, payer_id: null, scheduled_service_id: 'v1', service_record_id: null, line_items: [], notes: '' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // …and a $120 bill inside that cap is a real auto-charge → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ status: 'en_route', billing_mode: 'per_visit', is_recurring: false, estimated_price: '120.00', monthly_rate: '300.00', prepaid_method: null, annual_prepay_term_id: null })],
+      invoices: [{ id: 'inv-open', status: 'sent', subtotal: '120.00', total: '120.00', discount_amount: 0, payer_id: null, scheduled_service_id: 'v1', service_record_id: null, line_items: [], notes: '' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
   test('an uncovered, priced, still-completable (en_route) visit keeps the warning', async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'en_route' })] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
@@ -507,16 +530,27 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       apptCardRequests: [{ id: 'acr-1', customer_id: 'c-other', status: 'completed' }],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
-    // a matching consent with the lane gate ON → the lane itself charges → warning
+    // a matching consent with the lane gate ON on a ONE-TIME customer → the
+    // lane itself charges → warning
     const gatesMod = require('../config/feature-gates');
     gatesMod.isEnabled.mockReturnValue(true);
     try {
       route({
         terms: coveredAlways(['c-prepaid']),
-        visits: [baseVisit({ is_recurring: false })],
+        visits: [baseVisit({ is_recurring: false, billing_mode: 'per_visit' })],
         apptCardRequests: [{ id: 'acr-1', customer_id: 'c-prepaid', status: 'completed', accepted_amount: '120.00' }],
       });
       expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      // …but the route admits the appointment-card lane ONLY outside the
+      // explicit per-application / annual-prepay / membership lanes
+      // (resolveAppointmentCardLane) — an annual_prepay customer's matching
+      // consent cannot charge, so the exemption stands.
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ is_recurring: false, billing_mode: 'annual_prepay' })],
+        apptCardRequests: [{ id: 'acr-1', customer_id: 'c-prepaid', status: 'completed', accepted_amount: '120.00' }],
+      });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
     } finally { gatesMod.isEnabled.mockReturnValue(false); }
   });
 
