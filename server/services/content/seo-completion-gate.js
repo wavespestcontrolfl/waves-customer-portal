@@ -283,6 +283,12 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   tick: /\bticks?\b/i,
   wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b/i,
   wdo: /\bwdo\b|wood[- ]destroying/i,
+  // Lawn specialties (established brief service IDs) — their own terms name
+  // the lawn family. Fertilization is lawn wording only when not the
+  // tree/shrub/palm treatment ("Deep Root Fertilization").
+  'lawn-fertilization': /\b(?<!tree[ -])(?<!shrub[ -])(?<!palm[ -])(?<!root[ -])fertiliz/i,
+  'lawn-aeration': /\baerat/i,
+  'lawn-weed-control': /\bweed/i,
 };
 
 // Specialty → the broad service whose conversion path it books through. A
@@ -303,6 +309,9 @@ const CTA_SERVICE_FAMILY = {
   // brief-builder's conversion-path aliases are untouched.
   'commercial-lawn': 'lawn',
   'commercial-pest': 'pest',
+  'lawn-fertilization': 'lawn',
+  'lawn-aeration': 'lawn',
+  'lawn-weed-control': 'lawn',
   // The catch-all specialty lane converts through the pest paths.
   specialty: 'pest',
 };
@@ -448,7 +457,10 @@ function extractLinks(body) {
   // href={`/contact/`}). The backtick arm mirrors the guardrails'
   // PLAIN_STRING_LITERAL_RE: `$` excluded, so an interpolated template
   // (a dynamic destination) never reads as a static one.
-  const html = /<a\b[^>]*\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))[^>]*>([\s\S]*?)<\/a>/gi;
+  // The attribute region is QUOTE-AWARE — a quoted value may contain ">"
+  // (`title="1 > 0"`), so quoted strings are consumed atomically and never
+  // char-by-char (the bare class excludes quotes to prevent that).
+  const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?\bhref\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a>/gi;
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[6].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
   return links;
 }
@@ -625,7 +637,7 @@ function badCtaAnchor(body, brief = {}) {
 // Inspection". Qualifiers exclude the function words that mark EDITORIAL
 // phrasing ("Get ready for your termite inspection" — "ready"/"for" break
 // the request shape), so those anchors still pass.
-const FORBIDDEN_CTA_ANCHOR_RE = /^(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\b)[a-z&-]+\s+){0,4}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
+const FORBIDDEN_CTA_ANCHOR_RE = /^(?:please\s+)?(?:(?:click|tap)\s+(?:here\s+)?to\s+)?(?:please\s+)?(?:request|book|schedule|get|arrange)\s+(?:(?:a|an|your|my|the|our|free)\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\b)[a-z&-]+\s+){0,4}inspection\b(?!\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))/i;
 function forbiddenCtaAnchor(body) {
   // Any link (markdown or HTML, any destination — the legacy pattern points
   // at service pages, not conversion paths) whose decoration-stripped anchor

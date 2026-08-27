@@ -676,6 +676,59 @@ describe('seo-completion-gate', () => {
     });
     expect(escapedBacktick.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // Polite lead-ins do not launder inspection requests.
+    const politeInspection = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Please schedule a termite inspection](/termite-inspection/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(politeInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // A quoted ">" inside an earlier attribute does not hide the anchor.
+    const quotedGt = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a title="1 > 0" href="/contact/">Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(quotedGt.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // Lawn specialty terms name the lawn family in CTA anchors.
+    // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
+    // it satisfies presence and is not forbidden wording.
+    const fert = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Grass. [Get a Fertilization Quote](/contact/) today.' }),
+      brief: baseBrief({ service: 'lawn-fertilization' }),
+      shadowMode: true,
+    });
+    expect(fert.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(fert.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    const aeration = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Grass. [Get a Lawn Aeration Estimate](/contact/) now.' }),
+      brief: baseBrief({ service: 'lawn-aeration' }),
+      shadowMode: true,
+    });
+    expect(aeration.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    const weed = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Grass. [Get a Weed Control Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'lawn-weed-control' }),
+      shadowMode: true,
+    });
+    expect(weed.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    // A lawn-family CTA on the WRONG brief is still forbidden wording.
+    const wrongBrief = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get My Free Termite Estimate](/contact/) and [Get a Fertilization Quote](/contact/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(wrongBrief.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    // Tree/shrub fertilization is NOT lawn wording.
+    const shrubFert = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Palms. [Get a Shrub Fertilization Estimate](/contact/) now.' }),
+      brief: baseBrief({ service: 'tree-shrub-care' }),
+      shadowMode: true,
+    });
+    expect(shrubFert.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     const spacedDest = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate]( /contact/ ) today.' }),
       brief: baseBrief({ service: 'termite-control' }),
