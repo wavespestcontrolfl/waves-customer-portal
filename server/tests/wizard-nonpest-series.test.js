@@ -996,7 +996,8 @@ describe('booking route wiring (source contracts)', () => {
       expect(pestRecoveryEpoch()).toBeNull();
       // STRICT ISO with an explicit offset only (hook P1): a bare date, an
       // offset-less local time, or a number never opens the gate.
-      for (const bad of ['1', '2026-08-28', '2026-08-28T12:00:00', 'Aug 28 2026', '1756382400000']) {
+      // r4 P2: calendar-invalid values fail closed instead of normalising.
+      for (const bad of ['1', '2026-08-28', '2026-08-28T12:00:00', 'Aug 28 2026', '1756382400000', '2026-02-30T12:00:00Z', '2026-13-01T00:00:00Z', '2026-08-28T24:00:00Z', '2026-08-28T12:60:00Z']) {
         process.env.GATE_PEST_STRANDED_RECOVERY = bad;
         expect(pestRecoveryEpoch()).toBeNull();
       }
@@ -1015,6 +1016,20 @@ describe('booking route wiring (source contracts)', () => {
     expect(gatesSrc).toMatch(/pestStrandedRecovery: gateEnvTimestamp\('GATE_PEST_STRANDED_RECOVERY'\) != null,/);
     expect(gatesSrc).toMatch(/GATE_PEST_STRANDED_RECOVERY=<ISO timestamp>/);
     expect(typeof require('../config/feature-gates').gateEnvTimestamp).toBe('function');
+    // r4 P1: the module must LOAD with the gate set (the gates object calls
+    // gateEnvTimestamp at module init — a TDZ here crashed boot).
+    const savedGate = process.env.GATE_PEST_STRANDED_RECOVERY;
+    try {
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-08-28T14:00:00Z';
+      let loaded;
+      jest.isolateModules(() => { loaded = require('../config/feature-gates'); });
+      expect(loaded.gates.pestStrandedRecovery).toBe(true);
+      process.env.GATE_PEST_STRANDED_RECOVERY = '2026-02-30T12:00:00Z';
+      jest.isolateModules(() => { loaded = require('../config/feature-gates'); });
+      expect(loaded.gates.pestStrandedRecovery).toBe(false);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = savedGate;
+    }
     expect(recoverySrc).toMatch(/qb\.whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\);\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(epoch\) qb\.orWhere\('ss\.created_at', '>=', epoch\);/);
     expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control'\) \{\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(!epoch \|\| !parent\.created_at \|\| new Date\(parent\.created_at\) < epoch\) continue;/);
     const backfillSrc0 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
