@@ -1832,11 +1832,14 @@ function extractRawMarkdownTables(text) {
   const lines = raw.map((l) => {
     if (/^\s*(?:>\s*)*(?:```|~~~)/.test(l)) { inFence = !inFence; return ''; }
     if (inFence) return '';
+    // 4-space / tab indent is an indented code block, not a table row.
+    if (/^(?: {4}|\t)/.test(l)) return '';
     return l.replace(/^\s*(?:>\s*)+/, '');
   });
   const tables = [];
   for (let i = 1; i < lines.length; i += 1) {
-    const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
+    // GFM delimiter cells are 1+ dashes (":-|-:" is valid), pipes/colons/spaces around them.
+    const delimiter = /^\s*\|?[\s:|-]*-+[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
     // Header = a pipe row with at least one non-empty cell — icon-only
     // headings ("| ✅ | ❌ |") are still headings.
     const headerAbove = lines[i - 1].includes('|') && /[^\s|]/.test(lines[i - 1]);

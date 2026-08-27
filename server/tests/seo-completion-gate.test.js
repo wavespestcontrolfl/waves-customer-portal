@@ -312,7 +312,7 @@ describe('seo-completion-gate', () => {
   });
 
   test('actionable conversion anchors without estimate/quote wording are flagged even beside a valid CTA', () => {
-    for (const anchor of ['Contact Waves', 'Talk to Us', 'View Options']) {
+    for (const anchor of ['Contact Waves', 'Talk to Us', 'View Options', 'Visit our contact page', 'Open the calculator']) {
       const result = SeoCompletionGate.evaluate({
         draft: baseDraft({
           body: `Act. [Get My Free Pest Control Estimate](/pest-control-quote/) or [${anchor}](/contact/).`,

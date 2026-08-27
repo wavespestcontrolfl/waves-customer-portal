@@ -316,12 +316,12 @@ function allowedAnchorServices(briefService) {
 }
 
 // A conversion-path link is an actionable CTA unless its anchor is
-// POSITIVELY prose-shaped — an article/possessive lead-in ("our contact
-// page", "the pest control calculator") or a page/tool reference. Every
+// POSITIVELY prose-shaped — a noun phrase with an article/possessive
+// lead-in ("our contact page", "the pest control calculator"). Every
 // actionable CTA ("Contact Waves", "Talk to Us", "View Options", "Schedule
 // Service", "Click here") must carry estimate/quote wording; prose
 // references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
-const PROSE_REFERENCE_ANCHOR_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b|\b(?:page|calculator|tool)\b/i;
+const PROSE_REFERENCE_ANCHOR_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
 
 // Canonicalize a brief's service for CTA-anchor validation. Specialty
 // topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
