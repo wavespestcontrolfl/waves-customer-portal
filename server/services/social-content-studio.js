@@ -1147,17 +1147,20 @@ async function reviewMilestoneStats() {
   }
 }
 
-// Durable "this milestone is live somewhere" stamp, written at the FIRST
-// provider success (publishToAll's onFirstPlatformSuccess) — independent of
-// the run row, so an audit-update crash that leaves the run 'failed' after
-// an external post exists can never let the next tick celebrate it again.
+// Durable milestone ownership, independent of the run row. Written as
+// 'claimed' under the fleet-stats leases BEFORE the external post and
+// upgraded to 'published' after it — so neither an onFirstPlatformSuccess
+// hook failure nor an audit-update crash that leaves the run 'failed' can
+// let the next tick celebrate the same threshold again. Cleared only when
+// the publish produced ZERO provider successes (nothing is live), so the
+// threshold becomes selectable again for a retry.
 function milestoneStampKey(threshold) {
   return `social.milestone.celebrated.${threshold}`;
 }
 
-async function stampMilestoneCelebrated(threshold, runId) {
+async function stampMilestoneCelebrated(threshold, runId, state = 'published') {
   const now = new Date();
-  const value = JSON.stringify({ threshold, runId: runId || null, at: now.toISOString() });
+  const value = JSON.stringify({ threshold, runId: runId || null, state, at: now.toISOString() });
   await db('system_settings')
     .insert({
       key: milestoneStampKey(threshold),
@@ -1171,8 +1174,17 @@ async function stampMilestoneCelebrated(threshold, runId) {
     .merge({ value, updated_at: now });
 }
 
-// A threshold is claimed by the durable stamp above, or by any non-skipped
-// run that carried it — including in-flight 'started' rows and
+async function clearMilestoneStamp(threshold, runId) {
+  const row = await db('system_settings').where({ key: milestoneStampKey(threshold) }).first('value').catch(() => null);
+  if (!row) return;
+  const parsed = toJson(row.value, {});
+  // Only the owning run may release its own claim.
+  if (parsed?.runId && runId && parsed.runId !== runId) return;
+  await db('system_settings').where({ key: milestoneStampKey(threshold) }).del();
+}
+
+// A threshold is claimed by the durable stamp above (any state), or by any
+// non-skipped run that carried it — including in-flight 'started' rows and
 // approval-queue drafts — so a crash or a pending draft can't let the next
 // tick mint a duplicate celebration.
 async function milestoneAlreadyClaimed(threshold) {
@@ -1949,14 +1961,12 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
         // later provider call can no longer outlive the claim TTL with the
         // testimonial live externally but unrecorded. First-win: the
         // post-publish stamp below becomes a no-op backstop.
-        onFirstPlatformSuccess: SOCIAL_FLAGS.dryRun
-          ? null
-          : (isReviewRun && (() => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)))
-            || (isMilestoneRun && (() => stampMilestoneCelebrated(plan.milestone, run?.id)))
-            || null,
+        onFirstPlatformSuccess: isReviewRun && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(plan.reviewGraphic.googleReviewId, run?.id)
+          : null,
       });
     const publishOutcome = isMilestoneRun
-      ? await publishWithFleetStatsLease(plan, publishFn)
+      ? await publishWithFleetStatsLease(plan, publishFn, run?.id)
       : await publishWithReviewLivenessLock(
         isReviewRun ? plan.reviewGraphic.googleReviewId : null,
         publishFn,
@@ -2125,30 +2135,50 @@ const PUBLISH_CLAIM_MS = 10 * 60 * 1000;
 const NOOP_RELEASE = async () => {};
 const NOOP_ABANDON = () => {};
 
-// Milestone counterpart of publishWithReviewLivenessLock. The fleet snapshot
-// is written by the Places stats sync, which runs under runExclusive
-// `gbp-review-sync:<location>`; holding EVERY configured location's lease
-// (non-blocking try-locks, fixed order → no deadlock) across the final drift
-// re-check AND the external post means no sync can move a count/rating in
-// between. Any contention → { blocked, lockBusy } and the caller retries
-// later (the hourly sync's tick is short; the milestone is not urgent).
-async function publishWithFleetStatsLease(plan, publishFn) {
+// Milestone counterpart of publishWithReviewLivenessLock, same shape as the
+// review lane's release-before-publish design: the fleet snapshot is
+// written by the Places stats sync under runExclusive
+// `gbp-review-sync:<location>`, so EVERY configured location's lease is
+// held (non-blocking try-locks, fixed order → no deadlock) only for the
+// atomic part — the final drift re-check plus writing the durable 'claimed'
+// stamp — and released BEFORE the external provider calls (which have no
+// total deadline; holding four sync leases and pool connections across them
+// would starve review sync fleet-wide). The stamp is what survives: a
+// stats change during the publish itself can only shift the count by the
+// handful of reviews that land in those seconds — the same staleness any
+// published statistic has — and can never produce a second celebration.
+// Any lease contention → { blocked, lockBusy } and the caller retries later.
+async function publishWithFleetStatsLease(plan, publishFn, runId) {
   const ids = WAVES_LOCATIONS.map((loc) => loc.id).sort();
   const HELD = Symbol('held');
   const acquire = async (i) => {
     if (i >= ids.length) {
       const driftReason = await milestonePublishBlocker(plan);
       if (driftReason) return { [HELD]: true, blocked: true, driftReason };
-      // Same { blocked, result, releaseClaim, abandonClaim } outcome shape
-      // the callers already handle (non-review pass-through).
-      return { [HELD]: true, outcome: await publishWithReviewLivenessLock(null, publishFn) };
+      await stampMilestoneCelebrated(plan.milestone, runId, 'claimed');
+      return { [HELD]: true, claimed: true };
     }
     return runExclusive(`gbp-review-sync:${ids[i]}`, () => acquire(i + 1), { recordHealth: false });
   };
-  const result = await acquire(0);
-  if (!result || !result[HELD]) return { blocked: true, lockBusy: true };
-  if (result.blocked) return { blocked: true, driftReason: result.driftReason };
-  return result.outcome;
+  const gate = await acquire(0);
+  if (!gate || !gate[HELD]) return { blocked: true, lockBusy: true };
+  if (gate.blocked) return { blocked: true, driftReason: gate.driftReason };
+
+  // Leases released — publish. Same { blocked, result, releaseClaim,
+  // abandonClaim } outcome shape the callers already handle.
+  // A thrown publish leaves the 'claimed' stamp in place on purpose: provider
+  // state is unknown, and a duplicate celebration is worse than a missed one.
+  const outcome = await publishWithReviewLivenessLock(null, publishFn);
+  const anySuccess = !!outcome?.result?.success
+    || (Array.isArray(outcome?.result?.platforms) && outcome.result.platforms.some((p) => p?.success));
+  if (anySuccess) {
+    await stampMilestoneCelebrated(plan.milestone, runId, 'published').catch((err) => {
+      logger.error(`[studio] milestone ${plan.milestone} published but stamp upgrade failed (claim retained): ${err.message}`);
+    });
+  } else {
+    await clearMilestoneStamp(plan.milestone, runId).catch(() => {});
+  }
+  return outcome;
 }
 
 async function publishWithReviewLivenessLock(sourceReviewId, publishFn, { rejectConsumed = false, allowConsumedByRunId = null } = {}) {
@@ -2431,7 +2461,7 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
     // publishWithFleetStatsLease) — the drift re-check and the post happen
     // with the stats sync excluded.
     const withPublishLock = (fn) => (input.milestone
-      ? publishWithFleetStatsLease(input, fn)
+      ? publishWithFleetStatsLease(input, fn, run.id)
       : publishWithReviewLivenessLock(sourceReviewId, fn, { rejectConsumed: true, allowConsumedByRunId: run.id }));
     const publishOutcome = remainingChannels.length
       ? await withPublishLock(() => SocialMediaService.publishToAll({
@@ -2457,11 +2487,9 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
         postId: run.social_media_post_id || null,
         // Durable stamp at the FIRST provider success — mirrors the
         // autonomous path; the post-publish stamp below is the no-op backstop.
-        onFirstPlatformSuccess: SOCIAL_FLAGS.dryRun
-          ? null
-          : (input.reviewGraphic?.googleReviewId && (() => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)))
-            || (input.milestone && (() => stampMilestoneCelebrated(input.milestone, run.id)))
-            || null,
+        onFirstPlatformSuccess: input.reviewGraphic?.googleReviewId && !SOCIAL_FLAGS.dryRun
+          ? () => recordTestimonialPublished(input.reviewGraphic.googleReviewId, run.id)
+          : null,
       }))
       : { blocked: false, result: { success: false, platforms: [], note: 'all requested channels already posted in a prior attempt' }, releaseClaim: async () => {}, abandonClaim: () => {} };
     if (publishOutcome.blocked) {
