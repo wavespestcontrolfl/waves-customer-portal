@@ -314,6 +314,18 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
         if (leadSource.channel) fbQuery.where('channel', leadSource.channel);
         sourceRecord = await fbQuery.first();
       }
+      if (!sourceRecord && leadSource.source === 'google_ads') {
+        // Paid Google click (gclid/wbraid/gbraid, or utm google/cpc). Prefer the
+        // phone-less "Google Ads — Web Form" row over the call-extension
+        // tracking-number row so form vs call conversions stay separable in
+        // source ROI; the call row is the fallback so attribution never drops
+        // to NULL. (Before this branch every gclid form lead was Unattributed.)
+        sourceRecord = await db('lead_sources')
+          .where('source_type', 'google_ads')
+          .where('is_active', true)
+          .orderByRaw('(twilio_phone_number IS NULL) DESC')
+          .first();
+      }
       if (sourceRecord) leadSourceId = sourceRecord.id;
     } catch (e) {
       logger.warn(`[lead-webhook] Lead source lookup failed: ${e.message}`);

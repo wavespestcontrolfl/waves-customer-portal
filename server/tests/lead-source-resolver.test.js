@@ -15,13 +15,15 @@ const { resolveLeadSource, MAIN_SITE_NAME } = require('../services/lead-source-r
 function mockLeadSources({ facebook = null, google = null, byName = {} } = {}) {
   db.mockImplementation(() => ({
     whereRaw: () => ({ first: async () => facebook }),
-    where: (clause) => ({
-      first: async () => {
+    where: (clause) => {
+      const first = async () => {
         if (clause && clause.source_type === 'google_ads') return google;
         if (clause && clause.name) return byName[clause.name] || null;
         return null;
-      },
-    }),
+      };
+      // google branch chains .orderByRaw(web-form row first) before .first()
+      return { first, orderByRaw: () => ({ first }) };
+    },
   }));
 }
 
@@ -54,6 +56,17 @@ describe('resolveLeadSource', () => {
 
     expect((await resolveLeadSource({ wbraid: 'w1' })).leadSourceId).toBe('ls-google');
     expect((await resolveLeadSource({ gbraid: 'b1' })).leadSourceId).toBe('ls-google');
+  });
+
+  test('google paid lookup prefers the phone-less web-form row (orderByRaw), never a bare .first()', async () => {
+    const orderByRaw = jest.fn(() => ({ first: async () => ({ id: 'ls-google-form', source_type: 'google_ads' }) }));
+    db.mockImplementation(() => ({
+      whereRaw: () => ({ first: async () => null }),
+      where: () => ({ first: async () => { throw new Error('bare .first() would pick an arbitrary google_ads row'); }, orderByRaw }),
+    }));
+    const res = await resolveLeadSource({ gclid: 'g1' });
+    expect(res.leadSourceId).toBe('ls-google-form');
+    expect(orderByRaw).toHaveBeenCalledWith('(twilio_phone_number IS NULL) DESC');
   });
 
   test('classifies utm_source=google&utm_medium=cpc as Google Ads', async () => {

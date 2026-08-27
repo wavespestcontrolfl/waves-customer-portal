@@ -114,7 +114,13 @@ async function resolveLeadSource(attribution) {
     if (metaPaid) {
       row = await db('lead_sources').whereRaw("LOWER(name) LIKE '%facebook%'").first();
     } else if (googlePaid) {
-      row = await db('lead_sources').where({ source_type: 'google_ads' }).first();
+      // Two google_ads rows exist (call-extension number + web form). This is
+      // the web path, so prefer the phone-less web-form row; the call row is
+      // the fallback so a paid click never drops to NULL.
+      row = await db('lead_sources')
+        .where({ source_type: 'google_ads' })
+        .orderByRaw('(twilio_phone_number IS NULL) DESC')
+        .first();
     } else {
       row = await db('lead_sources').where({ name: targetName }).first();
     }
