@@ -1065,7 +1065,7 @@ const TERMITE = {
 // ============================================================
 // Staged-remediation pricing model (Apr 2026 v2):
 //   1. Inspection / diagnosis (creditable)
-//   2. Active trapping (setup + unlimited trap checks during active window)
+//   2. Active trapping (Standard: setup + unlimited callbacks/checks)
 //   3. Exclusion (per-point with home-size minimums + access multipliers)
 //   4. Sanitation (light / standard / heavy with sqft + debris scaling)
 //   5. Bundle discount (7% / 5% / 10% with floors)
@@ -1095,24 +1095,27 @@ const RODENT = {
   baitPerStationOverage: r(8),
 
   // ── Inspection / diagnosis ────────────────────────────────
+  // $75 (owner directive 2026-08-26, down from $125) — fully creditable
+  // toward approved treatment within the window, so a converting customer
+  // nets $0 for the inspection. inspection-credit.js reads this fee live.
   inspection: {
-    fee: r(125),
+    fee: r(75),
     creditableWithinDays: 14,
     waiveIfApprovedTotalOver: r(995),
   },
 
   // ── Trapping ──────────────────────────────────────────────
+  // Standard is the only plan (owner directive 2026-08-26): flat $350 with
+  // UNLIMITED callbacks/checks for the same active trapping job — callbacks
+  // never bill. The separate Unlimited tier / upgrade / per-callback extras
+  // are retired.
   trapping: {
     standardPrice: r(350),
-    unlimitedPrice: r(450),
-    upgradeToUnlimitedPrice: r(125),
     base: r(350),
     floor: r(350),
-    unlimitedFloor: r(450),
     ceilingBeforeCustom: r(795),
-    includedFollowUps: 2,
+    includedFollowUps: 'unlimited',
     activeWindowDays: null,
-    additionalFollowUpRate: r(125),
     homeSizeAdjustments: [
       { maxSqFt: 1200,     adjustment: -r(25) },
       { maxSqFt: 2500,     adjustment: 0 },
@@ -1136,8 +1139,7 @@ const RODENT = {
     emergencyMultiplier: 1.20,           // OR fixed surcharge, whichever is greater
     emergencyMinimumSurcharge: r(75),
     invoiceDescriptions: {
-      standard: 'Rodent Trapping - Standard: initial setup plus 2 callbacks/checks. Additional callbacks after included visits are $125 each.',
-      unlimited: 'Rodent Trapping - Unlimited Callback: callbacks for the same active trapping job only. Does not include exclusion, sanitation, or warranty.',
+      standard: 'Rodent Trapping - Unlimited callbacks/checks for the same active trapping job. Does not include exclusion, sanitation, or warranty.',
     },
   },
 
@@ -1248,7 +1250,8 @@ const RODENT = {
 
   // ── Exclusion V2 (unified mesh-point + bird-box + linear-mesh) ─
   exclusionV2: {
-    inspectionFee: r(125),
+    // Fallback only — live callers read RODENT.inspection.fee ($75).
+    inspectionFee: r(75),
 
     floors: {
       pointOnly: r(195),
@@ -1919,7 +1922,7 @@ const SPECIALTY = {
     constructionMultipliers: { block: 1.00, stucco: 1.05, frame: 1.10, mixed: 1.10 },
     // Inspection fee — sourced from RODENT.inspection.fee in V2 callers.
     // Kept here for V1 backward compat; new callers should read RODENT.inspection.
-    inspectionFee: r(125),
+    inspectionFee: r(75),
     rodentGuarantee: r(199), // legacy reference; new gating in RODENT.guarantee
   },
   wdo: {
@@ -2212,9 +2215,9 @@ const CARD_HOLD = {
 // moves a promise already made. DB-authoritative via pricing_config key
 // `inspection_credit`. Per-service overrides still win where they exist:
 // rodent's creditableWithinDays (14) AND its amount — a rodent inspection
-// credits its quoted RODENT.inspection.fee ($125), because the public
-// estimator promises that fee as creditable on tokenized estimates
-// (owner ruling 2026-08-04).
+// credits its quoted RODENT.inspection.fee ($75 since 2026-08-26; was
+// $125), because the public estimator promises that fee as creditable on
+// tokenized estimates (owner ruling 2026-08-04).
 const INSPECTION_CREDIT = {
   amount: 75,
   creditableWithinDays: 30,

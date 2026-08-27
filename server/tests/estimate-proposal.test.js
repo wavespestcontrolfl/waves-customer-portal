@@ -717,3 +717,123 @@ describe('pricing authority by estimate state', () => {
     expect(perApplicationRecurringLines(base, base.estimate_data, { unresolved: true })).toBeNull();
   });
 });
+
+describe('one-time rows itemize on the proposal when they account for the stored total (owner 2026-08-27)', () => {
+  const rows = [
+    { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Bird Boxes', price: 150 },
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Linear Mesh', price: 140 },
+  ];
+
+  test('itemized rodent rows print instead of one "One-time service" line', () => {
+    const p = normalizeProposal({
+      customer_name: 'R', address: '1 Attic Ln', monthly_total: 0, onetime_total: 940,
+      estimate_data: { result: { oneTime: { total: 940, specItems: rows } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Exclusion — Wire Mesh Points', 300],
+      ['Rodent Exclusion — Bird Boxes', 150],
+      ['Rodent Exclusion — Linear Mesh', 140],
+    ]);
+    expect(oneTime.some((l) => l.description === 'One-time service')).toBe(false);
+  });
+
+  test('rows that do not sum to the stored total (a discount outside them) keep the single total line', () => {
+    const p = normalizeProposal({
+      customer_name: 'R', address: '1 Attic Ln', monthly_total: 0, onetime_total: 840,
+      estimate_data: { result: { oneTime: { total: 840, specItems: rows } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime).toHaveLength(1);
+    expect(oneTime[0]).toMatchObject({ description: 'One-time service', amount: 840 });
+  });
+
+  test('quote-required and included rows never print as priced lines', () => {
+    const p = normalizeProposal({
+      customer_name: 'R', address: '1 Attic Ln', monthly_total: 0, onetime_total: 350,
+      estimate_data: { result: { oneTime: { total: 350, specItems: [
+        rows[0],
+        { service: 'rodent_sanitation', name: 'Rodent Sanitation', price: 0, quoteRequired: true },
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 0, serviceSpecificDiscountApplied: true },
+      ] } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    // Quote-required rows never print; a credited (included) row prints as
+    // approved scope at $0 so the PDF matches the page (codex #3521 r4 P1).
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Inspection (Included)', 0],
+    ]);
+  });
+});
+
+describe('one-time itemization reads every persisted result shape (codex #3521 r2 P2)', () => {
+  test('agent estimates persist engineResult, not result', () => {
+    const p = normalizeProposal({
+      customer_name: 'A', address: '2 Attic Ln', monthly_total: 0, onetime_total: 650,
+      estimate_data: { engineResult: { oneTime: { total: 650, items: [
+        { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+        { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+      ] } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Exclusion — Wire Mesh Points', 300],
+    ]);
+  });
+
+  test('items and specItems both contribute (mixed one-time estimate)', () => {
+    const p = normalizeProposal({
+      customer_name: 'A', address: '2 Attic Ln', monthly_total: 0, onetime_total: 500,
+      estimate_data: { result: { oneTime: {
+        total: 500,
+        items: [{ service: 'flea_treatment', name: 'Flea Treatment', price: 150 }],
+        specItems: [{ service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 }],
+      } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => l.description).sort()).toEqual(['Flea Treatment', 'Rodent Trapping']);
+  });
+});
+
+describe('fully credited one-time scope still prints on the proposal (uncapped audit P1 on #3521)', () => {
+  test('every row comped, stored total $0 → included rows print at $0', () => {
+    const p = normalizeProposal({
+      customer_name: 'C', address: '3 Attic Ln', monthly_total: 0, onetime_total: 0,
+      estimate_data: { result: { oneTime: { total: 0, items: [
+        { service: 'rodent_inspection', name: 'Rodent Inspection', price: 0, serviceSpecificDiscountApplied: true },
+      ] } } },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([['Rodent Inspection (Included)', 0]]);
+  });
+
+  test('no rows and no total still adds nothing', () => {
+    const p = normalizeProposal({ customer_name: 'C', address: '3 Attic Ln', monthly_total: 120, onetime_total: 0, estimate_data: {} });
+    expect(p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time')).toHaveLength(0);
+  });
+});
+
+describe('one-time itemization reads the frozen send-snapshot bundle first (codex #3521 r16 P2)', () => {
+  test('an engineInputs-only sent estimate itemizes from sendSnapshot.pricingBundle.oneTimeBreakdown', () => {
+    const p = normalizeProposal({
+      customer_name: 'S', address: '4 Attic Ln', monthly_total: 0, onetime_total: 650,
+      estimate_data: {
+        engineInputs: { services: { rodentTrapping: {}, exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 4 } } },
+        sendSnapshot: { pricingBundle: { oneTimeBreakdown: { total: 650, items: [
+          { service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, kind: 'charge' },
+          { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 300, kind: 'charge' },
+        ] } } },
+      },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Exclusion — Wire Mesh Points', 300],
+    ]);
+  });
+});

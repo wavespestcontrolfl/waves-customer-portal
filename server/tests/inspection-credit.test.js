@@ -167,19 +167,21 @@ describe('recordInspectionCreditOffer — the promise, not the money', () => {
   });
 
   it('a rodent inspection credits its QUOTED fee, never the flat default (r23 P0, owner ruling 2026-08-04)', async () => {
-    // The public estimator has promised "$125 inspection (creditable for
-    // 14 days toward remediation work)" on tokenized estimates since before
-    // this feature — an in-flight estimate is a keep-working surface, so
-    // freezing the flat $75 onto a rodent offer would short a promise
-    // already sent.
+    // The public estimator prints the live inspection fee as "creditable
+    // for 14 days toward remediation work" on tokenized estimates — an
+    // in-flight estimate is a keep-working surface, so a rodent offer must
+    // freeze the fee the estimator quoted, not a divergent flat default.
+    // The quoted fee is $75 since the 2026-08-26 owner directive (down
+    // from $125) — the full fee still goes toward treatment on booking.
     const res = await recordInspectionCreditOffer({
       customerId: 'cust-1', scheduledServiceId: 'svc-1', serviceKey: 'rodent_inspection',
     });
     expect(res.recorded).toBe(true);
-    expect(res.amount).toBe(125); // RODENT.inspection.fee — the estimator's number
+    expect(res.amount).toBe(75); // RODENT.inspection.fee — the estimator's number
     expect(res.windowDays).toBe(14); // and rodent's own window
-    // The override is rodent-specific: everything else keeps the flat default.
-    expect(configuredCreditAmountForServiceKey('rodent_inspection')).toBe(125);
+    // The override path is rodent-specific: everything else uses the flat
+    // default (coincidentally also $75 today — the sourcing differs).
+    expect(configuredCreditAmountForServiceKey('rodent_inspection')).toBe(75);
     expect(configuredCreditAmountForServiceKey('wdo_inspection')).toBe(75);
     expect(configuredCreditAmountForServiceKey(null)).toBe(75);
   });
@@ -821,8 +823,15 @@ describe('closeout route wiring — source contracts (the completion route is to
     expect(source).toContain('...(Number(frozenCreditTerms?.amount) > 0 ? { amount: Number(frozenCreditTerms.amount) } : {}),');
     expect(source).toContain('...(Number(frozenCreditTerms?.windowDays) > 0 ? { windowDays: Number(frozenCreditTerms.windowDays) } : {}),');
     // And the terms frozen at closeout are themselves service-aware —
-    // rodent freezes its quoted fee, not the flat default (r23 P0).
-    expect(source).toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
+    // rodent freezes the fee it SOLD for (the visit's invoice amount), so
+    // an inspection accepted at $125 before the fee dropped to $75 still
+    // freezes $125 (#3521 r1 P0); the live config only when nothing sold.
+    expect(source).toContain('amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, null),');
+    // The locked branch re-resolves the sold amount from the LOCKED row when
+    // the pre-lock pass produced none (a repoint into an inspection that won
+    // the race must still freeze the promised face, not the live fee).
+    expect(source).toContain('await IC.soldInspectionAmountForVisit(trx, lockedSvcRow || svc),');
+    expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmount(),');
   });
 
@@ -849,6 +858,11 @@ describe('closeout route wiring — source contracts (the completion route is to
     const locked = source.match(/isCreditableInspectionProfile\(effectiveCompletionProfile\)/g) || [];
     expect(preLock.length).toBe(1); // marker freeze in the literal
     expect(locked.length).toBe(2); // locked adjustment + offer creation
+    // The sold amount is resolved ONLY from the locked row inside the
+    // transaction, for every eligible inspection (#3521 uncapped P0) —
+    // never from a pre-lock read.
+    expect(source).not.toContain('soldInspectionAmountForVisit(db, svc)');
+    expect(source).toContain('} else if (lockedEligible) {');
     expect(source).not.toMatch(/completionProfile\?\.category \|\| ''\) === 'inspection'/);
     // The client renders the opt-out for rodent inspections too.
     const client = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/SchedulePage.jsx'), 'utf8');
@@ -1437,5 +1451,151 @@ describe('inspectionCreditMemoForVisit — the report-email channel (owner rulin
     expect(migration).toContain('allowed_variables');
     expect(migration).toContain('optional_variables');
     expect(migration).toContain("'service.report_ready'");
+  });
+});
+
+describe('closeoutCreditAmountForServiceKey (codex #3521 r1 P0)', () => {
+  const IC = require('../services/inspection-credit');
+
+  test('rodent freezes the SOLD fee when the visit billed one', () => {
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 125)).toBe(125);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', '75.00')).toBe(75);
+  });
+
+  test('rodent falls back to the configured fee when nothing was sold', () => {
+    const configured = IC.configuredCreditAmountForServiceKey('rodent_inspection');
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 0)).toBe(configured);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', null)).toBe(configured);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 'n/a')).toBe(configured);
+  });
+
+  test('non-rodent inspections keep the flat configured credit regardless of the sold amount', () => {
+    expect(IC.closeoutCreditAmountForServiceKey('termite_inspection', 999))
+      .toBe(IC.configuredCreditAmountForServiceKey('termite_inspection'));
+  });
+});
+
+describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, never the visit aggregate)', () => {
+  const IC = require('../services/inspection-credit');
+  const fakeDb = ({ estimate = null, addons = [], audit = [] } = {}) => {
+    const db = (table) => ({
+      where: (cond) => ({
+        first: async () => (table === 'estimates' ? estimate : null),
+        select: async () => {
+          if (table === 'scheduled_service_addons') return addons;
+          if (table === 'pricing_config_audit') return audit.filter((a) => !cond?.config_key || a.config_key === cond.config_key);
+          return [];
+        },
+      }),
+    });
+    return db;
+  };
+
+  test('a grouped booking credits the primary line FACE value — never the group total, never net of a line discount', async () => {
+    const svc = { id: 'v1', estimated_price: 275, primary_line_price: 75, line_discount_dollars: 0 };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), svc)).toBe(75);
+    // Owner ruling 2026-08-03: a discounted inspection still earns the full credit.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { ...svc, line_discount_dollars: 10 })).toBe(75);
+  });
+
+  test('an estimate-accepted visit credits the estimate\'s inspection row', async () => {
+    const estimate = { id: 'est-1', estimate_data: { result: { oneTime: { total: 425, items: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 },
+      { service: 'rodent_trapping', name: 'Rodent Trapping', price: 300 },
+    ] } } } };
+    const svc = { id: 'v2', estimated_price: 425, source_estimate_id: 'est-1' };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate }), svc)).toBe(125);
+    // A service-specific credit that comped the inspection leaves its FACE value intact.
+    const comped = { id: 'est-2', estimate_data: JSON.stringify({ engineResult: { oneTime: { total: 300, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125, priceAfterDiscount: 0, serviceSpecificDiscountApplied: true },
+    ] } } }) };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: comped }), { ...svc, source_estimate_id: 'est-2' })).toBe(125);
+    // Agent/IB estimates persist the RAW engine lineItems under engineResult
+    // (no oneTime.items at all) — the in-flight $125 must be found there.
+    const agent = { id: 'est-3', estimate_data: { engineResult: { lineItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 },
+      { service: 'rodent_exclusion', name: 'Rodent Exclusion', price: 300 },
+    ], oneTime: { total: 425 } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: agent }), { ...svc, source_estimate_id: 'est-3' })).toBe(125);
+    // A WaveGuard member's stored price is the discounted $106.25; the face
+    // the mapper persists as priceBeforeDiscount is the $125 promise.
+    const member = { id: 'est-4', estimate_data: { result: { oneTime: { total: 106.25, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, priceBeforeDiscount: 125 },
+    ] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: member }), { ...svc, source_estimate_id: 'est-4' })).toBe(125);
+    // ALREADY-SENT member row: only the net was stored (pre-change mapper).
+    // The estimate's recurring-customer input + the configured perk rate
+    // recover the face: 106.25 / (1 − 0.15) = 125 (codex #3521 r8 P0).
+    const legacyMember = { id: 'est-5', estimate_data: {
+      inputs: { recurringCustomer: true },
+      result: { oneTime: { total: 106.25, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25 }] } },
+    } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: legacyMember }), { ...svc, source_estimate_id: 'est-5' })).toBe(125);
+    // A row that carries its own perk rate is self-describing.
+    const rated = { id: 'est-6', estimate_data: { result: { oneTime: { total: 106.25, specItems: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25, recurringCustomerDiscountRate: 0.15 },
+    ] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: rated }), { ...svc, source_estimate_id: 'est-6' })).toBe(125);
+    // The V2 estimator persists the flag as "YES"/"NO" strings — "NO" must
+    // never read as recurring (codex #3521 r9 P1), "YES" must.
+    const v2No = { id: 'est-8', estimate_data: { inputs: { isRecurringCustomer: 'NO' },
+      result: { oneTime: { total: 125, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: v2No }), { ...svc, source_estimate_id: 'est-8' })).toBe(125);
+    const v2Yes = { id: 'est-9', estimate_data: { inputs: { isRecurringCustomer: 'YES' },
+      result: { oneTime: { total: 106.25, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 106.25 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: v2Yes }), { ...svc, source_estimate_id: 'est-9' })).toBe(125);
+    // PROVABLE inference only: an admin-edited $110 fee in the audit trail
+    // must not claim the $125 promise — $125 × (1 − 0.15) reproduces
+    // $106.25 to the cent, $110 at no known rate does.
+    const trail = [
+      { config_key: 'rodent_inspection', old_value: JSON.stringify({ fee: 125 }), new_value: JSON.stringify({ fee: 110 }) },
+      { config_key: 'rodent_inspection', old_value: JSON.stringify({ fee: 110 }), new_value: JSON.stringify({ fee: 75 }) },
+    ];
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: legacyMember, audit: trail }), { ...svc, source_estimate_id: 'est-5' })).toBe(125);
+    // A $110 face sold at a 10% perk (rate recorded in the trail) proves out to $110.
+    const trailWithRate = [...trail, { config_key: 'onetime_recurring_discount', old_value: JSON.stringify({ discount: 0.15 }), new_value: JSON.stringify({ discount: 0.10 }) }];
+    const tenOff = { id: 'est-10', estimate_data: { inputs: { recurringCustomer: true }, result: { oneTime: { total: 99, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 99 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: tenOff, audit: trailWithRate }), { ...svc, source_estimate_id: 'est-10' })).toBe(110);
+    // Exact-face collision (codex #3521 r15 P1): a $75 net with a 40% perk in
+    // the trail could be a 40%-off $125 — the largest supported face wins,
+    // but ONLY when the estimate establishes the customer was recurring
+    // (uncapped P0): explicit "NO" or no evidence at all keeps $75 as $75.
+    const fortyOff = [...trail, { config_key: 'onetime_recurring_discount', old_value: JSON.stringify({ discount: 0.15 }), new_value: JSON.stringify({ discount: 0.40 }) }];
+    const collideYes = { id: 'est-12', estimate_data: { inputs: { isRecurringCustomer: 'YES' }, result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collideYes, audit: fortyOff }), { ...svc, source_estimate_id: 'est-12' })).toBe(125);
+    const collideNo = { id: 'est-13', estimate_data: { inputs: { isRecurringCustomer: 'NO' }, result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collideNo, audit: fortyOff }), { ...svc, source_estimate_id: 'est-13' })).toBe(75);
+    const collideUnknown = { id: 'est-14', estimate_data: { result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collideUnknown, audit: fortyOff }), { ...svc, source_estimate_id: 'est-14' })).toBe(75);
+    // Without such a rate in history, $75 is simply the $75 face.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: collideYes, audit: trail }), { ...svc, source_estimate_id: 'est-12' })).toBe(75);
+    // An unprovable net stands as the face (never inflated by guesswork).
+    const odd = { id: 'est-11', estimate_data: { inputs: { recurringCustomer: true }, result: { oneTime: { total: 101, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 101 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: odd, audit: trail }), { ...svc, source_estimate_id: 'est-11' })).toBe(101);
+    // A non-member's net IS the face.
+    const nonMember = { id: 'est-7', estimate_data: { inputs: { recurringCustomer: false },
+      result: { oneTime: { total: 75, specItems: [{ service: 'rodent_inspection', name: 'Rodent Inspection', price: 75 }] } } } };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate: nonMember }), { ...svc, source_estimate_id: 'est-7' })).toBe(75);
+  });
+
+  test('a legacy grouped row with no primary line credits the parent price minus its add-ons — unless the group was discounted', async () => {
+    const svc = { id: 'v3', estimated_price: 275 };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ addons: [{ estimated_price: 200 }] }), svc)).toBe(75);
+    // A discounted group would yield a NET figure — decline, so the closeout uses the configured face.
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ addons: [{ estimated_price: 200 }] }), { ...svc, discount_dollars: 20 })).toBeNull();
+  });
+
+  test('the configured fee is the floor of the closeout credit; a higher quoted face is honored in full', () => {
+    const configured = IC.configuredCreditAmountForServiceKey('rodent_inspection');
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', 125)).toBe(125);
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', configured - 15)).toBe(configured);
+  });
+
+  test('nothing sold → null (caller falls back to the configured fee); lookup errors are soft', async () => {
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { id: 'v4' })).toBeNull();
+    const throwingDb = () => { throw new Error('db down'); };
+    expect(await IC.soldInspectionAmountForVisit(throwingDb, { id: 'v5', estimated_price: 75 })).toBeNull();
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', null))
+      .toBe(IC.configuredCreditAmountForServiceKey('rodent_inspection'));
   });
 });

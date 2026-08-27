@@ -1247,21 +1247,21 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     // Trapping (new structure)
     if (config.rodent_trapping) {
       const t = config.rodent_trapping;
-      if (t.standard_price != null) constants.RODENT.trapping.standardPrice = r(t.standard_price);
-      if (t.unlimited_price != null) constants.RODENT.trapping.unlimitedPrice = r(t.unlimited_price);
-      if (t.upgrade_to_unlimited_price != null) constants.RODENT.trapping.upgradeToUnlimitedPrice = r(t.upgrade_to_unlimited_price);
-      if (t.base != null) constants.RODENT.trapping.base = r(t.base);
-      if (t.floor != null) constants.RODENT.trapping.floor = r(t.floor);
-      if (t.unlimited_floor != null) constants.RODENT.trapping.unlimitedFloor = r(t.unlimited_floor);
-      if (t.ceiling_before_custom != null) constants.RODENT.trapping.ceilingBeforeCustom = r(t.ceiling_before_custom);
+      // standard_price is NOT overlaid: the flat $350 Standard plan is fixed
+      // by directive (owner 2026-08-26) and is the single dollar authority for
+      // the engine, the catalog row (20260826000005), and the client mirror —
+      // a DB-editable copy left three prices to drift (codex #3521).
+      // unlimited_price / upgrade_to_unlimited_price / unlimited_floor are
+      // retired (Standard is the only plan, owner 2026-08-26) — stale rows
+      // may still carry them; they are deliberately not mapped.
       if (t.included_followups != null) {
         constants.RODENT.trapping.includedFollowUps =
           String(t.included_followups).toLowerCase() === 'unlimited'
             ? 'unlimited'
             : Number(t.included_followups);
       }
-      if (t.active_window_days != null) constants.RODENT.trapping.activeWindowDays = Number(t.active_window_days);
-      if (t.additional_followup_rate != null) constants.RODENT.trapping.additionalFollowUpRate = r(t.additional_followup_rate);
+      // additional_followup_rate is retired (callbacks are unlimited on the
+      // Standard plan, owner 2026-08-26) — deliberately not mapped.
       if (t.emergency_multiplier != null) constants.RODENT.trapping.emergencyMultiplier = Number(t.emergency_multiplier);
       if (t.emergency_minimum_surcharge != null) constants.RODENT.trapping.emergencyMinimumSurcharge = r(t.emergency_minimum_surcharge);
       if (Array.isArray(t.home_size_adjustments)) {

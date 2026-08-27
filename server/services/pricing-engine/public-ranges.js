@@ -448,22 +448,13 @@ function buildRows() {
     oneTimePerkKey: 'rodent_trapping',
     name: 'Rodent Trapping',
     unit: 'per program',
-    // The mid-program upgrade is an incremental delta, not a program price —
-    // it goes in the note (config-derived), never into the range.
+    // Standard is the only plan (owner 2026-08-26): flat program fee with
+    // unlimited callbacks/checks for the same active trapping job.
     values: sweepValues(
-      [
-        { plan: 'standard' },
-        { plan: 'unlimited' },
-        // Standard plan with the configured callback allowance exhausted
-        // plus billable extras (allowance read from live config). Extra
-        // callbacks are additive per-unit with no cap — the note discloses
-        // the live per-callback rate so any count is quotable.
-        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 2 },
-        { plan: 'standard', callbacksUsed: Number(constants.RODENT.trapping.includedFollowUps) || 2, extraCallbackCount: 6 },
-      ],
+      [{ plan: 'standard' }],
       (opts) => sp.priceRodentTrapping({}, opts),
       (r) => r.price),
-    notes: `Standard (setup + ${Number(constants.RODENT.trapping.includedFollowUps) || 2} included callbacks) or unlimited-callback plan; additional callbacks beyond the range $${Math.round(Number(constants.RODENT.trapping.additionalFollowUpRate) || 125)} each; existing Standard customers can upgrade to unlimited mid-program for $${Math.round(sp.priceRodentTrapping({}, { plan: 'standard', upgradeToUnlimited: true }).price)}. Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
+    notes: `Standard plan (flat program fee — setup plus unlimited callbacks/checks for the same active trapping job). Emergency same-day service carries a surcharge quoted at booking. ${rodentBundleTerms}`,
   }));
 
   add('rodent_sanitation', () => rangeRow({

@@ -414,6 +414,20 @@ function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
   return parts.join(' + ');
 }
 
+// The recurring-customer one-time perk rate that netted an engine line:
+// the explicit field when the pricer set one, else the perk recorded in the
+// line's discount block (recurring_customer_one_time_perk). 0 when none.
+function perkRateOf(li = {}) {
+  const explicit = Number(li.recurringCustomerDiscountRate);
+  if (Number.isFinite(explicit) && explicit > 0 && explicit < 1) return explicit;
+  const applied = Array.isArray(li.discount?.appliedDiscounts) ? li.discount.appliedDiscounts : [];
+  if (applied.some((d) => d && d.type === 'recurring_customer_one_time_perk')) {
+    const rate = Number(li.discount?.effectiveDiscount);
+    if (Number.isFinite(rate) && rate > 0 && rate < 1) return rate;
+  }
+  return 0;
+}
+
 function mapV1ToLegacyShape(v1Result) {
   const R = {};
   const lineItems = v1Result.lineItems || [];
@@ -953,6 +967,14 @@ function mapV1ToLegacyShape(v1Result) {
       // `price` above stays GROSS, so consumers showing what the customer
       // accepted need this alongside it. Zero is a real accepted value.
       if (Number.isFinite(Number(li.manualFinalOneTime))) item.manualFinalOneTime = Number(li.manualFinalOneTime);
+      // FACE value before the recurring-customer (WaveGuard) one-time perk:
+      // `price` is the discounted effective price, and the inspection-credit
+      // promise is the quoted face, not what a member paid (codex #3521 r5
+      // P0). Persisted so closeout can read it off the stored row.
+      if (Number.isFinite(Number(li.priceBeforeDiscount))) item.priceBeforeDiscount = Number(li.priceBeforeDiscount);
+      // The perk rate itself, so a stored row is self-describing even where a
+      // reader only has the net price (codex #3521 r8 P0).
+      if (perkRateOf(li) > 0) item.recurringCustomerDiscountRate = perkRateOf(li);
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
@@ -964,6 +986,22 @@ function mapV1ToLegacyShape(v1Result) {
         // branch. Zero is a real accepted value.
         ...(Number.isFinite(Number(li.manualFinalOneTime))
           ? { manualFinalOneTime: Number(li.manualFinalOneTime) } : {}),
+        // Face value before the WaveGuard one-time perk (see the ONE_TIME_
+        // SERVICES branch) — rodent_inspection lands here.
+        ...(Number.isFinite(Number(li.priceBeforeDiscount))
+          ? { priceBeforeDiscount: Number(li.priceBeforeDiscount) } : {}),
+        ...(perkRateOf(li) > 0
+          ? { recurringCustomerDiscountRate: perkRateOf(li) } : {}),
+        // Included-row marker survives the specialty branch too: a V2
+        // exclusion section a service credit zeroed must still reach the
+        // customer page / PDF as "Included" instead of being filtered as an
+        // unmarked $0 row (codex #3521 r15 P1).
+        ...(li.serviceSpecificDiscountApplied !== undefined
+          ? { serviceSpecificDiscountApplied: !!li.serviceSpecificDiscountApplied } : {}),
+        ...(li.serviceSpecificDiscounts !== undefined
+          ? { serviceSpecificDiscounts: li.serviceSpecificDiscounts } : {}),
+        ...(li.priceAfterDiscount !== undefined && Number.isFinite(Number(li.priceAfterDiscount))
+          ? { priceAfterDiscount: Number(li.priceAfterDiscount) } : {}),
         onProg: !!li.includedOnProgram,
         quoteRequired,
         reason: li.reason,
@@ -1203,6 +1241,15 @@ function mapV1ToLegacyShape(v1Result) {
           addOns: s.addOns,
           serviceSpecificDiscountApplied: !!s.serviceSpecificDiscountApplied,
           serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
+          // Gross/perk fields survive the FINAL projection too (codex #3521
+          // r16 P1): a member inspection's persisted row must carry its
+          // face and rate so closeout never depends on audit reconstruction.
+          ...(Number.isFinite(Number(s.priceBeforeDiscount))
+            ? { priceBeforeDiscount: Number(s.priceBeforeDiscount) } : {}),
+          ...(Number(s.recurringCustomerDiscountRate) > 0
+            ? { recurringCustomerDiscountRate: Number(s.recurringCustomerDiscountRate) } : {}),
+          ...(s.priceAfterDiscount !== undefined && Number.isFinite(Number(s.priceAfterDiscount))
+            ? { priceAfterDiscount: Number(s.priceAfterDiscount) } : {}),
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
           ...measurementMetadataFields(s),

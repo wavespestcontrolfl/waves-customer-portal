@@ -552,6 +552,64 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
     }
   }
 
+  // One-time work the engine itemized (result.oneTime rows — rodent
+  // trapping + per-section exclusion, a flea package, …) prints as those
+  // rows, matching the estimate page (owner 2026-08-27), but ONLY when the
+  // rows account for the stored one-time total to the cent: a manual
+  // one-time discount or an engine adjustment lives outside these rows,
+  // and printing rows that don't sum to the total would quote a number
+  // the page never showed. Otherwise the single total line below stands.
+  if (!lineItems.some((item) => item.frequency === 'one_time')) {
+    const oneTimeTotal = num(estimate.onetime_total);
+    // The page's own normalizer: reads result OR engineResult (agent
+    // estimates persist the latter), merges items + specItems + the nested
+    // results bucket, dedupes, and classifies rows — so the PDF prints
+    // exactly the rows the estimate page prints. Lazy require: the route
+    // module requires this service lazily too; loading it at module scope
+    // would create a cycle.
+    // The frozen/live pricing bundle is the page's own itemization: a sent
+    // estimate that persists only engineInputs keeps its per-section rows
+    // under sendSnapshot.pricingBundle.oneTimeBreakdown (or the caller's
+    // livePricing bundle) while the raw data has no result at all (codex
+    // #3521 r16 P2). Read those first; re-normalize raw data only when no
+    // bundle rows exist.
+    let normalizedRows = [];
+    const bundleRows = livePricing?.bundle?.oneTimeBreakdown?.items
+      ?? estimateData?.sendSnapshot?.pricingBundle?.oneTimeBreakdown?.items;
+    if (Array.isArray(bundleRows) && bundleRows.length > 0) {
+      normalizedRows = bundleRows;
+    } else {
+      try {
+        const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+        if (typeof normalizeOneTimeBreakdown === 'function') {
+          normalizedRows = normalizeOneTimeBreakdown(estimateData).items || [];
+        }
+      } catch (_) { normalizedRows = []; }
+    }
+    // Charged rows must reconcile; rows a service credit zeroed print too,
+    // as "(Included)" at $0 — they are approved scope the page shows and
+    // the PDF must not drop (codex #3521 r4 P1).
+    const charged = normalizedRows.filter((row) => row && row.kind === 'charge' && num(row.amount) > 0);
+    const included = normalizedRows.filter((row) => row && row.kind === 'included');
+    const rowsTotal = Math.round(charged.reduce((sum, row) => sum + num(row.amount), 0) * 100) / 100;
+    // Included-only (every row comped, stored total $0) still prints the
+    // approved scope — the charged sum ($0) reconciles to the $0 total.
+    if ((charged.length > 0 || included.length > 0) && Math.abs(rowsTotal - oneTimeTotal) < 0.005) {
+      for (const row of normalizedRows) {
+        const isCharged = charged.includes(row);
+        if (!isCharged && !included.includes(row)) continue;
+        lineItems.push(normalizeLineItem({
+          description: isCharged
+            ? (row.label || row.service || 'One-time service')
+            : `${row.label || row.service || 'One-time service'} (Included)`,
+          unitPrice: isCharged ? num(row.amount) : 0,
+          frequency: 'one_time',
+          taxable: false,
+        }));
+      }
+    }
+  }
+
   // Last-ditch: fill whichever side is still missing from the stored totals
   // so the PDF still shows a number rather than an empty table.
   if (!suppressRecurringPricing && !lineItems.some((item) => item.frequency !== 'one_time')) {

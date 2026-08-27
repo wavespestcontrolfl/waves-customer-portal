@@ -454,8 +454,25 @@ function bookingServiceFor(name) {
 // is correct for routing the /book link's ?service= param but reads wrong
 // as confirmation copy once a real appointment exists. Falls back to the
 // estimate's service_interest, then the supplied bucket label.
+// An itemized job's component rows share a "<Job> — <Section>" label. For
+// acceptance/confirmation copy the customer accepted the JOB, so a label
+// that is one section of a multi-section job collapses to the job name
+// (codex #3521 r13 P2); a lone section-labelled row keeps its label.
+function jobLevelOneTimeLabel(label, rows = []) {
+  const text = String(label || '').trim();
+  const sep = text.indexOf(' — ');
+  if (sep <= 0) return text;
+  const prefix = text.slice(0, sep).trim();
+  const siblings = (Array.isArray(rows) ? rows : []).filter((r) => {
+    const name = String(r?.name || r?.label || r?.displayName || '').trim();
+    const i = name.indexOf(' — ');
+    return i > 0 && name.slice(0, i).trim().toLowerCase() === prefix.toLowerCase();
+  });
+  return siblings.length > 1 ? prefix : text;
+}
+
 function confirmationServiceLabel(oneTimeList, estimate, fallbackLabel) {
-  const specific = (Array.isArray(oneTimeList) ? oneTimeList[0]?.name : '')
+  const specific = (Array.isArray(oneTimeList) ? jobLevelOneTimeLabel(oneTimeList[0]?.name, oneTimeList) : '')
     || estimate?.service_interest
     || fallbackLabel
     || '';
@@ -1588,7 +1605,10 @@ function buildOneTimeInvoiceServiceLabel({
   // a customer-facing label — prefer the mapped category label.
   const rowLabelIsRawServiceKey = !!rowLabel && !!row
     && rowLabel.toLowerCase() === String(row.service || '').toLowerCase();
-  if (rowLabel && !rowLabelIsRawServiceKey) return rowLabel;
+  if (rowLabel && !rowLabelIsRawServiceKey) {
+    // Job-level name for a multi-section itemized job (codex #3521 r13 P2).
+    return jobLevelOneTimeLabel(rowLabel, listRow ? oneTimeList : (breakdown?.items || []));
+  }
   return oneTimeInvoiceLabelForCategory(category);
 }
 
@@ -4436,7 +4456,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
     Number.isFinite(savedEstimateTierDiscount) ? savedEstimateTierDiscount : null,
   );
   const recurring = recurringServicesWithSupplements(estResult);
-  const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  const oneTimeItems = oneTimeItemsForRender(estResult, estData);
   // Bora-Care detection reads the normalized one-time rows — the same set the
   // Waves AI card uses — so it stays consistent with the AI card and also covers
   // nested-result / engine-backed estimates that don't populate
@@ -5300,7 +5320,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
         <span class="num" style="font-size:42px">Quote Required</span>
       </div>
       <div class="day-price" data-mode-only="recurring">${escapeHtml(quoteDisplayReason)}</div>
-    ` : (isOneTimeOnly ? oneTimeOnlyHeroPriceHtml : (serviceCardsCoverRecurringTotal ? `
+    ` : (isOneTimeOnly ? '' : (serviceCardsCoverRecurringTotal ? `
       ${recurringChoiceTreatmentHtml || `<div class="service-price-list" data-mode-only="recurring">${servicePriceCardsHtml}</div>`}
     ` : recurringBilledMonthly ? `
       <div class="big-price" data-mode-only="recurring">
@@ -5369,16 +5389,14 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const oneTimeSingleRowNoDiscount = loneBillableOneTimeAmount != null
     && manualOneTimeDiscount === 0
     && Math.abs(separatelyBilledOneTimeTotal - loneBillableOneTimeAmount) < 0.005;
-  const suppressLoneOneTimeRowAmount = isOneTimeOnly
-    && oneTimeSingleRowNoDiscount
-    && billableOneTimeItems[0].serviceSpecificDiscountApplied !== true
-    && Math.abs(loneBillableOneTimeAmount - onetimeTotal) < 0.005;
+  // One-time-ONLY pages no longer render a hero price card (owner
+  // 2026-08-27, mirrors the React OneTimeBreakdownCard-leads layout), so
+  // the lone row keeps its dollars — it is the only place the price shows.
   const realOneTimeRows = billableOneTimeItems.map((it) => {
     const price = oneTimeItemAmount(it);
     const includedByServiceCredit = it.serviceSpecificDiscountApplied === true;
     const detail = isTermiteInstallItem(it) ? formatTermiteBaitDetail(R.tmBait, it.detail) : it.detail;
-    const priceHtml = includedByServiceCredit ? 'Included' : fmtMoney(price);
-    const priceCell = suppressLoneOneTimeRowAmount ? '' : priceHtml;
+    const priceCell = includedByServiceCredit ? 'Included' : fmtMoney(price);
     return `<tr><td>${escapeHtml(friendlyOneTimeRowName(it) || 'One-time service')}${detail ? `<div class="sub">${escapeHtml(detail)}</div>` : ''}</td><td style="text-align:right">${priceCell}</td></tr>`;
   }).join('');
   const manualOneTimeDiscountRowHtml = manualOneTimeDiscount > 0
@@ -6137,6 +6155,12 @@ ${shellTopBar()}
       <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</button>
     </div>` : ''}
     ${recurringHeroPriceHtml}
+    ${/* One-time-only pages lead with the itemized card (owner 2026-08-27);
+        the hero price card survives ONLY as the fallback for a legacy /
+        in-flight tokenized estimate that stored a one-time total but no
+        billable rows — those links must never render without a price
+        (pre-push P0). */ ''}
+    ${isOneTimeOnly && !quoteRequired && !hasRealOneTime ? oneTimeOnlyHeroPriceHtml : ''}
     ${canChooseOneTime ? `
     <div class="choice-treatment" data-mode-only="one_time" hidden>
       <div class="choice-treatment-name">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</div>
@@ -6151,7 +6175,6 @@ ${shellTopBar()}
     </div>
     ` : ''}
     ${quoteRequired || isOneTimeOnly ? '' : `<div class="mini-guarantee" data-mode-only="recurring">${escapeHtml(pageCopy.recurringAssurance)}</div>`}
-    ${isOneTimeOnly && !hasOnlyBoraCareServices ? `<div class="mini-guarantee">${escapeHtml(hasPreSlabOneTime ? preSlabCopy.warranty : (germanRoachCleanoutItem ? germanRoachGuaranteeCopy : 'Includes a 30-day callback period if pests return after this visit.'))}</div>` : ''}
     ${canChooseOneTime && (!oneTimeToggleCopy || oneTimeToggleCopy.callbackNote) ? `<div class="mini-guarantee" data-mode-only="one_time" hidden>${escapeHtml(oneTimeToggleCopy?.callbackNote || 'Includes a 30-day callback period if pests return after this visit.')}</div>` : ''}
     ${oneTimeItemsCardHtml}
   </div>
@@ -13738,7 +13761,7 @@ router.put('/:token/preferences', estimateToggleLimiter, async (req, res, next) 
 
     const estResult = parsedData.result || parsedData || {};
     const recurring = recurringServicesWithSupplements(estResult);
-    const oneTimeItems = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+    const oneTimeItems = oneTimeItemsForRender(estResult, parsedData);
     const pestRecurring = detectPestRecurring(recurring);
     const hasPestOneTime = detectPestOneTime(oneTimeItems);
     const pestOneTimeTotal = hasPestOneTime ? pestOneTimeBase(oneTimeItems) : 0;
@@ -14768,6 +14791,39 @@ function oneTimeItemSearchText(item = {}) {
     item.displayName,
     item.name,
   ].filter(Boolean).join(' ').toLowerCase().replace(/[_-]+/g, ' ');
+}
+
+// The raw one-time rows for the SSR page, falling back to the normalized
+// breakdown when the result carries none: agent/IB estimates persist their
+// priced work under engineResult.lineItems, and reading only
+// result.oneTime left the itemized card empty and re-showed the fallback
+// hero for an engine-backed exclusion quote (codex #3521 r5 P2). The
+// normalized rows are re-shaped to the raw item contract the helpers read.
+function oneTimeItemsForRender(estResult, estData) {
+  const raw = [...(estResult?.oneTime?.items || []), ...(estResult?.oneTime?.specItems || [])];
+  if (raw.length > 0) return raw;
+  let normalized = [];
+  try { normalized = normalizeOneTimeBreakdown(estData).items || []; } catch { normalized = []; }
+  // The normalizer also emits the pooled manual one-time discount as a
+  // negative `manual_discount` row. The SSR card subtracts
+  // manualDiscount.oneTimeAmount itself, so carrying THAT row through
+  // would net the discount twice ($500 − $100 stored as $400 rendering a
+  // $300 total while accept charges $400 — pre-push P0 on #3521). Only
+  // the manual-discount row is dropped: every other adjustment row (an
+  // engine/member discount that reconciles the rows to the stored total)
+  // must carry through, or the page shows the gross while accept charges
+  // the net (uncapped audit P0 on #3521).
+  return normalized.filter((row) => row && String(row.service || '') !== 'manual_discount').map((row) => ({
+    service: row.service || null,
+    name: row.label,
+    label: row.label,
+    price: row.quoteRequired ? null : row.amount,
+    detail: row.detail || null,
+    quoteRequired: row.quoteRequired === true,
+    reason: row.reason || null,
+    customQuoteReason: row.customQuoteReason || null,
+    ...(row.kind === 'included' ? { serviceSpecificDiscountApplied: true } : {}),
+  }));
 }
 
 function oneTimeItemAmount(item = {}) {

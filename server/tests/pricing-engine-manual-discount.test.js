@@ -160,7 +160,10 @@ describe('pricing engine manual recurring discount', () => {
     // Only the eligible one-time line (exclusion) is discounted; the excluded
     // trap-only retainer keeps its full price.
     expect(md.eligibleServices).toEqual(['exclusion']);
-    expect(md.oneTimeDiscountableBase).toBeCloseTo(720, 2);
+    // Exclusion here carries the inspect fee (the trap-only retainer is not
+    // a rodent-service opt-in): $595 work + $75 inspection (owner 2026-08-26,
+    // was $125 → 720).
+    expect(md.oneTimeDiscountableBase).toBeCloseTo(670, 2);
   });
 
   test('member discounts (requiresWaveGuardTier) apply without confirmation and keep the informational warning', () => {

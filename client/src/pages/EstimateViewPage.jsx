@@ -1643,12 +1643,16 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
   );
 }
 
-function OneTimePriceCard({ oneTimePrice, breakdown }) {
+// Fallback ONLY: a legacy / in-flight tokenized estimate that stored a
+// one-time total but no billable breakdown rows must still show its price
+// (pre-push P0 on #3521). Every itemized estimate renders
+// OneTimeBreakdownCard instead (owner 2026-08-27).
+export function OneTimePriceCard({ oneTimePrice, breakdown }) {
   return (
     <div style={estimateCard()}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
         <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
-        {fmtMoney(oneTimePrice)}
+          {fmtMoney(oneTimePrice)}
         </span>
         <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
       </div>
@@ -5960,20 +5964,23 @@ function EstimateViewPageInner() {
         </>
       );
     }
+    // One-time-only pages lead with the itemized card (owner 2026-08-27):
+    // the big price card repeated the card's own total, so the breakdown
+    // is the headline and the approve CTA follows it. No headlineTotal —
+    // with no price card above, a single-row breakdown must keep its
+    // dollars or the page shows no price at all.
+    const hasOneTimeRows = (Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : []).length > 0;
     return (
       <>
-        <OneTimePriceCard
-          oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-          breakdown={pricing.oneTimeBreakdown}
-        />
+        {hasOneTimeRows
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+          : (
+            <OneTimePriceCard
+              oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+              breakdown={pricing.oneTimeBreakdown}
+            />
+          )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
-        {/* headlineTotal: a single-item breakdown matching the price card
-            above keeps the service NAME but drops its repeated dollars
-            (owner 2026-07-23). */}
-        <OneTimeBreakdownCard
-          breakdown={pricing.oneTimeBreakdown}
-          headlineTotal={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
-        />
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
             .filter((section) => section.isPest)

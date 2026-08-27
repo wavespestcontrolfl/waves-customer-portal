@@ -4837,20 +4837,18 @@ function priceRodentBait(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING (One-Time)
 // ============================================================
-// Standard = setup + 2 callbacks/checks. Unlimited = callbacks for the same
-// active trapping job only. Trap-only monitoring is priced separately and is
-// not a warranty.
+// Standard is the ONLY trapping plan (owner directive 2026-08-26): flat
+// $350 with UNLIMITED callbacks/checks for the same active trapping job —
+// callbacks never bill. The separate Unlimited tier, the mid-program
+// upgrade, and per-callback extras are all retired; legacy plan/upgrade/
+// callback-count inputs from saved estimates are accepted and ignored so
+// a re-price never crashes. Trap-only monitoring is priced separately and
+// is not a warranty.
 //
 // Inputs:
 //   property: { footprint, lotSqFt, features }
 //   options:
-//     pressure: 'light' | 'normal' | 'moderate' | 'heavy' | 'severe'
 //     emergency: boolean — same-day / urgent surcharge
-//
-// Pressure inferred from property.features when not provided:
-//   trees=heavy + nearWater  → heavy
-//   trees=heavy or nearWater → moderate
-//   default                  → normal
 function _bracketLookup(value, brackets, key) {
   for (const b of brackets) {
     if (value <= b[key]) return b;
@@ -4860,21 +4858,10 @@ function _bracketLookup(value, brackets, key) {
 
 function priceRodentTrapping(property, options = {}) {
   const cfg = RODENT.trapping;
-  const plan = options.plan === 'unlimited' || options.rodentTrappingPlan === 'unlimited'
-    ? 'unlimited'
-    : 'standard';
   const { emergency = false } = options;
-  const includedCallbacks = plan === 'standard' ? Number(cfg.includedFollowUps) || 2 : 'unlimited';
-  const unlimitedCallbacks = plan === 'unlimited';
   const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
   const requestedExtraCallbacks = Math.max(0, Math.floor(Number(options.extraCallbackCount) || 0));
-  const extraCallbackAllowed = plan === 'standard' && callbacksUsed >= includedCallbacks;
-  const extraCallbackCount = extraCallbackAllowed ? requestedExtraCallbacks : 0;
-  const extraCallbackPrice = extraCallbackCount * cfg.additionalFollowUpRate;
-  const basePrice = unlimitedCallbacks ? cfg.unlimitedPrice : cfg.standardPrice;
-  const trappingBasePrice = options.upgradeToUnlimited
-    ? cfg.upgradeToUnlimitedPrice
-    : basePrice;
+  const trappingBasePrice = cfg.standardPrice;
 
   let emergencySurcharge = 0;
   if (emergency) {
@@ -4882,22 +4869,15 @@ function priceRodentTrapping(property, options = {}) {
     emergencySurcharge = Math.max(pctSurcharge, cfg.emergencyMinimumSurcharge);
   }
 
-  const price = Math.round(trappingBasePrice + emergencySurcharge + extraCallbackPrice);
-  const name = options.upgradeToUnlimited
-    ? 'Rodent Trapping - Upgrade to Unlimited'
-    : plan === 'unlimited'
-      ? 'Rodent Trapping - Unlimited Callback'
-      : 'Rodent Trapping - Standard';
-  const warnings = [];
-  if (requestedExtraCallbacks > 0 && !extraCallbackAllowed) {
-    warnings.push('Extra callbacks can only be billed after the 2 included Standard callbacks/checks are used.');
+  const price = Math.round(trappingBasePrice + emergencySurcharge);
+  const name = 'Rodent Trapping - Standard';
+  const warnings = [
+    'Unlimited callbacks apply to the same active trapping job only, not lifetime coverage or new infestations after job closure.',
+  ];
+  if (requestedExtraCallbacks > 0) {
+    warnings.push('Callbacks are unlimited on the Standard trapping plan — extra callback charges no longer apply.');
   }
-  if (plan === 'unlimited') {
-    warnings.push('Unlimited callbacks apply to the same active trapping job only, not lifetime coverage or new infestations after job closure.');
-  }
-  const detail = options.upgradeToUnlimited
-    ? 'Upgrade Standard Rodent Trapping to Unlimited Callback for the same active trapping job.'
-    : cfg.invoiceDescriptions[plan];
+  const detail = cfg.invoiceDescriptions.standard;
 
   return {
     service: 'rodent_trapping',
@@ -4919,30 +4899,21 @@ function priceRodentTrapping(property, options = {}) {
         discountEligible: false,
         detail: '20% or $75 minimum, whichever is greater.',
       }] : []),
-      ...(extraCallbackCount > 0 ? [{
-        service: 'rodent_trapping_extra_callback',
-        name: 'Rodent Trapping - Extra Callback',
-        count: extraCallbackCount,
-        perVisit: cfg.additionalFollowUpRate,
-        price: extraCallbackPrice,
-        discountEligible: false,
-        detail: `Additional callbacks after included visits are $${cfg.additionalFollowUpRate} each.`,
-      }] : []),
     ],
     base: trappingBasePrice,
     trappingBasePrice,
-    rodentTrappingPlan: plan,
-    includedCallbacks,
+    rodentTrappingPlan: 'standard',
+    includedCallbacks: 'unlimited',
     callbacksUsed,
-    extraCallbackCount,
-    extraCallbackPrice,
-    extraCallbackAllowed,
-    unlimitedCallbacks,
+    extraCallbackCount: 0,
+    extraCallbackPrice: 0,
+    extraCallbackAllowed: false,
+    unlimitedCallbacks: true,
     emergency,
     emergencySurcharge: Math.round(emergencySurcharge),
     emergencySurchargeApplied: emergencySurcharge > 0,
     emergencySurchargeAmount: Math.round(emergencySurcharge),
-    includedFollowUps: includedCallbacks,
+    includedFollowUps: 'unlimited',
     activeWindowDays: null,
     customRecommended: false,
     requiresCustomQuote: false,
@@ -4955,12 +4926,9 @@ function priceRodentTrapping(property, options = {}) {
     discounts: [],
     warnings,
     warrantyEligible: false,
-    pricingSource: 'rodent_trapping_revised_2026',
+    pricingSource: 'rodent_trapping_standard_only_2026',
     pricingBasis: {
       standardPrice: cfg.standardPrice,
-      unlimitedPrice: cfg.unlimitedPrice,
-      upgradeToUnlimitedPrice: cfg.upgradeToUnlimitedPrice,
-      extraCallbackRate: cfg.additionalFollowUpRate,
       emergencyMultiplier: cfg.emergencyMultiplier,
       emergencyMinimumSurcharge: cfg.emergencyMinimumSurcharge,
     },
@@ -4970,41 +4938,25 @@ function priceRodentTrapping(property, options = {}) {
 // ============================================================
 // RODENT TRAPPING — ADDITIONAL FOLLOW-UP VISITS
 // ============================================================
-function priceRodentTrappingFollowups(count = 1, options = {}) {
+// Callbacks are unlimited on the Standard plan (owner 2026-08-26), so
+// trap checks for the same active trapping job are always included — no
+// per-callback billing.
+function priceRodentTrappingFollowups(count = 1) {
   const n = Math.max(0, Math.floor(count));
   if (n === 0) return null;
-
-  const cfg = RODENT.trapping;
-  const callbacksUsed = Math.max(0, Math.floor(Number(options.callbacksUsed) || 0));
-  const includedCallbacks = Number(cfg.includedFollowUps) || 2;
-  if (options.plan === 'unlimited' || options.unlimitedCallbacks) {
-    return {
-      service: 'rodent_trapping_followup',
-      count: n,
-      perVisit: 0,
-      price: 0,
-      included: true,
-      unlimitedCallbacks: true,
-      detail: `${n} trap check${n === 1 ? '' : 's'} included for the same active trapping job`,
-    };
-  }
-  const allowed = callbacksUsed >= includedCallbacks;
 
   return {
     service: 'rodent_trapping_followup',
     count: n,
-    perVisit: allowed ? cfg.additionalFollowUpRate : 0,
-    price: allowed ? n * cfg.additionalFollowUpRate : 0,
-    included: !allowed,
-    includedCallbacks,
-    callbacksUsed,
+    perVisit: 0,
+    price: 0,
+    included: true,
+    unlimitedCallbacks: true,
     requiresCustomQuote: false,
     quoteRequired: false,
     customQuoteReason: null,
-    reason: allowed ? null : 'Extra callbacks can only be billed after the 2 included Standard callbacks/checks are used.',
-    detail: allowed
-      ? `${n} extra callback${n === 1 ? '' : 's'} at $${cfg.additionalFollowUpRate} each`
-      : `${n} callback${n === 1 ? '' : 's'} not billable until included callbacks/checks are used`,
+    reason: null,
+    detail: `${n} trap check${n === 1 ? '' : 's'} included for the same active trapping job`,
   };
 }
 
@@ -8116,12 +8068,100 @@ function priceRodentExclusionV2(options = {}) {
     ? `${parts.join(', ')}${inspectDetail}`
     : `Rodent Exclusion${inspectDetail}`;
 
+  // Per-section line items (owner directive 2026-08-26): each exclusion
+  // section quotes as its own line on the estimate instead of one combined
+  // price. All rows keep service 'rodent_exclusion' so catalog linking,
+  // family classification/adoption, and completion profiles see the same
+  // identity as the old single row; rows sum EXACTLY to `total`. The word
+  // "inspection" is deliberately avoided in names/labels — estimate-public's
+  // isInspectionReviewOneTimeItem would classify such a row non-billable.
+  // Rows must reconcile to installPrice to the CENT: a fractional measured
+  // quantity (20.1 LF) makes the component subtotals fractional, and a
+  // delta computed against the ROUNDED raw install would leave the rows
+  // summing $0.40 over the price the estimate persists (codex #3521 r2 P2).
+  // Each component is rounded to cents and the minimum delta is taken
+  // against that cent-rounded component sum.
+  // The pricer's install price is a WHOLE-dollar figure (max(floor,
+  // round(raw))), so the cent-rounded rows can land above OR below it by
+  // under a dollar. The remainder is one number: when the job minimum
+  // lifted the price it is the minimum row; otherwise (pre-push P0 on
+  // #3521 — fractional work above the minimum) it folds into the last
+  // component row, so the rows never exceed the price the engine charges.
+  const cents = (value) => Math.round(value * 100) / 100;
+  const componentSubtotal = cents(
+    cents(wireMeshPointSubtotal) + cents(birdBoxSubtotal) + cents(linearMeshSubtotal)
+  );
+  const minimumApplied = floor > Math.round(rawInstall);
+  const reconcileDelta = cents(installPrice - componentSubtotal);
+  const floorDelta = minimumApplied ? Math.max(0, reconcileDelta) : 0;
+  const roundingDelta = minimumApplied ? 0 : reconcileDelta;
+  const urgencyDelta = Math.max(0, cents(installWithUrgency - installPrice));
+  const componentLineItems = [];
+  const pushComponent = (component, label, price, componentDetail) => {
+    componentLineItems.push({
+      service: 'rodent_exclusion',
+      component,
+      name: label,
+      label,
+      price: cents(price),
+      detail: componentDetail,
+      pricingVersion: 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX',
+    });
+  };
+  const unitParts = (pairs) => pairs.filter(([count]) => count > 0)
+    .map(([count, text]) => `${count} ${text}`).join(', ');
+  if (wireMeshPointSubtotal > 0) {
+    pushComponent('wire_mesh_points', 'Rodent Exclusion — Wire Mesh Points', wireMeshPointSubtotal,
+      unitParts([
+        [stdPts, `standard @ $${cfg.wireMeshPoints.standard}/pt`],
+        [advPts, `roof/high @ $${cfg.wireMeshPoints.advancedRoofHigh}/pt`],
+      ]));
+  }
+  if (birdBoxSubtotal > 0) {
+    pushComponent('bird_boxes', 'Rodent Exclusion — Bird Boxes', birdBoxSubtotal,
+      unitParts([
+        [stdBoxes, `standard @ $${cfg.birdBoxes.standard}`],
+        [tileBoxes, `tile/high @ $${cfg.birdBoxes.tileHighAccess}`],
+        [custBoxes, `custom @ $${cfg.birdBoxes.customOversized}+`],
+      ]));
+  }
+  if (linearMeshSubtotal > 0) {
+    pushComponent('linear_mesh', 'Rodent Exclusion — Linear Mesh', linearMeshSubtotal,
+      unitParts([
+        [softLF, `LF soft @ $${cfg.linearMesh.softRatePerLF}/LF`],
+        [hardLF, `LF hard @ $${cfg.linearMesh.hardRatePerLF}/LF`],
+      ]));
+  }
+  if (componentLineItems.length > 0) {
+    if (floorDelta > 0) {
+      pushComponent('job_minimum', 'Rodent Exclusion — Job Minimum', floorDelta,
+        `Exclusion jobs carry a $${floor} minimum.`);
+    } else if (roundingDelta !== 0) {
+      const last = componentLineItems[componentLineItems.length - 1];
+      last.price = cents(last.price + roundingDelta);
+    }
+    if (urgencyDelta > 0) {
+      pushComponent('urgency_surcharge', 'Rodent Exclusion — Urgency Surcharge', urgencyDelta,
+        'Same-day / after-hours scheduling surcharge.');
+    }
+    if (inspectionFee > 0) {
+      pushComponent('inspect_fee', 'Rodent Exclusion — Inspect & Assessment', inspectionFee,
+        `$${inspectionFee} inspect fee — waived with rodent service opt-in or approved work over $${ins.waiveIfApprovedTotalOver}.`);
+    } else if (inspectionWaived) {
+      componentLineItems[0].detail = `${componentLineItems[0].detail} (inspect waived)`;
+    }
+  }
+
   return {
     service: 'rodent_exclusion',
     name: 'Rodent Exclusion',
     pricingVersion: 'RODENT_EXCLUSION_V2_MESH_BIRD_BOX',
     price: total,
     detail,
+
+    // Per-section rows for the estimate (empty when nothing is quoted —
+    // callers fall back to this summary object as the single line item).
+    lineItems: componentLineItems,
 
     quantities: {
       standardWireMeshPoints: stdPts,

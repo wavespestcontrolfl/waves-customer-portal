@@ -64,12 +64,13 @@ function configuredCreditAmount() {
 /**
  * The credit amount for a specific service. Rodent inspections credit their
  * QUOTED fee, not the flat default (owner ruling 2026-08-04): the public
- * estimator has been promising "$125 inspection (creditable for 14 days
- * toward remediation work)" on tokenized estimates since before this
- * feature existed, and an in-flight estimate is a keep-working surface —
- * freezing the flat $75 onto a rodent offer would short a promise already
- * sent. pricing_config stays authoritative for both values via the
- * db-bridge overlay.
+ * estimator prints the live fee as "creditable for 14 days toward
+ * remediation work" on tokenized estimates, and an in-flight estimate is a
+ * keep-working surface — freezing a different amount onto a rodent offer
+ * would short a promise already sent. (The quoted fee is $75 since
+ * 2026-08-26; offers frozen at the earlier $125 keep what they promised.)
+ * pricing_config stays authoritative for both values via the db-bridge
+ * overlay.
  */
 function configuredCreditAmountForServiceKey(serviceKey) {
   try {
@@ -80,6 +81,225 @@ function configuredCreditAmountForServiceKey(serviceKey) {
     }
   } catch { /* fall through to the flat default */ }
   return configuredCreditAmount();
+}
+
+/**
+ * Amount to freeze on a closeout offer: the fee actually SOLD on the visit
+ * when there is one, else the configured fee. A customer who accepted a
+ * $125 rodent inspection before the fee dropped to $75 was promised the
+ * full $125 toward treatment; freezing the live config at closeout would
+ * short that promise (codex #3521 r1 P0). Only rodent carries a
+ * quoted-fee promise — other inspections keep the flat configured credit.
+ */
+/**
+ * What the visit's INSPECTION LINE sold for — never the visit aggregate.
+ * A grouped appointment stores the whole group (primary + add-ons) in the
+ * parent's estimated_price, so the completion invoice amount would credit
+ * the add-ons too; an appointment-level discount would credit less than
+ * the line the customer was quoted (codex #3521 r3 P1). Precedence:
+ *   1. the parent's own primary line (gross − its line discount), which
+ *      grouped bookings persist alongside the group total;
+ *   2. the linked estimate's rodent_inspection row (estimate accepts);
+ *   3. the parent price minus its add-on rows (legacy grouped rows with
+ *      no primary line recorded);
+ * null when none applies — the caller falls back to the configured fee.
+ * Read-only and fail-soft: a lookup error is a null, never a thrown
+ * closeout.
+ */
+// What the estimate says about the customer being recurring when it was
+// quoted: true / false when the inputs carry an explicit flag, null when
+// they carry none. The V2 estimator persists isRecurringCustomer as the
+// STRINGS "YES"/"NO" (codex #3521 r9 P1) — parse explicitly.
+function recurringCustomerEvidence(estData) {
+  const inputs = estData?.inputs || estData?.engineInputs || estData?.engineRequest || {};
+  const raw = inputs.recurringCustomer !== undefined ? inputs.recurringCustomer : inputs.isRecurringCustomer;
+  if (raw === undefined || raw === null || raw === '') return null;
+  if (raw === true || raw === 1) return true;
+  if (raw === false || raw === 0) return false;
+  const text = String(raw).trim().toLowerCase();
+  if (['yes', 'y', 'true', '1'].includes(text)) return true;
+  if (['no', 'n', 'false', '0'].includes(text)) return false;
+  return null;
+}
+
+// Every fee the rodent inspection has ever carried: the fee configured
+// today, every value in the pricing_config audit trail (20260826000002
+// records 125 → 75 there), and the legacy $125 as a seed for a database
+// without that trail. Read-only; fail-soft to the seeds.
+const LEGACY_INSPECTION_FACES = [125];
+async function knownInspectionFaces(db) {
+  const faces = new Set(LEGACY_INSPECTION_FACES);
+  const add = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0) faces.add(round2(n)); };
+  add(configuredCreditAmountForServiceKey('rodent_inspection'));
+  try {
+    if (typeof db === 'function') {
+      const rows = await db('pricing_config_audit')
+        .where({ config_key: 'rodent_inspection' })
+        .select('old_value', 'new_value');
+      for (const row of (Array.isArray(rows) ? rows : [])) {
+        for (const raw of [row?.old_value, row?.new_value]) {
+          try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            add(parsed?.fee);
+          } catch { /* unparseable audit value — skip */ }
+        }
+      }
+    }
+  } catch { /* no audit table / lookup error — seeds only */ }
+  return [...faces];
+}
+
+// Every recurring-customer one-time perk rate ever configured: today's
+// (constants, DB-overlaid), every value in the onetime_recurring_discount
+// audit trail, and the long-standing 15% as a seed. Read-only, fail-soft.
+const LEGACY_PERK_RATES = [0.15];
+async function knownPerkRates(db) {
+  const rates = new Set(LEGACY_PERK_RATES);
+  const add = (value) => { const n = Number(value); if (Number.isFinite(n) && n > 0 && n < 1) rates.add(n); };
+  try {
+    const { WAVEGUARD } = require('./pricing-engine/constants');
+    add(WAVEGUARD?.recurringCustomerOneTimePerk);
+  } catch { /* constants unavailable — seeds only */ }
+  try {
+    if (typeof db === 'function') {
+      const rows = await db('pricing_config_audit')
+        .where({ config_key: 'onetime_recurring_discount' })
+        .select('old_value', 'new_value');
+      for (const row of (Array.isArray(rows) ? rows : [])) {
+        for (const raw of [row?.old_value, row?.new_value]) {
+          try {
+            const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            add(parsed?.discount);
+          } catch { /* unparseable audit value — skip */ }
+        }
+      }
+    }
+  } catch { /* no audit table / lookup error — seeds only */ }
+  return [...rates];
+}
+
+async function soldInspectionAmountForVisit(db, svc) {
+  if (!svc || typeof svc !== 'object') return null;
+  // FACE value, never net: a comped or line-discounted inspection still
+  // earns the full credit (owner ruling 2026-08-03, pinned in
+  // tests/inspection-credit.test.js) — the promise is "the inspection is
+  // worth its quoted fee toward service", not a refund of what was paid
+  // (codex #3521 r4 P0).
+  const gross = Number(svc.primary_line_price);
+  if (Number.isFinite(gross) && gross > 0) return round2(gross);
+  if (typeof db !== 'function') return null;
+  try {
+    if (svc.source_estimate_id) {
+      const estimate = await db('estimates').where({ id: svc.source_estimate_id }).first();
+      if (estimate) {
+        const estData = typeof estimate.estimate_data === 'string'
+          ? JSON.parse(estimate.estimate_data)
+          : (estimate.estimate_data || {});
+        const result = estData?.result && typeof estData.result === 'object'
+          ? estData.result
+          : (estData?.engineResult && typeof estData.engineResult === 'object' ? estData.engineResult : {});
+        const oneTime = result?.oneTime && typeof result.oneTime === 'object' ? result.oneTime : {};
+        // Every persisted one-time container: the page's normalized
+        // items/specItems, the nested results bucket, AND the raw engine
+        // lineItems that agent/IB estimates persist verbatim under
+        // engineResult (uncapped audit P0 on #3521 — an in-flight $125
+        // inspection lives only there).
+        const rawRows = [
+          ...(Array.isArray(oneTime.items) ? oneTime.items : []),
+          ...(Array.isArray(oneTime.specItems) ? oneTime.specItems : []),
+          ...(Array.isArray(result?.results?.oneTime?.items) ? result.results.oneTime.items : []),
+          ...(Array.isArray(result?.results?.oneTime?.specItems) ? result.results.oneTime.specItems : []),
+          ...(Array.isArray(result?.lineItems) ? result.lineItems : []),
+          ...(Array.isArray(estData?.lineItems) ? estData.lineItems : []),
+        ];
+        // FACE = the largest gross the row carries: before the WaveGuard
+        // one-time perk (priceBeforeDiscount / subtotalBefore…), before a
+        // service-specific credit, or the plain price. A member's stored
+        // price is the discounted $106.25; the promise was $125 (codex
+        // #3521 r5 P0).
+        const row = rawRows.find((r) => r && String(r.service || '') === 'rodent_inspection' && r.quoteRequired !== true);
+        if (row) {
+          const positive = (values) => values.map(Number).filter((n) => Number.isFinite(n) && n > 0);
+          const gross = positive([
+            row.priceBeforeDiscount,
+            row.subtotalBeforeRecurringCustomerDiscount,
+            row.priceBeforeServiceSpecificDiscount,
+          ]);
+          if (gross.length) return round2(Math.max(...gross));
+          // Already-sent rows predate the mapper's gross fields and store
+          // only the NET: a WaveGuard member's $125 inspection sits at
+          // $106.25. Undo the one-time perk — the row's own persisted rate
+          // first, else the estimate's recurring-customer flag with the
+          // configured perk rate (codex #3521 r8 P0).
+          const net = positive([row.price, row.amount]);
+          if (net.length) {
+            const netFace = Math.max(...net);
+            // A row that persisted its own perk rate is self-describing.
+            const ownRate = Number(row.recurringCustomerDiscountRate);
+            if (Number.isFinite(ownRate) && ownRate > 0 && ownRate < 1) return round2(netFace / (1 - ownRate));
+            // A perk is reversed ONLY when the estimate establishes one
+            // applied (uncapped audit P0 on #3521): explicit non-member
+            // evidence ("NO"/false) or no evidence at all means the net IS
+            // the face — never mint an unearned credit by matching a
+            // non-member's $75 against a 40%-off $125.
+            if (recurringCustomerEvidence(estData) !== true) return round2(netFace);
+            // Otherwise recover the HISTORICAL face without consulting live
+            // config (codex #3521 r13 P1 — the perk rate is admin-editable,
+            // so dividing by today's rate would drift the promise): match
+            // the net against the fees this inspection has ever carried
+            // (configured today + every value in the pricing_config audit
+            // trail + the legacy $125). A net that IS a known face is a
+            // non-member's; otherwise the smallest known face the net could
+            // have been discounted from (≥ 50% of it) is the promise.
+            // PROVABLE only (uncapped audit P0 on #3521): a face counts when
+            // it IS the net (a non-member's), or when some perk rate that
+            // has ever been configured reproduces the stored net to the
+            // cent (face × (1 − rate) === net). "The smallest fee above the
+            // net" is not proof — an admin-edited $110 fee in the trail
+            // would have claimed a $125 promise. Every combination is
+            // weighed before an exact match is trusted (codex #3521 r15
+            // P1: a $75 net could be a 40%-off $125 when that rate is in
+            // the trail); the largest supported face is honored — never
+            // short a promise. If nothing proves out, the net stands.
+            const faces = await knownInspectionFaces(db);
+            const rates = await knownPerkRates(db);
+            const supported = faces.filter((f) => Math.abs(f - netFace) < 0.005
+              || (f > netFace && rates.some((r) => Math.abs(round2(f * (1 - r)) - netFace) < 0.005)));
+            return round2(supported.length ? Math.max(...supported) : netFace);
+          }
+        }
+      }
+    }
+    // Legacy grouped row with no primary line recorded: the parent price
+    // minus its add-ons is the inspection's face ONLY when nothing
+    // discounted the group — a discounted group would yield a net figure.
+    const parent = Number(svc.estimated_price);
+    const groupDiscounted = [svc.discount_dollars, svc.line_discount_dollars, svc.discount_amount, svc.line_discount_amount]
+      .some((v) => Number.isFinite(Number(v)) && Number(v) > 0);
+    if (Number.isFinite(parent) && parent > 0 && svc.id && !groupDiscounted) {
+      const addons = await db('scheduled_service_addons')
+        .where({ scheduled_service_id: svc.id })
+        .select('estimated_price');
+      const addonTotal = (Array.isArray(addons) ? addons : []).reduce((sum, addon) => {
+        const n = Number(addon?.estimated_price);
+        return Number.isFinite(n) && n > 0 ? sum + n : sum;
+      }, 0);
+      return round2(Math.max(0, parent - addonTotal));
+    }
+  } catch { /* fail-soft: the closeout freezes the configured fee */ }
+  return null;
+}
+
+function closeoutCreditAmountForServiceKey(serviceKey, soldAmount) {
+  const configured = configuredCreditAmountForServiceKey(serviceKey);
+  if (String(serviceKey || '') === 'rodent_inspection') {
+    const sold = Number(soldAmount);
+    // The configured fee is the FLOOR (comped/discounted inspections still
+    // earn the full credit); a higher quoted face value — a $125 promise
+    // made before the fee dropped — is honored in full.
+    if (Number.isFinite(sold) && sold > 0) return round2(Math.max(sold, configured));
+  }
+  return configured;
 }
 
 /**
@@ -105,8 +325,8 @@ function isCreditableInspectionProfile(profile) {
 
 /**
  * Services whose credit promise exists INDEPENDENT of GATE_INSPECTION_CREDIT
- * (Codex #3178 r31 P0): the public estimator prints "$125 inspection
- * (creditable for 14 days toward remediation work)" on every rodent
+ * (Codex #3178 r31 P0): the public estimator prints the live inspection fee
+ * as "creditable for 14 days toward remediation work" on every rodent
  * tokenized estimate — a keep-working surface that predates this lane.
  * While the gate is dark these closeouts still write the durable marker
  * and freeze the offer, or a customer completing an in-flight estimate
@@ -1779,6 +1999,8 @@ module.exports = {
   sweepInspectionCreditRedemptions,
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,
+  closeoutCreditAmountForServiceKey,
+  soldInspectionAmountForVisit,
   isCreditableInspectionProfile,
   carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,

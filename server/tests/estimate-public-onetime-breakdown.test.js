@@ -3597,14 +3597,14 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('data-estimate-ask-prompt="How does pre-slab treatment work?"');
     expect(html).not.toContain('data-estimate-ask-prompt="How does the bait work?"');
 
-    // The service note and the warranty assurance each render exactly once —
-    // they used to print as one combined sentence in both the one-time note and
-    // the mini-guarantee, which showed the customer the same text twice.
+    // The one-time hero price card and its guarantee line are retired on
+    // one-time-only pages (owner 2026-08-27 — the itemized card leads), so
+    // neither the service note nor the warranty assurance renders in the hero.
     const noteOccurrences = (html.match(/Includes pre-slab soil treatment for the measured slab area\./g) || []).length;
     const warrantyOccurrences = (html.match(/Warranty terms depend on the selected warranty option\./g) || []).length;
-    expect(noteOccurrences).toBe(1);
-    expect(warrantyOccurrences).toBe(1);
-    expect(html).toContain('No extended warranty selected.');
+    expect(noteOccurrences).toBe(0);
+    expect(warrantyOccurrences).toBe(0);
+    expect(html).not.toContain('class="mini-guarantee"');
   });
 
   test('server-rendered Bora-Care estimate uses Bora-Care copy + AI card + chips, not pest defaults', () => {
@@ -3641,9 +3641,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).not.toContain('choose your pest control option');
     expect(html).not.toContain('to show the details behind your WaveGuard plan.');
 
-    // Description note + treatment-detail label replace the bare "One-time service".
-    expect(html).toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
-    expect(html).toContain('Bora-Care wood treatment');
+    // The hero price card (description note + treatment-detail label) is
+    // retired on one-time-only pages (owner 2026-08-27); the itemized card
+    // names the treatment instead.
+    expect(html).not.toContain('Bora-Care is a borate wood treatment applied to the measured attic and surface areas.');
+    expect(html).not.toContain('class="choice-treatment-detail"');
+    expect(html).toMatch(/<tr><td>Bora-Care/);
 
     // Ask Waves surfaces a Bora-Care service chip + a Bora-Care-worded safety chip
     // (so clicking it routes to the borate answer); never the bait/pest chips it
@@ -3712,8 +3715,10 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('class="mini-guarantee"');
-    expect(html).toContain('Warranty terms depend on the selected warranty option.');
+    // One-time-only pages render no hero guarantee line at all (owner
+    // 2026-08-27) — the mixed quote must not resurrect it either.
+    expect(html).not.toContain('class="mini-guarantee"');
+    expect(html).not.toContain('Warranty terms depend on the selected warranty option.');
   });
 
   test('Bora-Care-only quote with a member-discount row still renders Bora-Care copy and no pest callback', () => {
@@ -3802,8 +3807,12 @@ describe('public estimate one-time breakdown', () => {
     // Hero treatment name comes from the normalized rows too, so the nested shape
     // shows the Bora-Care name instead of falling back to "WaveGuard Bronze" or the
     // raw "bora_care" service key.
-    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
-    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    // The nested-only shape now itemizes through the normalized rows
+    // (codex #3521 r5 P2): the card leads with the friendly name, and the
+    // fallback hero stays off.
+    expect(html).not.toContain('class="choice-treatment-name"');
+    expect(html).toMatch(/<tr><td>Bora-Care/);
+    expect(html).not.toContain('id="onetime-display"');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -3827,8 +3836,11 @@ describe('public estimate one-time breakdown', () => {
       },
     });
 
-    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
-    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    // No hero price card on one-time-only pages (owner 2026-08-27): the
+    // friendly name must come through the itemized card row instead.
+    expect(html).not.toContain('class="choice-treatment-name"');
+    expect(html).toContain('Bora-Care Wood Treatment');
+    expect(html).not.toContain('WaveGuard Bronze');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -4225,7 +4237,8 @@ describe('public estimate one-time breakdown', () => {
     });
 
     expect(html).not.toContain('your Bora-Care wood treatment quote.');
-    expect(html).toContain('class="mini-guarantee"');
+    // No hero guarantee line on one-time-only pages (owner 2026-08-27).
+    expect(html).not.toContain('class="mini-guarantee"');
     // The one-time hero detail/note are gated on Bora-Care-only too, so a mixed
     // billable estimate doesn't show the Bora-Care wood-treatment detail line.
     expect(html).not.toContain('class="choice-treatment-detail">Bora-Care wood treatment');
@@ -7907,8 +7920,12 @@ describe('SSR copy parity with the React page (#2969 dedupe; estimator audit 202
       },
     });
     expect(html).toContain('Flea Cleanout');
-    // Empty price cell — the lone row's amount is a pure repeat of the hero.
-    expect(html).toContain('<td style="text-align:right"></td>');
+    // With the hero price card retired (owner 2026-08-27) the lone row is
+    // the ONLY place the price shows, so it keeps its dollars; a single
+    // row still gets no Total row (the row states the price).
+    expect(html).toContain('<td style="text-align:right">$257.00</td>');
+    expect(html).not.toContain('<td style="text-align:right"></td>');
+    expect(html).not.toContain('id="onetime-display"');
     expect(html).not.toMatch(/<strong>Total<\/strong>/);
   });
 
@@ -8018,5 +8035,128 @@ describe('sanitizePublicOneTimeBreakdown — review-lane enums stay server-side 
     expect(sanitizePublicOneTimeBreakdown(null)).toBeNull();
     const noItems = { total: 0 };
     expect(sanitizePublicOneTimeBreakdown(noItems)).toBe(noItems);
+  });
+});
+
+describe('legacy one-time estimates with no billable rows keep a visible price (pre-push P0 on #3521)', () => {
+  test('a stored one-time total with no item rows falls back to the hero price card', () => {
+    const html = renderPage('legacy-onetime-no-rows-token', {
+      id: 'estimate-legacy-onetime',
+      status: 'sent',
+      customerName: 'Legacy Customer',
+      address: '9 Old Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 257, items: [], specItems: [] },
+        specItems: [],
+      },
+    });
+    // The price is visible either way: the normalizer synthesizes an
+    // "Other one-time services" row from the stored total when the estimate
+    // carries no rows (same as the React page), and when it cannot, the
+    // hero price card renders as the fallback. Never a page with no price.
+    expect(html).toContain('$257.00');
+    expect(html).toMatch(/id="onetime-display">\$257\.00<|<tr><td>Other one-time services/);
+  });
+
+  test('an itemized one-time estimate never renders the hero price card', () => {
+    const html = renderPage('itemized-onetime-token', {
+      id: 'estimate-itemized-onetime',
+      status: 'sent',
+      customerName: 'Itemized Customer',
+      address: '10 New Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 257, items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).not.toContain('id="onetime-display"');
+    expect(html).toContain('<td style="text-align:right">$257.00</td>');
+  });
+});
+
+describe('engine-backed (engineResult-only) one-time estimates itemize on the SSR page (codex #3521 r5 P2)', () => {
+  test('rows persisted under engineResult.lineItems lead with the itemized card, not the fallback hero', () => {
+    const html = renderPage('engine-backed-onetime-token', {
+      id: 'estimate-engine-backed',
+      status: 'sent',
+      customerName: 'Agent Customer',
+      address: '11 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 650,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [
+          { service: 'rodent_trapping', name: 'Rodent Trapping', price: 350 },
+          { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+        ],
+        oneTime: { total: 650 },
+      },
+    });
+    expect(html).toContain('Rodent Trapping');
+    expect(html).toContain('Rodent Exclusion — Wire Mesh Points');
+    expect(html).toContain('<td style="text-align:right">$350.00</td>');
+    expect(html).not.toContain('id="onetime-display"');
+  });
+});
+
+describe('engine-backed SSR fallback nets a manual one-time discount ONCE (pre-push P0 on #3521)', () => {
+  test('a $720 line with a $108 discount stored as $612 renders a $612 total, not $504', () => {
+    const html = renderPage('engine-backed-discount-token', {
+      id: 'estimate-engine-discount',
+      status: 'sent',
+      customerName: 'Discount Customer',
+      address: '12 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 612,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 }],
+        summary: {
+          manualDiscount: { label: 'WaveGuard Member Discount', type: 'PERCENT', value: 15, amount: 108, recurringAmount: 0, oneTimeAmount: 108 },
+        },
+      },
+    });
+    expect(html).toContain('$612.00');
+    expect(html).not.toContain('$504.00');
+    // The synthesized discount row itself never prints as a service row.
+    expect(html).not.toMatch(/<tr><td>WaveGuard Member Discount<div class="sub">one-time<\/div><\/td><td[^>]*>−\$108\.00<\/td><\/tr>.*<tr><td>WaveGuard Member Discount/s);
+  });
+});
+
+describe('engine-backed SSR fallback keeps NON-manual adjustment rows (uncapped audit P0 on #3521)', () => {
+  test('a $720 line stored as a $612 total with no manual discount renders $612, never the $720 gross', () => {
+    const html = renderPage('engine-backed-adjustment-token', {
+      id: 'estimate-engine-adjustment',
+      status: 'sent',
+      customerName: 'Adjustment Customer',
+      address: '13 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 612,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 }],
+        oneTime: { total: 612 },
+      },
+    });
+    expect(html).toContain('$612.00');
+    expect(html).not.toMatch(/<strong>Total<\/strong><\/td><td[^>]*><strong>\$720\.00/);
   });
 });

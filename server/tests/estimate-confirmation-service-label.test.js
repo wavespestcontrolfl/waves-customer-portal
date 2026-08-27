@@ -26,3 +26,24 @@ describe('post-booking confirmation SMS service label', () => {
       .toBe('German Roach Cleanout');
   });
 });
+
+describe('multi-section itemized jobs confirm as the JOB, not the first section (codex #3521 r13 P2)', () => {
+  const { buildOneTimeInvoiceServiceLabel } = require('../routes/estimate-public');
+  const sections = [
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Wire Mesh Points', price: 300 },
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Bird Boxes', price: 150 },
+    { service: 'rodent_exclusion', name: 'Rodent Exclusion — Linear Mesh', price: 140 },
+  ];
+
+  test('confirmation copy names the job', () => {
+    expect(confirmationServiceLabel(sections, { service_interest: 'Rodent Services' }, 'Rodent Control')).toBe('Rodent Exclusion');
+  });
+
+  test('the invoice/acceptance service label names the job', () => {
+    expect(buildOneTimeInvoiceServiceLabel({ estimate: {}, estData: {}, pricingBundle: null, oneTimeList: sections })).toBe('Rodent Exclusion');
+  });
+
+  test('a lone section-labelled row keeps its full label', () => {
+    expect(confirmationServiceLabel([sections[0]], {}, 'Rodent Control')).toBe('Rodent Exclusion — Wire Mesh Points');
+  });
+});

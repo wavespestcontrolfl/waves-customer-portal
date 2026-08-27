@@ -5472,6 +5472,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
+    // The inspection-credit amount is resolved from the LOCKED row inside
+    // the completion transaction (below), never from this pre-lock read: a
+    // price edit committing between here and the lock would otherwise
+    // freeze stale terms (uncapped audit P0 on #3521). The serviceData
+    // literal carries the configured fee as a placeholder that the locked
+    // pass always overwrites for an eligible inspection.
     // Third-party Bill-To resolution — moved ABOVE the tax freeze (codex
     // pre-push P0): the frozen completion rate must be derived for the
     // entity that OWES it. Resolving the payer after freezing let a service
@@ -6713,9 +6719,12 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                 inspectionCreditTerms: (() => {
                   const InspectionCredit = require('../services/inspection-credit');
                   return {
-                    // Service-aware: rodent credits its quoted $125 fee,
-                    // not the flat default (owner ruling 2026-08-04).
-                    amount: InspectionCredit.configuredCreditAmountForServiceKey(completionProfile?.serviceKey || null),
+                    // Placeholder (configured fee): the locked pass below
+                    // re-freezes the amount from the locked row's SOLD
+                    // inspection line for every eligible inspection —
+                    // an inspection accepted at $125 before the fee
+                    // dropped still freezes $125 (codex #3521 r1 P0).
+                    amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, null),
                     windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
                     // The RESOLVED key rides the frozen terms (r35 P0) so
                     // recovery classifies standing-promise offers even for
@@ -6801,11 +6810,19 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             if (hasMarker && !lockedEligible) {
               delete serviceData.inspectionCreditOptIn;
               delete serviceData.inspectionCreditTerms;
-            } else if (lockedEligible && (!hasMarker
-              || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
+            } else if (lockedEligible) {
+              // EVERY eligible inspection (re)freezes its terms here, from
+              // the LOCKED row inside the transaction — not just a missing
+              // marker or a repoint. The pre-lock literal is a placeholder;
+              // a price edit committing before the lock, or a repoint into
+              // an inspection, must both land the sold face, never stale or
+              // live-config terms (uncapped audit P0 on #3521).
               serviceData.inspectionCreditOptIn = true;
               serviceData.inspectionCreditTerms = {
-                amount: IC.configuredCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null),
+                amount: IC.closeoutCreditAmountForServiceKey(
+                  effectiveCompletionProfile?.serviceKey || null,
+                  await IC.soldInspectionAmountForVisit(trx, lockedSvcRow || svc),
+                ),
                 windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
                 serviceKey: effectiveCompletionProfile?.serviceKey || null,
               };

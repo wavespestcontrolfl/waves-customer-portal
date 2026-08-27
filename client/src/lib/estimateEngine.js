@@ -3080,17 +3080,12 @@ export function calculateEstimate(inputs) {
   /* ── Rodent Trapping ─────────────────────────────────────── */
   if (svcRodentTrap && !isCommercial) {
     hasOT = true;
-    let p = 350;
-    p += interpolate(footprint, [
-      { at: 800, adj: -25 }, { at: 1500, adj: -10 }, { at: 2000, adj: 0 },
-      { at: 2500, adj: 20 }, { at: 3000, adj: 40 }, { at: 4000, adj: 65 },
-    ]);
-    p += interpolate(lotSqFt, [
-      { at: 5000, adj: 0 }, { at: 10000, adj: 10 },
-      { at: 15000, adj: 20 }, { at: 25000, adj: 35 },
-    ]);
-    const fp = otP(Math.max(350, p));
-    otItems.push({ name: 'Trapping', price: fp, detail: 'Setup + check visits' });
+    // Mirror of the server's standard-only trapping plan (owner
+    // 2026-08-26): a FIXED $350 (not DB-configurable — one dollar authority
+    // shared with the engine constant and the catalog row), unlimited
+    // callbacks, no footprint/lot adjustments.
+    const fp = otP(350);
+    otItems.push({ name: 'Trapping', price: fp, detail: 'Unlimited trap checks for the same active trapping job' });
   }
 
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */
@@ -3293,12 +3288,13 @@ export function calculateEstimate(inputs) {
   if (svcExclusion && !isCommercial && (exS + exM + exA) > 0) {
     const sc = exS * 37.50 + exM * 75 + exA * 150;
     let ep = Math.max(150, Math.round(sc));
-    let insp = exW ? 0 : 85;
+    // Static mirror of RODENT.inspection.fee ($75, owner 2026-08-26).
+    let insp = exW ? 0 : 75;
     const tp = otP(ep) + insp;
     let tl = 'Basic';
     if (exA > 0) tl = 'Advanced (Roof)';
     else if (exM > 0) tl = 'Moderate';
-    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $85 inspect' : '') + (exW ? ' (waived)' : '') });
+    specItems.push({ name: 'Rodent Exclusion', price: tp, det: tl + ' — ' + (exS + exM + exA) + ' points' + (insp > 0 ? ' + $75 inspect' : '') + (exW ? ' (waived)' : '') });
   }
 
   /* ═══════════ WAVEGUARD TOTALS ═══════════ */

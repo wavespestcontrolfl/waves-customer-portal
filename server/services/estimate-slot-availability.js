@@ -473,11 +473,36 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
 
   const rows = [];
   const seen = new Set();
+  const seenEngineKeys = new Map();
   // `service` is the category (used for the row's service field + label dedup).
   const add = (service, label, engineKey = null) => {
     const clean = String(label || '').trim();
     const key = clean.toLowerCase();
     if (!clean || !service || seen.has(key)) return;
+    // One ENGINE identity = one profile service, however many display rows
+    // it was itemized into: a V2 rodent exclusion quote carries a row per
+    // section ("Rodent Exclusion — Wire Mesh Points", "… — Bird Boxes", …)
+    // all keyed rodent_exclusion, and a second profile row would make the
+    // adoption stamp reject the profile as multi-service (codex #3521 r1
+    // P1). Collapse onto the first row and drop its section suffix so the
+    // visit is named for the job, not one of its parts.
+    // Only COMPONENT rows of one itemized job collapse — same engine key
+    // AND the same "<Job> — <Section>" label prefix. Two distinct paid
+    // products can deliberately share a key (oneTimeLawn + lawnPestControl
+    // both emit one_time_lawn) and must both stay in the profile, or the
+    // appointment's accepted-service mix drops paid work (codex #3521 r8
+    // P1).
+    if (engineKey && seenEngineKeys.has(engineKey)) {
+      const existing = seenEngineKeys.get(engineKey);
+      const prefixOf = (text) => { const i = text.indexOf(' — '); return i > 0 ? text.slice(0, i).trim().toLowerCase() : null; };
+      const existingPrefix = prefixOf(existing.rawLabel || existing.label);
+      const incomingPrefix = prefixOf(clean);
+      if (existingPrefix && incomingPrefix && existingPrefix === incomingPrefix) {
+        existing.rawLabel = existing.rawLabel || existing.label;
+        existing.label = existing.rawLabel.slice(0, existing.rawLabel.indexOf(' — ')).trim();
+        return;
+      }
+    }
     seen.add(key);
     // `service` is the CATEGORY (pest specialties all collapse to
     // 'pest_control'), which is right for labelling but destroys the identity
@@ -485,7 +510,9 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     // key so slot-reservation's catalogServiceIdForProfile can stamp service_id
     // for specialties like german_roach / stinging_insect — without it, both
     // query engine_key='pest_control' and stay unstamped (codex #3328 r1 P1).
-    rows.push({ service, label: clean, visitsPerYear: null, engineKey: engineKey || null });
+    const row = { service, label: clean, visitsPerYear: null, engineKey: engineKey || null };
+    rows.push(row);
+    if (engineKey && !seenEngineKeys.has(engineKey)) seenEngineKeys.set(engineKey, row);
   };
   const labelForCategory = (category) => (typeof oneTimeInvoiceLabelForCategory === 'function'
     ? oneTimeInvoiceLabelForCategory(category)
@@ -535,7 +562,12 @@ function oneTimeProfileServices(estimate = {}, estData = {}) {
     const service = String(item.service || '').toLowerCase();
     if (NON_SERVICE.includes(service)) continue;
     const amount = Number(item.amount ?? item.price ?? item.total);
-    if (!Number.isFinite(amount) || amount <= 0) continue;
+    // A row a service credit zeroed (kind 'included' / marker) is still
+    // scheduled work and still part of its job's scope — it must reach the
+    // collapse below so the appointment is profiled as the whole job, not
+    // as whichever section happened to stay billable (codex #3521 r19 P1).
+    const creditedScope = item.kind === 'included' || item.serviceSpecificDiscountApplied === true;
+    if (!Number.isFinite(amount) || (amount <= 0 && !creditedScope)) continue;
     const category = typeof serviceCategoryForOneTimeItem === 'function' ? serviceCategoryForOneTimeItem(item) : null;
     // Skip the priced one-time CHOICE row for the chosen category — it's the visit
     // already represented by the synthetic primary. The choice row is the generic
