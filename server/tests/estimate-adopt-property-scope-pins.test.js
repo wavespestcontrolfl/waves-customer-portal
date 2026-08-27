@@ -38,9 +38,14 @@ describe('adopt selector property scope', () => {
 describe('converter duplicate-series scope', () => {
   test('seriesAddressScope arms for every estimate with an address, not only grouped', () => {
     expect(converterSrc).not.toContain('if (estimate?.estimate_group_id && estimate.address) {');
-    const armIdx = converterSrc.indexOf('let seriesAddressScope = null;');
+    // The inline construction moved into the exported buildSeriesAddressScope
+    // (codex #3504 r4 — shared with the wizard self-book activation guard);
+    // the arming condition it pins is unchanged, and the conversion path
+    // still builds the scope for every estimate.
+    const armIdx = converterSrc.indexOf('async function buildSeriesAddressScope(database, estimate, customerId) {');
     expect(armIdx).toBeGreaterThan(-1);
-    expect(converterSrc.indexOf('if (estimate?.address || estimate?.property_id) {', armIdx)).toBeGreaterThan(armIdx);
+    expect(converterSrc.indexOf('if (!estimate?.address && !estimate?.property_id) return null;', armIdx)).toBeGreaterThan(armIdx);
+    expect(converterSrc).toContain('const seriesAddressScope = await buildSeriesAddressScope(database, estimate, customerId);');
   });
 });
 
