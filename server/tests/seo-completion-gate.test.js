@@ -587,6 +587,13 @@ describe('seo-completion-gate', () => {
     });
     expect(escapedBang.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
 
+    const requestClause = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Quote and Schedule Pool Cleaning](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(requestClause.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),
       brief: baseBrief({ service: 'mosquito-control' }),

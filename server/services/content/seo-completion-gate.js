@@ -491,10 +491,12 @@ function conversionCtaLinks(body) {
         // A trailing "for/on …" context clause is not a coordinated part.
         const coordinated = parts.map((part) => part.replace(/\s+(?:for|on)\s+.*$/i, '').trim()).filter(Boolean);
         const keywordRe = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
-        // Only an ESTIMATE/QUOTE-bearing part with no known service is an
-        // unknown service ("Pool Cleaning Estimate"); editorial clauses
-        // ("…and See Our Approach") carry no keyword and are not services.
-        const unknownPart = coordinated.some((part) => keywordRe.test(part) && termsIn(part).length === 0 && !filler.test(part));
+        const requestVerbRe = /^(?:request|schedule|book|get|arrange|order|buy|start|claim)\b/i;
+        // A part is a SERVICE-REQUEST clause when it carries the estimate/
+        // quote keyword OR opens with a request verb ("Schedule Pool
+        // Cleaning"); such a clause naming no known service is an unknown
+        // service. Editorial clauses ("…and See Our Approach") are neither.
+        const unknownPart = coordinated.some((part) => (keywordRe.test(part) || requestVerbRe.test(part)) && termsIn(part).length === 0 && !filler.test(part));
         if (unknownPart) named = [...named, 'unknown'];
         for (const part of coordinated) for (const svc of termsIn(part)) if (!named.includes(svc)) named.push(svc);
       }

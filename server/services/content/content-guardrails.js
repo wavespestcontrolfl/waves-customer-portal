@@ -1874,6 +1874,11 @@ function blankNonRenderedMarkdown(text) {
   }).join('\n');
 }
 
+function isDelimiterRow(line) {
+  const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
 function extractRawMarkdownTables(text) {
   const lines = blankNonRenderedMarkdown(text).split('\n');
   const tables = [];
@@ -1885,8 +1890,9 @@ function extractRawMarkdownTables(text) {
   let hm;
   while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
-    // GFM delimiter cells are 1+ dashes (":-|-:" is valid), pipes/colons/spaces around them.
-    const delimiter = /^\s*\|?[\s:|-]*-+[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
+    // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
+    // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
+    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]);
     // Header = a pipe row with at least one non-empty cell — icon-only
     // headings ("| ✅ | ❌ |") are still headings.
     const headerAbove = lines[i - 1].includes('|') && /[^\s|]/.test(lines[i - 1]);
