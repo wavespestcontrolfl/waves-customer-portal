@@ -293,7 +293,7 @@ function NowLine() {
   );
 }
 
-function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
+function AppointmentBlock({ service, top, height, durationMin, laneIdx = 0, laneCount = 1, onEdit, onResize, onProtocol, onTreatmentPlan, onViewAudit, onViewCustomer, isSelected, onToggleSelect, routeOrder, accent }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
     id: `svc-${service.id}`,
     data: { service },
@@ -330,8 +330,15 @@ function AppointmentBlock({ service, top, height, laneIdx = 0, laneCount = 1, on
       window.removeEventListener('pointerup', onUp);
       setResizeHeight(null);
       if (finalHeight !== startHeight) {
-        const newDurationMin = (finalHeight / SLOT_HEIGHT) * SLOT_MIN;
-        onResize(service, newDurationMin);
+        // Delta-based on the visit's REAL duration, not the drawn height: a
+        // block clipped at the grid's first row (05:00–07:00 draws 60 min)
+        // must keep its hidden pre-grid minutes when the operator drags the
+        // bottom edge, or the resize would silently shorten the visit.
+        const deltaMin = ((finalHeight - startHeight) / SLOT_HEIGHT) * SLOT_MIN;
+        const baseMin = Number.isFinite(durationMin) && durationMin > 0
+          ? durationMin
+          : (startHeight / SLOT_HEIGHT) * SLOT_MIN;
+        onResize(service, Math.max(SLOT_MIN, baseMin + deltaMin));
       }
     };
     window.addEventListener('pointermove', onMove);
@@ -635,6 +642,7 @@ function TechColumn({ tech, services, onEdit, onProtocol, onTreatmentPlan, onVie
                 service={svc}
                 top={top}
                 height={height}
+                durationMin={dur}
                 laneIdx={lane.laneIdx}
                 laneCount={lane.laneCount}
                 onEdit={onEdit}
