@@ -857,6 +857,36 @@ async function maybeAutoMerge(run, pr) {
     return { pending: true, reason: 'queue_row_moved_during_gating' };
   }
 
+  // 3.5 Named-competitor revoke check (owner directive 2026-08-26): a run
+  //    whose comparison gate flagged requiresHumanReview only got its PR
+  //    opened under the scoped autopublish eligibility — re-validate that
+  //    eligibility (TRUE-intercept marker + BOTH named-competitor gates)
+  //    fail-closed at the last instant, so unsetting the kill switch
+  //    (GATE_NAMED_COMPETITOR_AUTOPUBLISH or GATE_NAMED_COMPETITOR_COMPARISON)
+  //    during the build/Codex window stops an ALREADY-OPEN competitor PR
+  //    from merging. Fresh DB read (the tick's selection omits the column
+  //    and could be stale); any read/parse failure counts as flagged.
+  let comparisonRequiresReview = true;
+  try {
+    const fresh = await db('autonomous_runs').where('id', run.id).first('comparison_table_result');
+    let ctr = fresh ? fresh.comparison_table_result : null;
+    if (typeof ctr === 'string') { try { ctr = JSON.parse(ctr); } catch (_) { ctr = undefined; } }
+    if (ctr !== undefined) comparisonRequiresReview = Boolean(ctr && ctr.requiresHumanReview === true);
+  } catch (_) { comparisonRequiresReview = true; }
+  if (comparisonRequiresReview) {
+    let eligible = false;
+    try {
+      const { namedCompetitorAutopublishEligible } = require('./codex-remediation');
+      const runner = require('./autonomous-runner');
+      const brief = await runner._loadReviewedBrief(run);
+      eligible = namedCompetitorAutopublishEligible(brief) === true;
+    } catch (_) { eligible = false; }
+    if (!eligible) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
+      return { pending: true, reason: 'named_competitor_autopublish_revoked' };
+    }
+  }
+
   // 4. The merge itself is pinned to the head commit the gates above were
   //    checked against: GitHub rejects with 409 if the branch received
   //    another push while the merge call was in flight, so an unbuilt/

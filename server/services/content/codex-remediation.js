@@ -2244,6 +2244,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
 }
 
 module.exports = {
+  namedCompetitorAutopublishEligible,
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,

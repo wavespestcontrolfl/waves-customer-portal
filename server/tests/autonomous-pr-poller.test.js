@@ -101,7 +101,7 @@ function makeMetadataRun(overrides = {}) {
 // overrides what the pre-merge .first() re-check sees (simulates an operator
 // action landing AFTER the tick-start snapshot). `briefs` backs the
 // content_briefs target_url fallback lookup.
-function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0 } = {}) {
+function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [], newerRun = null, publishedTodayCount = 0, runFirst } = {}) {
   const queueRows = queue !== undefined ? queue : pending
     .filter((r) => r.opportunity_id)
     .map((r) => ({ id: r.opportunity_id, status: 'pending_review', skip_reason: r.skip_reason || 'astro_pr_pending_merge' }));
@@ -147,7 +147,12 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
         if (table === 'content_briefs') {
           return Promise.resolve(briefs.find((r) => r.id === q._filters.id) || null);
         }
-        // newer-sibling lookup in queueRowParkedState
+        // by-id lookup (named-competitor revoke check reads
+        // comparison_table_result fresh before merging); the newer-sibling
+        // lookup in queueRowParkedState filters by opportunity_id instead.
+        if (table === 'autonomous_runs' && q._filters.id !== undefined && runFirst !== undefined) {
+          return Promise.resolve(runFirst);
+        }
         if (table === 'autonomous_runs') return Promise.resolve(newerRun);
         return Promise.resolve(null);
       }),
@@ -668,6 +673,59 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  // Owner directive 2026-08-26: a run whose comparison gate flagged
+  // requiresHumanReview only reached this unattended merge under the scoped
+  // named-competitor autopublish eligibility — the poller re-validates it
+  // (TRUE-intercept marker + both gates) immediately before gh.mergePr, so
+  // unsetting a kill switch stops an ALREADY-OPEN competitor PR.
+  test('named-competitor run: auto-merge WITHHELD when autopublish eligibility is not (or no longer) met', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({
+      pending: [makeRun()],
+      runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: true } },
+    });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('named-competitor run: auto-merge proceeds when the TRUE-intercept marker and both gates hold at merge time', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const fg = require('../config/feature-gates');
+    const realIsEnabled = fg.isEnabled;
+    jest.spyOn(fg, 'isEnabled').mockImplementation((g) => (
+      (g === 'namedCompetitorAutopublish' || g === 'namedCompetitorComparison') ? true : realIsEnabled(g)));
+    try {
+      setupDb({
+        pending: [makeRun({ brief_id: 'brief-1' })],
+        briefs: [{ id: 'brief-1', gsc_signal: { bucket: 'operator_intercept', intercept: true } }],
+        runFirst: { comparison_table_result: { pass: true, findings: [], requiresHumanReview: true } },
+      });
+      gh.getPr.mockResolvedValue(openPr());
+      pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+      pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+      pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+      publisher.assertCodexReviewClear.mockResolvedValue(true);
+      gh.mergePr.mockResolvedValue({ merged: true });
+      indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+      publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+      const res = await poller.pollPending();
+
+      expect(gh.mergePr).toHaveBeenCalledTimes(1);
+      expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+    } finally {
+      fg.isEnabled.mockRestore();
+    }
   });
 
   test('flag on + green head build but Codex NOT clear: no merge', async () => {
