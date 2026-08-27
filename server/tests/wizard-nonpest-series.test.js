@@ -196,6 +196,37 @@ describe('wizardPlanServiceKey (palm identity through the tree_shrub funnel)', (
     expect(resolveWizardSeriesPlan(est, 'mosquito')).toBeNull();
   });
 
+  test('the REAL palm pricer output resolves a semiannual plan through the mirror mapping', () => {
+    // Executable regression against the actual engine shape (codex #3504
+    // r8 raised perVisit as absent from the pricer's return — it is not:
+    // service-pricing.js computes perVisit = max(rawPerVisit, minPerVisit)
+    // and returns BOTH, the engine pushes the raw result as the line item,
+    // and the mirror persists item.perVisit).
+    const { pricePalmInjection } = require('../services/pricing-engine/service-pricing');
+    const line = pricePalmInjection({}, { treatmentType: 'insecticide', palmCount: 4, palmSize: 'medium' });
+    expect(line.perVisit).toBeGreaterThan(0);
+    expect(line.appsPerYear).toBe(2);
+    // The public-quote mirror's field mapping, applied verbatim.
+    const mirrored = {
+      service: line.service,
+      annual: line.annual ?? null,
+      monthly: line.monthly ?? null,
+      perApp: line.perApp ?? null,
+      perVisit: line.perVisit ?? null,
+      visits: line.visits ?? null,
+      frequency: line.frequency ?? line.visitsPerYear ?? null,
+      appsPerYear: line.appsPerYear ?? null,
+    };
+    const estimate = {
+      id: 'est-real-palm',
+      annual_total: line.annual,
+      monthly_total: line.monthly,
+      estimate_data: { engineResult: { lineItems: [mirrored] } },
+    };
+    expect(wizardPlanServiceKey(estimate, 'tree_shrub')).toBe('palm_injection');
+    expect(resolveWizardSeriesPlan(estimate, 'palm_injection')).toEqual({ pattern: 'semiannual', visits: 2 });
+  });
+
   test('the wizard mirror persists appsPerYear (the palm line’s only cadence field)', () => {
     const publicQuote = fs.readFileSync(path.join(__dirname, '..', 'routes', 'public-quote.js'), 'utf8');
     expect(publicQuote).toMatch(/appsPerYear: item\.appsPerYear \?\? null,/);
@@ -305,6 +336,15 @@ describe('booking route wiring (source contracts)', () => {
 
   test('unplanned bookings keep the waiver-only disposition (stamp stays off)', () => {
     expect(booking).toMatch(/\} else if \(!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking\) \{/);
+  });
+
+  test('a failed/stale activation still runs the waiver-only fee disposition', () => {
+    // codex #3504 r8: kept-duplicate runs it in-transaction and success
+    // paths stamp with the series, but failed/stale outcomes left the live
+    // draft's positive frozen fee standing — a later conversion would
+    // charge a fee the shared recheck would have waived.
+    expect(booking).toMatch(/\} else if \(setupFeeHandoffEligible\) \{[\s\S]{0,900}stampDisclosedSetupFee\(trx, \{ allowStamp: false, stampServiceRow: serviceRow \}\)/);
+    expect(booking).toMatch(/post-failure setup-fee waiver recheck failed/);
   });
 
   test('seasonal plans refuse winter (Nov-Jan) parent starts', () => {

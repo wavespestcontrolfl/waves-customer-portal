@@ -3713,6 +3713,23 @@ async function createSelfBooking(payload = {}) {
         // heals it — every step is idempotent (linkage stamps only
         // unstamped rows, sync converges, tagger/welcome dedupe).
         await runWizardActivationFollowThrough(serviceRow.id);
+      } else if (setupFeeHandoffEligible) {
+        // Activation FAILED or went stale (seeding error, catalog abort,
+        // locked-draft drift): no series activated and the draft usually
+        // survives LIVE — run the same waiver-only disposition the solo
+        // path runs (codex #3504 r8). Without it, a membership or a
+        // queued setup-fee claim that arrived after the quote leaves the
+        // draft's positive frozen fee standing, and a later office
+        // conversion charges a fee the shared recheck would have waived.
+        // allowStamp:false — never a stamp from a failure path; the
+        // helper's shape checks no-op an archived draft.
+        try {
+          await db.transaction(async (trx) => {
+            await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: serviceRow });
+          });
+        } catch (err) {
+          logger.warn(`[booking:confirm] post-failure setup-fee waiver recheck failed for ${serviceRow.id} (booking kept): ${err.message}`);
+        }
       }
 
     } else if (!shouldSeedQuarterlyPestFollowUps && setupFeeHandoffEligible && !isOneTimeEstimateBooking) {
