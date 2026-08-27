@@ -574,6 +574,21 @@ async function markParentRecurring(conn, parent, pattern, opts = {}) {
     recurring_weekday: rOpts.weekday,
     recurring_interval_days: rOpts.intervalDays,
     updated_at: new Date(),
+    // Anchored-split PROVENANCE (owner ruling 2026-08-27): when this seed
+    // bills follow-ups at an even per-visit quotient (the parent absorbed
+    // the annual's remainder cents), record that quotient on the series
+    // template so auto-extend renews at the quoted per-application price
+    // rather than the parent's remainder-bearing one. The key is OUTSIDE
+    // the edit lane's override allowlist — an operator override never
+    // reads as an anchored split and vice versa.
+    ...(opts.estimatedPrice != null && Number(opts.estimatedPrice) > 0
+      ? {
+          recurring_template_overrides: conn.raw(
+            "COALESCE(recurring_template_overrides, '{}'::jsonb) || ?::jsonb",
+            [JSON.stringify({ anchored_split_per_visit: Math.round(Number(opts.estimatedPrice) * 100) / 100 })],
+          ),
+        }
+      : {}),
   }, columns);
   if (!Object.keys(updates).length) return 0;
   return conn('scheduled_services').where({ id: parentId }).update(updates);

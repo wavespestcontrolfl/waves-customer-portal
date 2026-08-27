@@ -2319,7 +2319,7 @@ export default function CustomersPageV2() {
           open={showAddModal}
           onClose={closeAddCustomer}
           initialValues={quickAddPreset}
-          title={quickAddPreset ? "Add Property" : "Add Customer"}
+          title="Add Customer"
           onCreated={handleQuickAddCreated}
         />
       )}
@@ -2346,32 +2346,6 @@ export default function CustomersPageV2() {
           key={selected360Id}
           customerId={selected360Id}
           onSelectCustomer={openCustomerProfile}
-          onAddProperty={(customer) => {
-            closeCustomerProfile();
-            openAddCustomer({
-              // Originating profile — the server pins the attach to THIS
-              // profile's account when the phone matches several accounts.
-              attachToCustomerId: customer.id ? String(customer.id) : "",
-              firstName: customer.firstName || "",
-              lastName: customer.lastName || "",
-              phone: customer.phone || "",
-              email: customer.email || "",
-              address: "",
-              city: "",
-              state: "FL",
-              zip: "",
-              profileLabel: "Other property",
-              leadSource: "existing_customer",
-              pipelineStage:
-                customer.pipelineStage === "active_customer"
-                  ? "active_customer"
-                  : "won",
-              tags: ["multi_property", "existing_customer_addon"],
-              notes: customer.profileLabel
-                ? `Additional property for ${customer.profileLabel}.`
-                : "",
-            });
-          }}
           onClose={closeCustomerProfile}
         />
       )}

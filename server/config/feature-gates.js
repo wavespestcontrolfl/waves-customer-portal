@@ -39,6 +39,7 @@
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
+ *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
@@ -1672,6 +1673,12 @@ const gates = {
   // flip needs no redeploy. Kill switch: unset the var.
   stopsAway: gateEnvValue('GATE_STOPS_AWAY'),
 
+  // Pest stranded-activation recovery (owner ruling 2026-08-27): the value is
+  // an ISO timestamp EPOCH, not a boolean — consumers read it at CALL time via
+  // gateEnvTimestamp() (flip needs no redeploy); this entry mirrors it as a
+  // boolean for status/inspection. Kill switch: unset.
+  pestStrandedRecovery: gateEnvTimestamp('GATE_PEST_STRANDED_RECOVERY') != null,
+
   // Best-time hints (2026-08-14): advisory "Best times this day" chips on
   // the admin date/time pickers (edit, reschedule, create), ranked by the
   // existing find-time drive-detour engine. Warn-only by design — picking a
@@ -1707,6 +1714,31 @@ function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
 
+// Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
+// GATE_PEST_STRANDED_RECOVERY). STRICT: a full ISO-8601 timestamp WITH an
+// explicit offset (`2026-08-28T14:00:00Z` / `2026-08-28T10:00:00-04:00`)
+// → Date; anything else — unset, a bare date, an offset-less local time
+// (Railway would read it as UTC and open the gate hours early), a number,
+// a locale string — → null (fail closed: an ambiguous value never enables
+// anything).
+// The regex lives INSIDE the function (codex r4 P1): the `gates` object
+// above evaluates gateEnvTimestamp() at module load, and a module-level
+// const declared below it would be in its temporal dead zone — the server
+// would fail to boot exactly when the gate is set. Calendar components are
+// round-trip validated (r4 P2): `2026-02-30T…` is ISO-shaped but JS would
+// normalise it to March 2 — an impossible date fails closed instead.
+function gateEnvTimestamp(envName) {
+  const raw = String(process.env[envName] || '').trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.exec(raw);
+  if (!m) return null;
+  const [y, mo, d, h, mi, s] = [m[1], m[2], m[3], m[4], m[5], m[6] || '00'].map(Number);
+  const calendar = new Date(Date.UTC(y, mo - 1, d));
+  if (calendar.getUTCFullYear() !== y || calendar.getUTCMonth() !== mo - 1 || calendar.getUTCDate() !== d) return null;
+  if (h > 23 || mi > 59 || s > 59) return null;
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -1723,5 +1755,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp };
 // gates 1775330914
