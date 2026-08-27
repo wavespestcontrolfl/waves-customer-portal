@@ -495,6 +495,27 @@ describe('verifyExtendedCompletionAnchor (shared in-lock cap authority)', () => 
       lockedInvoice: invoiceAt(90.55),
     })).resolves.toEqual({ ok: false, reason: 'out_of_band_prepayment' });
   });
+  test('an ALREADY-APPLIED prepayment (netting marker present) charges the residual', async () => {
+    const markerConn = (table) => {
+      const chain = {
+        where() { return chain; },
+        whereIn() { return chain; },
+        whereNotIn() { return chain; },
+        whereRaw() { return chain; },
+        orWhere() { return chain; },
+        andWhereRaw() { return chain; },
+        andWhere() { return chain; },
+        first: async () => (table === 'payments' ? { id: 'prepaid-marker' }
+          : (table === 'scheduled_services' ? { id: 's1', customer_id: 'c1' } : null)),
+      };
+      return chain;
+    };
+    await expect(verifyExtendedCompletionAnchor({
+      dbConn: markerConn, lockedCustomer: member,
+      lockedSvc: { ...visit, prepaid_method: 'cash', prepaid_amount: 50 },
+      lockedInvoice: invoiceAt(40.55),
+    })).resolves.toEqual({ ok: true, anchor: 90.55 });
+  });
   test('a live estimate card hold owns the booking (estimate_card_hold)', async () => {
     const holdConn = (table) => {
       const chain = {
@@ -610,9 +631,10 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false })).toBe(true);
   });
-  test('an out-of-band prepayment demotes the attached prediction (completion nets + verdict refuses)', () => {
+  test('an UNAPPLIED out-of-band prepayment demotes; the netted residual stays a promise', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50 })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: null, prepaidAmount: 50 })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50, prepaidApplied: true })).toBe(true);
   });
   test('per-application attached invoices promise the charge ONLY within the accepted cap (setup-fee line extends it)', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);

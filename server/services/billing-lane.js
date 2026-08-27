@@ -389,7 +389,23 @@ async function verifyExtendedCompletionAnchor({ dbConn, lockedCustomer, lockedSv
   // happens at mint time, before this lane admits the invoice.
   if (String(lockedSvc.prepaid_method || '') !== ANNUAL_PREPAY_PREPAID_METHOD
     && Number(lockedSvc.prepaid_amount) > 0) {
-    return { ok: false, reason: 'out_of_band_prepayment' };
+    // An ALREADY-APPLIED prepayment (completion netted invoice.total and
+    // booked the scheduled_service_prepaid payment marker) leaves the
+    // stamp populated — the residual is legitimately chargeable
+    // (manual-audit P1: an unconditional refusal would permanently
+    // disable Auto Pay on every partial-prepay visit). Only an
+    // unapplied/racing prepayment refuses; unreadable state refuses.
+    try {
+      const appliedMarker = await dbConn('payments')
+        .where({ customer_id: lockedSvc.customer_id, status: 'paid' })
+        .whereRaw("metadata::jsonb ->> 'source' = ?", ['scheduled_service_prepaid'])
+        .whereRaw("metadata::jsonb ->> 'invoice_id' = ?", [String(lockedInvoice.id)])
+        .whereRaw("metadata::jsonb ->> 'scheduled_service_id' = ?", [String(lockedSvc.id)])
+        .first('id');
+      if (!appliedMarker) return { ok: false, reason: 'out_of_band_prepayment' };
+    } catch {
+      return { ok: false, reason: 'out_of_band_prepayment' };
+    }
   }
   // The hold rail owns estimate-flow one-time bookings (GitHub r2 P1):
   // a live hold re-checked under the money locks — the admission-side
@@ -460,14 +476,17 @@ function attachedInvoiceAutoChargeLikely({
   billingMode,
   prepaidMethod = null,
   prepaidAmount = null,
+  prepaidApplied = false,
   annualCoverageValidated = null,
   perApplicationFee = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
-  // An out-of-band (cash/Zelle) prepayment demotes (GitHub r3 P2) —
-  // completion nets it first and the charge verdict refuses the residual.
+  // An UNAPPLIED out-of-band (cash/Zelle) prepayment demotes (GitHub r3
+  // P2) — completion nets it first; once the netting marker exists
+  // (prepaidApplied, the same scheduled_service_prepaid detection the
+  // sheets already run) the residual legitimately auto-charges.
   if (String(prepaidMethod || '') !== ANNUAL_PREPAY_PREPAID_METHOD
-    && Number(prepaidAmount) > 0) return false;
+    && Number(prepaidAmount) > 0 && !prepaidApplied) return false;
   // A stamped annual-prepay visit demotes unless the stamp was VALIDATED
   // stale (pre-push P1 round 8) — completion settles/voids the covered
   // invoice, and an unverifiable stamp refuses the charge anyway.
