@@ -126,6 +126,7 @@ describe('BacklinkMonitor snapshots', () => {
       insert: jest.fn(async () => [1]),
     };
 
+    db.transaction = jest.fn(async (fn) => fn(db));
     db.mockImplementation((table) => {
       if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
       if (activeQuery.where.mock.calls.length === 0) return activeQuery;

@@ -35,6 +35,8 @@ function makeDb(handlers) {
     return b;
   });
   db.raw = jest.fn((sql, bind) => ({ __raw: sql, bind }));
+  // transaction: run the body against the same mocked db; a throwing body propagates (rollback semantics)
+  db.transaction = jest.fn(async (fn) => fn(db));
   return log;
 }
 const passthrough = (_name, fn) => fn();
@@ -214,6 +216,18 @@ describe('BacklinkMonitor verified loss detection', () => {
     const link = { source_url: 'https://x.example/p', target_url: 'https://wavespestcontrol.com/', miss_count: 1 };
     await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 200, unverifiable: 'challenge' }) })).resolves.toEqual({ outcome: 'unverified', status: 200, error: 'challenge_page' });
     await expect(BacklinkMonitor.verifyLoss(link, { crawlFn: async () => ({ found: false, status: 200, unverifiable: 'non_html' }) })).resolves.toEqual({ outcome: 'unverified', status: 200, error: 'non_html_page' });
+  });
+
+  test('a state change and its ledger row are written in one transaction; a failed event insert rolls the flip back', async () => {
+    const crawl = jest.fn(async () => ({ found: false, status: 200 }));
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const { updates } = scanWith({ items: [seen], active: [activeRow({ miss_count: 1 })] });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'seo_backlink_events') throw new Error('events table down'); return impl(table); });
+    await expect(BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: jest.fn() })).rejects.toThrow('events table down');
+    expect(db.transaction).toHaveBeenCalled();
+    // inside the (rolled-back) transaction the update ran, but nothing was committed without its event
+    expect(updates.filter(u => u.patch.status === 'lost')).toHaveLength(1);
   });
 
   test('crawl still finds the link → survives (index churn), counter reset, no loss', async () => {

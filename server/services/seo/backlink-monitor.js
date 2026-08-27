@@ -131,6 +131,7 @@ class BacklinkMonitor {
       if (existing) {
         const newStatus = existing.status === 'disavowed' ? 'disavowed' : 'active';
         const patch = { ...record, status: newStatus, updated_at: now };
+        const events = [];
         if (existing.status === 'lost') {
           // A recovery prospect queued for this link (still un-pitched) is now
           // moot — resolve it BEFORE the row flips back to active. If that
@@ -147,13 +148,14 @@ class BacklinkMonitor {
           }
           patch.lost_at = null; patch.lost_reason = null; patch.recovery_queued_at = null;
           recovered++;
-          await this.recordEvent(existing.id, 'recovered', { previous_lost_reason: existing.lost_reason || null });
+          events.push(['recovered', { previous_lost_reason: existing.lost_reason || null }]);
         }
         if (existing.is_dofollow != null && existing.is_dofollow !== isDofollow) {
           relChanges++;
-          await this.recordEvent(existing.id, 'rel_changed', { from: existing.is_dofollow ? 'dofollow' : 'nofollow', to: isDofollow ? 'dofollow' : 'nofollow', source: 'dataforseo' });
+          events.push(['rel_changed', { from: existing.is_dofollow ? 'dofollow' : 'nofollow', to: isDofollow ? 'dofollow' : 'nofollow', source: 'dataforseo' }]);
         }
-        await db('seo_backlinks').where('id', existing.id).update(patch);
+        if (events.length) await this.transition(existing.id, patch, events);
+        else await db('seo_backlinks').where('id', existing.id).update(patch);
       } else {
         record.first_seen = today;
         record.status = 'active';
@@ -194,19 +196,19 @@ class BacklinkMonitor {
         if (v.outcome === 'live') {
           verifiedLive++;
           const patch = { miss_count: 0, last_seen: today, updated_at: now };
+          const events = [];
           if (l.is_dofollow != null && l.is_dofollow !== v.isDofollow) {
             relChanges++;
             patch.is_dofollow = v.isDofollow;
-            await this.recordEvent(l.id, 'rel_changed', { from: l.is_dofollow ? 'dofollow' : 'nofollow', to: v.isDofollow ? 'dofollow' : 'nofollow', source: 'crawl' });
+            events.push(['rel_changed', { from: l.is_dofollow ? 'dofollow' : 'nofollow', to: v.isDofollow ? 'dofollow' : 'nofollow', source: 'crawl' }]);
           }
-          await db('seo_backlinks').where('id', l.id).update(patch);
-          await this.recordEvent(l.id, 'verify_survived', { misses: (l.miss_count || 0) + 1, status: v.status || null });
+          events.push(['verify_survived', { misses: (l.miss_count || 0) + 1, status: v.status || null }]);
+          await this.transition(l.id, patch, events);
         } else if (v.outcome === 'lost') {
           lostLinks.push({ ...l, lost_reason: v.reason });
-          await db('seo_backlinks').where('id', l.id).update({
+          await this.transition(l.id, {
             status: 'lost', lost_at: now, lost_reason: v.reason, miss_count: (l.miss_count || 0) + 1, updated_at: now,
-          });
-          await this.recordEvent(l.id, 'lost', { reason: v.reason, status: v.status || null, error: v.error || null, misses: (l.miss_count || 0) + 1 });
+          }, [['lost', { reason: v.reason, status: v.status || null, error: v.error || null, misses: (l.miss_count || 0) + 1 }]]);
         } else {
           // unreachable but not yet past the patience window — keep counting
           unverified++;
@@ -388,12 +390,18 @@ class BacklinkMonitor {
     return out;
   }
 
-  async recordEvent(backlinkId, eventType, detail) {
-    try {
-      await db('seo_backlink_events').insert({ backlink_id: backlinkId, event_type: eventType, detail: detail ? JSON.stringify(detail) : null });
-    } catch (err) {
-      logger.warn(`Backlink event ${eventType} for ${backlinkId} not recorded: ${err.message}`);
-    }
+  // State changes and their ledger rows are written in ONE transaction (see
+  // transition()) so seo_backlinks and seo_backlink_events can never diverge —
+  // the snapshot trend and the recovery sweep both read the ledger.
+  async recordEvent(backlinkId, eventType, detail, q = db) {
+    await q('seo_backlink_events').insert({ backlink_id: backlinkId, event_type: eventType, detail: detail ? JSON.stringify(detail) : null });
+  }
+
+  async transition(backlinkId, patch, events) {
+    await db.transaction(async (trx) => {
+      await trx('seo_backlinks').where('id', backlinkId).update(patch);
+      for (const [type, detail] of events) await this.recordEvent(backlinkId, type, detail, trx);
+    });
   }
 
   scoreToxicity(link) {
