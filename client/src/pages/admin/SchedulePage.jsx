@@ -224,6 +224,29 @@ const AREAS_BY_SERVICE = {
     "Back yard",
     "Side yards",
   ],
+  // Termite and mosquito previously fell back to the pest room list
+  // (Kitchen/Bathrooms/Trash area on a bait-station visit). Vocabularies
+  // are service-native; labels never contain commas (comma-joined per
+  // product) — owner directive 2026-08-27.
+  termite: [
+    "Foundation perimeter",
+    "Bait stations",
+    "Garage / slab edge",
+    "Crawlspace",
+    "Attic",
+    "Exterior walls",
+    "Wood contact points",
+    "Interior slab penetrations",
+  ],
+  mosquito: [
+    "Yard vegetation",
+    "Shrubs & landscape beds",
+    "Under deck / patio",
+    "Fence line",
+    "Standing water areas",
+    "Property perimeter",
+    "Screened enclosure",
+  ],
 };
 // Per-product treatment areas are multi-select but stored as ONE
 // comma-joined string in the existing applicationArea field
@@ -6450,6 +6473,48 @@ const CP_EYEBROW = {
   marginBottom: 8,
 };
 
+// Desktop closeout mirrors the mobile sheet (owner directive 2026-08-27):
+// the same monochrome tokens and Roboto chrome, expressed on the D-palette
+// KEYS the desktop render already reads so the 2,000-line desktop copy
+// needs no per-site edits. Shadowed inside CompletionPanel's desktop block
+// — the same "shadow D locally" pattern ProtocolPanel uses. Success/error
+// semantics keep the mobile status colors; every accent (teal/blue/purple)
+// resolves to ink like the mobile action buttons.
+const CP_DESKTOP = {
+  bg: "#FAFAFA",
+  card: "#FFFFFF",
+  input: "#FFFFFF",
+  border: "#E5E5E5",
+  text: "#111111",
+  heading: "#111111",
+  muted: "#737373",
+  teal: "#111111",
+  blue: "#111111",
+  purple: "#111111",
+  // No colors on the closeout (owner 2026-08-27): success/warn accents
+  // resolve to ink/muted; red stays ONLY for genuine error states per the
+  // admin design rule.
+  green: "#111111",
+  amber: "#737373",
+  red: "#C2410C",
+  white: "#FFFFFF",
+  gray: "#A3A3A3",
+  inputBorder: "#E5E5E5",
+};
+const CP_DESKTOP_LABEL = { ...CP_EYEBROW };
+const CP_DESKTOP_INPUT = {
+  width: "100%",
+  background: CP_DESKTOP.input,
+  color: CP_DESKTOP.text,
+  border: `1px solid ${CP_DESKTOP.border}`,
+  borderRadius: 10,
+  padding: "10px 12px",
+  fontSize: 14,
+  fontFamily: CP_FONT,
+  boxSizing: "border-box",
+  marginBottom: 8,
+};
+
 function CPField({ label, children }) {
   return (
     <div style={{ marginBottom: 20 }}>
@@ -6798,7 +6863,10 @@ export function TypedFindingsSection({
   pesticideProductPresent = true,
   frozen = false,
 }) {
-  const mobile = variant === "mobile";
+  // Owner directive 2026-08-27: the desktop closeout mirrors the mobile
+  // sheet — same monochrome tokens and Roboto chrome on both variants.
+  // `variant` is kept on the API; both resolve to the CP_M token set.
+  const mobile = variant === "mobile" || variant === "desktop";
   const labelCss = mobile ? CP_EYEBROW : labelStyle;
   const textColor = mobile ? CP_M.ink : D.text;
   const mutedColor = mobile ? CP_M.ink4 : D.muted;
@@ -6842,7 +6910,14 @@ export function TypedFindingsSection({
     <div key={field.key} style={{ marginBottom: 12 }}>
       {/* Sectioned schemas (rodent trapping): header above the first
           field of each section so the checklist scans in groups. */}
-      {field.section && field.section !== list[index - 1]?.section && (
+      {/* A section whose name is the same as its first field's label
+          ("Entry points" / "Entry points addressed") would print twice —
+          the field label carries it alone in that case (owner 2026-08-27). */}
+      {field.section
+        && field.section !== list[index - 1]?.section
+        && !String(typedFieldLabel(schema.type, field, values) || "")
+          .toLowerCase()
+          .startsWith(String(field.section).toLowerCase()) && (
         <div style={sectionHeaderStyle}>{field.section}</div>
       )}
       <div style={fieldLabelStyle}>
@@ -6856,7 +6931,13 @@ export function TypedFindingsSection({
         )}
       </div>
       <ProjectFindingFieldInput
-        field={field}
+        /* Owner directive 2026-08-27: no chip walls anywhere on the
+           completion panel — chips-type findings render as the same
+           multi_select dropdown the T&S closeout proved out (same
+           comma-joined storage, so drafts/payload/validation are
+           untouched). Scoped here so chips stay chips on non-completion
+           surfaces. */
+        field={field.type === "chips" ? { ...field, type: "multi_select" } : field}
         id={`typed-finding-${schema.type}-${field.key}`}
         name={`structuredFindings.${field.key}`}
         value={values[field.key] || ""}
@@ -6904,42 +6985,37 @@ export function TypedFindingsSection({
             {schema.activity.label}
             <span style={{ color: requiredColor }}> *</span>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {[0, 1, 2, 3, 4, 5].map((n) => {
-              const selected = activityScore === n;
-              return (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => onActivityTap(n)}
-                  aria-pressed={selected}
-                  aria-label={`${schema.activity.label}: ${scoreLabels[n] || n}`}
-                  style={{
-                    minWidth: 64,
-                    height: 44,
-                    padding: "0 10px",
-                    borderRadius: 10,
-                    background: selected
-                      ? mobile
-                        ? accent
-                        : accent + "18"
-                      : cardBg,
-                    color: selected ? accentFg : textColor,
-                    border: `1px solid ${selected ? accent : hairline}`,
-                    fontSize: 14,
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  {scoreLabels[n] || n}
-                </button>
-              );
-            })}
-          </div>
+          {/* Gauge pills → the same select treatment as every other field
+              (owner directive 2026-08-27). Stores the 0–5 score through the
+              existing onActivityTap contract. A native select only fires
+              onChange on a CHANGED value, so the untouched control renders
+              blank (the derived prefill is named in the helper line) — any
+              pick, including the derived value itself, then fires and pins
+              the score exactly like the old tap-to-pin (codex P1 r6). */}
+          <ProjectFindingFieldInput
+            field={{
+              key: "activity_score",
+              label: schema.activity.label,
+              type: "select",
+              options: [0, 1, 2, 3, 4, 5].map((n) => ({
+                value: String(n),
+                label: scoreLabels[n] || String(n),
+              })),
+            }}
+            id={`typed-activity-${schema.type}`}
+            name="activityScore"
+            value={activityScoreTouched && activityScore != null ? String(activityScore) : ""}
+            onChange={(value) => {
+              if (value !== "") onActivityTap(Number(value));
+            }}
+            inputStyle={{ width: "100%", boxSizing: "border-box" }}
+          />
           <div style={{ fontSize: 12, color: mutedColor, marginTop: 6 }}>
             {activityScoreTouched
               ? "Set by technician"
-              : "Prefills from findings until you tap"}
+              : activityScore != null
+                ? `Prefills from findings: ${scoreLabels[activityScore] || activityScore} — choose to confirm or change`
+                : "Prefills from findings until you choose"}
           </div>
         </div>
       )}
@@ -6950,13 +7026,13 @@ export function TypedFindingsSection({
             <span style={{ color: requiredColor }}> *</span>
           )}
         </div>
-        {schema.type === "tree_shrub" ? (
-          /* Owner directive 2026-07-21 round 2: NO pills/chips on the T&S
-             closeout — every selection is a dropdown like the findings
-             fields (and lawn), so the whole form closes out in seconds.
-             Same toggle contract as the chip row: the diff between the
-             dropdown's value and current state is the one toggled chip. */
-          <ProjectFindingFieldInput
+        {/* Owner directive 2026-07-21 round 2 (T&S), extended panel-wide
+            2026-08-27: NO pills/chips on the closeout — every selection is
+            a dropdown like the findings fields, so the whole form closes
+            out in seconds. Same toggle contract as the old chip row: the
+            diff between the dropdown's value and current state is the set
+            of toggled chips. */}
+        <ProjectFindingFieldInput
             field={{
               key: "next_steps",
               label: "Next steps",
@@ -6991,48 +7067,6 @@ export function TypedFindingsSection({
               return null;
             }}
           />
-        ) : (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {(schema.nextStepChips || []).map((chip) => {
-            const selected = nextStepChips.includes(chip);
-            // A chip that conflicts with the recorded findings is disabled
-            // (server would reject it) — but a stale selection stays
-            // tappable so the tech can deselect it after changing a value.
-            const conflict = typedNextStepChipConflict(schema.type, chip, values);
-            const disabled = !!conflict && !selected;
-            return (
-              <button
-                key={chip}
-                type="button"
-                onClick={disabled ? undefined : () => onToggleChip(chip)}
-                aria-pressed={selected}
-                aria-disabled={disabled}
-                disabled={disabled}
-                title={conflict || undefined}
-                style={{
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 999,
-                  background: selected
-                    ? mobile
-                      ? accent
-                      : accent + "18"
-                    : cardBg,
-                  color: selected ? accentFg : textColor,
-                  border: `1px solid ${selected ? accent : hairline}`,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  opacity: disabled ? 0.45 : 1,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {chip}
-              </button>
-            );
-          })}
-        </div>
-        )}
       </div>
       {/* Recommendations textarea stays PRIMARY-only: companion sections pass
           onRecommendationsChange={null} and are chips-first deterministic copy
@@ -9386,27 +9420,11 @@ export function CompletionPanel({
   const [reentrySeeds, setReentrySeeds] = useState(null);
   const [reentryExtMinutes, setReentryExtMinutes] = useState(null);
   const [reentryIntMinutes, setReentryIntMinutes] = useState(null);
-  useEffect(() => {
-    let live = true;
-    if (!service?.id) return undefined;
-    adminFetch(`/admin/dispatch/${service.id}/reentry-defaults`)
-      .then((d) => {
-        if (!live) return;
-        const ext = Number(d?.exteriorMinutes);
-        const int_ = Number(d?.interiorMinutes);
-        const seeds = {
-          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
-          interiorMinutes: Number.isFinite(int_) && int_ > 0 ? Math.round(int_) : 0,
-        };
-        setReentrySeeds(seeds);
-        // Functional updates: a draft restore may have already set a value —
-        // the seed must never clobber restored operator input.
-        setReentryExtMinutes((cur) => (cur == null ? seeds.exteriorMinutes : cur));
-        setReentryIntMinutes((cur) => (cur == null ? seeds.interiorMinutes : cur));
-      })
-      .catch(() => {}); // fetch failure → steppers stay hidden, server defaults apply
-    return () => { live = false; };
-  }, [service?.id]);
+  // The seed fetch lives below, after sprayEvidenceInForm is derived — a
+  // no-spray termite identity seeds 0/0 (no steppers) until the form
+  // records spray evidence, at which point the seeds refresh to the line
+  // defaults and the steppers appear (codex inline r6 on #3516).
+  const reentrySeedsRef = useRef(null);
   // Dirty per side = the tech moved the stepper off its seed (or a restored
   // draft carries a moved value). Only dirty sides post — see the body build.
   const reentryExtDirty =
@@ -10315,11 +10333,87 @@ export function CompletionPanel({
   // (codex P2 r2 on #2963). The stale-draft clearing effect below keys
   // off the same flag so hidden state can't ride a restored draft into
   // the submit.
+  // A bait-station visit that ALSO records a spray-class product or a
+  // treatment-applied protocol action needs its treatment scope captured
+  // (the server's exterior/interior advisory keys off it) — so the
+  // station-lane hide only applies while nothing sprayed is recorded
+  // (codex inline r5 on #3516). Mirrors the server's
+  // isSprayApplicationMethod exclusions (bait / station check / injection).
+  // Product IDENTITY counts too, mirroring the server's
+  // isNonBaitPesticideProduct: a non-bait pesticide (pesticide-class
+  // category, EPA number on the catalog row, or a listed active) is
+  // evidence even under the defaulted station_check the panel assigns to
+  // methodless termite products (codex inline r10). Bait / station /
+  // cartridge / monitor families never count.
+  const isNonBaitPesticideSelection = (p) => {
+    const catalogRow = (products || []).find((row) => String(row.id) === String(p?.productId)) || {};
+    const identity = `${p?.category || ""} ${catalogRow.product_type || ""} ${p?.name || ""}`;
+    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
+    return /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${p?.category || ""} ${catalogRow.product_type || ""}`)
+      || !!String(catalogRow.epa_reg_number || "").trim()
+      || !!String(p?.activeIngredient || "").trim();
+  };
+  const sprayEvidenceInForm = selectedProducts.some((p) => {
+    const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+    return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
+      || isNonBaitPesticideSelection(p);
+  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
+  // completion would persist for this visit. Re-fetched whenever spray
+  // evidence appears/disappears so a bait/inspection identity that gains a
+  // supplemental spray application gets its 30/120 seeds — and its
+  // steppers — back. A side the tech never moved (still equal to the prior
+  // seed, or unset) adopts the new seed; a moved side is never clobbered.
+  useEffect(() => {
+    let live = true;
+    if (!service?.id) return undefined;
+    adminFetch(`/admin/dispatch/${service.id}/reentry-defaults?applicationsRecorded=${sprayEvidenceInForm ? 1 : 0}`)
+      .then((d) => {
+        if (!live) return;
+        const ext = Number(d?.exteriorMinutes);
+        const int_ = Number(d?.interiorMinutes);
+        const seeds = {
+          exteriorMinutes: Number.isFinite(ext) && ext > 0 ? Math.round(ext) : 0,
+          interiorMinutes: Number.isFinite(int_) && int_ > 0 ? Math.round(int_) : 0,
+        };
+        const prev = reentrySeedsRef.current;
+        reentrySeedsRef.current = seeds;
+        setReentrySeeds(seeds);
+        // A side whose seed drops to 0 hides its stepper — the value MUST
+        // follow to 0 too, or an earlier adjustment would submit invisibly
+        // and be persisted as reentry_adjusted on a visit with no treatment
+        // evidence (uncapped codex P1 r7).
+        setReentryExtMinutes((cur) => (
+          seeds.exteriorMinutes === 0 || cur == null || cur === prev?.exteriorMinutes ? seeds.exteriorMinutes : cur
+        ));
+        setReentryIntMinutes((cur) => (
+          seeds.interiorMinutes === 0 || cur == null || cur === prev?.interiorMinutes ? seeds.interiorMinutes : cur
+        ));
+      })
+      .catch(() => {
+        // Fail closed: a failed refresh must not leave the PREVIOUS seeds
+        // and adjusted values live (they would submit as overrides against
+        // an evidence state they no longer match — codex inline r7). Null
+        // seeds hide the steppers; null values post nothing; the server's
+        // computed defaults apply.
+        if (!live) return;
+        reentrySeedsRef.current = null;
+        setReentrySeeds(null);
+        setReentryExtMinutes(null);
+        setReentryIntMinutes(null);
+      });
+    return () => { live = false; };
+  }, [service?.id, sprayEvidenceInForm]);
   const areasTreatedHidden = treeShrubCloseoutOn
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
       "rodent_inspection", "rodent_bait_station", "bed_bug",
-    ].includes(service.completionProfile?.findingsType);
+    ].includes(service.completionProfile?.findingsType)
+    // Station visits have no meaningful "areas treated" — the station
+    // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
+    // termite lanes keep the termite area list, and a station visit that
+    // records spray evidence gets the picker back.
+    || (service.completionProfile?.findingsType === "termite_bait_station" && !sprayEvidenceInForm);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
   // dual-vision scoring lives server-side (no persistence); the result rides the
@@ -14452,7 +14546,7 @@ export function CompletionPanel({
                       marginTop: i === 0 ? 0 : 6,
                     }}
                   >
-                    ⚠️ {text}
+                    {text}
                   </div>
                 ))}
               </div>
@@ -15434,21 +15528,22 @@ export function CompletionPanel({
             {!quickComplete && !areasTreatedHidden && (
               <Field label="Areas treated">
                 {" "}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {areaOptions.map((area) => {
-                    const selected = areasServiced.includes(area);
-                    return (
-                      <Chip
-                        key={area}
-                        selected={selected}
-                        onClick={() => toggleArea(area)}
-                      >
-                        {selected ? "" : ""}
-                        {area}
-                      </Chip>
-                    );
-                  })}
-                </div>
+                {/* Owner directive 2026-08-27: every multi-choice control is
+                    the checkbox-dropdown, no chip walls. Diff-toggle through
+                    toggleArea so its side effects stay intact. */}
+                <ProjectFindingFieldInput
+                  field={{ key: "areas_treated", label: "Areas treated", type: "multi_select", options: areaOptions }}
+                  id="cp-areas-treated-mobile"
+                  name="areasServiced"
+                  value={areasServiced.join(", ")}
+                  onChange={(value) => {
+                    const next = String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+                    const added = next.filter((a) => !areasServiced.includes(a));
+                    const removed = areasServiced.filter((a) => !next.includes(a));
+                    [...added, ...removed].forEach((area) => toggleArea(area));
+                  }}
+                  inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
               </Field>
             )}
             {/* The customer-facing report summary is now auto-generated from the
@@ -15458,35 +15553,20 @@ export function CompletionPanel({
             {!quickComplete && (
               <Field label="Customer interaction">
                 {" "}
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                >
-                  {CUSTOMER_INTERACTION_OPTIONS.map((opt) => {
-                    const selected = customerInteraction === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() => setCustomerInteraction(opt.value)}
-                        style={{
-                          textAlign: "left",
-                          padding: "12px 16px",
-                          borderRadius: 12,
-                          background: selected ? M.ink : M.card,
-                          color: selected ? M.actionFg : M.ink,
-                          border: `1px solid ${selected ? M.ink : M.hairline}`,
-                          fontFamily: font,
-                          fontSize: 15,
-                          fontWeight: 500,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {selected ? "" : ""}
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                {/* Single-choice → native select, same no-pills directive. */}
+                <ProjectFindingFieldInput
+                  field={{
+                    key: "customer_interaction",
+                    label: "Customer interaction",
+                    type: "select",
+                    options: CUSTOMER_INTERACTION_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
+                  }}
+                  id="cp-customer-interaction-mobile"
+                  name="customerInteraction"
+                  value={customerInteraction || ""}
+                  onChange={(value) => setCustomerInteraction(value || null)}
+                  inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
                 {isCustomerConcernInteraction(customerInteraction) && (
                   <input
                     type="text"
@@ -16175,8 +16255,18 @@ export function CompletionPanel({
   }
 
   // ────────────────────────────────────────────────────────────────────
-  // Desktop render (legacy D dark palette) — unchanged
+  // Desktop render — mirrors the mobile sheet's monochrome tokens + Roboto
+  // (owner directive 2026-08-27). The D-keyed shadows below resolve every
+  // palette read in this block to the CP_DESKTOP set; block-scoped so the
+  // earlier mobile branch and the module-level styles are untouched.
   // ────────────────────────────────────────────────────────────────────
+  {
+   
+  const D = CP_DESKTOP;
+   
+  const labelStyle = CP_DESKTOP_LABEL;
+   
+  const inputStyle = CP_DESKTOP_INPUT;
   return createPortal(
     <>
       {" "}
@@ -16208,6 +16298,9 @@ export function CompletionPanel({
           display: "flex",
           flexDirection: "column",
           animation: "slideIn 0.25s ease",
+          fontFamily: CP_FONT,
+          // Native checkbox/radio accents inherit ink — no browser blue.
+          accentColor: CP_DESKTOP.text,
         }}
       >
         {success && (
@@ -16674,7 +16767,7 @@ export function CompletionPanel({
                     marginTop: i === 0 ? 0 : 6,
                   }}
                 >
-                  ⚠️ {text}
+                  {text}
                 </div>
               ))}
             </div>
@@ -16951,15 +17044,15 @@ export function CompletionPanel({
                   && typedZeroStateRefusesBody(typedFindingsSchema?.type, findingsValues, typedActivityScore))
                 || zeroStateCompanionOnly}
               style={{
+                // Same outlined ink pill as the mobile GENERATE AI REPORT
+                // button (owner 2026-08-27) — no gradient accent.
                 width: "100%",
-                padding: "10px 16px",
-                borderRadius: 10,
-                border: "none",
-                background: generating
-                  ? D.card
-                  : "linear-gradient(135deg, #8b5cf6, #6366f1)",
-                color: D.heading,
-                fontSize: 13,
+                padding: "12px 16px",
+                borderRadius: 999,
+                border: `1px solid ${D.teal}`,
+                background: D.card,
+                color: D.teal,
+                fontSize: 14,
                 fontWeight: 500,
                 cursor: generating ? "wait" : "pointer",
                 marginTop: 8,
@@ -17009,7 +17102,7 @@ export function CompletionPanel({
                 }}
               >
                 {" "}
-                <span style={{ fontSize: 16 }}>&#128247;</span>Add Photos (
+                Add Photos (
                 {servicePhotos.length}/5)
               </button>
               {servicePhotos.length > 0 && (
@@ -17288,7 +17381,7 @@ export function CompletionPanel({
                       border: `1px solid ${isSelected ? D.teal : D.border}`,
                     }}
                   >
-                    {isSelected ? "\u2713 " : ""}
+                    {""}
                     {p.display_name || p.name}
                   </button>
                 );
@@ -17490,7 +17583,7 @@ export function CompletionPanel({
                                 transition: "all 0.15s",
                               }}
                             >
-                              {selected ? "✓ " : ""}
+                              {""}
                               {area}
                             </button>
                           );
@@ -17609,31 +17702,21 @@ export function CompletionPanel({
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {areaOptions.map((area) => {
-                  const selected = areasServiced.includes(area);
-                  return (
-                    <button
-                      key={area}
-                      onClick={() => toggleArea(area)}
-                      style={{
-                        padding: "6px 14px",
-                        borderRadius: 20,
-                        fontSize: 12,
-                        fontWeight: 500,
-                        cursor: "pointer",
-                        background: selected ? D.teal + "22" : D.card,
-                        color: selected ? D.teal : D.muted,
-                        border: `1px solid ${selected ? D.teal : D.border}`,
-                        transition: "all 0.15s",
-                      }}
-                    >
-                      {selected ? "\u2713 " : ""}
-                      {area}
-                    </button>
-                  );
-                })}
-              </div>
+              {/* Owner directive 2026-08-27: checkbox-dropdown, no chip
+                  walls \u2014 desktop kept in lockstep with mobile. */}
+              <ProjectFindingFieldInput
+                field={{ key: "areas_treated", label: "Areas treated", type: "multi_select", options: areaOptions }}
+                id="cp-areas-treated-desktop"
+                name="areasServiced"
+                value={areasServiced.join(", ")}
+                onChange={(value) => {
+                  const next = String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+                  const added = next.filter((a) => !areasServiced.includes(a));
+                  const removed = areasServiced.filter((a) => !next.includes(a));
+                  [...added, ...removed].forEach((area) => toggleArea(area));
+                }}
+                inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
             </div>
           )}
           {/* Customer recap + SMS preview removed (desktop) — the report summary is
@@ -17644,33 +17727,20 @@ export function CompletionPanel({
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Customer Interaction</label>{" "}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {CUSTOMER_INTERACTION_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setCustomerInteraction(opt.value)}
-                    style={{
-                      padding: "10px 14px",
-                      borderRadius: 10,
-                      fontSize: 13,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      textAlign: "left",
-                      background:
-                        customerInteraction === opt.value
-                          ? D.teal + "18"
-                          : D.card,
-                      color:
-                        customerInteraction === opt.value ? D.teal : D.text,
-                      border: `1px solid ${customerInteraction === opt.value ? D.teal : D.border}`,
-                      transition: "all 0.15s",
-                    }}
-                  >
-                    {customerInteraction === opt.value ? "\u2713 " : ""}
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
+              {/* Single-choice \u2192 native select, same no-pills directive. */}
+              <ProjectFindingFieldInput
+                field={{
+                  key: "customer_interaction",
+                  label: "Customer interaction",
+                  type: "select",
+                  options: CUSTOMER_INTERACTION_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
+                }}
+                id="cp-customer-interaction-desktop"
+                name="customerInteraction"
+                value={customerInteraction || ""}
+                onChange={(value) => setCustomerInteraction(value || null)}
+                inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
               {isCustomerConcernInteraction(customerInteraction) && (
                 <input
                   type="text"
@@ -18158,8 +18228,11 @@ export function CompletionPanel({
             style={{
               ...btnBase,
               width: "100%",
-              background: D.green,
+              // Ink action pill like the mobile COMPLETE button (owner
+              // 2026-08-27); green stays for the saved-state overlay.
+              background: D.teal,
               color: "#fff",
+              borderRadius: 999,
               fontSize: 14,
               height: 52,
               opacity:
@@ -18196,6 +18269,7 @@ export function CompletionPanel({
     </>,
     document.body,
   );
+  }
 }
 
 const labelStyle = {
@@ -18205,18 +18279,6 @@ const labelStyle = {
   color: D.muted,
   textTransform: "uppercase",
   letterSpacing: 0.8,
-  marginBottom: 8,
-};
-const subLabelStyle = { fontSize: 11, color: D.muted, marginBottom: 4 };
-const inputStyle = {
-  width: "100%",
-  background: D.input,
-  color: D.text,
-  border: `1px solid ${D.border}`,
-  borderRadius: 8,
-  padding: "10px 12px",
-  fontSize: 13,
-  boxSizing: "border-box",
   marginBottom: 8,
 };
 const checkboxRow = {

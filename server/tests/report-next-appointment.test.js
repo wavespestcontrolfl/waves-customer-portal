@@ -135,7 +135,10 @@ test('an in-progress (en_route) same-line visit publishes as the next appointmen
   });
 });
 
-test('payload nextAppointment is null when nothing upcoming matches the service line', async () => {
+// Owner 2026-08-27: with no same-line visit scheduled, the report falls
+// back to the customer's next visit of ANY line — the label carries the
+// service name, so a lawn visit on a pest report reads unambiguously.
+test('payload nextAppointment falls back to the next visit of any line when nothing matches the service line', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
     scheduled_services: [
@@ -147,6 +150,24 @@ test('payload nextAppointment is null when nothing upcoming matches the service 
   });
 
   const data = await buildReportV1Data(BASE_SERVICE, 'token-next-appt-none', knex);
+
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Lawn Care Treatment',
+    scheduledDate: '2999-01-06',
+    windowStart: '09:00:00',
+  });
+});
+
+test('payload nextAppointment is null when nothing at all is upcoming', async () => {
+  const knex = makeKnex({
+    ...BASE_FIXTURES,
+    scheduled_services: [
+      { id: 'scheduled-past', customer_id: 'customer-1', scheduled_date: '2020-01-01', status: 'pending', service_type: 'Quarterly Pest Control Service' },
+      { id: 'scheduled-done', customer_id: 'customer-1', scheduled_date: '2999-01-05', status: 'completed', service_type: 'Quarterly Pest Control Service' },
+    ],
+  });
+
+  const data = await buildReportV1Data(BASE_SERVICE, 'token-next-appt-empty', knex);
 
   expect(data.nextAppointment).toBeNull();
 });
@@ -284,7 +305,7 @@ test('a rodent report never claims trap-named visits of OTHER detectable lines o
   });
 });
 
-test('non-rodent reports keep the strict same-line match', async () => {
+test('non-rodent reports keep the strict same-line pick first, then fall back to the next visit of any line', async () => {
   const knex = makeKnex({
     ...BASE_FIXTURES,
     scheduled_services: [
@@ -300,5 +321,11 @@ test('non-rodent reports keep the strict same-line match', async () => {
     knex,
   );
 
-  expect(data.nextAppointment).toBeNull();
+  // No lawn visit is scheduled, so the lawn report discloses the next
+  // visit of any line (the rodent-adjacent exclusion visit), named.
+  expect(data.nextAppointment).toEqual({
+    serviceType: 'Exclusion Service',
+    scheduledDate: '2999-01-03',
+    windowStart: '08:00:00',
+  });
 });

@@ -444,28 +444,17 @@ router.get('/station-map', async (req, res, next) => {
 // dateOnlyString handles the pg string/UTC-midnight-Date duality and
 // returns null on anything malformed (never throws — fail-soft).
 const { gateEnvValue } = require('../config/feature-gates');
-const { dateOnlyString } = require('../utils/date-only');
+const { activeTermiteBondsForCustomer, TERMITE_BOND_GATE } = require('../services/termite-bonds');
 
 router.get('/termite-bond', async (req, res, next) => {
   try {
-    if (!gateEnvValue('GATE_PORTAL_TERMITE_BOND')) {
+    if (!gateEnvValue(TERMITE_BOND_GATE)) {
       return res.json({ available: false, reason: 'disabled', bonds: [] });
     }
-    // Fail-soft: a bonds query error renders no card, never a broken tab.
-    const rows = await db('termite_bonds')
-      .where({ customer_id: req.customerId, status: 'active' })
-      .orderBy('renews_at', 'desc')
-      .select('service_type', 'term_years', 'started_at', 'renews_at', 'status')
-      .catch(() => []);
-    const bonds = rows
-      .map((r) => ({
-        serviceType: r.service_type,
-        termYears: Number(r.term_years) || 1,
-        startedAt: dateOnlyString(r.started_at),
-        renewsAt: dateOnlyString(r.renews_at),
-        status: r.status,
-      }))
-      .filter((b) => b.startedAt && b.renewsAt);
+    // Shared lookup with the service report's warranty cell — one owner
+    // for the gate/status/ordering/date rules. Fail-soft: a bonds query
+    // error renders no card, never a broken tab.
+    const bonds = await activeTermiteBondsForCustomer(req.customerId);
     if (!bonds.length) {
       return res.json({ available: false, reason: 'no_bond', bonds: [] });
     }

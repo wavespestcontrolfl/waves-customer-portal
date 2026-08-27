@@ -67,7 +67,7 @@ const router = require('../routes/admin-dispatch');
 const { reentryEditPlan, completionReentryPlan, productReentryFloor, REENTRY_EDIT_MAX_MINUTES } = require('../routes/admin-dispatch')._test;
 const { normalizeAdvisoryForTreatmentScope, buildCompletionAdvisory } = require('../services/service-report/report-data');
 const { buildReentryContextFromRecord } = require('../services/service-report/reentry');
-const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults } = require('../services/service-report/service-line-configs');
+const { SERVICE_LINE_CONFIGS, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct } = require('../services/service-report/service-line-configs');
 const { reentryAdjustedPdfSignature } = require('../services/service-report/pdf-storage');
 
 const source = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
@@ -134,6 +134,94 @@ describe('service-line advisory defaults', () => {
       exterior_reentry_min: 30,
       interior_reentry_min: 0,
     });
+  });
+
+  // Owner rule 2026-08-27: termite visits with no liquid/foam application
+  // (station checks, bait monitoring, cartridge/installation, inspections,
+  // warranty/bond renewals) have no re-entry concept — nothing is sprayed,
+  // so both windows are 0 and the customer report shows no countdown.
+  test('termite station/monitoring/inspection/warranty types default to 0/0', () => {
+    for (const type of [
+      'Termite Bait Station System Service',
+      'Termite Bait Monitoring',
+      'Termite Cartridge Replacement Service',
+      'Termite Installation Setup Fee Service',
+      'Termite Inspection Service',
+      'Termite Warranty Renewal Service',
+      'Termite Bond (1 Year)',
+      // Keyed catalog values — separators normalize before matching.
+      'termite_bait',
+      'termite_monitoring',
+      'termite_active_bait_quarterly',
+      'termite_installation_setup',
+      'termite_inspection',
+      'termite_renewal',
+      'termite_bond_10yr',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 0,
+        interior_reentry_min: 0,
+      });
+    }
+  });
+
+  test('bait/station/injection methods are never spray evidence; spray-class methods are', () => {
+    expect(isSprayApplicationMethod('bait_placement')).toBe(false);
+    expect(isSprayApplicationMethod('station_check')).toBe(false);
+    expect(isSprayApplicationMethod('trunk_injection')).toBe(false);
+    expect(isSprayApplicationMethod(null)).toBe(false);
+    expect(isSprayApplicationMethod('')).toBe(false);
+    expect(isSprayApplicationMethod('perimeter_spray')).toBe(true);
+    expect(isSprayApplicationMethod('spot_treatment')).toBe(true);
+    expect(isSprayApplicationMethod('Foam Application')).toBe(true);
+  });
+
+  test('product identity: non-bait pesticides are evidence, bait/station families never are', () => {
+    expect(isNonBaitPesticideProduct({ name: 'Termidor Foam', category: 'termiticide', epaReg: '' })).toBe(true);
+    expect(isNonBaitPesticideProduct({ name: 'Taurus SC', category: '', epaReg: '53883-279' })).toBe(true);
+    expect(isNonBaitPesticideProduct({ name: 'Trelona ATBS Annual Bait Cartridge', category: 'termite bait', epaReg: '499-557' })).toBe(false);
+    expect(isNonBaitPesticideProduct({ name: 'Advance Termite Bait Station', category: 'equipment', epaReg: '' })).toBe(false);
+    expect(isNonBaitPesticideProduct({ name: 'Mulch rake', category: 'tools', epaReg: '' })).toBe(false);
+    expect(isNonBaitPesticideProduct({})).toBe(false);
+  });
+
+  test('a no-spray termite identity keeps 30/120 when the completion recorded applications', () => {
+    expect(getAdvisoryDefaults('Termite Bait Station System Service', { applicationsRecorded: true })).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 120,
+    });
+    expect(getAdvisoryDefaults('termite_inspection', { applicationsRecorded: true })).toMatchObject({
+      exterior_reentry_min: 30,
+      interior_reentry_min: 120,
+    });
+  });
+
+  test('liquid/foam/trench termite forms keep the 30/120 line defaults', () => {
+    for (const type of [
+      // Mixed identities that ALSO apply product keep their guidance —
+      // a no-spray token beside a treatment token never zeroes the
+      // windows (uncapped codex P1 on this lane).
+      'Termite Liquid Treatment & Inspection',
+      'Termite Station Check & Liquid Treatment',
+      'Termite Bait Service & Trenching',
+      'Termite Inspection & Spot Treatment',
+      'Termite Liquid Treatment Service',
+      'Slab Pre-Treat Termite Service',
+      'Termite Trenching Service',
+      'Termite Foam Service',
+      'Recurring Termite Foam Service',
+      'Bora-Care Wood Treatment Service',
+      'termite_liquid',
+      'termite_trenching',
+      'termite_spot_treatment',
+      'foam_drill',
+      'foam_recurring',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+      });
+    }
   });
 });
 

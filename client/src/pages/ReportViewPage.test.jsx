@@ -9,6 +9,7 @@ import {
   customerActionItems,
   formatDate,
   formatDurationMinutes,
+  formatTermiteBondRenewalLabel,
   formatTimelineTime,
   getMinutesBetween,
   getReportArrivalTime,
@@ -55,6 +56,24 @@ describe('ReportViewPage date formatting', () => {
         exitedAt: '2026-05-17T19:10:00.000Z',
       },
     })).toBe('Sunday, May 17, 2026 at 2:35 PM to 3:10 PM');
+  });
+});
+
+describe('ReportViewPage termite warranty cell label', () => {
+  it('formats the renewal date for the hero cell', () => {
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2027-03-14' }, '2026-08-27')).toBe('Renews Mar 14, 2027');
+  });
+
+  it('labels a past renewal date as due, like the portal bond card', () => {
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2026-03-14' }, '2026-08-27')).toBe('Renewal due Mar 14, 2026');
+    // The renewal day itself still reads as upcoming.
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2026-08-27' }, '2026-08-27')).toBe('Renews Aug 27, 2026');
+  });
+
+  it('returns null for absent or malformed bond data (cell does not render)', () => {
+    expect(formatTermiteBondRenewalLabel(null)).toBeNull();
+    expect(formatTermiteBondRenewalLabel({})).toBeNull();
+    expect(formatTermiteBondRenewalLabel({ renewsAt: 'not-a-date' })).toBeNull();
   });
 });
 

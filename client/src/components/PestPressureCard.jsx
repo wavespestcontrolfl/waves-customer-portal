@@ -188,7 +188,10 @@ export default function PestPressureCard({ data, token, trendSection = null }) {
         border: `1px solid ${CUSTOMER_SURFACE.border}`,
         borderRadius: 14,
         padding: 24,
-        margin: '0 0 16px',
+        // Top margin keeps the card off whatever section precedes it — it
+        // previously relied on siblings' bottom margins and rendered flush
+        // against the section above (owner 2026-08-27).
+        margin: '20px 0 16px',
         fontFamily: "'Inter', system-ui, sans-serif",
         color: CUSTOMER_SURFACE.text,
       }}

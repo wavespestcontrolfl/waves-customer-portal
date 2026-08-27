@@ -414,13 +414,17 @@ export default function ServiceReportDocument({ data, token }) {
   // application, which is the case that made this filter necessary.
   const isProductApplication = (app) => {
     if ((app.method || 'perimeter_spray') !== 'station_check') return true;
-    // An EXPLICIT station_check is a deliberate device inspection — never
-    // re-classified by product identity (codex P1 r19): checking a station
-    // baited with a registered rodenticide applies nothing. Identity may
-    // only override the INFERRED case (legacy null application_method).
-    // Legacy payloads without the flag (methodInferred undefined) keep the
-    // identity override — their station_check can only have been inferred.
-    if (app.methodInferred === false) return false;
+    // Checking a station baited with a registered rodenticide/termiticide
+    // cartridge applies nothing — bait / station / cartridge / monitor
+    // product FAMILIES are never applications, whatever their EPA number
+    // (codex P1 r19, generalized). Beyond that, product identity decides
+    // regardless of methodInferred: the completion panel DEFAULTS methodless
+    // termite products to station_check and persists it (methodInferred
+    // false), so a freshly recorded Termidor Foam row would otherwise vanish
+    // from the PDF while the advisory says treatment occurred — this
+    // mirrors the server's isNonBaitPesticideProduct (#3516 r11).
+    const identity = `${app.product?.product_type || ''} ${app.product?.category || ''} ${app.product?.name || ''}`;
+    if (/bait|station|cartridge|monitor/i.test(identity)) return false;
     if (epaReg(app)) return true;
     const kind = `${app.product?.product_type || ''} ${app.product?.category || ''}`.toLowerCase();
     return /pestic|termitic|insectic|herbic|fungic|rodentic/.test(kind);
@@ -597,11 +601,22 @@ export default function ServiceReportDocument({ data, token }) {
     // chips restate nextStep in shorthand — only add ones that say something new
     if (!recommendations.some((r) => r.toLowerCase().includes(String(chip).toLowerCase()))) pushRec(chip);
   });
-  // ⛔ data.recommendations / data.protocol.recommendations are NOT rendered.
-  // buildProtocolPayload folds raw `[next]`-tagged technician_notes lines into
-  // both (report-data.js taggedNoteLines), and AGENTS.md is explicit: raw
-  // technician_notes never egress on any report path — parser-approved copy
-  // only. The web report renders neither array; the PDF must not either.
+  // data.recommendations is provenance-safe since 2026-08-27: report-data
+  // builds it ONLY from structured_notes.formRecommendations (the completion
+  // form's field, never [next]-tagged technician_notes lines) plus findings
+  // recommendations, screened with customerCopyViolations at the payload
+  // boundary — so the PDF renders it exactly like the web report's "What we
+  // recommend" section (codex inline on #3516). ⛔ data.protocol.recommendations
+  // stays unrendered: it still folds raw note lines in.
+  // Finding-derived entries already print inside their "What we found"
+  // bullet — skip them here so a customer never reads the same instruction
+  // twice in one document (codex inline r10).
+  const findingRecommendationSet = new Set(
+    (data.findings || []).map((f) => String(f?.recommendation || '').trim()).filter(Boolean),
+  );
+  (data.recommendations || [])
+    .filter((rec) => !findingRecommendationSet.has(String(rec || '').trim()))
+    .forEach(pushRec);
   // Lawn visits carry their guidance in the assessment + V2 aftercare
   // instead of typedReport — same section, same voice.
   // Legacy assessment recommendations are the LawnAssessmentCard's content,

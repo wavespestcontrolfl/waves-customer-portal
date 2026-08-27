@@ -51,6 +51,7 @@ import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
+import { etDateString } from '../lib/timezone';
 import ActivityCard from '../components/ActivityCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -490,6 +491,19 @@ function formatNextAppointmentLabel(nextAppointment) {
   const when = `${dateLabel} · ${fmt(start)}\u2013${fmt(start + 120)}`;
   const name = nextServiceName(nextAppointment.serviceType);
   return name ? `${name} · ${when}` : when;
+}
+
+// "Renews Mar 14, 2027" — or "Renewal due Mar 14, 2026" once that ET day
+// has passed, the same distinction the portal My Plan bond card draws
+// (bond rows are not auto-retired after their date — codex inline r4).
+// Payload field is live-view only and gated with the portal bond card
+// (owner 2026-08-27). `todayEt` is injectable for tests.
+export function formatTermiteBondRenewalLabel(termiteBond, todayEt = etDateString()) {
+  const date = calendarDateFromDateOnlyValue(termiteBond?.renewsAt);
+  if (!date) return null;
+  const pretty = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  const renewsIso = String(termiteBond.renewsAt).slice(0, 10);
+  return renewsIso < String(todayEt || '') ? `Renewal due ${pretty}` : `Renews ${pretty}`;
 }
 
 export function serviceReportDateTimeLabel(data = {}) {
@@ -2233,6 +2247,50 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               <div className="sr-cell-note">Subject to change</div>
             </div>
           )}
+          {(() => {
+            // Termite warranty cell (owner 2026-08-27): the renewal date plus
+            // a deep link to the portal's My Plan bond card. The payload field
+            // only arrives on live termite-line views with the bond gate on.
+            const bondLines = (data.termiteBonds || [])
+              .map((bond) => ({ bond, label: formatTermiteBondRenewalLabel(bond) }))
+              .filter((entry) => entry.label);
+            return bondLines.length ? (
+              <div className="sr-cell">
+                <div className="sr-cell-label">{bondLines.length > 1 ? 'Termite warranties' : 'Termite warranty'}</div>
+                {bondLines.map(({ bond, label }, i) => (
+                  <div className="sr-cell-value" key={`${i}-${bond.renewsAt}`}>
+                    {bondLines.length > 1 && bond.serviceType ? `${bond.serviceType} · ` : ''}{label}
+                  </div>
+                ))}
+                <div className="sr-cell-note">
+                  <a href="/?tab=plan">View your warranty in the portal</a>
+                </div>
+              </div>
+            ) : null;
+          })()}
+          {(() => {
+            // Documents cell (owner 2026-08-27): titles tied to THIS visit,
+            // plus the customer's document count, linking the portal
+            // Documents tab. Live-view-only payload field.
+            // Present on every live report (the Documents tab always holds
+            // this report itself); absent on pdf/static renders.
+            const docs = data.relatedDocuments;
+            if (!docs) return null;
+            const linkedTitles = (docs.linked || []).map((d) => d.title).filter(Boolean);
+            return (
+              <div className="sr-cell">
+                <div className="sr-cell-label">Your documents</div>
+                <div className="sr-cell-value">
+                  {linkedTitles.length
+                    ? linkedTitles.join(' · ')
+                    : 'Available in your portal'}
+                </div>
+                <div className="sr-cell-note">
+                  <a href="/?tab=documents">View documents in the portal</a>
+                </div>
+              </div>
+            );
+          })()}
         </div>
         {data.techVisitCard && <TechnicianVisitLine data={data} />}
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
@@ -8820,6 +8878,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             {data.serviceLine === 'tree_shrub' && data.reportV2 && (
               <TreeShrubReportV2Section data={data.reportV2} print={mode === 'pdf' || mode === 'static'} />
             )}
+          </section>
+        )}
+
+        {/* Technician recommendations (owner 2026-08-27): the completion
+            form's recommendation lines finally reach the customer. Sourced
+            from data.recommendations (protocol recommendations + findings
+            recommendations, already banned-copy-screened upstream). Renders
+            for every layout — V2 dashboards own the SUMMARY slot, not this. */}
+        {(data.recommendations || []).length > 0 && (
+          <section data-glass="card" className="sr-section" id="recommendations">
+            <h2>What we recommend</h2>
+            <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
+              {data.recommendations.map((rec, i) => (
+                <li key={`${i}-${rec}`}>{rec}</li>
+              ))}
+            </ul>
           </section>
         )}
 

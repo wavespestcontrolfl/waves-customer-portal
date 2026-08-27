@@ -35,7 +35,11 @@ const MIN_EXPECTED_REPORT_BYTES = 50000;
 // p6: relevance pass 2 (#3197) changes customer-visible copy (rain figure /
 // drought reconciliation, precaution wording, applied-today sentence) on top
 // of the document layout — supersedes p5-document, whose bust it subsumes.
-const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p6-document-relevance2-20260804';
+// p7: the document now renders the provenance-safe recommendations
+// section (#3516) — an older report with findings-derived or form
+// recommendations must re-render on next open instead of serving the
+// cached p6 object. Supersedes p6, whose bust it subsumes.
+const SERVICE_REPORT_PDF_STORAGE_VERSION = 'p7-recommendations-20260827';
 
 const s3 = new S3Client({
   region: config.s3?.region,

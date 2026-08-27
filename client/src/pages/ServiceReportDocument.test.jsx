@@ -172,14 +172,31 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(none.container.textContent).not.toMatch(claim);
   });
 
-  it('never egresses raw technician notes via the recommendations arrays', () => {
-    // buildProtocolPayload folds raw [next]-tagged technician_notes into both
-    // arrays; AGENTS.md forbids raw notes on any report path.
+  it('never renders protocol.recommendations (raw note lines) but does render the screened data.recommendations', () => {
+    // buildProtocolPayload folds raw [next]-tagged technician_notes into
+    // protocol.recommendations; AGENTS.md forbids raw notes on any report
+    // path. data.recommendations is provenance-safe since 2026-08-27
+    // (form field only + payload-boundary screen, tested server-side in
+    // service-report-related-docs.test.js) and renders like the web report.
     const leak = 'Gate code 4417, bill the office not the tenant';
-    const data = { ...BASE_DATA, recommendations: [leak], protocol: { recommendations: [leak] } };
+    const safe = 'Keep shrubs trimmed back from the exterior walls';
+    const data = { ...BASE_DATA, recommendations: [safe], protocol: { recommendations: [leak] } };
     const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
     expect(container.textContent).not.toContain(leak);
     expect(container.textContent).not.toContain('Gate code');
+    expect(container.textContent).toContain(safe);
+  });
+
+  it('prints a finding-derived recommendation once, not again under What we recommend', () => {
+    const rec = 'Pull mulch back from the slab edge';
+    const data = {
+      ...BASE_DATA,
+      findings: [{ id: 'f1', category: 'observation', severity: 'low', title: 'Ant trailing at the slab', detail: '', recommendation: rec }],
+      recommendations: [rec, 'Keep shrubs trimmed back from the exterior walls'],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent.split(rec).length - 1).toBe(1);
+    expect(container.textContent).toContain('Keep shrubs trimmed back from the exterior walls');
   });
 
   it('does not claim treatment areas on a visit with no applications', () => {
@@ -652,6 +669,29 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
       ...BASE_DATA,
       serviceLine: 'rodent',
       applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '1', amountUnit: 'ea', product: { name: 'Contrac Blox', epa_reg: '12455-79', category: 'rodenticide bait' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).not.toContain('Products applied');
+  });
+
+  it('keeps a freshly recorded non-bait termiticide under the client-defaulted station_check', () => {
+    // The completion panel defaults methodless termite products to
+    // station_check and persists it (methodInferred false) — identity, not
+    // the flag, decides (#3516 r11).
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '2', amountUnit: 'fl_oz', product: { name: 'Termidor Foam', category: 'termiticide', epa_reg: '' } }],
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toContain('Termidor Foam');
+  });
+
+  it('never lists a bait cartridge as an application, even EPA-registered', () => {
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'termite',
+      applications: [{ id: 'a1', method: 'station_check', methodInferred: false, totalAmount: '1', amountUnit: 'ea', product: { name: 'Trelona ATBS Annual Bait Cartridge', category: 'termite bait', epa_reg: '499-557' } }],
     };
     const { container } = render(<ServiceReportDocument data={data} token="t" />);
     expect(container.textContent).not.toContain('Products applied');

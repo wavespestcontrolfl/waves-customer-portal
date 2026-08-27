@@ -1121,6 +1121,9 @@ describe('service report v1', () => {
       areas_serviced: JSON.stringify(['Perimeter']),
       structured_notes: JSON.stringify({
         recommendations: ['Seal the gap under the front threshold.'],
+        // Provenance-kept form field (2026-08-27) — the customer list reads
+        // this alone; the merged list above may carry raw note lines.
+        formRecommendations: ['Seal the gap under the front threshold.'],
       }),
       service_data: '{}',
     }, 'token-recommendation-only', knex);
@@ -2015,6 +2018,7 @@ describe('service report v1', () => {
         protocolActionsCompleted: ['Treated front entry trail'],
         observations: ['Light ant activity at front entry'],
         recommendations: ['Seal the small gap under the front door'],
+        formRecommendations: ['Seal the small gap under the front door'],
       }),
       service_data: '{}',
     }, 'token-complete', knex);

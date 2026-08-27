@@ -32,7 +32,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { membershipDuesCoverVisit, completionInvoiceAmount, isMembershipTier, monthlyDuesCollected } = require('../services/billing-lane');
 const { assignDispatchJob, emitDispatchJobUpdate } = require('../services/dispatch-assignment');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType, SERVICE_LINE_IDS } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
 const { buildCompletionAdvisory } = require('../services/service-report/report-data');
@@ -1401,6 +1401,35 @@ async function productReentryFloor(knex, submittedProducts = []) {
     }
   }
   return { minutes: maxMinutes, verified };
+}
+
+// Product-identity evidence for the re-entry rules (codex inline r9 on
+// #3516): TRUE when any submitted product resolves to a non-bait pesticide
+// (see isNonBaitPesticideProduct) — the client defaults methodless termite
+// products to station_check and catalog rows such as Termidor Foam carry no
+// REI, so method and REI alone would miss a real liquid/foam application.
+// Fail closed to FALSE on a lookup error (the identity is then unknown).
+async function productIdentityEvidence(knex, submittedProducts = []) {
+  const productIds = [...new Set((submittedProducts || []).map((p) => p.productId).filter(Boolean))];
+  if (!productIds.length) return false;
+  let rows = null;
+  try {
+    // Nested transaction = SAVEPOINT on the outer completion trx: a failed
+    // catalog read rolls back to the savepoint instead of leaving the whole
+    // transaction aborted (mirrors productReentryFloor; uncapped codex P1).
+    rows = await knex.transaction(async (sp) => sp('products_catalog')
+      .whereIn('id', productIds)
+      .select('id', 'name', 'category', 'product_type', 'epa_reg_number'));
+  } catch {
+    rows = null;
+  }
+  if (!Array.isArray(rows)) return false;
+  return rows.some((row) => isNonBaitPesticideProduct({
+    name: row.name,
+    category: row.category,
+    productType: row.product_type,
+    epaReg: row.epa_reg_number,
+  }));
 }
 
 async function actualProductInventoryBlocks(submittedProducts = []) {
@@ -2881,7 +2910,12 @@ router.get('/:serviceId/reentry-defaults', async (req, res, next) => {
   try {
     const svc = await db('scheduled_services').where({ id: req.params.serviceId }).first();
     if (!svc) return res.status(404).json({ error: 'Service not found' });
-    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+    // `applicationsRecorded=1` = the panel currently records spray evidence
+    // (spray-class product or treatment-applied action) on a visit whose
+    // identity alone is no-spray — seeds return to the line defaults so the
+    // steppers reappear and the tech can adjust (codex inline r6).
+    const applicationsRecorded = ['1', 'true'].includes(String(req.query.applicationsRecorded || '').toLowerCase());
+    const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, { applicationsRecorded });
     res.json({
       exteriorMinutes: Number(lineAdvisoryDefaults?.exterior_reentry_min) || 0,
       interiorMinutes: Number(lineAdvisoryDefaults?.interior_reentry_min) || 0,
@@ -5280,6 +5314,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ...(Array.isArray(recommendations) ? recommendations : []),
       ...taggedCompletionNoteLines(technicianNotes, ['next']),
     ]);
+    // Provenance-kept copy of ONLY the form's recommendation field — the
+    // merged list above folds in [Next] technician-note lines, and the
+    // customer report's "What we recommend" section may never render raw
+    // note text (AGENTS.md egress; codex P1 on #3516). Persisted beside
+    // the merged list as structured_notes.formRecommendations.
+    const formRecommendations = normalizeCompletionTextArray(
+      Array.isArray(recommendations) ? recommendations : [],
+    );
     const [serviceRecordCols, serviceProductCols, serviceFindingsAvailable, activityScoresAvailable] = await Promise.all([
       db('service_records').columnInfo().catch(() => ({})),
       db('service_products').columnInfo().catch(() => ({})),
@@ -6586,6 +6628,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             protocolActionScopesCompleted: reportProtocolActionScopes,
             observations: reportObservations,
             recommendations: reportRecommendations,
+            formRecommendations,
             // Tech-speed telemetry from the typed CompletionPanel (contract
             // §10) — opaque client timings, persisted for budget analysis.
             ...(completionTelemetry && typeof completionTelemetry === 'object' && !Array.isArray(completionTelemetry)
@@ -6999,8 +7042,39 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             const productReentryMin = productReentry.minutes;
             // Type-aware base: cockroach-family visits default to a 120-min
             // INTERIOR window (owner rule 2026-08-11) instead of the pest
-            // line's 30 — see getAdvisoryDefaults.
-            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type);
+            // line's 30 — see getAdvisoryDefaults. Recorded applications are
+            // passed as evidence so a no-spray termite identity never zeroes
+            // a visit that actually applied product.
+            // Evidence = a label re-entry interval on any applied product, or
+            // an explicitly spray-class application method — bait cartridges
+            // and station checks are not evidence (uncapped codex P1).
+            // A treatment-applied protocol action is evidence too: products are
+            // optional on inspection/bait lanes, so an interior/exterior action
+            // marked treatmentApplied must keep the guidance (codex inline r4).
+            // A label REI counts only when genuinely PRESENT: productReentryFloor
+            // maps a null rei_hours to 0, so `!= null` alone would read a bait
+            // cartridge row as treatment evidence (codex inline r13). A real
+            // 0-hr spray is still caught by its spray-class method or product
+            // identity below.
+            const reentryApplicationsRecorded = (productReentryMin != null && productReentryMin > 0)
+              || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
+                p?.applicationMethod || p?.method || p?.application_method,
+              )))
+              || reportProtocolActionScopes.some((s) => s.treatmentApplied)
+              // Catalog identity: a non-bait pesticide product is evidence even
+              // under the client's defaulted station_check (codex inline r9).
+              || await productIdentityEvidence(trx, products || []);
+            const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
+              applicationsRecorded: reentryApplicationsRecorded,
+            });
+            // Server-authoritative no-re-entry visit: a no-spray termite
+            // identity with no treatment evidence persists 0/0 and IGNORES
+            // client stepper overrides — a stale adjustment submitted before
+            // the panel's async re-seed cleared it must not become a
+            // reentry_adjusted countdown (uncapped codex P1 r8).
+            const noReentryTermiteVisit = !reentryApplicationsRecorded
+              && getServiceLineConfig(svc.service_type).id === 'termite'
+              && isTermiteNoReentryServiceType(svc.service_type);
             let advisoryDefaultsForVisit = productReentryMin != null
               ? {
                 ...lineAdvisoryDefaults,
@@ -7018,8 +7092,8 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // stays the exterior floor — a tech-lowered dry-down window
             // never undercuts the most restrictive product label applied.
             {
-              let techExterior = reentryOverridePlan.exterior;
-              const techInterior = reentryOverridePlan.interior;
+              let techExterior = noReentryTermiteVisit ? undefined : reentryOverridePlan.exterior;
+              const techInterior = noReentryTermiteVisit ? undefined : reentryOverridePlan.interior;
               // Fail closed when the label floor is UNVERIFIABLE (codex P1
               // #3360): a lowering exterior override is dropped entirely —
               // the computed default (line default raised by any known REI)
@@ -9900,6 +9974,106 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       }
     }
     const serviceReportV1Delivery = shouldSendServiceReportV1Delivery(record);
+    // Auto-publish tech-captured visual moments to the customer report
+    // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
+    // Runs BEFORE the PDF enqueue below so the rendered artifact carries
+    // the promoted moments, and independent of the email branch (codex P1
+    // ×2 on this branch). Each moment is screened INDIVIDUALLY: the caption
+    // that will render (customer_caption, falling back to ai_caption) must
+    // be non-empty and pass the same banned-copy + access-code guards as
+    // every other customer copy path — violators stay internal_only for
+    // the existing admin review flow. Fail-soft: errors never block the
+    // completion. Also invalidates the visual-moment PDF cache, matching
+    // the admin visibility endpoint's contract. Publishes ONLY on a
+    // customer-delivered completion: typed internal_only/disabled modes
+    // keep their admin-review/suppression contract and quiet backfills send
+    // nothing (codex P1 r2) — isInternalOnlyCompletion alone only covers
+    // untyped consultations.
+    if (!isInternalOnlyCompletion && !isIncompleteVisit && !isBackfillCompletion
+      && typedDeliveryMode === 'auto_send') {
+      try {
+        const { gateEnvValue } = require('../config/feature-gates');
+        if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {
+          const { customerCopyViolations, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+          const candidates = await db('visual_service_moments')
+            .where({ job_id: svc.id, visibility_status: 'internal_only' })
+            .whereNull('deleted_at')
+            .select('id', 'customer_caption', 'ai_caption', 'tag_group', 'media_storage_key', 'note');
+          // Provenance rules (codex P1 r4): never auto-publish moments whose
+          // customer copy could derive from the raw technician note — the
+          // 'recommendation' tag's template embeds the note verbatim — nor
+          // the 'access' group (entry points / access issues carry the exact
+          // details the access-code screen exists to keep off reports).
+          // Only moments WITH media publish (a note-only moment is an
+          // internal visual note), and only on an explicit customer_caption
+          // or media-derived ai_caption — the note-templated fallback caption
+          // never qualifies. Media content itself is not machine-screenable;
+          // flipping the gate is the owner's acceptance of that.
+          const AUTO_PUBLISH_EXCLUDED_TAG_GROUPS = new Set(['recommendation', 'access']);
+          const publishable = candidates.filter((m) => {
+            if (AUTO_PUBLISH_EXCLUDED_TAG_GROUPS.has(String(m.tag_group || ''))) return false;
+            // Storage key REQUIRED: the report loader signs media from
+            // media_storage_key only, so a legacy URL-only row would publish
+            // as a caption-only card (codex inline r7).
+            if (!m.media_storage_key) return false;
+            const caption = String(m.customer_caption || m.ai_caption || '').trim();
+            if (!caption || customerCopyViolations(caption).length) return false;
+            // The tech's raw note is never published, but it is the best
+            // available signal for what the MEDIA shows: a note that carries
+            // an access code (gate/lockbox/keypad) almost certainly describes
+            // a photo of one — hold that moment internal (uncapped codex P1
+            // r11). Media content itself is not machine-screenable here; the
+            // gate flip is the owner's acceptance of that residual risk.
+            if (containsReportAccessCode(String(m.note || ''))) return false;
+            return true;
+          });
+          let promoted = 0;
+          let promotionError = null;
+          for (const m of publishable) {
+            // Conditional on the EXACT screened state (codex P1 r3): a
+            // concurrent admin rejection, deletion, or caption edit between
+            // the screen and this write leaves the row untouched — only a
+            // row still internal_only, undeleted, with the captions the
+            // screen approved is promoted.
+            try {
+              promoted += await db('visual_service_moments')
+                .where({ id: m.id, job_id: svc.id, visibility_status: 'internal_only' })
+                .whereNull('deleted_at')
+                .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
+                .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
+                // EVERY screened field is frozen — tag group, note, and
+                // storage key too — so a concurrent edit that adds an access
+                // code to the note (or swaps the media) after the screen
+                // leaves the row internal (uncapped codex P1 r12).
+                .whereRaw('tag_group IS NOT DISTINCT FROM ?', [m.tag_group ?? null])
+                .whereRaw('note IS NOT DISTINCT FROM ?', [m.note ?? null])
+                .whereRaw('media_storage_key IS NOT DISTINCT FROM ?', [m.media_storage_key ?? null])
+                .update({
+                  visibility_status: 'approved_customer',
+                  customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
+                  updated_at: db.fn.now(),
+                });
+            } catch (rowErr) {
+              // A later row failing must not skip cache invalidation for
+              // the rows already promoted (uncapped codex P1 r8).
+              promotionError = rowErr;
+              break;
+            }
+          }
+          if (promoted) {
+            const { invalidateVisualMomentReportPdfCache } = require('../services/visual-service-notes');
+            await invalidateVisualMomentReportPdfCache(svc.id).catch(() => {});
+            logger.info(`[dispatch] auto-published ${promoted}/${candidates.length} visual moment(s) for ${svc.id}`);
+          }
+          if (promotionError) throw promotionError;
+          if (!promoted && candidates.length) {
+            logger.info(`[dispatch] visual moments held internal_only for ${svc.id}: ${candidates.length} failed the caption screen`);
+          }
+        }
+      } catch (vmErr) {
+        logger.warn(`[dispatch] visual-moment auto-publish failed (non-blocking): ${vmErr.message}`);
+      }
+    }
     // Only auto_send completions queue a PDF render. 'disabled' is the typed
     // kill switch; 'internal_only' (Phase-1b shadow) can't render either —
     // the headless renderer opens /report/:token?mode=pdf without a staff

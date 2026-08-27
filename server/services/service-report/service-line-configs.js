@@ -237,15 +237,77 @@ function isCockroachServiceType(serviceType) {
   return COCKROACH_SERVICE_TYPE_RE.test(text);
 }
 
+// Termite visits with no liquid/foam application — station checks, bait
+// monitoring, cartridge/installation work, inspections, warranty/bond
+// renewals — have no re-entry concept: nothing is sprayed, so a dry-down
+// countdown on the report is wrong (owner rule 2026-08-27). Liquid,
+// pre-treat, trenching, spot and drill-and-foam termite forms keep the
+// line's 30/120 defaults. Same normalize-then-match approach as the
+// cockroach override above so keyed catalog values match too.
+const TERMITE_NO_REENTRY_SERVICE_TYPE_RE =
+  /\b(bait|station|monitor\w*|cartridge|installation|inspection|renewal|warranty|bond)\b/i;
+// Any treatment token keeps the line defaults: a mixed identity such as
+// "Termite Liquid Treatment & Inspection" still applies product, so its
+// re-entry guidance must survive (uncapped codex P1 on this lane). The
+// override fires only for an EXCLUSIVELY no-application identity.
+const TERMITE_TREATMENT_SERVICE_TYPE_RE =
+  /\b(liquid|foam|trench\w*|pre\s?treat\w*|pretreat\w*|spot|bora|termidor|drill|treatment|applic\w*)\b/i;
+
+function isTermiteNoReentryServiceType(serviceType) {
+  const text = String(serviceType || '').replace(/[_-]+/g, ' ');
+  return TERMITE_NO_REENTRY_SERVICE_TYPE_RE.test(text)
+    && !TERMITE_TREATMENT_SERVICE_TYPE_RE.test(text);
+}
+
+// Application methods that are NOT spray/liquid evidence: bait and
+// station work (Trelona/Advance cartridges, station checks) and trunk
+// injection carry no dry-down concept. A termite bait visit legitimately
+// records these products, so product PRESENCE is never re-entry evidence
+// — only a spray-class method (or an actual label REI, checked by the
+// caller) is (uncapped codex P1 on #3516).
+const NON_SPRAY_APPLICATION_METHODS = new Set(['bait_placement', 'station_check', 'trunk_injection']);
+function isSprayApplicationMethod(method) {
+  const key = String(method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  return !!key && key !== 'null' && !NON_SPRAY_APPLICATION_METHODS.has(key);
+}
+
+// Product-identity evidence, shared by the completion path and the
+// report-time check (codex inline r9): a NON-bait pesticide product —
+// EPA-registered or pesticide-class by type/category — is treatment
+// evidence even when its recorded method is the client's defaulted
+// station_check (methodless termite products default that way and
+// catalog rows such as Termidor Foam carry no method or REI). Bait /
+// station / cartridge / monitor families never count.
+const BAIT_FAMILY_RE = /bait|station|cartridge|monitor/i;
+const PESTICIDE_CLASS_RE = /pestic|termitic|insectic|herbic|fungic|rodentic/i;
+function isNonBaitPesticideProduct({ name = '', category = '', productType = '', epaReg = '' } = {}) {
+  const identity = `${productType || ''} ${category || ''} ${name || ''}`;
+  if (BAIT_FAMILY_RE.test(identity)) return false;
+  return !!String(epaReg || '').trim() || PESTICIDE_CLASS_RE.test(`${productType || ''} ${category || ''}`);
+}
+
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
-// line id) so the cockroach override can fire. Non-cockroach types return
-// their line's defaults unchanged.
-function getAdvisoryDefaults(serviceType) {
+// line id) so the cockroach and termite-station overrides can fire. Other
+// types return their line's defaults unchanged. `applicationsRecorded`
+// is completion evidence of a SPRAY-class application (see
+// isSprayApplicationMethod) or a label re-entry interval: a station visit
+// that recorded a supplemental liquid application keeps the line's
+// re-entry defaults regardless of its name (codex inline on #3516) — the
+// name alone never zeroes a chemically treated visit, and bait/station
+// products alone never un-zero one.
+function getAdvisoryDefaults(serviceType, { applicationsRecorded = false } = {}) {
   const config = getServiceLineConfig(serviceType);
   if (config.id === 'pest' && isCockroachServiceType(serviceType)) {
     return {
       ...config.advisoryDefaults,
       interior_reentry_min: COCKROACH_INTERIOR_REENTRY_MIN,
+    };
+  }
+  if (config.id === 'termite' && !applicationsRecorded && isTermiteNoReentryServiceType(serviceType)) {
+    return {
+      ...config.advisoryDefaults,
+      exterior_reentry_min: 0,
+      interior_reentry_min: 0,
     };
   }
   return config.advisoryDefaults;
@@ -272,6 +334,9 @@ module.exports = {
   SERVICE_LINE_CONFIGS,
   isRodentAdjacentServiceType,
   isCockroachServiceType,
+  isSprayApplicationMethod,
+  isNonBaitPesticideProduct,
+  isTermiteNoReentryServiceType,
   getAdvisoryDefaults,
   detectServiceLine,
   getServiceLineConfig,

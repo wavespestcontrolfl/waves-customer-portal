@@ -3,7 +3,7 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -482,12 +482,20 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ');
   // Area chips are a controlled vocabulary and remain a valid scope signal.
-  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
+  // attic covers the termite/rodent "Attic" area label (2026-08-27) — an
+  // indoor space whose treatment carries an interior wait (codex inline r8).
+  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic)\b/.test(text);
   // fence/trash cover the controlled pest-area chips "Fence line" and
   // "Trash area" — clearly exterior choices that previously fell through
   // and (under the explicit-exterior rule) would wrongly zero the
   // customer's dry-down timer (codex P1 #3007).
-  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash)\b/.test(text);
+  // screened/enclosure, standing water, deck, station(s), crawlspace, slab
+  // edge and wood contact cover the termite + mosquito area vocabularies
+  // added 2026-08-27 ("Screened enclosure", "Standing water areas", "Under
+  // deck / patio", "Bait stations", "Crawlspace", "Garage / slab edge",
+  // "Wood contact points") — exterior choices that would otherwise fall
+  // through and zero the customer's dry-down timer (codex inline r6).
+  const textExterior = /\b(exterior|outside|outdoor|perimeter|foundation|eaves|soffit|yard|front|back|rear|side|lanai|patio|pool|driveway|landscape|mulch|entry|threshold|lawn|fence|trash|screened|enclosure|standing water|deck|stations?|crawlspace|slab edge|wood contact)\b/.test(text);
   // Structured action scope is additive: an interior treatment fires interior
   // even when only exterior areas were chipped (and vice-versa).
   const action = structuredActionScope(service);
@@ -1486,6 +1494,15 @@ function buildProtocolPayload(record) {
       ...parseJsonArray(structured.recommendations),
       ...taggedNoteLines(record.technician_notes, ['next']),
     ]),
+    // Provenance-guaranteed source ONLY: structured_notes.formRecommendations
+    // is written at completion from the form's recommendation field alone.
+    // The merged lists (protocol.recommendations, structured.recommendations)
+    // fold in [Next] technician-note lines at persist time, so they can't
+    // distinguish form input from raw notes — and raw notes must never
+    // egress on a customer report (AGENTS.md; codex P1 r3 + inline on
+    // #3516). Records predating the field render findings recommendations
+    // only. The merged list above stays for its internal/recap consumers.
+    structuredRecommendations: uniqueStrings(parseJsonArray(structured.formRecommendations)),
     visitOutcome: protocol.visitOutcome || structured.visitOutcome || null,
   };
 }
@@ -3607,10 +3624,22 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   });
   const linearFt = await computeLinearFt(service.id, knex).catch(() => null);
   const treatedZoneIds = new Set(applications.flatMap((app) => app.zone_ids || []));
+  // Rendered verbatim on the customer report, so: structured sources only
+  // (never raw technician_notes lines — AGENTS.md report egress), AND
+  // screened at the PAYLOAD boundary, not just at completion intake —
+  // legacy structured_notes values predate the completion-time validators
+  // (codex P1 on this branch). A line with banned wording or an access
+  // code is dropped, never rewritten; the rest of the list still renders.
+  const recommendationScreen = (() => {
+    try {
+      const { customerCopyViolations } = require('./technician-report-copy');
+      return (line) => customerCopyViolations(line).length === 0;
+    } catch { return () => false; }
+  })();
   const recommendations = uniqueStrings([
-    ...protocol.recommendations,
+    ...(protocol.structuredRecommendations || []),
     ...findings.map((finding) => finding.recommendation).filter(Boolean),
-  ]);
+  ]).filter(recommendationScreen);
   // The turf-height gauge image is the on-site lawn-length documentation photo.
   // Surface it in the Mowing Height report module (next to the reading it
   // documents) instead of the generic gallery, so it appears exactly once. We
@@ -3743,12 +3772,62 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         }
         : {}),
     });
+  // Spray evidence at read time: a spray-class application row, or a
+  // treatment-applied protocol action scope persisted at completion
+  // (products are optional on inspection/bait lanes — codex inline r4).
+  // Mirrors ServiceReportDocument.isProductApplication (uncapped codex P1 r6):
+  // a legacy termite product with NO recorded method infers station_check,
+  // but an EPA-registered / pesticide-class product on such a row is a real
+  // application — an EXPLICIT station_check (methodInferred === false) is a
+  // deliberate device inspection and never counts.
+  // Product identity rule is shared with the completion path
+  // (isNonBaitPesticideProduct): bait/station families never count, even
+  // with an EPA number — a legacy Trelona/Advance cartridge row is station
+  // work, not a spray (codex inline r7/r9).
+  // The client DEFAULTS methodless termite products to station_check and
+  // persists it, so `methodInferred` is false for a freshly completed
+  // Termidor Foam row — inference provenance is lost at persist time.
+  // Product identity therefore decides regardless of the flag; bait /
+  // station families are excluded by the classifier itself, which is what
+  // keeps an explicit station check on a cartridge from counting (codex
+  // inline r10).
+  const isInferredPesticideApplication = (app) => app.method === 'station_check'
+    && isNonBaitPesticideProduct({
+      name: app.product?.name,
+      category: app.product?.category,
+      productType: app.product?.product_type,
+      epaReg: app.product?.epa_reg,
+    });
+  const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
+    || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
+      .some((s) => s && s.treatmentApplied === true);
+  const storedAdvisory = parseJsonObject(service.advisory);
+  // Legacy no-spray termite records (bait/monitoring/inspection completed
+  // before the 0/0 rule) persisted the old 30/120 line defaults, and the
+  // stored advisory wins the spread below — so permanent historical
+  // reports would keep a countdown for a visit that applied nothing.
+  // Zero each side that was NOT explicitly adjusted by a person (per-side
+  // reentry_adjusted marker) when the identity is no-spray and nothing
+  // proves treatment (codex inline r4).
+  // Fail closed: a failed product load means treatment evidence is UNKNOWN,
+  // so the stored guidance stands (uncapped codex P1 r5).
+  if (config.id === 'termite' && !productsLoadFailed && !readTimeSprayEvidence && isTermiteNoReentryServiceType(service.service_type)) {
+    // The legacy BOOLEAN marker means both sides were corrected by a person
+    // (normalizeAdvisoryForTreatmentScope honors it the same way) — it must
+    // never be read as "nothing adjusted" (codex inline r6).
+    const rawAdjusted = storedAdvisory.reentry_adjusted;
+    const adjusted = rawAdjusted === true
+      ? { exterior: true, interior: true }
+      : (rawAdjusted && typeof rawAdjusted === 'object' ? rawAdjusted : {});
+    if (!adjusted.exterior && storedAdvisory.exterior_reentry_min != null) storedAdvisory.exterior_reentry_min = 0;
+    if (!adjusted.interior && storedAdvisory.interior_reentry_min != null) storedAdvisory.interior_reentry_min = 0;
+  }
   const advisory = normalizeAdvisoryForTreatmentScope({
     // Type-aware defaults (cockroach-family visits default to a 120-min
     // interior window — owner rule 2026-08-11); the STORED advisory still
     // wins whenever the completion persisted one.
-    ...getAdvisoryDefaults(service.service_type),
-    ...parseJsonObject(service.advisory),
+    ...getAdvisoryDefaults(service.service_type, { applicationsRecorded: readTimeSprayEvidence }),
+    ...storedAdvisory,
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, {
     service,
@@ -4172,6 +4251,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
 
   let nextAppointment = null;
+  let sameLineNextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4248,17 +4328,89 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           && !!rodentCatalogNames
           && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
       }) || null;
-    if (nextApptRow && nextApptRow.scheduled_date) {
-      const rawDate = nextApptRow.scheduled_date;
-      nextAppointment = {
-        serviceType: nextApptRow.service_type || null,
+    // No upcoming visit on THIS report's service line → fall back to the
+    // customer's next visit of any line (owner 2026-08-27). The rendered
+    // label always carries the service name, so a pest visit on a termite
+    // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
+    // Same disclosable-status pool; the strict same-line pick above still
+    // wins whenever it exists.
+    const toNextAppointment = (row) => {
+      if (!row || !row.scheduled_date) return null;
+      const rawDate = row.scheduled_date;
+      return {
+        serviceType: row.service_type || null,
         scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
         // window_start only — the customer-facing arrival window is always
         // window_start + 2 hours (window_end is the internal job block).
-        windowStart: nextApptRow.window_start || null,
+        windowStart: row.window_start || null,
       };
-    }
+    };
+    // The narrative builders below were written under the same-line
+    // invariant (they keep only the date/window), so they receive the
+    // strict same-line pick ONLY; the hero cell gets the cross-line
+    // fallback, whose label carries the service name (codex inline r4).
+    sameLineNextAppointment = toNextAppointment(nextApptRow);
+    nextAppointment = sameLineNextAppointment
+      || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
   } catch { /* best-effort */ }
+
+  // Termite warranty line (owner ask 2026-08-27): a termite-line report
+  // links the customer to their active bond on the portal My Plan tab with
+  // its renewal date. Rides the SAME gate as the portal card
+  // (GATE_PORTAL_TERMITE_BOND) so the report never links to a surface that
+  // won't render, and LIVE VIEWS ONLY — a renewal date frozen into a
+  // cached PDF goes stale across a renewal (same rule as nextAppointment).
+  // Fail-soft like the portal endpoint: any error just omits the line.
+  let termiteBonds = null;
+  if (serviceLine === 'termite' && opts.mode === 'live') {
+    try {
+      // Shared with /api/property/termite-bond so the hero cell and the
+      // My Plan card it links to can never disagree (codex inline). EVERY
+      // active bond is carried — the My Plan card renders each one, and
+      // collapsing to the farthest renewal would misrepresent the warranty
+      // this report belongs to (codex inline r4).
+      const { activeTermiteBondsForCustomer } = require('../termite-bonds');
+      const bonds = await activeTermiteBondsForCustomer(service.customer_id, knex);
+      if (bonds.length) {
+        termiteBonds = bonds.map((bond) => ({
+          serviceType: bond.serviceType || null,
+          termYears: bond.termYears,
+          startedAt: bond.startedAt,
+          renewsAt: bond.renewsAt,
+        }));
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // Related documents (owner ask 2026-08-27): every LIVE report links the
+  // customer's portal Documents tab, listing the documents tied to THIS
+  // visit (linked_service_record_id) by title. Live-only for the same
+  // staleness reason as nextAppointment; fail-soft — errors omit the cell.
+  let relatedDocuments = null;
+  if (opts.mode === 'live') {
+    try {
+      // Only THIS visit's linked rows are read — filtered in the query, not
+      // after a history cap, so an old report's linked document can never
+      // fall outside a newest-first window (codex inline r3).
+      const linked = await knex('customer_documents')
+        .where({ customer_id: service.customer_id, linked_service_record_id: service.id })
+        .select('id', 'title', 'document_type')
+        .orderBy('created_at', 'desc')
+        .limit(3)
+        .catch(() => []);
+      // Always present on a live report: the Documents tab synthesizes a
+      // row for THIS completed report (and project reports), so the link
+      // never dead-ends even with no stored customer_documents. Stored
+      // rows only supply the linked titles; no count is ever computed here
+      // (it would disagree with the tab's synthesized rows — codex P1 r1/r2).
+      relatedDocuments = {
+        linked: (Array.isArray(linked) ? linked : []).map((d) => ({
+          title: d.title || d.document_type || 'Document',
+          documentType: d.document_type || null,
+        })),
+      };
+    } catch { /* best-effort */ }
+  }
 
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
@@ -4399,7 +4551,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       areasServiced: areaLabels,
       pestPressure,
       findings,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => structured.customerRecap || '');
   }
 
@@ -4442,7 +4594,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       stationCountDisputed,
       applications,
       photos: photoPayload,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => null);
     if (narrated && narrated !== visitSummary) {
       visitSummary = narrated;
@@ -4503,7 +4655,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       stationCountDisputed,
       applications,
       photos: photoPayload,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => null);
     if (narrated && narrated !== visitSummary) {
       visitSummary = narrated;
@@ -4675,6 +4827,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    termiteBonds,
+    relatedDocuments,
     visitTimeline,
     serviceLocations,
     workflowEvents,
