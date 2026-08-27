@@ -253,16 +253,51 @@ function hasIncludedLinkReason(contract, reason) {
 }
 
 // Which service a CTA anchor names, if any — used to reject a wrong-service
-// CTA ("Get a Lawn Care Quote" on a termite post). Keys match
-// normalizeService's output.
+// CTA ("Get a Lawn Care Quote" on a termite post, "Get a Cockroach Quote"
+// on a bed-bug post). Broad-service keys match normalizeService's output;
+// specialty keys match the raw brief topics the engine briefs carry.
 const CTA_ANCHOR_SERVICE_TERMS = {
   pest: /\bpest\b/i,
   lawn: /\blawn\b/i,
   termite: /\btermite/i,
   mosquito: /\bmosquito/i,
-  rodent: /\brodent|\brat\b|\bmice\b|\bmouse\b/i,
+  rodent: /\brodent|\brats?\b|\bmice\b|\bmouse\b/i,
   'tree-shrub': /\btree\b|\bshrub/i,
+  'bed-bug': /\bbed[ -]?bug/i,
+  cockroach: /roach/i,
+  ant: /\bants?\b/i,
+  spider: /\bspider/i,
+  flea: /\bfleas?\b/i,
+  tick: /\bticks?\b/i,
+  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b/i,
+  wdo: /\bwdo\b|wood[- ]destroying/i,
 };
+
+// Specialty → the broad service whose conversion path it books through. A
+// bed-bug post's CTA may say "bed bug" OR "pest" ("Get My Free Pest Control
+// Estimate" is that post's real conversion page); it may NOT say
+// "cockroach" or "lawn".
+const CTA_SERVICE_FAMILY = {
+  'bed-bug': 'pest',
+  cockroach: 'pest',
+  ant: 'pest',
+  spider: 'pest',
+  flea: 'pest',
+  tick: 'pest',
+  wasp: 'pest',
+  wdo: 'termite',
+};
+
+function allowedAnchorServices(briefService) {
+  const allowed = new Set([briefService]);
+  if (CTA_SERVICE_FAMILY[briefService]) allowed.add(CTA_SERVICE_FAMILY[briefService]);
+  // A broad-service brief accepts its own specialties ("Get an Ant Control
+  // Quote" on a pest post).
+  for (const [svc, fam] of Object.entries(CTA_SERVICE_FAMILY)) {
+    if (fam === briefService) allowed.add(svc);
+  }
+  return allowed;
+}
 
 function hasConversionCta(body, brief = {}) {
   // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
@@ -274,15 +309,24 @@ function hasConversionCta(body, brief = {}) {
   // "Get an estimate. [Click here](/contact/)", and a lawn-care quote anchor
   // on a termite post all fail to qualify.
   const s = String(body || '');
-  const briefService = brief.service ? normalizeService(brief.service) : null;
+  // normalizeService lowercases and maps broad aliases; specialty topics
+  // fall through raw — hyphen-normalize so 'bed bugs' meets the map keys.
+  const briefService = brief.service
+    ? normalizeService(brief.service).replace(/\s+/g, '-').replace(/e?s$/, '')
+    : null;
+  const allowed = briefService ? allowedAnchorServices(briefService) : null;
   const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
   let m;
   while ((m = conversionLink.exec(s)) !== null) {
     const anchor = m[1];
     if (!/(estimat|quot)/i.test(anchor)) continue;
-    const namesWrongService = briefService && Object.entries(CTA_ANCHOR_SERVICE_TERMS)
-      .some(([svc, re]) => svc !== briefService && re.test(anchor));
-    if (!namesWrongService) return true;
+    const named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+      .filter(([, re]) => re.test(anchor))
+      .map(([svc]) => svc);
+    // Generic estimate/quote anchors qualify for any service; an anchor
+    // that NAMES services qualifies only if one of them is the brief's own
+    // service (or its family).
+    if (!allowed || named.length === 0 || named.some((svc) => allowed.has(svc))) return true;
   }
   return false;
 }

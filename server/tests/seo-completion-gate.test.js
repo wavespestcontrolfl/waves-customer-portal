@@ -222,6 +222,28 @@ describe('seo-completion-gate', () => {
     expect(rightService.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
   });
 
+  test('specialty topics validate positively — family CTA allowed, cross-specialty rejected', () => {
+    // Bed-bug post with a cockroach quote anchor: rejected.
+    const crossSpecialty = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Bed bugs hide in seams. [Get a Cockroach Quote](/pest-control-quote/) now.',
+      }),
+      brief: baseBrief({ service: 'bed-bugs' }),
+      shadowMode: true,
+    });
+    expect(crossSpecialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    // Bed-bug post booking through its real conversion path wording: allowed.
+    const familyOk = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n[Get My Free Pest Control Estimate](/pest-control-quote/) today.`,
+      }),
+      brief: baseBrief({ service: 'bed-bugs' }),
+      shadowMode: true,
+    });
+    expect(familyOk.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+  });
+
   test('blocks customer PII and unapproved hardcoded prices', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
