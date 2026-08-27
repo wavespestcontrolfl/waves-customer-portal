@@ -3419,7 +3419,9 @@ const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled
  *       Monthly row, neither "already collected" (a paid/processing sibling
  *       for the same billed month — the sweep disarms it without charging)
  *       nor "absorbed" (the obligation date itself is prepay-covered — the
- *       sweep self-supersedes it). One-time retries are always collectible.
+ *       sweep self-supersedes it), and for any row not "parked" (no
+ *       PaymentIntent id + metadata.ambiguous_outcome — the sweep supersedes
+ *       it without charging). Other one-time retries are collectible.
  *   (b) a visit completion will bill: every still-completable visit in
  *       [today, horizon] run through predictCompletionBilling (billing-lane,
  *       the shared completion predicate) with the same inputs the schedule
@@ -3463,15 +3465,19 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
       .whereNotNull('next_retry_at')
-      .select('id', 'customer_id', 'description', 'payment_date', 'metadata');
+      .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id');
     const coveredOn = new Map();
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
+      let meta = {};
+      try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
+      // Ambiguous Stripe outcome (no PaymentIntent id): the sweep PARKS the
+      // row — supersedes it and raises a health alert, never re-charges — so
+      // it is not a forthcoming card charge.
+      if (!row.stripe_payment_intent_id && meta.ambiguous_outcome) continue;
       const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
       if (isMonthly) {
-        let meta = {};
-        try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
         const paidDate = dateOnly(row.payment_date);
         const obligationMonth = meta.billed_month || (paidDate ? paidDate.slice(0, 7) : null);
         if (obligationMonth) {

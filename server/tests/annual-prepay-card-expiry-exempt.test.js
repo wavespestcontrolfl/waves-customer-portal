@@ -115,6 +115,18 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
+  test('a parked retry (no PaymentIntent id + metadata.ambiguous_outcome) is never charged → stays exempt', async () => {
+    const calls = route({
+      terms: coveredAlways(['c-prepaid']),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed({ description: 'Invoice WPC-9', stripe_payment_intent_id: null, metadata: { ambiguous_outcome: true } })),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    expect(calls.payments.find((c) => c[0] === 'select')).toEqual(expect.arrayContaining(['stripe_payment_intent_id']));
+    // same row WITH a PaymentIntent id is a real retry → keeps the warning
+    route({ terms: coveredAlways(['c-prepaid']), payments: (own) => (isSiblingLookup(own) ? [] : armed({ description: 'Invoice WPC-9', stripe_payment_intent_id: 'pi_1', metadata: { ambiguous_outcome: true } })) });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
   test('a WaveGuard Monthly retry already collected by a paid sibling for that month → stays exempt', async () => {
     const calls = route({
       terms: (own) => (asked(own, 't.term_end') === '2026-04-03' && asked(own, 't.term_start') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
