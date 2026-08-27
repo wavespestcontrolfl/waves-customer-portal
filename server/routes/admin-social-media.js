@@ -435,8 +435,15 @@ router.get('/analytics', async (req, res, next) => {
     const engagement = await require('../services/social-engagement')
       .engagementByPost(publishedPosts.map(p => p.id));
     const withEngagement = Object.keys(engagement).length;
+    // Measured posts first (by score), then the unmeasured published posts
+    // (newer than the last sweep, failed fetches, GBP/LinkedIn-only) in
+    // recency order — the list never shrinks below ten just because the
+    // ingest hasn't reached a post.
     const ranked = withEngagement
-      ? publishedPosts.filter(p => engagement[p.id]).sort((a, b) => engagement[b.id].score - engagement[a.id].score)
+      ? [
+        ...publishedPosts.filter(p => engagement[p.id]).sort((a, b) => engagement[b.id].score - engagement[a.id].score),
+        ...publishedPosts.filter(p => !engagement[p.id]),
+      ]
       : publishedPosts;
     const topPosts = ranked
       .slice(0, 10)

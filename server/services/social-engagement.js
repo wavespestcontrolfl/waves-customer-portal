@@ -186,8 +186,10 @@ async function engagementByPost(postIds = []) {
     const counts = { likes: r.likes_count, comments: r.comments_count, shares: r.shares_count, views: r.views_count };
     agg.likes += counts.likes; agg.comments += counts.comments; agg.shares += counts.shares; agg.views += counts.views;
     agg.score += r.engagement_score;
-    agg.platforms[r.platform] = { ...counts, score: r.engagement_score, error: r.last_error || null };
-    if (!agg.fetchedAt || new Date(r.fetched_at) > new Date(agg.fetchedAt)) agg.fetchedAt = r.fetched_at;
+    agg.platforms[r.platform] = { ...counts, score: r.engagement_score, error: r.last_error || null, lastSuccessAt: r.last_success_at };
+    // Age of the DATA (last successful fetch), not of the last attempt —
+    // a failed refresh advances fetched_at while the counts stay old.
+    if (!agg.fetchedAt || new Date(r.last_success_at) > new Date(agg.fetchedAt)) agg.fetchedAt = r.last_success_at;
   }
   return out;
 }

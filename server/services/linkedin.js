@@ -223,24 +223,6 @@ class LinkedInService {
     }
   }
 
-  // ── Social actions (engagement) for one of our own posts ──────────────────
-  // GET /rest/socialActions/{urn} → { likesSummary, commentsSummary }. Read
-  // only; r_organization_social is already in the default scope list. Used
-  // by the engagement-ingest sweep (social-engagement.js).
-  async fetchSocialActions(postUrn) {
-    const token = await this._getValidAccessToken();
-    const res = await fetch(`https://api.linkedin.com/rest/socialActions/${encodeURIComponent(postUrn)}`, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'LinkedIn-Version': API_VERSION,
-        'X-Restli-Protocol-Version': '2.0.0',
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) throw new Error(`LinkedIn socialActions ${res.status}: ${(await res.text()).slice(0, 200)}`);
-    return res.json();
-  }
-
   // ── Valid access token (refresh when possible) ────────────────────────────
   async _getValidAccessToken() {
     const stored = await this._getStoredTokens();
