@@ -896,7 +896,10 @@ async function maybeAutoMerge(run, pr) {
       comparisonBlocked = false;
       for (const f of blogFiles) {
         const file = await gh.getFile(f.filename, pr.head?.sha);
-        const parsed = fmMod.parse(String(file?.content || ''));
+        // An unreadable file (404/null content) must WITHHOLD, not evaluate
+        // as an empty — clean — draft (hook r8 P1).
+        if (!file || typeof file.content !== 'string' || !file.content.trim()) { comparisonBlocked = true; break; }
+        const parsed = fmMod.parse(file.content);
         const verdict = comparisonMod.evaluate(
           { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
           { namedCompetitorEnabled: namedEnabled, operatorBriefText: opText },
@@ -904,9 +907,12 @@ async function maybeAutoMerge(run, pr) {
         if (!verdict || verdict.pass !== true) { comparisonBlocked = true; break; }
         if (verdict.requiresHumanReview === true) comparisonRequiresReview = true;
       }
-    } else if (Array.isArray(prFiles)) {
-      // No blog content in the PR (defensive — this lane always commits the
-      // .mdx): nothing for the comparison gate to judge.
+    } else if (Array.isArray(prFiles) && run.action_type !== 'new_supporting_blog') {
+      // No blog content in the PR and not the blog lane: nothing for the
+      // comparison gate to judge. A new_supporting_blog head with NO file
+      // under src/content/blog/ keeps the fail-closed default instead — its
+      // generated file was deleted or moved out of the gated tree (hook r8
+      // P1), which is never a state this lane should auto-merge.
       comparisonRequiresReview = false;
       comparisonBlocked = false;
     }

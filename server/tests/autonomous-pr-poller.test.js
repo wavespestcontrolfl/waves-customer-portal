@@ -703,6 +703,30 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     } finally { gate.evaluate.mockRestore(); }
   });
 
+  test('head gate fails CLOSED when a blog file at the head is unreadable (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.getFile.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('head gate fails CLOSED when a new-blog head carries NO file under src/content/blog (no merge)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/pages/about.astro', status: 'modified' }]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('head gate fails CLOSED when the PR files cannot be listed (no merge)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
