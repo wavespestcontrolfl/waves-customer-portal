@@ -1824,7 +1824,16 @@ function tenureClaimFinding(text) {
 // are stripped first so quoted tables still count. Prose pipes and plain
 // --- dividers never form the pair.
 function extractRawMarkdownTables(text) {
-  const lines = String(text || '').split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
+  // Fenced code (``` / ~~~) is not rendered markdown — a table shown inside
+  // a code example is documentation, not a live table. Blank those lines
+  // out (keeping line count) before scanning.
+  const raw = String(text || '').split('\n');
+  let inFence = false;
+  const lines = raw.map((l) => {
+    if (/^\s*(?:>\s*)*(?:```|~~~)/.test(l)) { inFence = !inFence; return ''; }
+    if (inFence) return '';
+    return l.replace(/^\s*(?:>\s*)+/, '');
+  });
   const tables = [];
   for (let i = 1; i < lines.length; i += 1) {
     const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
