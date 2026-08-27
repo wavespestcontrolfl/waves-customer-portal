@@ -614,7 +614,24 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50 })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: null, prepaidAmount: 50 })).toBe(false);
   });
-  test('per-application attached invoices stay a charge promise (their own rail collects)', () => {
+  test('per-application attached invoices promise the charge ONLY within the accepted cap (setup-fee line extends it)', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);
+    // over-cap → review at completion, never promised
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base, billingMode: 'per_application', invoice: { subtotal: 150, total: 150, discount_amount: 0 },
+    })).toBe(false);
+    // setup-fee line extends the cap by the line amount
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base,
+      billingMode: 'per_application',
+      invoice: {
+        subtotal: 189.55, total: 189.55, discount_amount: 0,
+        line_items: JSON.stringify([{ description: 'One-Time Setup Fee', amount: 99 }]),
+      },
+    })).toBe(true);
+    // no anchor at all → never promised
+    expect(attachedInvoiceAutoChargeLikely({
+      ...base, billingMode: 'per_application', estimatedPrice: null, perApplicationFee: null,
+    })).toBe(false);
   });
 });

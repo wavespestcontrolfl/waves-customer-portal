@@ -3058,7 +3058,12 @@ router.get('/', async (req, res, next) => {
       // authority completion uses; null = validation unavailable, the
       // prediction falls back to the stamp (Codex r3).
       let annualCoverageValidated = null;
-      if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+      if (s.prepaid_method === 'annual_prepay_invoice') {
+        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
+        // customer reclassified off annual_prepay keeps stale stamps from
+        // refunded/voided terms — leaving validation null would demote the
+        // prediction forever while completion's strict verdict validates
+        // and charges. Stamp present = validate, whatever the lane.
         try {
           const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
           annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
@@ -3127,6 +3132,7 @@ router.get('/', async (req, res, next) => {
             prepaidMethod: s.prepaid_method || null,
             prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
             annualCoverageValidated,
+            perApplicationFee: s.per_application_fee,
           }),
         }) || predictCompletionBilling({
           lane: lane.mode,
@@ -3588,7 +3594,12 @@ router.get('/week', async (req, res, next) => {
         // authority completion uses; null = validation unavailable, the
         // prediction falls back to the stamp (Codex r3).
         let annualCoverageValidated = null;
-        if (lane.mode === 'annual_prepay' && s.prepaid_method === 'annual_prepay_invoice') {
+        if (s.prepaid_method === 'annual_prepay_invoice') {
+        // Validated for ANY lane carrying the stamp (GitHub r4 P2): a
+        // customer reclassified off annual_prepay keeps stale stamps from
+        // refunded/voided terms — leaving validation null would demote the
+        // prediction forever while completion's strict verdict validates
+        // and charges. Stamp present = validate, whatever the lane.
           try {
             const AnnualPrepayRenewals = require('../services/annual-prepay-renewals');
             annualCoverageValidated = await AnnualPrepayRenewals.annualPrepayCoversVisit(s, db, { throwOnError: true });
@@ -3634,7 +3645,7 @@ router.get('/week', async (req, res, next) => {
             .where({ scheduled_service_id: s.id })
             .whereNot('status', 'void')
             .orderBy('created_at', 'desc')
-            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'credit_applied', 'payer_id');
+            .first('id', 'status', 'total', 'subtotal', 'discount_amount', 'line_items', 'credit_applied', 'payer_id');
         } catch { /* scheduled_service_id may be absent before migration */ }
         const billingLane = {
           mode: lane.mode,
@@ -3664,6 +3675,7 @@ router.get('/week', async (req, res, next) => {
               prepaidMethod: s.prepaid_method || null,
               prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
               annualCoverageValidated,
+              perApplicationFee: s.per_application_fee,
             }),
           }) || predictCompletionBilling({
             lane: lane.mode,

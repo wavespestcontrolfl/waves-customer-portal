@@ -461,6 +461,7 @@ function attachedInvoiceAutoChargeLikely({
   prepaidMethod = null,
   prepaidAmount = null,
   annualCoverageValidated = null,
+  perApplicationFee = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
   // An out-of-band (cash/Zelle) prepayment demotes (GitHub r3 P2) —
@@ -472,7 +473,35 @@ function attachedInvoiceAutoChargeLikely({
   // invoice, and an unverifiable stamp refuses the charge anyway.
   if (String(prepaidMethod || '') === ANNUAL_PREPAY_PREPAID_METHOD
     && annualCoverageValidated !== false) return false;
-  if (billingMode === 'per_application') return true;
+  if (billingMode === 'per_application') {
+    // The per-application rail is ALSO capped (GitHub r4 P2): an
+    // admin-edited invoice above the accepted per-visit amount routes to
+    // office review at completion, so the sheet must not promise the
+    // charge. Anchor mirrors the rail (visit price, else the acceptance
+    // fee); a setup-fee line on the invoice extends the cap by that line
+    // (approximation of the rail's bounded allowance — its authorization
+    // predicates aren't cheaply readable here, and over-allowing only
+    // risks a promise the rail then routes to review, never a charge).
+    const perAppAnchor = estimatedPrice != null && Number(estimatedPrice) > 0
+      ? Number(estimatedPrice)
+      : (perApplicationFee != null && Number(perApplicationFee) > 0 ? Number(perApplicationFee) : null);
+    if (perAppAnchor == null) return false;
+    let setupLineAmount = 0;
+    try {
+      const rawLines = invoice?.line_items;
+      const lines = typeof rawLines === 'string' ? JSON.parse(rawLines) : (rawLines || []);
+      const setupLine = (Array.isArray(lines) ? lines : []).find((li) => (
+        /one-time setup fee/i.test(String(li?.description || ''))
+      ));
+      if (setupLine) {
+        setupLineAmount = Number(setupLine.amount
+          ?? ((Number(setupLine.quantity) || 1) * (Number(setupLine.unit_price) || 0))) || 0;
+      }
+    } catch { /* unreadable lines -> no allowance */ }
+    const perAppSub = invoice?.subtotal != null ? Number(invoice.subtotal) : Number(invoice?.total || 0);
+    const perAppNet = perAppSub - Math.max(0, Number(invoice?.discount_amount) || 0);
+    return perAppNet <= perAppAnchor + Math.max(0, setupLineAmount) + 0.005;
+  }
   const hasVisitPrice = estimatedPrice != null && Number(estimatedPrice) > 0;
   if (membershipDuesCoverVisit({
     visitIsPayerBilled: false,
