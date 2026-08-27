@@ -792,6 +792,63 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('a refresh head that ADDS a frozen key (robots: noindex) is withheld — full frozen-field compare (PR r9 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Better Title\nrobots: noindex\n---\n\nRefreshed body.' }
+      : { content: '---\ntitle: Pest Control Venice FL\n---\n\nLive base copy.' }));
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a refresh head editing ONLY the editable meta fields merges (title/meta are the publisher contract)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.getFile.mockImplementation(async (path, ref) => (ref
+      ? { content: '---\ntitle: Better Venice Pest Title\nslug: /x/\n---\n\nRefreshed body.' }
+      : { content: '---\ntitle: Pest Control Venice FL\nslug: /x/\n---\n\nLive base copy.' }));
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+  });
+
+  test('a refresh PR carrying ANY asset row is withheld — publishRefresh emits markdown only (PR r9 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    refreshSetup();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' },
+      { filename: 'public/images/blog/pest-control-venice-fl/hero.webp', status: 'modified' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test("a new-blog asset RENAME or DELETION is withheld even inside the post's own dir (PR r9 P1)", async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'public/images/blog/blog/test-post/hero.webp', status: 'removed' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('a refresh head that rewrites the frozen target slug/canonical is withheld (PR r7 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     refreshSetup();

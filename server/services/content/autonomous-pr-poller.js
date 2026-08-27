@@ -888,12 +888,14 @@ async function maybeAutoMerge(run, pr) {
     const contentFiles = prFiles.filter((f) => (
       /^src\/content\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
     const blogFiles = contentFiles.filter((f) => /^src\/content\/blog\//.test(String(f?.filename || '')));
-    // Populated by whichever binding branch runs below: the hero/og asset
-    // directory prefixes belonging to THIS run's bound post. The row
-    // allowlist after the bindings only accepts assets under these — an
-    // unrelated post's image can't be altered or deleted on this PR
-    // (PR r7 P1).
-    const allowedAssetPrefixes = [];
+    // Populated by the new-blog binding below: the EXACT hero files the
+    // publisher can emit for THIS run's post (hero.<ext> in its route-keyed
+    // dir — publishOrUpdatePage commits at most that one generated asset;
+    // publishRefresh writes ONLY its markdown target, so the refresh lane
+    // allows no asset rows at all). Anything else under the image tree —
+    // other filenames, renames, deletions — is not publisher output and
+    // withholds (PR r7/r9 P1s).
+    let allowedAssetRe = null;
     // Bind the run's single-brief authorization to its OWN generated file
     // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
     // blog file, and its path must be the one the run's canonical routes to
@@ -953,11 +955,21 @@ async function maybeAutoMerge(run, pr) {
           if (departingOk && routeMatches(blogFiles[0].filename)) {
             boundOk = true;
             boundExpectedPath = expectedPath;
-            // The publisher keys this post's hero dir by its route slug —
-            // nested and (legacy flat) leaf forms both allowed.
+            // The publisher keys this post's image dir by its route slug —
+            // nested and (legacy flat) leaf forms both allowed. Image files
+            // only, directly in the post's OWN directory: today the
+            // publisher emits hero.<ext>, and the engine's ≥3-images-per-
+            // post rule (owner directive 2026-08-27; the companion
+            // image-pipeline PR) adds body images to this same directory —
+            // this dir-scoped allowance is that deliberate contract, while
+            // renames/deletions and any path outside the post's own dir
+            // still withhold (PR r9 P1).
+            const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
             const trimmed = expectedPath.replace(/^\/+|\/+$/g, '');
-            if (trimmed) allowedAssetPrefixes.push(`public/images/blog/${trimmed}/`);
-            if (leaf) allowedAssetPrefixes.push(`public/images/blog/${leaf}/`);
+            const dirs = [trimmed, leaf].filter(Boolean).map(esc);
+            if (dirs.length) {
+              allowedAssetRe = new RegExp(`^public/images/blog/(${dirs.join('|')})/[A-Za-z0-9._-]+\\.(webp|png|jpg)$`);
+            }
             // Targeting fields present on the stamped draft must survive on
             // the head verbatim.
             boundTargetingWant = (dp && dp.frontmatter) || null;
@@ -996,26 +1008,20 @@ async function maybeAutoMerge(run, pr) {
             && contentFiles[0].filename === expected
             && departing.every((name) => name === expected);
           if (boundOk) {
-            // Only THIS target's own hero dir (blog refreshes) may carry
-            // asset rows; a services-page refresh touches no image dir.
-            // Refresh briefs commonly store RELATIVE targets
-            // ("/pest-control-sarasota-fl/") — parse with a base so they
-            // don't throw and strand a bound refresh (hook r9 P1).
-            const targetPath = new URL(String(target), 'https://www.wavespestcontrol.com')
-              .pathname.replace(/^\/+|\/+$/g, '');
-            if (targetPath) allowedAssetPrefixes.push(`public/images/blog/${targetPath}/`);
-            // publishRefresh FREEZES the target's identity — the head's
-            // slug/canonical/domains/tracking must equal the LIVE target's
-            // own frontmatter on main (PR r7 P1: a head keeping the
-            // filename but rewriting these would retarget/fan out the
-            // page). Unreadable base fails closed.
+            // publishRefresh FREEZES the target: it starts from the live
+            // frontmatter and edits ONLY the four editable meta fields (its
+            // REFRESH_EDITABLE_META_FIELDS contract), bumping freshness
+            // programmatically — so EVERY other head frontmatter key must
+            // equal the LIVE target's own copy on main, and no frozen key
+            // may be added or removed (PR r7 + r9 P1s: slug/canonical were
+            // covered, but robots/schema/tracking-key rewrites were not).
+            // Unreadable base fails closed.
             const fmMod = require('../content-astro/frontmatter');
             const baseFile = await gh.getFile(expected);
             if (!baseFile || typeof baseFile.content !== 'string' || !baseFile.content.trim()) {
               boundOk = false;
             } else {
               boundTargetingWant = (fmMod.parse(baseFile.content) || {}).data || {};
-              boundTargetingKeys = ['slug', 'canonical', 'domains', 'tracking'];
               boundTargetingStrict = true;
             }
           }
@@ -1027,19 +1033,23 @@ async function maybeAutoMerge(run, pr) {
       }
     }
     // EVERY row on a bound lane must be in the publisher's expected output
-    // set (PR r6/r7 P1s): the content markdown judged by the binding +
-    // comparison checks, or a hero/og asset under THIS run's own post
-    // directory (allowedAssetPrefixes — never the whole public/images/blog
-    // tree, so an unrelated post's image can't be altered or deleted here).
-    // Any other row (.astro pages, JS modules, config, shared assets —
-    // modified, deleted, or renamed; previous_filename checked too) is
-    // outside the single brief's authorization and withholds: a green build
-    // + Codex-clear review must not let it ride an unattended merge.
+    // set (PR r6/r7/r9 P1s): the content markdown judged by the binding +
+    // comparison checks, or the ONE hero file the publisher can emit for
+    // this post (added/modified only — the publisher never renames or
+    // deletes assets; publishRefresh emits no assets at all, so refresh
+    // heads allow none). Any other row (.astro pages, JS modules, config,
+    // shared assets, other filenames under the image tree) is outside the
+    // single brief's authorization and withholds: a green build +
+    // Codex-clear review must not let it ride an unattended merge.
     if (run.action_type === 'new_supporting_blog' || run.action_type === 'refresh_existing_page') {
-      const allowed = (n) => !n
-        || /^src\/content\/.+\.(md|mdx)$/.test(n)
-        || allowedAssetPrefixes.some((p) => n.startsWith(p));
-      const unexpected = prFiles.find((f) => !(allowed(String(f?.filename || '')) && allowed(String(f?.previous_filename || ''))));
+      const contentMd = (n) => /^src\/content\/.+\.(md|mdx)$/.test(n);
+      const unexpected = prFiles.find((f) => {
+        const name = String(f?.filename || '');
+        const prev = String(f?.previous_filename || '');
+        if (contentMd(name) && (!prev || contentMd(prev))) return false;
+        if (allowedAssetRe && allowedAssetRe.test(name) && !prev && f.status !== 'removed') return false;
+        return true;
+      });
       if (unexpected) {
         logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: PR touches a file outside the publisher's expected output set (${unexpected.filename}) — PR left open for a human decision`);
         return { pending: true, reason: 'named_competitor_head_gate_failed' };
@@ -1078,17 +1088,28 @@ async function maybeAutoMerge(run, pr) {
           const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
           if (!rawSlug.trim() || slugPath !== boundExpectedPath) { comparisonBlocked = true; break; }
         }
-        // Publisher-owned targeting drift (PR r7 P1): the head's
-        // canonical/domains/tracking (and, for a refresh, its slug) must
-        // still equal what the run/live target authorized — a slug-stable
-        // head that redirects canonical or fans domains out withholds.
+        // Publisher-owned frontmatter drift (PR r7 + r9 P1s). New-blog lane:
+        // the stamped draft's canonical/domains/tracking must survive on the
+        // head verbatim. Refresh lane (strict): EVERY key except the
+        // publisher's editable meta fields + the programmatic freshness bump
+        // must equal the live target's copy — added, removed, or changed
+        // frozen keys (robots, schema, tracking keys, hero refs, …) all
+        // withhold.
         if (boundTargetingWant) {
+          const headFm = (parsed && parsed.data) || {};
           let drift = false;
-          for (const k of boundTargetingKeys) {
-            if (!boundTargetingStrict && boundTargetingWant[k] === undefined) continue;
-            const want = JSON.stringify(boundTargetingWant[k] ?? null);
-            const got = JSON.stringify((parsed && parsed.data ? parsed.data[k] : undefined) ?? null);
-            if (want !== got) { drift = true; break; }
+          if (boundTargetingStrict) {
+            const EDITABLE = new Set(['title', 'metaTitle', 'meta_description', 'metaDescription', 'modified', 'updated']);
+            const keys = new Set([...Object.keys(boundTargetingWant), ...Object.keys(headFm)]);
+            for (const k of keys) {
+              if (EDITABLE.has(k)) continue;
+              if (JSON.stringify(boundTargetingWant[k] ?? null) !== JSON.stringify(headFm[k] ?? null)) { drift = true; break; }
+            }
+          } else {
+            for (const k of boundTargetingKeys) {
+              if (boundTargetingWant[k] === undefined) continue;
+              if (JSON.stringify(boundTargetingWant[k] ?? null) !== JSON.stringify(headFm[k] ?? null)) { drift = true; break; }
+            }
           }
           if (drift) { comparisonBlocked = true; break; }
         }
