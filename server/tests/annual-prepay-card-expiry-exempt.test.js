@@ -602,13 +602,74 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
         : []),
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
-    // an OPEN live sibling is reused and completion can still auto-charge it → warning
+    // an OPEN live sibling bound to THIS visit is reused and completion
+    // can still auto-charge it → warning
     route({
       terms: coveredAlways(['c-prepaid']),
       visits: [baseVisit({ source_estimate_id: 'est-1' })],
-      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent')] : []),
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v1' })] : []),
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // an OPEN sibling bound to a DIFFERENT visit cannot be charged for
+    // this one (invoice_unbound) → pay-link only → exempt
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ source_estimate_id: 'est-1' })],
+      invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent', { scheduled_service_id: 'v-sibling' })] : []),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('a hold row closes the EXTENDED lane even under auto_charge — the hold rail alone decides', async () => {
+    // live hold, Auto Pay active (auto_charge prediction), bill above the
+    // frozen amount → the extended lane is hold-excluded and the rail
+    // withholds → exempt
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '100.00' }],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '200.00' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // a PARKED hold row still closes the extended lane and the rail
+    // refuses it → nothing can charge → exempt
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      cardHolds: [{ id: 'hold-1', status: 'held', parked_at: '2026-08-01T00:00:00Z', accepted_amount: '120.00' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // within the frozen amount the hold charges → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }],
+      invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test("the appointment lane's frozen cap: missing or exceeded accepted_amount routes to review → exempt", async () => {
+    const gatesMod = require('../config/feature-gates');
+    gatesMod.isEnabled.mockReturnValue(true);
+    try {
+      // consent with NO accepted amount → lane unchargeable, extended
+      // excluded by the consent row → exempt
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ is_recurring: false })],
+        apptCardRequests: [{ id: 'acr-1', customer_id: 'c-prepaid', status: 'completed' }],
+      });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+      // bill above the frozen amount → office review → exempt
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ is_recurring: false })],
+        apptCardRequests: [{ id: 'acr-1', customer_id: 'c-prepaid', status: 'completed', accepted_amount: '100.00' }],
+        invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '200.00' }],
+      });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    } finally { gatesMod.isEnabled.mockReturnValue(false); }
   });
 
   test('a reused invoice with FROZEN payer ownership cannot be card-charged → stays exempt', async () => {
