@@ -1080,8 +1080,8 @@ function selectAutonomousVersusPlan(now = new Date()) {
 
 // ── Review-count milestone lane ─────────────────────────────────────────────
 // Celebrates crossing a round Google-review count (the single best-engaging
-// organic format for local service brands). Company-wide count from the
-// synced google_reviews rows Google still shows; fires ONCE per threshold and
+// organic format for local service brands). Company-wide count from Google's
+// own per-location totals (see fleetReviewStats); fires ONCE per threshold and
 // only while the count is within MILESTONE_WINDOW of it, so a lane enabled
 // long after a threshold passed never posts a stale "we just hit 250".
 
@@ -1099,21 +1099,47 @@ function milestoneThresholdFor(count) {
   return Math.floor(n / 1000) * 1000;
 }
 
+// Authoritative count = Google's own per-location totals, which the Places
+// stats sync stores as one '_stats' pseudo-row per location (review_text =
+// {rating, totalReviews}). Same completeness/freshness rule as the admin
+// dashboard and the BI review tool: EVERY configured location must have a
+// row synced inside 24h with a finite totalReviews, else the snapshot is
+// partial and this returns null — a public milestone claim never falls back
+// to counting synced rows (incomplete, duplicable, may include retired
+// locations). Rating = simple mean of the location ratings (dashboard parity).
+const STATS_FRESH_MS = 24 * 60 * 60 * 1000;
+
+function fleetReviewStats(statsRows, locations = WAVES_LOCATIONS, now = Date.now()) {
+  const fresh = {};
+  for (const row of statsRows || []) {
+    const t = new Date(row.synced_at).getTime();
+    if (!(t > 0 && now - t <= STATS_FRESH_MS)) continue;
+    try {
+      const p = JSON.parse(row.review_text);
+      if (p && typeof p === 'object' && Number.isFinite(p.totalReviews)) fresh[row.location_id] = p;
+    } catch { /* unparseable stats payload — location stays incomplete */ }
+  }
+  if (!locations.length || !locations.every((loc) => fresh[loc.id])) return null;
+  let count = 0;
+  let ratingSum = 0;
+  let ratingCount = 0;
+  for (const loc of locations) {
+    const p = fresh[loc.id];
+    count += p.totalReviews;
+    if (p.rating) { ratingSum += p.rating; ratingCount += 1; }
+  }
+  if (count <= 0) return null;
+  return { count, average: ratingCount ? Math.round((ratingSum / ratingCount) * 10) / 10 : null };
+}
+
 async function reviewMilestoneStats() {
   if (!(await hasTable('google_reviews'))) return null;
   try {
-    const row = await db('google_reviews')
-      .whereNull('missing_since')
-      // The Places stats sync writes one '_stats' pseudo-row per location
-      // (repo-wide exclusion pattern) — not a customer review, and its
-      // rounded star_rating would skew the average.
-      .where('reviewer_name', '!=', '_stats')
-      .count({ count: '*' })
-      .avg({ average: 'star_rating' })
-      .first();
-    const count = Number(row?.count) || 0;
-    const average = Number(row?.average);
-    return { count, average: Number.isFinite(average) ? Math.round(average * 10) / 10 : null };
+    const rows = await db('google_reviews')
+      .where({ reviewer_name: '_stats' })
+      .whereIn('location_id', WAVES_LOCATIONS.map((loc) => loc.id))
+      .select('location_id', 'review_text', 'synced_at');
+    return fleetReviewStats(rows);
   } catch {
     return null;
   }
@@ -1165,7 +1191,7 @@ function planMilestone({ threshold, count, average, city, channels }) {
       validation: validateDrafts(drafts),
       sources: [{
         type: 'google_review_count',
-        label: `${count} live Google reviews across all locations`,
+        label: `${count} Google-reported reviews across all locations (fresh Places snapshot)`,
         detail: average ? `Average star rating ${average.toFixed(1)}; milestone threshold ${threshold}.` : `Milestone threshold ${threshold}.`,
       }],
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
@@ -2991,6 +3017,7 @@ module.exports = {
   buildMilestoneDrafts,
   milestoneThresholdFor,
   milestoneDrift,
+  fleetReviewStats,
   planMilestone,
   selectAutonomousMilestonePlan,
   approveAutonomousRun,

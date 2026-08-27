@@ -529,6 +529,28 @@ describe('autonomous review-milestone lane', () => {
     }
   });
 
+  test('fleetReviewStats: authoritative Places totals, fail closed on a partial/stale fleet', () => {
+    const now = Date.parse('2026-06-10T16:00:00Z');
+    const fresh = new Date(now - 60 * 60 * 1000).toISOString();
+    const stale = new Date(now - 30 * 60 * 60 * 1000).toISOString();
+    const locs = [{ id: 'sarasota' }, { id: 'venice' }];
+    const row = (location_id, payload, synced_at = fresh) => ({ location_id, review_text: JSON.stringify(payload), synced_at });
+
+    // Complete + fresh: sum of totals, simple mean of location ratings (dashboard parity).
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7, totalReviews: 112 })], locs, now))
+      .toEqual({ count: 312, average: 4.8 });
+    // Missing location → null (never a partial total).
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 })], locs, now)).toBeNull();
+    // Stale row → null.
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7, totalReviews: 112 }, stale)], locs, now)).toBeNull();
+    // Corrupt / rating-only payload does not count the location complete.
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), { location_id: 'venice', review_text: '"corrupt"', synced_at: fresh }], locs, now)).toBeNull();
+    expect(Studio.fleetReviewStats([row('sarasota', { rating: 4.9, totalReviews: 200 }), row('venice', { rating: 4.7 })], locs, now)).toBeNull();
+    // Rows for unconfigured locations are ignored; no ratings → average null, never an invented 5.0.
+    expect(Studio.fleetReviewStats([row('sarasota', { totalReviews: 50 }), row('venice', { totalReviews: 10 }), row('retired', { rating: 5, totalReviews: 999 })], locs, now))
+      .toEqual({ count: 60, average: null });
+  });
+
   test('milestoneDrift blocks a stored plan the current stats no longer support', () => {
     const plan = { milestone: 300, averageRating: 4.9 };
     expect(Studio.milestoneDrift(plan, { count: 312, average: 4.9 })).toBeNull();
@@ -547,7 +569,7 @@ describe('autonomous review-milestone lane', () => {
     expect(plan.topic).toBe('300 Google reviews');
     expect(Object.keys(plan.preview.drafts).sort()).toEqual(['facebook', 'gbp']);
     expect(plan.preview.suggestedLink).toBe('https://www.wavespestcontrol.com/reviews/');
-    expect(plan.preview.sources[0].label).toContain('312 live Google reviews');
+    expect(plan.preview.sources[0].label).toContain('312 Google-reported reviews');
     const card = Studio.buildMilestoneCardInput(plan);
     expect(card).toMatchObject({ variant: 'milestone', count: 300, averageRating: 4.9 });
   });
