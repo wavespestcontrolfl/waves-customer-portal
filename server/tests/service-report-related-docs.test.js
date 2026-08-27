@@ -186,6 +186,24 @@ describe('recommendations are screened at the payload boundary', () => {
     ]);
   });
 
+  test('the approved "safe once dry + technician confirms timing" idiom survives; bare "safe once dry" does not', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'pest',
+      service_type: 'Quarterly Pest Control Service',
+      structured_notes: JSON.stringify({
+        formRecommendations: [
+          'Treated beds are safe once dry and your technician confirmed the re-entry timing on site',
+          'The lanai is safe once dry',
+        ],
+      }),
+    }, 'token-recs', knex, { mode: 'live' });
+    expect(data.recommendations).toEqual([
+      'Treated beds are safe once dry and your technician confirmed the re-entry timing on site',
+    ]);
+  });
+
   test('raw [Next]-tagged technician note lines never render as recommendations', async () => {
     const knex = fixtureKnex(EMPTY_TABLES);
     const data = await buildReportV1Data({

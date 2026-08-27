@@ -16195,6 +16195,8 @@ export function CompletionPanel({
           flexDirection: "column",
           animation: "slideIn 0.25s ease",
           fontFamily: CP_FONT,
+          // Native checkbox/radio accents inherit ink — no browser blue.
+          accentColor: CP_DESKTOP.text,
         }}
       >
         {success && (

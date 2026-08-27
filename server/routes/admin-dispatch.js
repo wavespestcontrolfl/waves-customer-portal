@@ -9973,6 +9973,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               .whereNull('deleted_at')
               .whereRaw('customer_caption IS NOT DISTINCT FROM ?', [m.customer_caption ?? null])
               .whereRaw('ai_caption IS NOT DISTINCT FROM ?', [m.ai_caption ?? null])
+              // The screened tag group is frozen too — a concurrent
+              // reclassification to an excluded group leaves it internal.
+              .whereRaw('tag_group IS NOT DISTINCT FROM ?', [m.tag_group ?? null])
               .update({
                 visibility_status: 'approved_customer',
                 customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),

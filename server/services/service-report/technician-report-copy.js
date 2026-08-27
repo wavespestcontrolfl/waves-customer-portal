@@ -192,6 +192,11 @@ function contentLines(lines) {
  * customer-ready single paragraph, nulled when a banned-copy screen matched
  * (violations then lists the offending terms).
  */
+// Hoisted from the parser so the shared screen below applies the same
+// approved-idiom normalization to every customer-copy consumer.
+const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
+const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\b(?:not|nothing|neither|never|no)\b)[^.!?]){0,25}(?<!\b(?!(?:the|its|confirm(?:s|ed|ing)?|re-?entry|entry|reentry|drying|dry(?:ing)?|dry[-\s]?time|time|treatment)\b)[a-z][a-z'’-]*\s+)\btiming\b(?![^.!?]{0,30}\b(?:not|never|no|nothing|unavailable|unknown|unconfirmed|undetermined|pending|(?:wasn|weren|isn|aren|won|didn|doesn|hasn|haven|hadn|couldn|shouldn|wouldn)['’]t|cannot|can['’]t)\b)/i;
+
 function technicianReportCustomerCopy(notes) {
   const text = String(notes || '');
   if (!text.trim() || text.length > MAX_REPORT_CHARS) return null;
@@ -232,7 +237,6 @@ function technicianReportCustomerCopy(notes) {
   // STANDALONE "safe" only (codex r79): "pet-safe once dry" must keep its
   // compound intact so the vocabulary screens still see the banned claim —
   // stripping from the hyphen onward would hide the only "safe" token.
-  const SAFE_IDIOM_RE = /(?<![-\w])(?<!\b(?:pets?|kids?|child|children|family)\s)safe\s+(?:once|when|after|as\s+soon\s+as)\s+(?:it\s+is\s+|everything\s+is\s+|the\s+(?:product|application|treatment|area)\s+is\s+)?(?:fully\s+|completely\s+)?dry\b/gi;
   // AFFIRMATIVE technician confirmation only (codex r66/r67): the subject
   // must be the technician and the tempered gaps refuse to cross a
   // negation, so "the technician did not confirm timing" (and a homeowner
@@ -242,11 +246,10 @@ function technicianReportCustomerCopy(notes) {
   // pending-obligation forms — "still needs to / has yet to / is waiting
   // to / will confirm timing" describe a confirmation that has NOT
   // happened (codex r73).
-  const TIMING_CONFIRM_RE = /\b(?:technician|tech)\b(?:(?!\b(?:not|never|no|didn['’]t|doesn['’]t|don['’]t|won['’]t|cannot|can['’]t|couldn['’]t|isn['’]t|aren['’]t|wasn['’]t|weren['’]t|hasn['’]t|haven['’]t|hadn['’]t|shouldn['’]t|wouldn['’]t|fail(?:s|ed|ing)?|unable|without|refus(?:es|ed|ing)?|forg(?:ot|ets?|etting)|neglect(?:s|ed|ing)?|omit(?:s|ted|ting)?|declin(?:es|ed|ing)?|miss(?:es|ed|ing)?|need(?:s|ed|ing)?|yet|wait(?:s|ed|ing)?|await(?:s|ed|ing)?|pending|remain(?:s|ed|ing)?|plan(?:s|ned|ning)?|intend(?:s|ed|ing)?|expect(?:s|ed|ing)?|hop(?:es|ed|ing)?|tr(?:y|ies|ied|ying)|attempt(?:s|ed|ing)?|schedul(?:es|ed|ing)?|going|will|would|should|must|supposed)\b)[^.!?]){0,40}\bconfirm(?:s|ed|ing)?\b(?:(?!\b(?:not|nothing|neither|never|no)\b)[^.!?]){0,25}(?<!\b(?!(?:the|its|confirm(?:s|ed|ing)?|re-?entry|entry|reentry|drying|dry(?:ing)?|dry[-\s]?time|time|treatment)\b)[a-z][a-z'’-]*\s+)\btiming\b(?![^.!?]{0,30}\b(?:not|never|no|nothing|unavailable|unknown|unconfirmed|undetermined|pending|(?:wasn|weren|isn|aren|won|didn|doesn|hasn|haven|hadn|couldn|shouldn|wouldn)['’]t|cannot|can['’]t)\b)/i;
-  const screenText = TIMING_CONFIRM_RE.test(body)
-    ? body.replace(SAFE_IDIOM_RE, 'once dry')
-    : body;
-  const violations = customerCopyViolations(screenText);
+  // Idiom normalization now lives INSIDE customerCopyViolations so every
+  // consumer (this parser, report recommendations, visual-moment captions)
+  // enforces the identical approved-idiom policy (codex inline on #3516).
+  const violations = customerCopyViolations(body);
   return {
     whatWeDid,
     whatWeFound,
@@ -317,7 +320,12 @@ function summaryCopySignature(service = {}) {
 // with exactly the same rules instead of a subset (codex P1 2026-08-27).
 // Returns the matched violations; an empty array means the text may render.
 function customerCopyViolations(text) {
-  const value = String(text || '');
+  const raw = String(text || '');
+  // The approved conditional re-entry idiom ("safe once dry" WITH an
+  // affirmative technician timing confirmation) is normalized away before
+  // the vocabulary screens run — the one sanctioned "safe" never rejects
+  // the copy, every unconditional safety claim still does.
+  const value = TIMING_CONFIRM_RE.test(raw) ? raw.replace(SAFE_IDIOM_RE, 'once dry') : raw;
   const violations = [
     ...findBannedCustomerCopy(value),
     ...EXTRA_FORBIDDEN.map((rx) => value.match(rx)?.[0] || null).filter(Boolean),

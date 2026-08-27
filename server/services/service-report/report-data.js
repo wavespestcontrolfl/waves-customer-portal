@@ -4302,23 +4302,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   let termiteBond = null;
   if (serviceLine === 'termite' && opts.mode === 'live') {
     try {
-      const { gateEnvValue } = require('../../config/feature-gates');
-      const { dateOnlyString } = require('../../utils/date-only');
-      if (gateEnvValue('GATE_PORTAL_TERMITE_BOND')) {
-        const bondRow = await knex('termite_bonds')
-          .where({ customer_id: service.customer_id, status: 'active' })
-          .orderBy('renews_at', 'desc')
-          .first('service_type', 'term_years', 'started_at', 'renews_at')
-          .catch(() => null);
-        const renewsAt = bondRow ? dateOnlyString(bondRow.renews_at) : null;
-        if (bondRow && renewsAt) {
-          termiteBond = {
-            serviceType: bondRow.service_type || null,
-            termYears: Number(bondRow.term_years) || 1,
-            startedAt: dateOnlyString(bondRow.started_at),
-            renewsAt,
-          };
-        }
+      // Shared with /api/property/termite-bond so the hero cell and the
+      // My Plan card it links to can never disagree (codex inline).
+      const { activeTermiteBondsForCustomer } = require('../termite-bonds');
+      const [bond] = await activeTermiteBondsForCustomer(service.customer_id, knex);
+      if (bond) {
+        termiteBond = {
+          serviceType: bond.serviceType || null,
+          termYears: bond.termYears,
+          startedAt: bond.startedAt,
+          renewsAt: bond.renewsAt,
+        };
       }
     } catch { /* best-effort */ }
   }
