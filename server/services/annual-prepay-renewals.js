@@ -3471,17 +3471,11 @@ async function openInvoiceClearlyOverCompletionCap(inv, visit, laneMode, conn) {
     if (!authorized) {
       authorized = (apptRows || []).some((row) => row.selected_plan === 'per_application');
     }
-    if (!authorized && visit.source_estimate_id) {
-      const srcEst = await conn('estimates').where({ id: visit.source_estimate_id }).first('estimate_data');
-      if (srcEst) {
-        let srcData = {};
-        try {
-          srcData = typeof srcEst.estimate_data === 'string' ? JSON.parse(srcEst.estimate_data) : (srcEst.estimate_data || {});
-        } catch (e) { srcData = {}; }
-        const frozen = Number(srcData?.acceptedSetupFeeAmount ?? srcData?.setupFeeQuote?.amount);
-        authorized = Number.isFinite(frozen) && frozen > 0;
-      }
-    }
+    // Deliberately NOT the estimate JSON: completion treats the frozen
+    // wizard fee as an amount CAP only, never the allowance PREDICATE —
+    // every seeded child keeps source_estimate_id, so estimate-derived
+    // authorization would outlive the one-time obligation. The predicate
+    // comes from current consent (above) or the immutable claim (below).
     if (!authorized) {
       const claim = await conn('setup_fee_claims').where({ invoice_id: inv.id }).first('amount');
       authorized = !!(claim && Math.round(Number(claim.amount) * 100) > 0
@@ -3594,13 +3588,21 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
   }
   if (!covered.size) return covered;
   try {
-    // (a) armed retries, classified like the sweep.
-    const retrying = await conn('payments')
+    // (a) armed retries, classified like the sweep — bounded to the
+    // horizon: the sweep only fires rows with next_retry_at <= now, so a
+    // retry armed for AFTER the horizon cannot charge inside this warning
+    // window (ET end of the horizon day, exclusive next-midnight bound).
+    const retryQuery = conn('payments')
       .whereIn('customer_id', [...covered])
       .where({ status: 'failed' })
       .whereNull('superseded_by_payment_id')
       .where('retry_count', '<', 3)
-      .whereNotNull('next_retry_at')
+      .whereNotNull('next_retry_at');
+    const horizonNextMidnight = dayAfter(dateOnly(horizon));
+    if (horizonNextMidnight) {
+      retryQuery.where('next_retry_at', '<', parseETDateTime(`${horizonNextMidnight}T00:00:00`));
+    }
+    const retrying = await retryQuery
       .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id');
     // The sweep's state guards (billing-cron retryFailedPayments /
     // autopay-eligibility.isPaused): disabled Auto Pay permanently DISARMS
@@ -3789,7 +3791,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       const visitInvoices = await conn('invoices')
         .where({ scheduled_service_id: v.id })
         .orderBy('created_at', 'desc')
-        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes');
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
       if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
       const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
@@ -3810,6 +3812,12 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         return !!(seq && String(seq.status || '').toLowerCase() === 'stopped');
       };
       if (reused) {
+        // A reused invoice with FROZEN payer ownership is owed by the
+        // payer's AP inbox — completion requires !invoice.payer_id before
+        // every saved-card charge, whatever the service/customer links
+        // currently resolve to (the invoice's stamp is authoritative for
+        // the invoice it reuses).
+        if (reused.payer_id) continue;
         // An OPEN reused invoice charges only within completion's cap —
         // over the accepted amount it routes to office review instead.
         if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
@@ -3830,8 +3838,41 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         if (siblingStatus === 'refunded') continue;
         if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
         if (!sibling.invoice && sibling.canceledSetupFee) continue;
+        if (sibling.invoice && sibling.invoice.payer_id) continue;
         if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
         if (sibling.invoice && await dunningStopped(sibling.invoice)) continue;
+      }
+      // The unminted setup-fee completion hold (owner ruling 2026-08-24,
+      // GATE_UNMINTED_SETUP_FEE_PARK): a Mark Won estimate's plan visit
+      // that still owes the never-minted setup fee is PARKED for manual
+      // billing — both charges — instead of touching the saved card. One
+      // parked visit per estimate: when a DIFFERENT visit already holds
+      // the parked alert, this one mints and charges normally (keep the
+      // warning). A detector error means the completion mints normally
+      // too — same catch direction, keep the warning.
+      if (v.source_estimate_id && process.env.GATE_UNMINTED_SETUP_FEE_PARK === 'true') {
+        let parkedHere = false;
+        try {
+          const { findUnmintedSetupFeeObligation } = require('./setup-fee-obligation');
+          const obligation = await findUnmintedSetupFeeObligation({
+            sourceEstimateId: v.source_estimate_id,
+            customerId: v.customer_id,
+            excludeScheduledServiceId: v.id,
+            visitPlanRow: { is_recurring: v.is_recurring, recurring_parent_id: v.recurring_parent_id || null },
+          }, conn);
+          if (obligation.owed && !obligation.firstVisitAlreadyCompleted) {
+            const priorParkedAlert = await conn('notifications')
+              .where({ recipient_type: 'admin' })
+              .whereRaw("metadata->>'dedupeKey' = ?", [`unminted_setup_fee_manual_billing:${v.source_estimate_id}`])
+              .whereRaw("COALESCE(metadata->>'resolvedCovered', '') <> 'true'")
+              .first('id', 'metadata');
+            const parkedVisitId = priorParkedAlert && (typeof priorParkedAlert.metadata === 'string'
+              ? (() => { try { return JSON.parse(priorParkedAlert.metadata)?.scheduledServiceId; } catch { return null; } })()
+              : priorParkedAlert.metadata?.scheduledServiceId);
+            parkedHere = !priorParkedAlert || String(parkedVisitId || '') === String(v.id);
+          }
+        } catch (e) { parkedHere = false; }
+        if (parkedHere) continue;
       }
       // Only an auto_charge touches the saved card at completion ('invoice'
       // — gate off or a priced callback — goes out as a pay-link).

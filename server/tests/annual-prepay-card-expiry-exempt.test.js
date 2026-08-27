@@ -8,6 +8,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipRenewalReminder: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ gates: { completionAutopayCharge: true } }));
+jest.mock('../services/setup-fee-obligation', () => ({ findUnmintedSetupFeeObligation: jest.fn(async () => ({ owed: false })) }));
 
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
@@ -47,7 +48,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
@@ -58,8 +59,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
-    if (table === 'estimates') return chain([], []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
+    if (table === 'notifications') return chain(notifications, []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -154,6 +155,11 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
     expect(calls.payments).toEqual(expect.arrayContaining([
       ['where', { status: 'failed' }], ['whereNull', 'superseded_by_payment_id'], ['where', 'retry_count', '<', 3], ['whereNotNull', 'next_retry_at'],
     ]));
+    // horizon-bounded: a retry armed for AFTER the window cannot charge
+    // inside it (the sweep fires only next_retry_at <= now)
+    const bound = calls.payments.find((c) => c[0] === 'where' && c[1] === 'next_retry_at');
+    expect(bound[2]).toBe('<');
+    expect(bound[3]).toBeInstanceOf(Date);
   });
 
   test('a pre-term WaveGuard Monthly retry (obligation date not covered, not collected) keeps the warning', async () => {
@@ -405,6 +411,36 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       invoices: (own) => (isSiblingInvoiceLookup(own) ? [siblingInvoice('sent')] : []),
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('a reused invoice with FROZEN payer ownership cannot be card-charged → stays exempt', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status: 'sent', subtotal: '120.00', payer_id: 7 }] });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('the unminted setup-fee park (gate on) holds the completion → stays exempt; a different parked visit charges normally', async () => {
+    const { findUnmintedSetupFeeObligation } = require('../services/setup-fee-obligation');
+    process.env.GATE_UNMINTED_SETUP_FEE_PARK = 'true';
+    try {
+      findUnmintedSetupFeeObligation.mockResolvedValue({ owed: true, firstVisitAlreadyCompleted: false });
+      route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ source_estimate_id: 'est-1' })] });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+      // a DIFFERENT visit already holds the parked alert → this one mints
+      // and charges normally → warning
+      route({
+        terms: coveredAlways(['c-prepaid']),
+        visits: [baseVisit({ source_estimate_id: 'est-1' })],
+        notifications: [{ id: 'n1', metadata: { dedupeKey: 'unminted_setup_fee_manual_billing:est-1', scheduledServiceId: 'v-other' } }],
+      });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      // gate off → completion does not park → warning
+      delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+      route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ source_estimate_id: 'est-1' })] });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    } finally {
+      delete process.env.GATE_UNMINTED_SETUP_FEE_PARK;
+      findUnmintedSetupFeeObligation.mockImplementation(async () => ({ owed: false }));
+    }
   });
 
   test('a malformed annual_prepay_invoice stamp (no amount / no term) fails toward the warning — nobody exempt', async () => {
