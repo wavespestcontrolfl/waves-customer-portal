@@ -183,13 +183,32 @@ async function computeDashboardAlertsUncached() {
   //    "expiring in 7 days." Now we compute the last-day-of-expiry-month
   //    and bound it to a forward window so already-expired cards
   //    (which belong in a different alert) don't pile in either.
+  //
+  //    Prepay-covered customers are EXCLUDED: a customer whose annual
+  //    prepay coverage is still active at the end of the window has no
+  //    card charge inside it (the billing cron suppresses them via the same
+  //    getActivelyCoveredCustomerIds set), so their expiring card is not an
+  //    "autopay breaks this week" — it matters at renewal, which the
+  //    renewal notices own. A term ending INSIDE the window is not covered
+  //    at the horizon and stays flagged (the card is needed to renew).
   try {
-    const expiring = await db('payment_methods')
+    const horizon = etDateString(addETDays(new Date(), 7));
+    let coveredIds = [];
+    try {
+      const { getActivelyCoveredCustomerIds } = require('./annual-prepay-renewals');
+      coveredIds = [...(await getActivelyCoveredCustomerIds(horizon))];
+    } catch (coverErr) {
+      // Fail toward the warning: an over-flagged card is noise, not money.
+      logger.warn(`[dashboard-alerts] cards_expiring_7d: prepay coverage lookup failed, not excluding: ${coverErr.message}`);
+    }
+    let expiringQuery = db('payment_methods')
       .join('customers', 'customers.id', 'payment_methods.customer_id')
       .where('customers.active', true)
       .whereNull('customers.deleted_at')
       .where('customers.autopay_enabled', true)
-      .where('payment_methods.autopay_enabled', true)
+      .where('payment_methods.autopay_enabled', true);
+    if (coveredIds.length) expiringQuery = expiringQuery.whereNotIn('customers.id', coveredIds);
+    const expiring = await expiringQuery
       .whereRaw(
         "(make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) + INTERVAL '1 month - 1 day')::date "
           + "BETWEEN (NOW() AT TIME ZONE 'America/New_York')::date "

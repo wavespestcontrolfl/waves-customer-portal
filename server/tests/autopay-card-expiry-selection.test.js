@@ -16,6 +16,9 @@ jest.mock('../services/sms-template-renderer', () => ({
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendPaymentMethodExpiring: jest.fn(async () => ({ ok: true })),
 }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getActivelyCoveredCustomerIds: jest.fn(async () => new Set()),
+}));
 jest.mock('../services/autopay-eligibility', () => {
   const actual = jest.requireActual('../services/autopay-eligibility');
   return {
@@ -27,6 +30,7 @@ jest.mock('../services/autopay-eligibility', () => {
 
 const db = require('../models/db');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
+const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendCardExpiryWarnings } = require('../services/autopay-notifications');
 
@@ -121,5 +125,31 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
     const res = await sendCardExpiryWarnings();
     expect(res.sent).toBe(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendCardExpiryWarnings — prepay-covered customers', () => {
+  test('a customer still covered at the 60-day horizon is skipped entirely (no walk, no SMS)', async () => {
+    getActivelyCoveredCustomerIds.mockResolvedValueOnce(new Set([CUSTOMER.id]));
+    wireDb({ customers: [thenable([CUSTOMER])] });
+    const res = await sendCardExpiryWarnings();
+    expect(res.sent).toBe(0);
+    expect(getChargeableAutopayMethod).not.toHaveBeenCalled();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    const [asOf] = getActivelyCoveredCustomerIds.mock.calls[0];
+    expect(asOf).toBe('2026-10-25'); // ET today (2026-08-26) + 60 days
+  });
+
+  test('coverage lookup failure fails toward the warning', async () => {
+    getActivelyCoveredCustomerIds.mockRejectedValueOnce(new Error('boom'));
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [
+        thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa', last_four: '4242', exp_month: '9', exp_year: '26' }]),
+      ],
+    });
+    const res = await sendCardExpiryWarnings();
+    expect(res.sent).toBe(1);
   });
 });

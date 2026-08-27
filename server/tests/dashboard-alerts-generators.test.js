@@ -10,10 +10,14 @@ jest.mock('../services/logger', () => ({
   info: jest.fn(),
 }));
 jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
+jest.mock('../services/annual-prepay-renewals', () => ({
+  getActivelyCoveredCustomerIds: jest.fn(async () => new Set()),
+}));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
+const { getActivelyCoveredCustomerIds } = require('../services/annual-prepay-renewals');
 const {
   computeDashboardAlerts,
   computeDashboardAlertsUncached,
@@ -81,6 +85,7 @@ beforeEach(() => {
   db.raw.mockImplementation((sql) => ({ sql, rows: [] }));
   db.schema.hasTable.mockResolvedValue(false);
   listAtRiskMrrAccounts.mockResolvedValue([]);
+  getActivelyCoveredCustomerIds.mockResolvedValue(new Set());
   primeDb({});
 });
 
@@ -427,5 +432,37 @@ describe('computeDashboardAlerts memo', () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+});
+
+describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks this week"', () => {
+  const cardsCalls = (capture) => capture.filter((c) => c.table === 'payment_methods');
+
+  test('asks coverage at the 7-day horizon and excludes covered customers from the count', async () => {
+    getActivelyCoveredCustomerIds.mockResolvedValue(new Set(['cust-prepaid']));
+    const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });
+    const { alerts } = await computeDashboardAlertsUncached();
+
+    const [asOf] = getActivelyCoveredCustomerIds.mock.calls[0];
+    expect(asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const excl = cardsCalls(capture).find((c) => c.method === 'whereNotIn');
+    expect(excl.args).toEqual(['customers.id', ['cust-prepaid']]);
+    // Still-present alert reflects the DB count with the exclusion applied.
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toMatchObject({ count: 1 });
+  });
+
+  test('no covered customers → no exclusion clause (query unchanged)', async () => {
+    const capture = primeDb({ payment_methods: { count: 2 }, leads: { count: 0 } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(cardsCalls(capture).some((c) => c.method === 'whereNotIn')).toBe(false);
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toMatchObject({ count: 2 });
+  });
+
+  test('coverage lookup failure fails toward the warning (no exclusion, alert still computed)', async () => {
+    getActivelyCoveredCustomerIds.mockRejectedValue(new Error('boom'));
+    const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });
+    const { alerts } = await computeDashboardAlertsUncached();
+    expect(cardsCalls(capture).some((c) => c.method === 'whereNotIn')).toBe(false);
+    expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toMatchObject({ count: 1 });
   });
 });

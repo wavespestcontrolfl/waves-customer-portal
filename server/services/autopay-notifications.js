@@ -150,8 +150,24 @@ async function sendCardExpiryWarnings() {
     .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
 
+  // Prepay-covered customers get NO card warning: coverage still active at
+  // the end of the 60-day outlook means no card charge inside it (the
+  // billing cron suppresses them via this same set), so "your card expires,
+  // autopay will fail" would be a false alarm to a customer who paid the
+  // year up front. Coverage ending inside the window is not covered at the
+  // horizon and keeps its warning — that card is needed to renew.
+  let coveredIds = new Set();
+  try {
+    const { getActivelyCoveredCustomerIds } = require('./annual-prepay-renewals');
+    coveredIds = await getActivelyCoveredCustomerIds(etDateString(sixty));
+  } catch (coverErr) {
+    logger.warn(`[autopay-notifications] prepay coverage lookup failed, not excluding: ${coverErr.message}`);
+  }
+  let prepayCovered = 0;
+
   const rows = [];
   for (const customer of customers) {
+    if (coveredIds.has(String(customer.id))) { prepayCovered += 1; continue; }
     try {
       let target = null;
       const current = await getChargeableAutopayMethod(customer, db, { now });
