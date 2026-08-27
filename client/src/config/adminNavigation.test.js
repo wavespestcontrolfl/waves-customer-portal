@@ -187,6 +187,15 @@ describe("isAdminNavItemActive", () => {
     ).toBe(true);
   });
 
+  it("keeps the Settings tab active on the Settings leaves it lists inline", () => {
+    const more = ADMIN_MOBILE_TABS.find(({ id }) => id === "more");
+    expect(isAdminNavItemActive(more, "/admin/more")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/settings", "?tab=team")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/settings/pest-pressure")).toBe(true);
+    expect(isAdminNavItemActive(more, "/admin/invoices")).toBe(true); // a nav row
+    expect(isAdminNavItemActive(more, "/admin/customers")).toBe(false); // another tab
+  });
+
   it("keeps Schedule active across its dispatch workspace", () => {
     expect(
       isAdminNavItemActive(

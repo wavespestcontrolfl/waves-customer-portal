@@ -476,14 +476,20 @@ export function isAdminNavItemActive(item, pathname, search = "") {
     return true;
   }
   if (item.id === "more") {
-    return ADMIN_MOBILE_MORE_SECTIONS.some(({ items }) =>
-      items.some((moreItem) => {
-        const morePathname = pathnameFor(moreItem.path);
-        return (
-          pathname === morePathname || pathname.startsWith(`${morePathname}/`)
-        );
-      }),
-    );
+    // The Settings tab owns every destination its page lists: the nav rows
+    // AND the routes it renders inline (/admin/settings?tab=… leaves) —
+    // those left the nav rows, so they must be named here explicitly or
+    // the tab goes inactive while one of its own leaves is open.
+    const owned = [
+      ...ADMIN_MOBILE_MORE_SECTIONS.flatMap(({ items }) => items),
+      ...[...MOBILE_INDEX_INLINE_IDS].map((id) => ADMIN_NAV_ITEMS[id]),
+    ];
+    return owned.some((moreItem) => {
+      const morePathname = pathnameFor(moreItem.path);
+      return (
+        pathname === morePathname || pathname.startsWith(`${morePathname}/`)
+      );
+    });
   }
   return pathname.startsWith(`${itemPathname}/`);
 }
