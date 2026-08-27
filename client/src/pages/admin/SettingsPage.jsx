@@ -325,49 +325,20 @@ export default function SettingsPage() {
           if (g) selectTab(g.tabs[0]);
         }}
         navGridClassName="grid-cols-2 md:grid-cols-4 xl:grid-cols-4"
+        secondarySections={
+          activeGroup.tabs.length > 1
+            ? activeGroup.tabs.map((leafKey) => ({
+                key: leafKey,
+                label: SETTINGS_LEAF_META[leafKey]?.label || leafKey,
+                Icon: SETTINGS_LEAF_META[leafKey]?.Icon,
+              }))
+            : []
+        }
+        secondaryActiveKey={tab}
+        onSecondaryChange={selectTab}
+        secondaryAriaLabel="Settings page"
+        secondaryNavGridClassName="grid-cols-2 md:grid-cols-4"
       />
-      {activeGroup.tabs.length > 1 && (
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 8,
-            marginBottom: 16,
-          }}
-        >
-          {activeGroup.tabs.map((leafKey) => {
-            const meta = SETTINGS_LEAF_META[leafKey];
-            const LeafIcon = meta?.Icon;
-            const active = tab === leafKey;
-            return (
-              <button
-                key={leafKey}
-                type="button"
-                onClick={() => selectTab(leafKey)}
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 6,
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 6,
-                  fontSize: 14,
-                  fontWeight: 700,
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                  cursor: "pointer",
-                  border: active ? "1px solid #18181B" : "1px solid #E4E4E7",
-                  background: active ? "#18181B" : "#FFFFFF",
-                  color: active ? "#fff" : "#27272A",
-                }}
-              >
-                {LeafIcon && <LeafIcon size={14} strokeWidth={1.9} aria-hidden />}
-                {meta?.label || leafKey}
-              </button>
-            );
-          })}
-        </div>
-      )}
       {/* ── GENERAL ── */}
       {tab === "general" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>

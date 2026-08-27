@@ -218,7 +218,7 @@ export default function PriceMatchPage() {
   const staleInMin = !claimedAtMs || Number.isNaN(claimedAtMs) ? 0 : Math.max(1, Math.ceil((STALE_CLAIM_MS - (Date.now() - claimedAtMs)) / 60000));
 
   return (
-    <div style={{ background: D.bg, minHeight: "100%", padding: 16 }}>
+    <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       <AdminCommandHeader
         title="Price Match"
         icon={Tag}

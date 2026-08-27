@@ -245,7 +245,7 @@ export default function BillingRecoveryPage() {
   const agingBuckets = aging?.aging || {};
 
   return (
-    <div className="p-6 max-w-6xl mx-auto">
+    <div className="max-w-[1300px] mx-auto">
       <AdminCommandHeader title="Billing Recovery" icon={Banknote} />
       <div className="flex items-start justify-between gap-4 mb-5">
         <div>

@@ -1682,6 +1682,10 @@ export default function ServiceLibraryPage() {
     { key: "discounts", label: "Discounts", Icon: Percent },
   ];
 
+  // Sub-tabs + actions registered by the embedded Protocol & Readiness page
+  // (null on the other tabs).
+  const [secondary, setSecondary] = useState(null);
+
   return (
     <div style={{ maxWidth: 1300, margin: "0 auto" }}>
       {" "}
@@ -1693,6 +1697,12 @@ export default function ServiceLibraryPage() {
         onSectionChange={setTab}
         ariaLabel="Services section"
         navGridClassName="grid-cols-1 sm:grid-cols-3"
+        actions={secondary?.actions}
+        secondarySections={secondary?.sections || []}
+        secondaryActiveKey={secondary?.activeKey}
+        onSecondaryChange={secondary?.onChange}
+        secondaryAriaLabel={secondary?.ariaLabel}
+        secondaryNavGridClassName={secondary?.navGridClassName}
         action={
           tab === "catalog"
             ? {
@@ -2032,7 +2042,7 @@ export default function ServiceLibraryPage() {
             </div>
           )}
         >
-          <LawnProtocolCommandCenterPage embedded />
+          <LawnProtocolCommandCenterPage embedded onSecondaryNav={setSecondary} />
         </Suspense>
       )}
       {/* === DISCOUNTS TAB === */}

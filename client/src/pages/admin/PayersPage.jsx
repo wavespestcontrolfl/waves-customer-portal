@@ -159,7 +159,7 @@ export default function PayersPage() {
   }
 
   return (
-    <div className="p-4 sm:p-6 max-w-6xl mx-auto">
+    <div className="max-w-[1300px] mx-auto">
       <AdminCommandHeader
         title="Payers"
         icon={Building2}
