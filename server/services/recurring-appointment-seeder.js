@@ -822,13 +822,20 @@ async function findActiveRecurringSeries(conn, {
       // outstanding visit sits in that state is not lapsed, and reading
       // it as lapsed let a second same-family billable series activate
       // (codex #3504 r15).
-      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
+      // en_route / on_site are IN-PROGRESS (codex #3504 r25): a fixed
+      // series on its final occurrence is not lapsed while that visit is
+      // being served — only completion/cancellation ends it.
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'])
       // A 'rescheduled' placeholder stays active PAST its original date
       // (codex #3504 r21): it is awaiting re-placement, and its date is
-      // the slot it left, not one it will be served on — the date bound
+      // the slot it left, not one it will be served on. In-progress rows
+      // likewise stay active across a midnight boundary. The date bound
       // applies to pending/confirmed rows only.
       .where(function activeBound() {
-        this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
+        this.where('scheduled_date', '>=', etDateString())
+          .orWhere('status', 'rescheduled')
+          .orWhere('status', 'en_route')
+          .orWhere('status', 'on_site');
       })
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');

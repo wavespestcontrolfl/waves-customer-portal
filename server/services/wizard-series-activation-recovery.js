@@ -39,6 +39,10 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     .join('estimates as e', 'e.id', 'ss.source_estimate_id')
     .whereNotNull('ss.self_booking_id')
     .where('ss.payment_method_preference', 'pay_at_visit')
+    // The activation-minted billing state, in full (codex #3504 r25): a
+    // staff edit that clears the invoice flag takes the row out of the
+    // claim rather than getting overwritten by the reconcile.
+    .where('ss.create_invoice_on_complete', true)
     .where((qb) => qb.where('ss.is_recurring', false).orWhereNull('ss.is_recurring'))
     .whereNull('ss.recurring_parent_id')
     // EVERY non-cancelled status (codex #3504 r13): a stranded parent can
@@ -166,11 +170,12 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
           .forUpdate()
-          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id',
+          .first('id', 'is_recurring', 'payment_method_preference', 'create_invoice_on_complete', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id',
             ...(hasGenerationColumn ? ['source_estimate_generation'] : []));
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
+          || fresh.create_invoice_on_complete !== true
           || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
         const disposition = await classifyStrandedDisposition(trx, parent.id, String(fresh.status || ''));
@@ -203,6 +208,30 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           && !!fresh.source_estimate_generation
           && !!freshDraft.updated_at
           && new Date(freshDraft.updated_at).getTime() === new Date(fresh.source_estimate_generation).getTime();
+        // Strip the PRICE only when it is provably the activation-minted
+        // amount (codex #3504 r25): staff can reprice a stranded parent
+        // before this sweep, and blanking that edit would leave a legit
+        // visit unbilled. The minted amount is re-derivable only from the
+        // draft generation the booking priced from; when the live draft IS
+        // that generation, the anchored first-visit amount must match —
+        // otherwise (repriced, or the generation is gone) the price is
+        // KEPT for office review while the pay-at-visit machinery still
+        // clears so the row leaves the claim.
+        const mintedPriceConfirmed = (() => {
+          if (!draftRepresentsParent) return false;
+          try {
+            const { wizardPlanServiceKey, resolveWizardSeriesPlan, resolveBookingVisitPrice } = require('./booking-pay-at-visit');
+            const family = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: fresh.service_type });
+            const planKey = wizardPlanServiceKey(freshDraft, family);
+            const plan = resolveWizardSeriesPlan(freshDraft, planKey);
+            if (!plan) return false;
+            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: plan.visits });
+            return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
+          } catch { return false; }
+        })();
+        const priceKeptNote = mintedPriceConfirmed
+          ? ''
+          : ' (per-application price KEPT on the visit — it could not be confirmed as the plan\'s minted amount, so it may be a staff edit; office reviews before billing)';
         const draftNote = !draftLive
           ? ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.'
           : (draftRepresentsParent
@@ -235,11 +264,11 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit). ${draftRepresentsParent ? "The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program." : 'Convert for the REMAINING program from the office.'}`,
           },
           terminal_unbilled: {
-            patch: STRIP_PATCH(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, pricing stripped; office converts the live quote for the FULL program`),
+            patch: (mintedPriceConfirmed ? STRIP_PATCH : KEEP_PRICE_PATCH)(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, ${mintedPriceConfirmed ? 'pricing stripped' : 'pay-at-visit cleared'}${priceKeptNote}; office converts the live quote for the FULL program`),
             bell: `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed and none was invoiced. The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the FULL plan.`,
           },
           in_flight: {
-            patch: STRIP_PATCH(trx, ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'),
+            patch: (mintedPriceConfirmed ? STRIP_PATCH : KEEP_PRICE_PATCH)(trx, ` — series activation never completed (worker died mid-booking); ${mintedPriceConfirmed ? 'pricing stripped' : 'pay-at-visit cleared'}${priceKeptNote}, office converts from the live quote`),
             bell: `${who} committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
           },
         }[disposition];

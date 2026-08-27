@@ -298,7 +298,7 @@ describe('booking route wiring (source contracts)', () => {
     // application. Any mismatch = stale, no seed, no write.
     // FOR UPDATE (codex #3504 r7): cancellation writers don't take the
     // comms lock, so the parent row lock is what serializes them.
-    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',\s*\n\s*'scheduled_date', 'window_start', 'window_end', 'technician_id'\)/);
+    expect(booking).toMatch(/\.forUpdate\(\)\s*\n\s*\.first\('id', 'is_recurring', 'status', 'payment_method_preference',\s*\n\s*'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',\s*\n\s*'scheduled_date', 'window_start', 'window_end', 'technician_id',\s*\n\s*\.\.\.\(\(await trx\.schema\.hasColumn\('scheduled_services', 'source_estimate_generation'\)\)/);
     expect(booking).toMatch(/lockedParent\.payment_method_preference !== 'pay_at_visit'\s*\n\s*\|\| lockedParent\.create_invoice_on_complete !== true\s*\n\s*\|\| Number\(lockedParent\.estimated_price\) !== Number\(visitPrice\)/);
     expect(booking).toMatch(/no longer matches its priced state under lock/);
     // The correlation is stamped SERVER-SIDE from the verified pricing
@@ -389,7 +389,7 @@ describe('booking route wiring (source contracts)', () => {
 
   test('a reschedule-pending visit keeps a fixed series ACTIVE in the duplicate guard (r15)', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled'\]\)[\s\S]{0,600}this\.where\('scheduled_date', '>=', etDateString\(\)\)\.orWhere\('status', 'rescheduled'\)/);
+    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'\]\)[\s\S]{0,900}this\.where\('scheduled_date', '>=', etDateString\(\)\)\s*\n\s*\.orWhere\('status', 'rescheduled'\)/);
     // r16: a rescheduled PARENT stays in the candidate set too — only a
     // cancelled parent is excluded; the probe/ongoing flag decide activity.
     expect(seeder).toMatch(/\.whereNull\('recurring_parent_id'\)[\s\S]{0,700}\.whereNotIn\('status', \['cancelled'\]\)\s*\n\s*\.select\('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status'\)/);
@@ -455,7 +455,7 @@ describe('booking route wiring (source contracts)', () => {
   test('a rescheduled parent (date/window/technician moved before activation) fails closed with strip + bell', () => {
     // codex #3504 r9: seeding from the stale in-memory parent would anchor
     // every child and the pre-locked occupancy plan to the OLD placement.
-    expect(booking).toMatch(/'scheduled_date', 'window_start', 'window_end', 'technician_id'\)/);
+    expect(booking).toMatch(/'scheduled_date', 'window_start', 'window_end', 'technician_id',/);
     expect(booking).toMatch(/lockedDateStr !== parentDateStr\s*\n\s*\|\| timeKey\(lockedParent\.window_start\) !== timeKey\(seriesParentRow\.window_start\)/);
     expect(booking).toMatch(/placement changed before activation/);
   });
@@ -744,6 +744,20 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r25: sweep preserves staff billing edits; in-progress final visits stay active; activation binds to the parent generation', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/\.where\('ss\.create_invoice_on_complete', true\)/);
+    expect(recoverySrc).toMatch(/\|\| fresh\.create_invoice_on_complete !== true/);
+    expect(recoverySrc).toMatch(/const mintedPriceConfirmed = \(\(\) => \{\s*\n\s*if \(!draftRepresentsParent\) return false;/);
+    expect(recoverySrc).toMatch(/in_flight: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
+    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'\]\)/);
+    expect(seeder).toMatch(/\.orWhere\('status', 'rescheduled'\)\s*\n\s*\.orWhere\('status', 'en_route'\)\s*\n\s*\.orWhere\('status', 'on_site'\);/);
+    expect(booking).toMatch(/const draftGenerationMatches = !lockedParent\?\.source_estimate_generation\s*\n\s*\|\| \(!!lockedDraft\?\.updated_at\s*\n\s*&& new Date\(lockedDraft\.updated_at\)\.getTime\(\) === new Date\(lockedParent\.source_estimate_generation\)\.getTime\(\)\);/);
+    expect(booking).toMatch(/\|\| !quotedPropertyIsBooked\s*\n\s*\|\| !draftGenerationMatches/);
+  });
+
   test('r22: handoff retires only for a draft proven to be THIS booking\'s; replay echoes extension; cleanup strip is priced-state conditional', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     // P0: a reused draft (updated_at after the booking) is a NEWER quote —
@@ -753,7 +767,9 @@ describe('booking route wiring (source contracts)', () => {
     // updated_at; no window, no content inference, unstamped fails closed.
     expect(recoverySrc).toMatch(/&& !!fresh\.source_estimate_generation\s*\n\s*&& !!freshDraft\.updated_at\s*\n\s*&& new Date\(freshDraft\.updated_at\)\.getTime\(\) === new Date\(fresh\.source_estimate_generation\)\.getTime\(\);/);
     expect(recoverySrc).toMatch(/hasColumn\('scheduled_services', 'source_estimate_generation'\)/);
-    expect(recoverySrc).not.toMatch(/Number\(priced\.amount\) === Number\(fresh\.estimated_price\)/);
+    // ownership never infers from content — the price match lives only in
+    // mintedPriceConfirmed (r25), which is gated on the generation proof.
+    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& String\(freshDraft\.customer_id \|\| ''\) === String\(fresh\.customer_id \|\| ''\)\s*\n\s*&& !!fresh\.source_estimate_generation/);
     // The booking stamps the generation on the parent at INSERT, only for
     // trusted wizard pricing, column-guarded.
     expect(booking).toMatch(/sourceEstimateGeneration = pricingTrusted && pricingEstimate\?\.updated_at \? pricingEstimate\.updated_at : null;/);
@@ -776,7 +792,7 @@ describe('booking route wiring (source contracts)', () => {
 
   test('r21: overdue reschedule placeholders stay active; extended reservation is echoed on the response', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.where\(function activeBound\(\) \{\s*\n\s*this\.where\('scheduled_date', '>=', etDateString\(\)\)\.orWhere\('status', 'rescheduled'\);/);
+    expect(seeder).toMatch(/\.where\(function activeBound\(\) \{\s*\n\s*this\.where\('scheduled_date', '>=', etDateString\(\)\)\s*\n\s*\.orWhere\('status', 'rescheduled'\)/);
     expect(booking).toMatch(/parentExtension = \{ end_time: extendedEnd, duration_minutes: seededChildDuration \};/);
     expect(booking).toMatch(/return \{ seedResult, parentExtension \};/);
     expect(booking).toMatch(/if \(seriesOutcome\?\.parentExtension\) Object\.assign\(booking, seriesOutcome\.parentExtension\);/);
@@ -846,7 +862,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'inv', status: 'refunded' }]), 'p1', 'completed')).toBe('completed_refunded');
     expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'a', status: 'refunded' }, { id: 'b', status: 'paid' }]), 'p1', 'completed')).toBe('completed_billed');
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: STRIP_PATCH\(/);
+    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
     expect(recoverySrc).toMatch(/bill the FULL plan/);
     expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*retireHandoff: true,\s*\n\s*patch: KEEP_PRICE_PATCH\(/);
   });

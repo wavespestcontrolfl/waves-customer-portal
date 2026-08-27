@@ -3016,7 +3016,8 @@ async function createSelfBooking(payload = {}) {
             .forUpdate()
             .first('id', 'is_recurring', 'status', 'payment_method_preference',
               'estimated_price', 'create_invoice_on_complete', 'source_estimate_id',
-              'scheduled_date', 'window_start', 'window_end', 'technician_id');
+              'scheduled_date', 'window_start', 'window_end', 'technician_id',
+              ...((await trx.schema.hasColumn('scheduled_services', 'source_estimate_generation')) ? ['source_estimate_generation'] : []));
           if (lockedParent && lockedParent.is_recurring) {
             // is_recurring alone is NOT activation-owned evidence (codex
             // #3504 r18): staff can make the committed parent recurring
@@ -3150,8 +3151,20 @@ async function createSelfBooking(payload = {}) {
           const quotedPropertyIsBooked = !!lockedDraft
             && !!bookedCustomerRow
             && estimateQuotesCustomerAddress(lockedDraft.address, bookedCustomerRow);
+          // GENERATION bind (codex #3504 r25): the parent carries the
+          // draft generation it was priced from (source_estimate_generation,
+          // migration 20260827000001). A crash-retry that arrives after
+          // /calculate rewrote the draft could otherwise pass every content
+          // check (same family + first-visit price on a different cadence)
+          // and seed the NEWER quote's cadence onto the OLDER parent while
+          // archiving the newer handoff. When the parent is stamped, the
+          // locked draft must be that exact generation — else drift.
+          const draftGenerationMatches = !lockedParent?.source_estimate_generation
+            || (!!lockedDraft?.updated_at
+              && new Date(lockedDraft.updated_at).getTime() === new Date(lockedParent.source_estimate_generation).getTime());
           if (!freshPlan
             || !quotedPropertyIsBooked
+            || !draftGenerationMatches
             || freshPlan.pattern !== wizardSeriesPlan.pattern
             || freshPlan.visits !== wizardSeriesPlan.visits
             || !freshPriced
