@@ -415,7 +415,7 @@ function extractLinks(body) {
   // literal syntax, not a link. Whitespace is allowed inside the
   // parentheses ("( /contact/ )").
   // Link text may contain ONE level of balanced brackets ("[Get a [Termite] Estimate]").
-  const md = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
+  const md = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -456,7 +456,7 @@ function extractLinks(body) {
     if (!defs.has(key)) defs.set(key, dest(m[2]));
   }
   if (defs.size) {
-    const ref = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\[\]\\]|\[(?:\\[\s\S]|[^\[\]\\])*\])+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -465,7 +465,7 @@ function extractLinks(body) {
     // that is not itself an inline/full reference or the definition line.
     // (?<![\]!]) — skip the label half of a full reference (`[text][label]`)
     // and image syntax; (?![\[(:]) — skip inline/full references and definitions.
-    const shortcut = /(?<!\])(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\](?![\[(:])/g;
+    const shortcut = /(?<!\])(?<!(?<!\\)(?:\\\\)*\\)(?<!(?<!\\)(?:\\\\)*!)\[((?:\\[\s\S]|[^\]\\])+)\](?![\[(:])/g;
     while ((m = shortcut.exec(s)) !== null) {
       const href = defs.get(label(m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -497,6 +497,7 @@ function plainAnchor(raw) {
   return decodeEntitiesForScan(String(raw || ''))
     .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (m, n) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[n.toLowerCase()])
     .replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, '')
+    .replace(/\\([!-/:-@[-`{-~])/g, '$1')
     .replace(/[*_~`]/g, '')
     .replace(/\s+/g, ' ')
     .trim();

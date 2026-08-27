@@ -2275,6 +2275,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // "    - inner" is that item's child block, not indented code.
     expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n      | A | B |\n      | - | - |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n          | A | B |\n          | - | - |')).toBe(false);
+    // A table starting AS a list item's content renders with the marker
+    // removed — the marker-stripped header is a valid signature.
+    expect(guardrails.hasRawMarkdownTable('- | A | B |\n  | - | - |')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

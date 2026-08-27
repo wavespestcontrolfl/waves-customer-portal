@@ -1991,13 +1991,18 @@ function extractRawMarkdownTables(text) {
   let hm;
   while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
+    // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
+    // visible-text requirement — the count match below is the signature.
+    // A header that IS a list item's content ("- | A | B |") renders with
+    // the marker removed, so the marker-stripped form is a candidate too.
+    const headerCandidates = [lines[i - 1]];
+    const marked = lines[i - 1].match(/^(?:[-*+]|\d+[.)])\s+(.*)$/);
+    if (marked) headerCandidates.push(marked[1]);
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
-    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && cellCount(lines[i]) === cellCount(lines[i - 1]);
-    // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
-    // visible-text requirement — the count match above is the signature.
-    const headerAbove = lines[i - 1].includes('|');
-    if (!delimiter || !headerAbove) continue;
+    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i])
+      && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
+    if (!delimiter) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
     // whitespace-normalized, so refresh grandfathering can compare table
     // CONTENT rather than counts.

@@ -756,6 +756,15 @@ describe('seo-completion-gate', () => {
     });
     expect(reserveInspection.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    // An ESCAPED closing bracket inside a label is label content — the link
+    // still renders and its anchor is judged.
+    const escapedLabelBracket = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule \\] Service](/contact/)` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(escapedLabelBracket.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
     // Lawn specialty terms name the lawn family in CTA anchors.
     // A fertilization CTA on a lawn-fertilization brief is topic-accurate:
     // it satisfies presence and is not forbidden wording.
