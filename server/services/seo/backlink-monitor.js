@@ -107,16 +107,17 @@ class BacklinkMonitor {
     // same link as http→https, ±www, ±trailing slash, ±tracking query on our
     // page. Keyed raw, every respelling inserted a second row while the old one
     // survived its crawl through the redirect — both active forever, inflating
-    // totals, snapshots and velocity. Source = comparable URL (scheme/www/slash
-    // dropped); target = the same minus query/fragment (our page, utm irrelevant).
-    const { normalizeComparableUrl, comparableUrlSql } = require('./link-prospect-verifier')._test;
-    const canonicalTarget = (u) => normalizeComparableUrl(String(u || '').split('#')[0].split('?')[0]);
-    const linkKey = (source, target) => `${normalizeComparableUrl(source)}::${canonicalTarget(target)}`;
-    // Query/fragment stripped FIRST, then the comparable normalization (which
+    // totals, snapshots and velocity. Source = canonical link URL (scheme/www/
+    // slash dropped, host lower-cased, path case KEPT — /Post ≠ /post); target =
+    // the same minus query/fragment (our page, utm irrelevant).
+    const { canonicalLinkUrl, canonicalLinkUrlSql } = require('./link-prospect-verifier')._test;
+    const canonicalTarget = (u) => canonicalLinkUrl(String(u || '').split('#')[0].split('?')[0]);
+    const linkKey = (source, target) => `${canonicalLinkUrl(source)}::${canonicalTarget(target)}`;
+    // Query/fragment stripped FIRST, then the canonical normalization (which
     // ends with the trailing-slash strip) — the same order as canonicalTarget(),
     // so '/page/?utm=x' is '/page' on both sides.
     // `\?` = a literal question mark to knex.raw (a bare `?` is a binding slot).
-    const TARGET_CANONICAL_SQL = comparableUrlSql("regexp_replace(target_url, '[\\?#].*$', '')");
+    const TARGET_CANONICAL_SQL = canonicalLinkUrlSql("regexp_replace(target_url, '[\\?#].*$', '')");
 
     // Build active link map with canonical keys BEFORE processing (a key may
     // hold several rows — legacy respelled duplicates — all seen together).
@@ -142,7 +143,7 @@ class BacklinkMonitor {
       // Canonical lookup; an exact-spelling row wins over a respelled twin so a
       // legacy duplicate pair is never collapsed onto the wrong row here.
       const existing = await db('seo_backlinks')
-        .whereRaw(`${comparableUrlSql('source_url')} = ?`, [normalizeComparableUrl(link.url_from)])
+        .whereRaw(`${canonicalLinkUrlSql('source_url')} = ?`, [canonicalLinkUrl(link.url_from)])
         .whereRaw(`${TARGET_CANONICAL_SQL} = ?`, [canonicalTarget(link.url_to)])
         .orderByRaw('(source_url = ? AND target_url = ?) DESC, last_checked DESC NULLS LAST', [link.url_from, link.url_to])
         .first();
@@ -227,6 +228,11 @@ class BacklinkMonitor {
       if (candidates.length > VERIFY_CAP) {
         logger.warn(`Backlink scan: ${candidates.length} loss candidates, verifying first ${VERIFY_CAP} (rest carried to next scan)`);
       }
+      // Longest-waiting first: carried rows gain a miss each scan, so ordering by
+      // miss_count (id as the stable tie-break) guarantees every candidate is
+      // eventually verified — DB order would let a stable front group that keeps
+      // surviving its crawl starve the tail forever.
+      candidates.sort((a, b) => ((b.miss_count || 0) - (a.miss_count || 0)) || String(a.id).localeCompare(String(b.id)));
       const toVerify = candidates.slice(0, VERIFY_CAP);
       const carried = candidates.slice(VERIFY_CAP);
       if (carried.length) {

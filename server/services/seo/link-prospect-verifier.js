@@ -49,6 +49,23 @@ function comparableUrlSql(column) {
 }
 const SOURCE_URL_COMPARABLE_SQL = comparableUrlSql('source_url');
 
+// Case-PRESERVING canonical link URL for backlink identity (backlink-monitor):
+// scheme + www dropped, HOST lower-cased, path/query kept as-is (paths are
+// case-sensitive: /Post and /post are different pages), trailing slashes
+// dropped. `canonicalLinkUrlSql` is its SQL twin (no bare '?' — knex slot).
+function canonicalLinkUrl(u) {
+  const s = String(u || '').trim().replace(/&amp;/gi, '&').replace(/^https?:\/\//i, '').replace(/^\/\//, '').replace(/^www\./i, '');
+  const slash = s.indexOf('/');
+  const host = (slash === -1 ? s : s.slice(0, slash)).toLowerCase();
+  const path = slash === -1 ? '' : s.slice(slash);
+  return host + path.replace(/\/+$/, '');
+}
+function canonicalLinkUrlSql(column) {
+  const stripped = `regexp_replace(regexp_replace(regexp_replace(${column}, '^https://', '', 'i'), '^http://', '', 'i'), '^www\\.', '', 'i')`;
+  const host = `split_part(${stripped}, '/', 1)`;
+  return `(lower(${host}) || regexp_replace(substr(${stripped}, length(${host}) + 1), '/+$', ''))`;
+}
+
 function stripUrl(u) {
   // Also decodes &amp; (hrefs in HTML) and accepts protocol-relative //host/path.
   return String(u || '').trim().replace(/&amp;/gi, '&').replace(/^https?:\/\//, '').replace(/^\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
@@ -542,7 +559,7 @@ async function run({ limit = 200 } = {}) {
 
 module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
-  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL, comparableUrlSql,
+  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL, comparableUrlSql, canonicalLinkUrl, canonicalLinkUrlSql,
   comparableDomain, parseQuality, expectedTargetUrl,
   comparableFirstSeen, placementFloorEt, firstSeenOnOrAfter,
 };

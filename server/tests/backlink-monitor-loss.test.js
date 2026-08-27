@@ -55,9 +55,9 @@ function scanWith({ items = [], total = items.length, active = [], existingByUrl
       if (op === 'select') return st.nulls.includes('recovery_queued_at') ? owed : active;
       if (op === 'first') {
         // per-link upsert lookup: CANONICAL source (comparable SQL) + canonical target
-        const srcRaw = st.raws.find(r => /lower\(source_url\)/.test(r[0]));
+        const srcRaw = st.raws.find(r => /source_url/.test(r[0]) && /split_part/.test(r[0]));
         if (srcRaw) {
-          const norm = (u) => String(u).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+          const norm = (u) => { const t = String(u).replace(/^https?:\/\//, '').replace(/^www\./, ''); const i = t.indexOf('/'); return (i === -1 ? t : t.slice(0, i)).toLowerCase() + (i === -1 ? '' : t.slice(i)).replace(/\/+$/, ''); };
           const hit = Object.keys(existingByUrl).find(u => norm(u) === srcRaw[1][0]);
           return hit ? existingByUrl[hit] : null;
         }
@@ -303,8 +303,9 @@ describe('BacklinkMonitor verified loss detection', () => {
     await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     const tgt = raws.find(r => /target_url/.test(r[0]));
     expect(tgt[1]).toEqual(['wavespestcontrol.com/page']); // JS side: query gone, slash gone
-    // SQL side: the innermost expression is the query strip; the outermost is the trailing-slash strip
-    expect(tgt[0]).toMatch(/^regexp_replace\(.*regexp_replace\(target_url, '\[\\\?#\]\.\*\$', ''\).*'\/\+\$', ''\) = \?$/);
+    // SQL side: the query strip is INSIDE the canonical expression; the trailing-slash strip is its last step
+    expect(tgt[0]).toMatch(/regexp_replace\(target_url, '\[\\\?#\]\.\*\$', ''\)/);
+    expect(tgt[0]).toMatch(/'\/\+\$', ''\)\) = \?$/);
     // and it COMPILES through real knex with exactly one binding — the regex '?' must be
     // escaped (\?) or knex reads it as a second placeholder and every scan throws
     const knex = require('knex')({ client: 'pg' });
@@ -313,6 +314,32 @@ describe('BacklinkMonitor verified loss detection', () => {
       expect(compiled.bindings).toEqual(bind);
       if (/target_url/.test(sql)) expect(compiled.sql).toContain("[?#]"); // the escape is consumed by knex, the regex reaches pg intact
     }
+  });
+
+  test('canonical identity lower-cases the HOST only: /Post and /post are different links (the other is missed)', async () => {
+    const { canonicalLinkUrl } = require('../services/seo/link-prospect-verifier')._test;
+    expect(canonicalLinkUrl('HTTPS://WWW.Blog.Example/Post/')).toBe('blog.example/Post');
+    expect(canonicalLinkUrl('http://blog.example/post?a=B#f')).toBe('blog.example/post?a=B#f');
+    const seen = { url_from: 'https://blog.example/Post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const lower = activeRow({ id: 'lower', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
+    const { increments } = scanWith({ items: [seen], active: [lower] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ missed: 1 }));
+    expect(increments).toEqual([expect.objectContaining({ ids: ['lower'] })]);
+  });
+
+  test('VERIFY_CAP takes the longest-waiting candidates first (miss_count desc, id tie-break) so the tail is never starved', async () => {
+    const crawl = jest.fn(async () => ({ found: true, isDofollow: true, status: 200 }));
+    // 302 twice-missed candidates; the two with the HIGHEST miss_count sit last in DB order
+    const active = Array.from({ length: 302 }, (_, i) => activeRow({ id: `c${String(i).padStart(3, '0')}`, source_url: `https://d${i}.example/p`, source_domain: `d${i}.example`, miss_count: i >= 300 ? 5 : 1 }));
+    const { increments } = scanWith({ items: [], total: 0, active });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl });
+    expect(crawl).toHaveBeenCalledTimes(300);
+    const crawled = new Set(crawl.mock.calls.map(c => c[0]));
+    expect(crawled.has('https://d300.example/p')).toBe(true);
+    expect(crawled.has('https://d301.example/p')).toBe(true);
+    // the two carried rows are the lowest-priority ones (c298, c299 by id tie-break) and got a miss each
+    expect(increments.find(i => Array.isArray(i.ids) && i.ids.length === 2).ids).toEqual(['c298', 'c299']);
   });
 
   test('two legacy rows under one canonical key are both seen by one report; neither is missed', async () => {
