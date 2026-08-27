@@ -73,12 +73,25 @@ function parseFacebookEngagement(json = {}) {
   };
 }
 
+// Instagram media object carries likes/comments; shares come from the
+// separate Media Insights call (parseInstagramShares) — null here means
+// "not measured in this fetch", never zero.
 function parseInstagramEngagement(json = {}) {
   return {
     likes: toCount(json?.like_count),
     comments: toCount(json?.comments_count),
-    shares: 0,
+    shares: null,
   };
+}
+
+// /{media-id}/insights?metric=shares → { data: [{ name: 'shares',
+// values: [{ value }] }] } (or total_value.value on newer API versions).
+// null when the metric is absent (unsupported media type / API version).
+function parseInstagramShares(json = {}) {
+  const entry = (Array.isArray(json?.data) ? json.data : []).find((d) => d?.name === 'shares');
+  if (!entry) return null;
+  const raw = entry.total_value?.value ?? entry.values?.[0]?.value;
+  return raw == null ? null : toCount(raw);
 }
 
 // ── fetchers ────────────────────────────────────────────────────────────────
@@ -104,12 +117,29 @@ async function fetchEngagement(target, { fetchFn = fetch } = {}) {
   if (target.platform === 'facebook' || target.platform === 'instagram') {
     const token = process.env.FACEBOOK_ACCESS_TOKEN;
     if (!token) throw new Error('FACEBOOK_ACCESS_TOKEN not configured');
-    const fields = target.platform === 'facebook'
-      ? 'likes.summary(true),comments.summary(true),shares'
-      : 'like_count,comments_count';
-    const url = `${GRAPH_BASE}/${encodeURIComponent(target.platformPostId)}?fields=${fields}&access_token=${encodeURIComponent(token)}`;
-    const body = await fetchGraph(url, fetchFn);
-    return target.platform === 'facebook' ? parseFacebookEngagement(body) : parseInstagramEngagement(body);
+    const id = encodeURIComponent(target.platformPostId);
+    const auth = `access_token=${encodeURIComponent(token)}`;
+    if (target.platform === 'facebook') {
+      // A Facebook VIDEO object (postToFacebookVideo persists the video id,
+      // mediaType 'video') has likes/comments edges but no `shares` field —
+      // asking for it rejects the whole query. Post objects get all three.
+      const fields = target.mediaType === 'video'
+        ? 'likes.summary(true),comments.summary(true)'
+        : 'likes.summary(true),comments.summary(true),shares';
+      const counts = parseFacebookEngagement(await fetchGraph(`${GRAPH_BASE}/${id}?fields=${fields}&${auth}`, fetchFn));
+      if (target.mediaType === 'video') counts.shares = null; // not exposed on Video nodes
+      return counts;
+    }
+    const counts = parseInstagramEngagement(await fetchGraph(`${GRAPH_BASE}/${id}?fields=like_count,comments_count&${auth}`, fetchFn));
+    // Shares live in Media Insights; the metric is not available for every
+    // media type/version, so a miss leaves shares null (retain prior value).
+    try {
+      counts.shares = parseInstagramShares(await fetchGraph(`${GRAPH_BASE}/${id}/insights?metric=shares&${auth}`, fetchFn));
+    } catch (err) {
+      logger.warn(`[social-engagement] instagram shares insight unavailable for ${target.platformPostId}: ${err.message}`);
+      counts.shares = null;
+    }
+    return counts;
   }
   throw new Error(`no engagement source for ${target.platform}`);
 }
@@ -136,13 +166,23 @@ async function upsertEngagement(postId, target, counts, error = null) {
       .merge(['fetched_at', 'updated_at', 'last_error']);
     return;
   }
+  // A metric the provider did not expose in this fetch (shares === null)
+  // keeps the row's previously measured value rather than resetting to 0.
+  let shares = counts.shares;
+  if (shares == null) {
+    const prior = await db('social_post_engagement')
+      .where({ post_id: postId, platform: target.platform })
+      .first('shares_count');
+    shares = prior?.shares_count ?? 0;
+  }
+  const merged = { likes: counts.likes, comments: counts.comments, shares };
   await db('social_post_engagement')
     .insert({
       ...base,
-      likes_count: toCount(counts.likes),
-      comments_count: toCount(counts.comments),
-      shares_count: toCount(counts.shares),
-      engagement_score: scoreCounts(counts),
+      likes_count: toCount(merged.likes),
+      comments_count: toCount(merged.comments),
+      shares_count: toCount(merged.shares),
+      engagement_score: scoreCounts(merged),
       last_success_at: now,
     })
     .onConflict(['post_id', 'platform'])
@@ -239,6 +279,7 @@ module.exports = {
   fetchEngagement,
   parseFacebookEngagement,
   parseInstagramEngagement,
+  parseInstagramShares,
   scoreCounts,
   syncRecentEngagement,
 };

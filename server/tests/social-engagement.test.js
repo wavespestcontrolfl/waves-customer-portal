@@ -39,14 +39,18 @@ describe('platform response parsers', () => {
     expect(Engagement.parseFacebookEngagement({})).toEqual({ likes: 0, comments: 0, shares: 0 });
   });
 
-  test('instagram: like_count / comments_count', () => {
+  test('instagram: like_count / comments_count; shares come from insights (null = not measured)', () => {
     expect(Engagement.parseInstagramEngagement({ like_count: 19, comments_count: 4 }))
-      .toEqual({ likes: 19, comments: 4, shares: 0 });
+      .toEqual({ likes: 19, comments: 4, shares: null });
+    expect(Engagement.parseInstagramShares({ data: [{ name: 'shares', values: [{ value: 7 }] }] })).toBe(7);
+    expect(Engagement.parseInstagramShares({ data: [{ name: 'shares', total_value: { value: 3 } }] })).toBe(3);
+    expect(Engagement.parseInstagramShares({ data: [{ name: 'reach', values: [{ value: 900 }] }] })).toBeNull();
+    expect(Engagement.parseInstagramShares({})).toBeNull();
   });
 
   test('negative / non-numeric counts clamp to 0', () => {
     expect(Engagement.parseInstagramEngagement({ like_count: -3, comments_count: 'many' }))
-      .toEqual({ likes: 0, comments: 0, shares: 0 });
+      .toEqual({ likes: 0, comments: 0, shares: null });
   });
 });
 
@@ -88,6 +92,34 @@ describe('fetchEngagement', () => {
     const truncated = jest.fn(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('Unexpected end of JSON input'); } }));
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '1_2' }, { fetchFn: truncated }))
       .rejects.toThrow(/malformed response body/);
+  });
+
+  test('facebook VIDEO targets omit the Post-only shares field and report shares as not measured', async () => {
+    process.env.FACEBOOK_ACCESS_TOKEN = 't';
+    const fetchFn = jest.fn(async (url) => {
+      expect(url).toContain('/v25.0/987?fields=likes.summary(true),comments.summary(true)&');
+      expect(url).not.toContain('shares');
+      return { ok: true, status: 200, json: async () => ({ likes: { summary: { total_count: 5 } }, comments: { summary: { total_count: 2 } } }) };
+    });
+    await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '987', mediaType: 'video' }, { fetchFn }))
+      .resolves.toEqual({ likes: 5, comments: 2, shares: null });
+  });
+
+  test('instagram: media fields + insights shares; an unavailable insight leaves shares null', async () => {
+    process.env.FACEBOOK_ACCESS_TOKEN = 't';
+    const ok = jest.fn(async (url) => {
+      if (url.includes('/insights?metric=shares')) return { ok: true, status: 200, json: async () => ({ data: [{ name: 'shares', values: [{ value: 4 }] }] }) };
+      return { ok: true, status: 200, json: async () => ({ like_count: 19, comments_count: 3 }) };
+    });
+    await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: ok }))
+      .resolves.toEqual({ likes: 19, comments: 3, shares: 4 });
+
+    const noInsight = jest.fn(async (url) => {
+      if (url.includes('/insights')) return { ok: false, status: 400, json: async () => ({ error: { message: 'Unsupported metric' } }) };
+      return { ok: true, status: 200, json: async () => ({ like_count: 1, comments_count: 0 }) };
+    });
+    await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '17' }, { fetchFn: noInsight }))
+      .resolves.toEqual({ likes: 1, comments: 0, shares: null });
   });
 
   test('facebook/instagram without a token fails that target only', async () => {
