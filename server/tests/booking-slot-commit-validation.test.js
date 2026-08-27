@@ -116,7 +116,9 @@ describe('resolveBookingDuration — server-derived, never trusted raw', () => {
     expect(BOOKING_FUNNEL_SERVICE_DURATIONS).toEqual({
       pest_control: 60,
       lawn_care: 60,
-      mosquito: 45,
+      // 60 since the 2026-08-27 owner ruling (was 45; the catalog authority
+      // for both mosquito programs is 60).
+      mosquito: 60,
       tree_shrub: 60,
       termite: 90,
       rodent: 60,
@@ -152,8 +154,9 @@ describe('resolveBookingDuration — server-derived, never trusted raw', () => {
     expect(normalizeBookingServiceKey('pest_control+mosquito+lawn_care+termite')).toBe('');
     // Duration = catalog sum, client minutes still ignored.
     for (const requested of [45, 600, 'abc', null]) {
-      expect(resolveBookingDuration(requested, {}, 'mosquito+pest_control')).toBe(105);
-      expect(resolveBookingDuration(requested, {}, 'lawn_care+mosquito+pest_control')).toBe(165);
+      // mosquito 60 (2026-08-27 ruling): 60+60 and 60+60+60.
+      expect(resolveBookingDuration(requested, {}, 'mosquito+pest_control')).toBe(120);
+      expect(resolveBookingDuration(requested, {}, 'lawn_care+mosquito+pest_control')).toBe(180);
     }
   });
 
