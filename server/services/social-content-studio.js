@@ -1104,6 +1104,10 @@ async function reviewMilestoneStats() {
   try {
     const row = await db('google_reviews')
       .whereNull('missing_since')
+      // The Places stats sync writes one '_stats' pseudo-row per location
+      // (repo-wide exclusion pattern) — not a customer review, and its
+      // rounded star_rating would skew the average.
+      .where('reviewer_name', '!=', '_stats')
       .count({ count: '*' })
       .avg({ average: 'star_rating' })
       .first();
@@ -1167,6 +1171,32 @@ function planMilestone({ threshold, count, average, city, channels }) {
       fastestRisers: FASTEST_RISER_PROFILES.slice(0, 8),
     },
   };
+}
+
+// Why a stored milestone plan may no longer be publishable: the count fell
+// below the rung (reviews removed), advanced past the window (a stale
+// "we just hit 300"), or the average the copy states has drifted. Pure —
+// returns the reason string, or null when the plan still matches reality.
+function milestoneDrift(plan, stats) {
+  if (!stats) return 'review stats unavailable — milestone publish blocked';
+  const threshold = Number(plan?.milestone);
+  if (milestoneThresholdFor(stats.count) !== threshold) {
+    return `review count is now ${stats.count}; the ${threshold} milestone no longer matches — reject this draft so the lane can regenerate`;
+  }
+  if (stats.count - threshold >= MILESTONE_WINDOW) {
+    return `review count (${stats.count}) has moved past the ${threshold} milestone window — reject this draft so the lane can regenerate`;
+  }
+  const stated = plan?.averageRating == null ? null : Number(plan.averageRating);
+  if ((stated ?? null) !== (stats.average ?? null)) {
+    return `average rating changed (${stated ?? 'n/a'} → ${stats.average ?? 'n/a'}) since the copy was written — reject this draft so the lane can regenerate`;
+  }
+  return null;
+}
+
+// Re-read stats immediately before publication (direct run) or approval
+// (draft) — the plan was built earlier and reviews/ratings move.
+async function milestonePublishBlocker(plan) {
+  return milestoneDrift(plan, await reviewMilestoneStats());
 }
 
 async function selectAutonomousMilestonePlan(now = new Date()) {
@@ -1826,6 +1856,17 @@ async function runAutonomousLocked({ force = false, mode } = {}) {
       }
     }
 
+    // Milestone counterpart of the liveness gate: the count/average were read
+    // at selection, before render/upload — re-check so the post never claims
+    // a milestone reality no longer supports.
+    if (isMilestoneRun) {
+      const reason = await milestonePublishBlocker(plan);
+      if (reason) {
+        await updateAutonomousRun(run?.id, { status: 'failed', preview: finalPreview, skipReason: reason });
+        return { success: false, skipped: true, reason, mode: effectiveMode, preview: finalPreview };
+      }
+    }
+
     const guid = `${AUTONOMOUS_SOURCE}_${startedAt.toISOString()}`;
     // The snapshot gate above rejects cheaply; the lock closes its TOCTOU —
     // the reconcile cannot stamp the source row between here and the post.
@@ -2219,6 +2260,13 @@ async function approveAutonomousRun(runId, { variantIndex = 0 } = {}) {
       if (srcReview.missing_since) {
         return { ok: false, status: 409, error: 'source Google review has been removed from Google — testimonial cannot be published' };
       }
+    }
+    // A milestone draft can sit in the queue for days; the stored copy and
+    // card state a count/average that may no longer hold. Re-validate before
+    // publishing (rejecting the draft releases the threshold claim).
+    if (input.milestone) {
+      const reason = await milestonePublishBlocker(input);
+      if (reason) return { ok: false, status: 409, error: reason };
     }
     const variants = runVariants(preview);
     const priorRecordFull = toJson(run.publish_result, {});
@@ -2942,6 +2990,7 @@ module.exports = {
   buildMilestoneCardInput,
   buildMilestoneDrafts,
   milestoneThresholdFor,
+  milestoneDrift,
   planMilestone,
   selectAutonomousMilestonePlan,
   approveAutonomousRun,

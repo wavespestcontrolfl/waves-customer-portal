@@ -529,6 +529,17 @@ describe('autonomous review-milestone lane', () => {
     }
   });
 
+  test('milestoneDrift blocks a stored plan the current stats no longer support', () => {
+    const plan = { milestone: 300, averageRating: 4.9 };
+    expect(Studio.milestoneDrift(plan, { count: 312, average: 4.9 })).toBeNull();
+    expect(Studio.milestoneDrift(plan, null)).toMatch(/unavailable/);
+    expect(Studio.milestoneDrift(plan, { count: 298, average: 4.9 })).toMatch(/no longer matches/); // reviews removed
+    expect(Studio.milestoneDrift(plan, { count: 330, average: 4.9 })).toMatch(/past the 300 milestone window/);
+    expect(Studio.milestoneDrift(plan, { count: 355, average: 4.9 })).toMatch(/no longer matches/); // next rung
+    expect(Studio.milestoneDrift(plan, { count: 312, average: 4.8 })).toMatch(/average rating changed/);
+    expect(Studio.milestoneDrift({ milestone: 300, averageRating: null }, { count: 312, average: null })).toBeNull();
+  });
+
   test('planMilestone carries the claim key and a grounded source', () => {
     const plan = Studio.planMilestone({ threshold: 300, count: 312, average: 4.9, city: 'Venice', channels: ['gbp', 'facebook'] });
     expect(plan.milestone).toBe(300);
