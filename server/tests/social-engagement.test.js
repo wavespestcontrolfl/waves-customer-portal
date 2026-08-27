@@ -5,12 +5,12 @@ const Engagement = require('../services/social-engagement');
 const Studio = require('../services/social-content-studio');
 
 describe('engagementTargets (platforms_posted → fetch targets)', () => {
-  test('keeps successful FB/IG entries with ids; drops LinkedIn/GBP, failures, blanks, and dupes', () => {
+  test('keeps successful FB/IG/LinkedIn entries with ids; drops GBP, failures, blanks, and dupes', () => {
     const post = {
       platforms_posted: [
         { platform: 'facebook', postId: '123_456', success: true, content: 'x' },
         { platform: 'instagram', postId: '17912345678901234', success: true, mediaType: 'reel' },
-        { platform: 'linkedin', postId: 'urn:li:share:1', success: true },  // LinkedIn: no metrics leg in v1
+        { platform: 'linkedin', postId: null, success: true },            // LinkedIn can legitimately return no id
         { platform: 'gbp', postId: 'accounts/1/locations/2/localPosts/3', success: true, location: 'venice' },
         { platform: 'facebook', postId: '999', success: false, error: 'boom' },
         { platform: 'instagram', postId: 'dupe', success: true },          // second IG entry ignored
@@ -46,6 +46,14 @@ describe('platform response parsers', () => {
     expect(Engagement.parseInstagramShares({ data: [{ name: 'shares', total_value: { value: 3 } }] })).toBe(3);
     expect(Engagement.parseInstagramShares({ data: [{ name: 'reach', values: [{ value: 900 }] }] })).toBeNull();
     expect(Engagement.parseInstagramShares({})).toBeNull();
+  });
+
+  test('linkedin: likesSummary / commentsSummary (aggregated preferred); reshares not exposed → shares null', () => {
+    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: 5 }, commentsSummary: { aggregatedTotalComments: 2, totalFirstLevelComments: 1 } }))
+      .toEqual({ likes: 5, comments: 2, shares: null });
+    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: '7' }, commentsSummary: { totalFirstLevelComments: 1 } }))
+      .toEqual({ likes: 7, comments: 1, shares: null });
+    expect(Engagement.parseLinkedInEngagement({})).toEqual({ likes: 0, comments: 0, shares: null });
   });
 
   test('negative / non-numeric counts clamp to 0', () => {
@@ -148,6 +156,18 @@ describe('fetchEngagement', () => {
     delete process.env.FACEBOOK_ACCESS_TOKEN;
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '1' }, { fetchFn: jest.fn() }))
       .rejects.toThrow(/FACEBOOK_ACCESS_TOKEN/);
+  });
+
+  test('linkedin: reads socialActions through the linkedin service', async () => {
+    const linkedin = require('../services/linkedin');
+    const spy = jest.spyOn(linkedin, 'fetchSocialActions').mockResolvedValue({ likesSummary: { totalLikes: 3 }, commentsSummary: { aggregatedTotalComments: 1 } });
+    try {
+      await expect(Engagement.fetchEngagement({ platform: 'linkedin', platformPostId: 'urn:li:share:99' }, { fetchFn: jest.fn() }))
+        .resolves.toEqual({ likes: 3, comments: 1, shares: null });
+      expect(spy).toHaveBeenCalledWith('urn:li:share:99');
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('unsupported platform rejects', async () => {

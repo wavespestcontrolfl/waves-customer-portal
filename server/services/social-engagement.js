@@ -13,18 +13,18 @@ const logger = require('./logger');
 // endpoints with type- and version-specific metric names — add them with
 // that integration, not as a permanently-zero column.
 //
-// Sources: Facebook Graph (page posts + videos) and Instagram Graph (media).
-// GBP exposes no per-post metrics. LinkedIn is deliberately out of v1: its
-// socialActions read needs the r_organization_social_feed scope the OAuth
-// flow does not request (an app-product decision for the owner) and stored
-// tokens have no refresh path — a leg that 403s forever is worse than none.
+// Sources: Facebook Graph (page posts + videos), Instagram Graph (media +
+// shares insight), LinkedIn socialActions (likes/comments on the page's own
+// posts; needs the r_organization_social_feed grant — a token without it is
+// skipped for the whole sweep with one warning, see linkedinEngagementReady).
+// GBP exposes no per-post metrics.
 // Fail-soft per target: a provider error records last_error on that row and
 // the sweep continues; nothing here can affect publishing.
 // =============================================================================
 
 const GRAPH_BASE = 'https://graph.facebook.com/v25.0';
 const FETCH_TIMEOUT_MS = 10_000;
-const ENGAGEMENT_PLATFORMS = new Set(['facebook', 'instagram']);
+const ENGAGEMENT_PLATFORMS = new Set(['facebook', 'instagram', 'linkedin']);
 
 function toCount(value) {
   const n = Number(value);
@@ -92,6 +92,16 @@ function parseInstagramShares(json = {}) {
   if (!entry) return null;
   const raw = entry.total_value?.value ?? entry.values?.[0]?.value;
   return raw == null ? null : toCount(raw);
+}
+
+// LinkedIn socialActions: likes + comments. Reshares are not exposed by this
+// endpoint, so shares is null (not measured), never zero.
+function parseLinkedInEngagement(json = {}) {
+  return {
+    likes: toCount(json?.likesSummary?.totalLikes),
+    comments: toCount(json?.commentsSummary?.aggregatedTotalComments ?? json?.commentsSummary?.totalFirstLevelComments),
+    shares: null,
+  };
 }
 
 // ── fetchers ────────────────────────────────────────────────────────────────
@@ -162,6 +172,10 @@ async function fetchEngagement(target, { fetchFn = fetch } = {}) {
     }
     return counts;
   }
+  if (target.platform === 'linkedin') {
+    const linkedin = require('./linkedin');
+    return parseLinkedInEngagement(await linkedin.fetchSocialActions(target.platformPostId));
+  }
   throw new Error(`no engagement source for ${target.platform}`);
 }
 
@@ -222,12 +236,17 @@ async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchF
   // but whose shares insight was refused for lack of the
   // instagram_manage_insights scope — the sweep still succeeds, but the
   // count is logged so a missing scope is never invisible.
-  const summary = { posts: 0, targets: 0, synced: 0, failed: 0, sharesPermissionDenied: 0 };
+  const summary = { posts: 0, targets: 0, synced: 0, failed: 0, skippedTargets: 0, sharesPermissionDenied: 0 };
   if (!(await db.schema.hasTable('social_post_engagement'))) {
     throw new Error('social_post_engagement table missing — run migrations');
   }
   const since = new Date(Date.now() - Math.max(1, Math.min(365, Number(lookbackDays) || 30)) * 86400000);
   const size = Math.max(1, Math.min(1000, Number(batchSize) || 200));
+  // LinkedIn is skipped for the whole sweep (not failed per target) when the
+  // stored grant can't read engagement — a pre-scope token or no connection.
+  const linkedinReady = await require('./linkedin').linkedinEngagementReady();
+  if (!linkedinReady.ready) logger.warn(`[social-engagement] LinkedIn targets skipped this sweep: ${linkedinReady.reason}`);
+  const skipPlatforms = new Set(linkedinReady.ready ? [] : ['linkedin']);
   let cursor = null; // { ts, id } of the last row of the previous batch
   let started = false;
   for (;;) {
@@ -245,7 +264,7 @@ async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchF
     if (!started) { started = true; if (typeof onStart === 'function') onStart(); }
     if (!batch.length) break;
     summary.posts += batch.length;
-    await sweepBatch(batch, { fetchFn, summary });
+    await sweepBatch(batch, { fetchFn, summary, skipPlatforms });
     if (batch.length < size) break;
     const last = batch[batch.length - 1];
     cursor = { ts: last.sort_ts, id: last.id };
@@ -263,9 +282,10 @@ async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchF
   return summary;
 }
 
-async function sweepBatch(posts, { fetchFn, summary }) {
+async function sweepBatch(posts, { fetchFn, summary, skipPlatforms = new Set() }) {
   for (const post of posts) {
     for (const target of engagementTargets(post)) {
+      if (skipPlatforms.has(target.platform)) { summary.skippedTargets += 1; continue; }
       summary.targets += 1;
       try {
         const counts = await fetchEngagement(target, { fetchFn });
@@ -311,6 +331,7 @@ module.exports = {
   parseFacebookEngagement,
   parseInstagramEngagement,
   parseInstagramShares,
+  parseLinkedInEngagement,
   classifyInsightError,
   scoreCounts,
   syncRecentEngagement,
