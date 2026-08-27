@@ -13,6 +13,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
+import { formatETDate } from "../../lib/timezone";
 const ContentCalendar = lazy(() => import("./ContentCalendar"));
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
@@ -2658,7 +2659,7 @@ function AnalyticsTab() {
                       {p.title || "(untitled)"}
                     </td>
                     <td style={{ padding: "6px 8px", color: D.muted, whiteSpace: "nowrap" }}>
-                      {p.publishedAt ? new Date(p.publishedAt).toLocaleDateString() : "—"}
+                      {p.publishedAt ? formatETDate(p.publishedAt) : "—"}
                     </td>
                     <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.likes)}</td>
                     <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.comments)}</td>
