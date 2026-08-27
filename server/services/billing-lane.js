@@ -459,9 +459,14 @@ function attachedInvoiceAutoChargeLikely({
   monthlyRate,
   billingMode,
   prepaidMethod = null,
+  prepaidAmount = null,
   annualCoverageValidated = null,
 }) {
   if (isCallback || isAlwaysFreeServiceType(serviceType)) return false;
+  // An out-of-band (cash/Zelle) prepayment demotes (GitHub r3 P2) —
+  // completion nets it first and the charge verdict refuses the residual.
+  if (String(prepaidMethod || '') !== ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(prepaidAmount) > 0) return false;
   // A stamped annual-prepay visit demotes unless the stamp was VALIDATED
   // stale (pre-push P1 round 8) — completion settles/voids the covered
   // invoice, and an unverifiable stamp refuses the charge anyway.

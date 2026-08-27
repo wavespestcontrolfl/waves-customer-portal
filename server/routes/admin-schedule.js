@@ -2744,15 +2744,19 @@ async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayAct
   if (billingMode === 'per_application') return true;
   if (require('../config/feature-gates').gates.completionAutopayCharge !== true) return false;
   try {
-    const [dunningRow, consentRow, planRow] = await Promise.all([
+    const [dunningRow, consentRow, planRow, holdRow] = await Promise.all([
       db('invoice_followup_sequences').where({ invoice_id: invoice.id }).first('status'),
       db('appointment_card_requests').where({ scheduled_service_id: scheduledServiceId }).first('id'),
       // An active payment plan owns the invoice's collection (GitHub r2
       // P2) — completion refuses the charge, so the sheet must not
       // promise it.
       db('payment_plans').where({ invoice_id: invoice.id, status: 'active' }).first('id'),
+      // A live estimate card hold owns the booking (GitHub r3 P2) — the
+      // hold rail charges its frozen consent, not the extended lane.
+      db('estimate_card_holds').where({ scheduled_service_id: scheduledServiceId })
+        .whereNotIn('status', ['released', 'cancelled', 'failed']).first('id'),
     ]);
-    return !consentRow && !planRow && String(dunningRow?.status || '').toLowerCase() !== 'stopped';
+    return !consentRow && !planRow && !holdRow && String(dunningRow?.status || '').toLowerCase() !== 'stopped';
   } catch {
     return false;
   }
@@ -3121,6 +3125,7 @@ router.get('/', async (req, res, next) => {
             monthlyRate: s.monthly_rate,
             billingMode: s.billing_mode || null,
             prepaidMethod: s.prepaid_method || null,
+            prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
             annualCoverageValidated,
           }),
         }) || predictCompletionBilling({
@@ -3657,6 +3662,7 @@ router.get('/week', async (req, res, next) => {
               monthlyRate: s.monthly_rate,
               billingMode: s.billing_mode || null,
               prepaidMethod: s.prepaid_method || null,
+              prepaidAmount: s.prepaid_amount != null ? Number(s.prepaid_amount) : null,
               annualCoverageValidated,
             }),
           }) || predictCompletionBilling({

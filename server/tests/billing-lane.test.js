@@ -610,6 +610,10 @@ describe('attachedInvoiceAutoChargeLikely (sheet-side sync approximation)', () =
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: true })).toBe(false);
     expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'annual_prepay_invoice', annualCoverageValidated: false })).toBe(true);
   });
+  test('an out-of-band prepayment demotes the attached prediction (completion nets + verdict refuses)', () => {
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: 'cash', prepaidAmount: 50 })).toBe(false);
+    expect(attachedInvoiceAutoChargeLikely({ ...base, prepaidMethod: null, prepaidAmount: 50 })).toBe(false);
+  });
   test('per-application attached invoices stay a charge promise (their own rail collects)', () => {
     expect(attachedInvoiceAutoChargeLikely({ ...base, billingMode: 'per_application' })).toBe(true);
   });
