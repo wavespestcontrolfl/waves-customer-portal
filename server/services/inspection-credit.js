@@ -91,6 +91,61 @@ function configuredCreditAmountForServiceKey(serviceKey) {
  * short that promise (codex #3521 r1 P0). Only rodent carries a
  * quoted-fee promise — other inspections keep the flat configured credit.
  */
+/**
+ * What the visit's INSPECTION LINE sold for — never the visit aggregate.
+ * A grouped appointment stores the whole group (primary + add-ons) in the
+ * parent's estimated_price, so the completion invoice amount would credit
+ * the add-ons too; an appointment-level discount would credit less than
+ * the line the customer was quoted (codex #3521 r3 P1). Precedence:
+ *   1. the parent's own primary line (gross − its line discount), which
+ *      grouped bookings persist alongside the group total;
+ *   2. the linked estimate's rodent_inspection row (estimate accepts);
+ *   3. the parent price minus its add-on rows (legacy grouped rows with
+ *      no primary line recorded);
+ * null when none applies — the caller falls back to the configured fee.
+ * Read-only and fail-soft: a lookup error is a null, never a thrown
+ * closeout.
+ */
+async function soldInspectionAmountForVisit(db, svc) {
+  if (!svc || typeof svc !== 'object') return null;
+  const gross = Number(svc.primary_line_price);
+  if (Number.isFinite(gross) && gross > 0) {
+    const disc = Number(svc.line_discount_dollars);
+    return round2(Math.max(0, gross - (Number.isFinite(disc) && disc > 0 ? disc : 0)));
+  }
+  if (typeof db !== 'function') return null;
+  try {
+    if (svc.source_estimate_id) {
+      const estimate = await db('estimates').where({ id: svc.source_estimate_id }).first();
+      if (estimate) {
+        // Lazy: estimate-public requires this service at module scope.
+        const ep = require('../routes/estimate-public');
+        const estData = typeof ep.parseEstimateDataSafe === 'function'
+          ? ep.parseEstimateDataSafe(estimate)
+          : (typeof estimate.estimate_data === 'string' ? JSON.parse(estimate.estimate_data) : estimate.estimate_data);
+        const rows = typeof ep.normalizeOneTimeBreakdown === 'function'
+          ? (ep.normalizeOneTimeBreakdown(estData).items || [])
+          : [];
+        const row = rows.find((r) => String(r?.service || '') === 'rodent_inspection'
+          && r.kind === 'charge' && Number(r.amount) > 0);
+        if (row) return round2(Number(row.amount));
+      }
+    }
+    const parent = Number(svc.estimated_price);
+    if (Number.isFinite(parent) && parent > 0 && svc.id) {
+      const addons = await db('scheduled_service_addons')
+        .where({ scheduled_service_id: svc.id })
+        .select('estimated_price');
+      const addonTotal = (Array.isArray(addons) ? addons : []).reduce((sum, addon) => {
+        const n = Number(addon?.estimated_price);
+        return Number.isFinite(n) && n > 0 ? sum + n : sum;
+      }, 0);
+      return round2(Math.max(0, parent - addonTotal));
+    }
+  } catch { /* fail-soft: the closeout freezes the configured fee */ }
+  return null;
+}
+
 function closeoutCreditAmountForServiceKey(serviceKey, soldAmount) {
   if (String(serviceKey || '') === 'rodent_inspection') {
     const sold = Number(soldAmount);
@@ -1743,6 +1798,7 @@ module.exports = {
   configuredCreditAmount,
   configuredCreditAmountForServiceKey,
   closeoutCreditAmountForServiceKey,
+  soldInspectionAmountForVisit,
   isCreditableInspectionProfile,
   carriesStandingCreditPromise,
   redeemInspectionCreditForBooking,

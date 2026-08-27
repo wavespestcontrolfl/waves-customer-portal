@@ -823,8 +823,8 @@ describe('closeout route wiring — source contracts (the completion route is to
     // rodent freezes the fee it SOLD for (the visit's invoice amount), so
     // an inspection accepted at $125 before the fee dropped to $75 still
     // freezes $125 (#3521 r1 P0); the live config only when nothing sold.
-    expect(source).toContain('amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, invoiceAmount),');
-    expect(source).toContain('amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, invoiceAmount),');
+    expect(source).toContain('amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, soldInspectionAmount),');
+    expect(source).toContain('amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, soldInspectionAmount),');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmountForServiceKey(');
     expect(source).not.toContain('amount: InspectionCredit.configuredCreditAmount(),');
   });
@@ -1461,5 +1461,46 @@ describe('closeoutCreditAmountForServiceKey (codex #3521 r1 P0)', () => {
   test('non-rodent inspections keep the flat configured credit regardless of the sold amount', () => {
     expect(IC.closeoutCreditAmountForServiceKey('termite_inspection', 999))
       .toBe(IC.configuredCreditAmountForServiceKey('termite_inspection'));
+  });
+});
+
+describe('soldInspectionAmountForVisit (codex #3521 r3 P1 — inspection LINE, never the visit aggregate)', () => {
+  const IC = require('../services/inspection-credit');
+  const fakeDb = ({ estimate = null, addons = [] } = {}) => {
+    const db = (table) => ({
+      where: () => ({
+        first: async () => (table === 'estimates' ? estimate : null),
+        select: async () => (table === 'scheduled_service_addons' ? addons : []),
+      }),
+    });
+    return db;
+  };
+
+  test('a grouped booking credits the primary line net of its line discount, not the group total', async () => {
+    const svc = { id: 'v1', estimated_price: 275, primary_line_price: 75, line_discount_dollars: 0 };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), svc)).toBe(75);
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { ...svc, line_discount_dollars: 10 })).toBe(65);
+  });
+
+  test('an estimate-accepted visit credits the estimate\'s inspection row', async () => {
+    const estimate = { id: 'est-1', estimate_data: { result: { oneTime: { total: 425, items: [
+      { service: 'rodent_inspection', name: 'Rodent Inspection', price: 125 },
+      { service: 'rodent_trapping', name: 'Rodent Trapping', price: 300 },
+    ] } } } };
+    const svc = { id: 'v2', estimated_price: 425, source_estimate_id: 'est-1' };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ estimate }), svc)).toBe(125);
+  });
+
+  test('a legacy grouped row with no primary line credits the parent price minus its add-ons', async () => {
+    const svc = { id: 'v3', estimated_price: 275 };
+    expect(await IC.soldInspectionAmountForVisit(fakeDb({ addons: [{ estimated_price: 200 }] }), svc)).toBe(75);
+  });
+
+  test('nothing sold → null (caller falls back to the configured fee); lookup errors are soft', async () => {
+    expect(await IC.soldInspectionAmountForVisit(fakeDb(), { id: 'v4' })).toBeNull();
+    const throwingDb = () => { throw new Error('db down'); };
+    expect(await IC.soldInspectionAmountForVisit(throwingDb, { id: 'v5', estimated_price: 75 })).toBeNull();
+    expect(IC.closeoutCreditAmountForServiceKey('rodent_inspection', null))
+      .toBe(IC.configuredCreditAmountForServiceKey('rodent_inspection'));
   });
 });

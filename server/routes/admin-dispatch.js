@@ -5430,6 +5430,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       monthlyRate: svc.cust_monthly_rate,
       billingMode: svc.cust_billing_mode,
     });
+    // What the INSPECTION LINE itself sold for — not the visit total: a
+    // grouped appointment's estimated_price is the whole group (primary +
+    // add-ons), so freezing invoiceAmount as the inspection credit would
+    // credit the add-ons too (codex #3521 r3 P1). Read-only, fail-soft
+    // (null → the closeout falls back to the configured fee).
+    const soldInspectionAmount = await require('../services/inspection-credit')
+      .soldInspectionAmountForVisit(db, svc);
     // Third-party Bill-To resolution — moved ABOVE the tax freeze (codex
     // pre-push P0): the frozen completion rate must be derived for the
     // entity that OWES it. Resolving the payer after freezing let a service
@@ -6675,7 +6682,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
                     // amount, so an inspection accepted at $125 before the
                     // fee dropped still freezes $125 (codex #3521 r1 P0);
                     // the configured fee only when nothing was sold.
-                    amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, invoiceAmount),
+                    amount: InspectionCredit.closeoutCreditAmountForServiceKey(completionProfile?.serviceKey || null, soldInspectionAmount),
                     windowDays: InspectionCredit.creditWindowDaysForServiceKey(completionProfile?.serviceKey || null),
                     // The RESOLVED key rides the frozen terms (r35 P0) so
                     // recovery classifies standing-promise offers even for
@@ -6765,7 +6772,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
               || effectiveCompletionProfile?.serviceKey !== completionProfile?.serviceKey)) {
               serviceData.inspectionCreditOptIn = true;
               serviceData.inspectionCreditTerms = {
-                amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, invoiceAmount),
+                amount: IC.closeoutCreditAmountForServiceKey(effectiveCompletionProfile?.serviceKey || null, soldInspectionAmount),
                 windowDays: IC.creditWindowDaysForServiceKey(effectiveCompletionProfile?.serviceKey || null),
                 serviceKey: effectiveCompletionProfile?.serviceKey || null,
               };
