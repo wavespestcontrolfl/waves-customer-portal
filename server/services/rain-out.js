@@ -1761,7 +1761,34 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
             : null;
-          if (Array.isArray(seriesResult?.warnings)) memberWarnings.push(...seriesResult.warnings);
+          if (Array.isArray(seriesResult?.warnings) && seriesResult.warnings.length) {
+            memberWarnings.push(...seriesResult.warnings);
+            // A series shift that COMMITTED onto occupied windows on other
+            // dates (advisory) is not visible from today's board — file the
+            // same durable schedule_conflict card the unassigned-sibling
+            // path uses (existing mechanism), naming every clashing date,
+            // so those assigned double-bookings stay actionable after the
+            // sheet closes.
+            const clashDates = [...new Set(seriesResult.warnings
+              .map((w) => (String(w).match(/\d{4}-\d{2}-\d{2}/) || [])[0])
+              .filter(Boolean))].sort();
+            if (clashDates.length) {
+              try {
+                const NotificationService = require('./notification-service');
+                const card = await NotificationService.notifyAdmin(
+                  'schedule_conflict',
+                  'Rain-out series shift overlaps other visits',
+                  `A rain-out shifted a recurring series with its moved visit; ${clashDates.length} occurrence(s) now overlap other appointments and were kept on the calendar (${clashDates.join(', ')}). Check those days' routes from dispatch.`,
+                  { metadata: { scheduledServiceId: job.id, customerId: job.customer_id || null, overlapDates: clashDates, targetDate: target.date, reasonCode } },
+                );
+                if (!card) {
+                  logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — series overlaps on ${clashDates.join(', ')} with no admin card`);
+                }
+              } catch (notifyErr) {
+                logger.error(`[rain-out] schedule_conflict (series overlap) notification failed for ${job.id}: ${notifyErr.message}`);
+              }
+            }
+          }
         } catch (err) {
           logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
         }

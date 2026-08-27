@@ -879,6 +879,26 @@ describe('rain-out service', () => {
       expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-06-12'), expect.stringContaining('2026-09-12')]);
     });
 
+    test('gate on: a series shift that committed overlaps on other dates files ONE durable schedule_conflict card naming every clashing date', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        success: true,
+        rescheduledOccurrences: [],
+        warnings: [
+          'Heads up: this booking overlaps another appointment on the schedule on 2026-09-12 — both are kept on the calendar.',
+          'Heads up: this booking overlaps another appointment on the schedule on 2026-12-12 — both are kept on the calendar.',
+        ],
+      });
+
+      await RainOut.commit(DAY_MOVE_ARGS);
+
+      const cards = NotificationService.notifyAdmin.mock.calls.filter((c) => c[0] === 'schedule_conflict');
+      expect(cards).toHaveLength(1);
+      expect(cards[0][2]).toContain('2026-09-12, 2026-12-12');
+      expect(cards[0][3].metadata).toMatchObject({ scheduledServiceId: 'svc-1', overlapDates: ['2026-09-12', '2026-12-12'] });
+    });
+
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
       process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
       wireRecurring();
@@ -1429,7 +1449,7 @@ describe('rain-out service', () => {
         { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-3'] });
     });
 
-    test('a batch member RE-MOVED by another actor into a later target BLOCKS that later move (no moved-ids exclusion)', async () => {
+    test('a batch member RE-MOVED by another actor into a later target COMMITS that later move WITH a warning (no moved-ids exclusion; overlaps are advisory)', async () => {
       // Same-day forward push, tail-first: the sibling (svc-2) moves first
       // and COMMITS at 15:30-17:30. While the anchor is still unprocessed,
       // another actor (customer /reschedule link, dispatch board) RE-MOVES
@@ -1439,7 +1459,7 @@ describe('rain-out service', () => {
       // invisible purely because its id sat in the moved set, and the
       // anchor silently double-booked on top of it. Now the anchor excludes
       // ONLY itself, the rebooker's rung-1-locked occupancy probe sees the
-      // committed row, and the move fails SLOT_TAKEN — a loud per-member
+      // committed row, and the move COMMITS with a dated warning — a visible per-member
       // failure instead of a silent overlap.
       const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
       wireDb({
@@ -1453,10 +1473,9 @@ describe('rain-out service', () => {
       });
       SmartRebooker.reschedule
         .mockResolvedValueOnce({ success: true }) // svc-2 commits at 15:30
-        .mockRejectedValueOnce(Object.assign(
-          new Error('That window conflicts with another job on the technician\'s route'),
-          { statusCode: 409, code: 'SLOT_TAKEN' },
-        )); // anchor blocked by svc-2's re-moved position
+        // Anchor lands on svc-2's re-moved position: under the advisory
+        // contract the rebooker COMMITS it and returns the dated warning.
+        .mockResolvedValueOnce({ success: true, warnings: ['Heads up: this booking overlaps another appointment on the schedule on 2026-06-11 — both are kept on the calendar.'] });
 
       const result = await RainOut.commit({
         serviceId: 'svc-1',
@@ -1475,16 +1494,17 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
         { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
-      // Loud partial result: the blocked anchor is reported failed; the
-      // sibling's committed move stands.
+      // Both moves commit; the anchor's overlap is surfaced, never a failure.
       expect(result.ok).toBe(true);
-      expect(result.movedCount).toBe(1);
-      expect(result.failedCount).toBe(1);
-      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: false, statusCode: 409 });
+      expect(result.movedCount).toBe(2);
+      expect(result.failedCount).toBe(0);
+      expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true, warnings: [expect.stringContaining('2026-06-11')] });
       expect(result.results.find((r) => r.id === 'svc-2')).toMatchObject({ ok: true });
+      expect(result.overlapCount).toBe(1);
+      expect(result.overlapWarnings).toEqual([expect.stringContaining('2026-06-11')]);
     });
 
-    test('a not-yet-processed member genuinely occupying an earlier target BLOCKS that move (no anticipatory exclusion)', async () => {
+    test('a not-yet-processed member genuinely occupying an earlier target COMMITS that move WITH a warning (no anticipatory exclusion; overlaps are advisory)', async () => {
       // Same-day forward push, tail-first: the sibling (svc-2) moves first,
       // while the ANCHOR (svc-1) is still unprocessed. Another actor
       // (customer /reschedule link, dispatch) has concurrently moved svc-1
@@ -1493,7 +1513,7 @@ describe('rain-out service', () => {
       // committed row — a silent double-book no later bookkeeping could
       // undo. Now svc-1 is NOT in svc-2's exclusion set, the rebooker's
       // occupancy probe (rung-1-locked, committed rows visible) sees it and
-      // throws SLOT_TAKEN — a loud per-member failure instead.
+      // commits WITH a dated warning — a visible per-member overlap instead.
       const logRow = chain({ first: jest.fn().mockResolvedValue({ id: 'log-1' }) });
       wireDb({
         scheduled_services: [
@@ -1505,10 +1525,9 @@ describe('rain-out service', () => {
         reschedule_log: [logRow, chain()],
       });
       SmartRebooker.reschedule
-        .mockRejectedValueOnce(Object.assign(
-          new Error('That window conflicts with another job on the technician\'s route'),
-          { statusCode: 409, code: 'SLOT_TAKEN' },
-        ))
+        // svc-2 lands on the concurrently-moved anchor's window: the advisory
+        // rebooker COMMITS it and returns the dated warning.
+        .mockResolvedValueOnce({ success: true, warnings: ['Heads up: this booking overlaps another appointment on the schedule on 2026-06-11 — both are kept on the calendar.'] })
         .mockResolvedValueOnce({ success: true });
 
       const result = await RainOut.commit({
@@ -1530,13 +1549,14 @@ describe('rain-out service', () => {
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
         { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
-      // Loud partial result: the clashing member is reported failed, the
+      // Both moves commit; the clashing member's overlap is surfaced, the
       // rest of the batch is not stranded.
       expect(result.ok).toBe(true);
-      expect(result.movedCount).toBe(1);
-      expect(result.failedCount).toBe(1);
-      expect(result.results.find((r) => r.id === 'svc-2')).toMatchObject({ ok: false, statusCode: 409 });
+      expect(result.movedCount).toBe(2);
+      expect(result.failedCount).toBe(0);
+      expect(result.results.find((r) => r.id === 'svc-2')).toMatchObject({ ok: true, warnings: [expect.stringContaining('2026-06-11')] });
       expect(result.results.find((r) => r.id === 'svc-1')).toMatchObject({ ok: true });
+      expect(result.overlapCount).toBe(1);
     });
   });
 
