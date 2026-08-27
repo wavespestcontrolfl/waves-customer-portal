@@ -36,8 +36,12 @@ describe("MorePage — the mobile Settings tab", () => {
     expect(screen.getByRole("link", { name: /Blackout Days/ })).toHaveAttribute("href", "/admin/settings?tab=blackout-days");
     // …and there is no single "Settings" row pointing at a second index page.
     expect(screen.queryByRole("link", { name: /^Settings$/ })).not.toBeInTheDocument();
-    // Ordinary destinations are still there.
-    expect(screen.getByRole("link", { name: /Invoices/ })).toHaveAttribute("href", "/admin/invoices");
+    // Standalone leaves that only the old mobile Settings index linked survive…
+    expect(screen.getByRole("link", { name: /Early feature access/ })).toHaveAttribute("href", "/admin/_design-system/flags");
+    // …while destinations already in the nav sections are not repeated.
+    expect(screen.getAllByRole("link", { name: /^Invoices$/ })).toHaveLength(1);
+    expect(screen.getByRole("link", { name: /^Invoices$/ })).toHaveAttribute("href", "/admin/invoices");
+    expect(screen.queryByRole("link", { name: /^Payments$/ })).not.toBeInTheDocument();
   });
 
   it("hides owner-only Settings leaves from a technician", () => {

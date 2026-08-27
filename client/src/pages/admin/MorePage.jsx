@@ -10,15 +10,21 @@ import { refetchFlags, useFeatureFlag } from "../../hooks/useFeatureFlag";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import useIsMobile from "../../hooks/useIsMobile";
 import { markUsageSource } from "../../lib/adminUsage";
-import { ADMIN_MOBILE_MORE_SECTIONS } from "../../config/adminNavigation";
+import { ADMIN_MOBILE_MORE_SECTIONS, ADMIN_MOBILE_TABS } from "../../config/adminNavigation";
 import { MOBILE_SETTINGS_SECTIONS } from "../../components/admin/MobileSettingsPage";
 
-// The Settings leaves this page lists inline — only the ones that live
-// INSIDE SettingsPage (?tab=). Standalone destinations in that list
-// (Invoices, Banking, Communications, flags) already appear in the nav
-// sections above, so they are not repeated here.
-const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter((sec) =>
-  sec.to.startsWith("/admin/settings?tab="),
+// The Settings leaves this page lists inline: every entry of the former
+// mobile Settings index whose destination is NOT already a nav row or tab
+// on this surface (Invoices, Banking, Communications are; the SettingsPage
+// ?tab= leaves and the standalone Early-feature-access route are not).
+// Derived, not hand-picked, so a destination can't silently vanish from
+// mobile (codex P1: the flags route was dropped by a ?tab=-only filter).
+const NAV_PATHS = new Set(
+  [...ADMIN_MOBILE_TABS, ...ADMIN_MOBILE_MORE_SECTIONS.flatMap(({ items }) => items)]
+    .map(({ path }) => path.split("?")[0]),
+);
+const SETTINGS_LEAVES = MOBILE_SETTINGS_SECTIONS.filter(
+  (sec) => !NAV_PATHS.has(sec.to.split("?")[0]) || sec.to.includes("?tab="),
 );
 
 export default function MorePage() {
