@@ -880,8 +880,14 @@ async function maybeAutoMerge(run, pr) {
     if (!Array.isArray(prFiles) || prFiles.length >= 3000) {
       throw new Error('PR file inventory unavailable or possibly truncated');
     }
-    const blogFiles = (Array.isArray(prFiles) ? prFiles : []).filter((f) => (
-      /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
+    // ALL live content markdown on the head — refresh runs legitimately
+    // target non-blog files (src/content/services/*.md etc.), and their
+    // competitor content must be judged the same way (PR r5 P1: an
+    // intercept refresh of a services page previously cleared both flags
+    // unevaluated).
+    const contentFiles = prFiles.filter((f) => (
+      /^src\/content\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status !== 'removed'));
+    const blogFiles = contentFiles.filter((f) => /^src\/content\/blog\//.test(String(f?.filename || '')));
     // Bind the run's single-brief authorization to its OWN generated file
     // (hook r10 P1): a new_supporting_blog PR must carry exactly one live
     // blog file, and its path must be the one the run's canonical routes to
@@ -897,7 +903,10 @@ async function maybeAutoMerge(run, pr) {
     if (run.action_type === 'new_supporting_blog') {
       let boundOk = false;
       try {
-        if (blogFiles.length === 1) {
+        // A new-blog PR commits exactly its own post — any OTHER content
+        // markdown (a services page, another post) is out of this run's
+        // authorization and withholds.
+        if (blogFiles.length === 1 && contentFiles.length === 1) {
           let dp = run.draft_payload;
           if (typeof dp === 'string') dp = JSON.parse(dp);
           const canon = dp?.frontmatter?.canonical;
@@ -911,13 +920,20 @@ async function maybeAutoMerge(run, pr) {
           // in the loop below.
           const routeMatches = (name) => fileRoute(name) === expectedPath
             || (Boolean(leaf) && fileRoute(name) === `/${leaf}/`);
-          // REMOVED blog rows are legitimate only as the expected post's own
-          // same-route .md↔.mdx migration counterpart — a deletion of any
-          // OTHER blog file must not ride this PR's authorization (PR r4 P1).
-          const removedBlog = prFiles.filter((f) => (
-            /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(f?.filename || '')) && f.status === 'removed'));
-          const removedOk = removedBlog.every((f) => routeMatches(f.filename));
-          if (removedOk && routeMatches(blogFiles[0].filename)) {
+          // Blog rows LEAVING the tree are legitimate only as the expected
+          // post's own same-route .md↔.mdx migration counterpart — a
+          // deletion of any OTHER blog file must not ride this PR's
+          // authorization (PR r4 P1). GitHub reports a RENAME as one row
+          // whose previous_filename is the deleted source (no separate
+          // 'removed' row) — treat every previous_filename as a removal too
+          // (PR r5 P1: renaming an unrelated post into the expected route
+          // would otherwise delete the source unevaluated).
+          const departing = [
+            ...prFiles.filter((f) => f.status === 'removed').map((f) => f.filename),
+            ...prFiles.filter((f) => f.previous_filename).map((f) => f.previous_filename),
+          ].filter((name) => /^src\/content\/blog\/.+\.(md|mdx)$/.test(String(name || '')));
+          const departingOk = departing.every((name) => routeMatches(name));
+          if (departingOk && routeMatches(blogFiles[0].filename)) {
             boundOk = true;
             boundExpectedPath = expectedPath;
           }
@@ -928,7 +944,7 @@ async function maybeAutoMerge(run, pr) {
         return { pending: true, reason: 'named_competitor_head_gate_failed' };
       }
     }
-    if (blogFiles.length) {
+    if (contentFiles.length) {
       const fmMod = require('../content-astro/frontmatter');
       const comparisonMod = require('./comparison-table-gate');
       const runner = require('./autonomous-runner');
@@ -946,7 +962,7 @@ async function maybeAutoMerge(run, pr) {
       } catch (_) { opText = ''; }
       comparisonRequiresReview = false;
       comparisonBlocked = false;
-      for (const f of blogFiles) {
+      for (const f of contentFiles) {
         const file = await gh.getFile(f.filename, pr.head?.sha);
         // An unreadable file (404/null content) must WITHHOLD, not evaluate
         // as an empty — clean — draft (hook r8 P1).
@@ -956,7 +972,7 @@ async function maybeAutoMerge(run, pr) {
         // alike, the fetched file's slug must route to the run's expected
         // path, or the binding above was satisfied by filename alone
         // (PR r2 + r4 P1s). Missing/foreign slug fails closed.
-        if (boundExpectedPath) {
+        if (boundExpectedPath && /^src\/content\/blog\//.test(String(f.filename || ''))) {
           const rawSlug = String((parsed && parsed.data && parsed.data.slug) || '');
           const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
           if (!rawSlug.trim() || slugPath !== boundExpectedPath) { comparisonBlocked = true; break; }
@@ -968,12 +984,12 @@ async function maybeAutoMerge(run, pr) {
         if (!verdict || verdict.pass !== true) { comparisonBlocked = true; break; }
         if (verdict.requiresHumanReview === true) comparisonRequiresReview = true;
       }
-    } else if (Array.isArray(prFiles) && run.action_type !== 'new_supporting_blog') {
-      // No blog content in the PR and not the blog lane: nothing for the
-      // comparison gate to judge. A new_supporting_blog head with NO file
-      // under src/content/blog/ keeps the fail-closed default instead — its
-      // generated file was deleted or moved out of the gated tree (hook r8
-      // P1), which is never a state this lane should auto-merge.
+    } else if (run.action_type !== 'new_supporting_blog') {
+      // No content markdown in the PR at all and not the blog lane: nothing
+      // for the comparison gate to judge. A new_supporting_blog head with NO
+      // content file keeps the fail-closed default instead — its generated
+      // file was deleted or moved out of the gated tree (hook r8 P1), which
+      // is never a state this lane should auto-merge.
       comparisonRequiresReview = false;
       comparisonBlocked = false;
     }

@@ -816,6 +816,55 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
   });
 
+  test('a RENAME from an unrelated blog path withholds; a same-route .md→.mdx migration rename merges (PR r5 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    // GitHub reports a rename as ONE row: filename = destination,
+    // previous_filename = deleted source (no separate 'removed' row).
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/pest-control/unrelated-source.mdx' },
+    ]);
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+
+    // Same-route migration rename is legitimate.
+    jest.clearAllMocks();
+    pagesPoll.liveUrlResponds.mockResolvedValue(true);
+    pagesPoll.latestSuccessfulProductionDeployment.mockResolvedValue({ id: 'prod-deploy-1' });
+    pagesPoll.deploymentCreatedAtMs.mockImplementation(() => Date.now() + 60000);
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'renamed', previous_filename: 'src/content/blog/blog/test-post.md' },
+    ]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res2 = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
+    expect(res2.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a new-blog PR touching a NON-blog content file is withheld (out of the run authorization)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([
+      { filename: 'src/content/blog/blog/test-post.mdx', status: 'added' },
+      { filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' },
+    ]);
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('a flat file whose FRONTMATTER slug routes elsewhere is withheld — filename alone never binds (PR r2 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
@@ -866,6 +915,35 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
     expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a refresh head touching a services page IS evaluated — competitor-flagged content without eligibility is withheld (PR r5 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun({ action_type: 'refresh_existing_page' })] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' }]);
+    const gate = require('../services/content/comparison-table-gate');
+    jest.spyOn(gate, 'evaluate').mockReturnValue({ pass: true, findings: [], requiresHumanReview: true });
+    try {
+      const res = await poller.pollPending();
+      expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_autopublish_revoked' });
+      expect(gh.mergePr).not.toHaveBeenCalled();
+    } finally { gate.evaluate.mockRestore(); }
+  });
+
+  test('a refresh head whose services page is competitor-free merges normally', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun({ action_type: 'refresh_existing_page' })] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/services/pest-control-venice-fl.md', status: 'modified' }]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Pest Control Venice FL\n---\n\nSeasonal service details for Venice homes.' });
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
   test('head gate fails CLOSED when the PR files cannot be listed (no merge)', async () => {

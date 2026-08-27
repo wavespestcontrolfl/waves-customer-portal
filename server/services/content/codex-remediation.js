@@ -68,8 +68,8 @@ const CODEX_LOGINS = new Set(['chatgpt-codex-connector', 'chatgpt-codex-connecto
 
 // Owner directive 2026-08-26: the SINGLE scoped named-competitor autopublish
 // eligibility predicate lives in comparison-table-gate (PR #3508 r4 P1) —
-// re-exported here so every remediation call site and the PR poller share
-// the identical authorization decision.
+// every call site (runner, both remediation parks, the PR poller's merge
+// gate) imports it from there.
 const { namedCompetitorAutopublishEligible } = require('./comparison-table-gate');
 
 function remediationEnabled() {
@@ -2253,7 +2253,6 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
 }
 
 module.exports = {
-  namedCompetitorAutopublishEligible,
   maybeRemediateBlogPost,
   maybeRemediateAutonomousPr,
   runRemediationForPr,
