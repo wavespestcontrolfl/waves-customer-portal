@@ -31,7 +31,13 @@ const DISMISS_WINDOW_HOURS = 24;
 //
 // Logs and falls back to empty on any failure — flaky alert query must
 // never break the bell.
-async function liveAlertNotifications(adminUserId) {
+//
+// trx (optional): run the per-admin dismissal queries on an existing
+// transaction's connection (see getUnreadCountForAdmin). NOT threaded
+// into computeDashboardAlerts — that is a shared 30s-memoized global
+// whose pool usage is identical to what the bell route already did on
+// main before this feature; a transaction handle would defeat the memo.
+async function liveAlertNotifications(adminUserId, trx = null) {
   let alerts = [];
   try {
     const result = await computeDashboardAlerts();
@@ -55,7 +61,7 @@ async function liveAlertNotifications(adminUserId) {
   // active window. DISTINCT ON keeps one row per alert_id (the freshest).
   let dismissals = [];
   try {
-    dismissals = await db.raw(
+    dismissals = await (trx || db).raw(
       `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_members, dismissed_at
        FROM dashboard_alert_dismissed
        WHERE admin_user_id = ?
@@ -71,7 +77,7 @@ async function liveAlertNotifications(adminUserId) {
       // alerts — a write-side fallback alone would record rows this read
       // then fails to load, and the bell badge would bounce back anyway.
       try {
-        dismissals = await db.raw(
+        dismissals = await (trx || db).raw(
           `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
            FROM dashboard_alert_dismissed
            WHERE admin_user_id = ?
@@ -148,14 +154,20 @@ function isLiveDuplicate(persisted, liveKeys) {
 // on, or a non-admin role, excludes the live overlay entirely (owner-only
 // finance alerts are hidden from scoped feeds, so their persisted rows
 // must not be re-subtracted either).
-async function computeUnreadCount({ adminUserId, role } = {}) {
+// trx (optional): run every query except the shared memoized
+// computeDashboardAlerts on the caller's transaction connection, so an
+// advisory-lock section never borrows a second pool connection while
+// holding one (codex #3541 round 11 — twenty concurrent staff polls
+// could otherwise hold twenty transactions all waiting for compute
+// connections).
+async function computeUnreadCount({ adminUserId, role } = {}, trx = null) {
   const liveCtx = isBellPolicyEnabled() || role !== 'admin'
     ? { live: [], liveKeys: new Set() }
-    : await liveAlertNotifications(adminUserId);
-  let persistedCount = await NotificationService.getAdminUnreadCount({ role });
+    : await liveAlertNotifications(adminUserId, trx);
+  let persistedCount = await NotificationService.getAdminUnreadCount({ role }, trx);
   if (liveCtx.liveKeys.size > 0) {
     try {
-      const unreadDashboardAlerts = await db('notifications')
+      const unreadDashboardAlerts = await (trx || db)('notifications')
         .where({ recipient_type: 'admin', category: 'alert' })
         .whereNull('read_at');
       const dupes = unreadDashboardAlerts.filter((n) => isLiveDuplicate(n, liveCtx.liveKeys)).length;
@@ -208,7 +220,11 @@ async function runBadgeSection(key, fn) {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`${BADGE_LOCK_NS}${key}`]);
     let result;
     try {
-      result = await fn();
+      // fn runs its queries on THIS transaction's connection (round 11):
+      // a section must never borrow a second pool connection while
+      // holding one, or concurrent sections for distinct admins could
+      // hold the whole pool waiting on each other's compute.
+      result = await fn(trx);
     } catch (err) {
       err.badgeComputeError = true; // fn's own failure — never retried below
       throw err;
@@ -242,7 +258,7 @@ async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandon
       if (err && err.badgeComputeError) throw err;
       // Same µs unit as the locked path so a fallback stamp still competes.
       logger.warn(`[admin-unread] badge ordering lock unavailable (${err.message}) — unserialized stamp`);
-      return { ...(await fn()), at: Date.now() * 1000 };
+      return { ...(await fn(null)), at: Date.now() * 1000 };
     }
   };
   if (!queued) return attempt();
@@ -277,8 +293,8 @@ async function withBadgeOrderingStamp(adminUserId, fn, { queued = false, abandon
 // fan-out only); opts.abandoned lets a queued caller that already gave
 // up cancel the task before it starts.
 async function getUnreadCountForAdmin({ adminUserId, role } = {}, opts = {}) {
-  return withBadgeOrderingStamp(adminUserId, async () => ({
-    count: await computeUnreadCount({ adminUserId, role }),
+  return withBadgeOrderingStamp(adminUserId, async (trx) => ({
+    count: await computeUnreadCount({ adminUserId, role }, trx),
   }), opts);
 }
 
