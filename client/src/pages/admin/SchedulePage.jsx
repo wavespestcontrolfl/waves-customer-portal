@@ -223,6 +223,29 @@ const AREAS_BY_SERVICE = {
     "Back yard",
     "Side yards",
   ],
+  // Termite and mosquito previously fell back to the pest room list
+  // (Kitchen/Bathrooms/Trash area on a bait-station visit). Vocabularies
+  // are service-native; labels never contain commas (comma-joined per
+  // product) — owner directive 2026-08-27.
+  termite: [
+    "Foundation perimeter",
+    "Bait stations",
+    "Garage / slab edge",
+    "Crawlspace",
+    "Attic",
+    "Exterior walls",
+    "Wood contact points",
+    "Interior slab penetrations",
+  ],
+  mosquito: [
+    "Yard vegetation",
+    "Shrubs & landscape beds",
+    "Under deck / patio",
+    "Fence line",
+    "Standing water areas",
+    "Property perimeter",
+    "Screened enclosure",
+  ],
 };
 // Per-product treatment areas are multi-select but stored as ONE
 // comma-joined string in the existing applicationArea field
@@ -6808,7 +6831,13 @@ export function TypedFindingsSection({
         )}
       </div>
       <ProjectFindingFieldInput
-        field={field}
+        /* Owner directive 2026-08-27: no chip walls anywhere on the
+           completion panel — chips-type findings render as the same
+           multi_select dropdown the T&S closeout proved out (same
+           comma-joined storage, so drafts/payload/validation are
+           untouched). Scoped here so chips stay chips on non-completion
+           surfaces. */
+        field={field.type === "chips" ? { ...field, type: "multi_select" } : field}
         id={`typed-finding-${schema.type}-${field.key}`}
         name={`structuredFindings.${field.key}`}
         value={values[field.key] || ""}
@@ -6856,38 +6885,28 @@ export function TypedFindingsSection({
             {schema.activity.label}
             <span style={{ color: requiredColor }}> *</span>
           </div>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {[0, 1, 2, 3, 4, 5].map((n) => {
-              const selected = activityScore === n;
-              return (
-                <button
-                  key={n}
-                  type="button"
-                  onClick={() => onActivityTap(n)}
-                  aria-pressed={selected}
-                  aria-label={`${schema.activity.label}: ${scoreLabels[n] || n}`}
-                  style={{
-                    minWidth: 64,
-                    height: 44,
-                    padding: "0 10px",
-                    borderRadius: 10,
-                    background: selected
-                      ? mobile
-                        ? accent
-                        : accent + "18"
-                      : cardBg,
-                    color: selected ? accentFg : textColor,
-                    border: `1px solid ${selected ? accent : hairline}`,
-                    fontSize: 14,
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  {scoreLabels[n] || n}
-                </button>
-              );
-            })}
-          </div>
+          {/* Gauge pills → the same select treatment as every other field
+              (owner directive 2026-08-27). Stores the 0–5 score through the
+              existing onActivityTap contract, so the prefill-until-touched
+              behavior is unchanged. */}
+          <ProjectFindingFieldInput
+            field={{
+              key: "activity_score",
+              label: schema.activity.label,
+              type: "select",
+              options: [0, 1, 2, 3, 4, 5].map((n) => ({
+                value: String(n),
+                label: scoreLabels[n] || String(n),
+              })),
+            }}
+            id={`typed-activity-${schema.type}`}
+            name="activityScore"
+            value={activityScore == null ? "" : String(activityScore)}
+            onChange={(value) => {
+              if (value !== "") onActivityTap(Number(value));
+            }}
+            inputStyle={{ width: "100%", boxSizing: "border-box" }}
+          />
           <div style={{ fontSize: 12, color: mutedColor, marginTop: 6 }}>
             {activityScoreTouched
               ? "Set by technician"
@@ -6902,13 +6921,13 @@ export function TypedFindingsSection({
             <span style={{ color: requiredColor }}> *</span>
           )}
         </div>
-        {schema.type === "tree_shrub" ? (
-          /* Owner directive 2026-07-21 round 2: NO pills/chips on the T&S
-             closeout — every selection is a dropdown like the findings
-             fields (and lawn), so the whole form closes out in seconds.
-             Same toggle contract as the chip row: the diff between the
-             dropdown's value and current state is the one toggled chip. */
-          <ProjectFindingFieldInput
+        {/* Owner directive 2026-07-21 round 2 (T&S), extended panel-wide
+            2026-08-27: NO pills/chips on the closeout — every selection is
+            a dropdown like the findings fields, so the whole form closes
+            out in seconds. Same toggle contract as the old chip row: the
+            diff between the dropdown's value and current state is the set
+            of toggled chips. */}
+        <ProjectFindingFieldInput
             field={{
               key: "next_steps",
               label: "Next steps",
@@ -6943,48 +6962,6 @@ export function TypedFindingsSection({
               return null;
             }}
           />
-        ) : (
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-          {(schema.nextStepChips || []).map((chip) => {
-            const selected = nextStepChips.includes(chip);
-            // A chip that conflicts with the recorded findings is disabled
-            // (server would reject it) — but a stale selection stays
-            // tappable so the tech can deselect it after changing a value.
-            const conflict = typedNextStepChipConflict(schema.type, chip, values);
-            const disabled = !!conflict && !selected;
-            return (
-              <button
-                key={chip}
-                type="button"
-                onClick={disabled ? undefined : () => onToggleChip(chip)}
-                aria-pressed={selected}
-                aria-disabled={disabled}
-                disabled={disabled}
-                title={conflict || undefined}
-                style={{
-                  height: 36,
-                  padding: "0 14px",
-                  borderRadius: 999,
-                  background: selected
-                    ? mobile
-                      ? accent
-                      : accent + "18"
-                    : cardBg,
-                  color: selected ? accentFg : textColor,
-                  border: `1px solid ${selected ? accent : hairline}`,
-                  fontSize: 14,
-                  fontWeight: 500,
-                  cursor: disabled ? "not-allowed" : "pointer",
-                  opacity: disabled ? 0.45 : 1,
-                  whiteSpace: "nowrap",
-                }}
-              >
-                {chip}
-              </button>
-            );
-          })}
-        </div>
-        )}
       </div>
       {/* Recommendations textarea stays PRIMARY-only: companion sections pass
           onRecommendationsChange={null} and are chips-first deterministic copy
@@ -10271,6 +10248,10 @@ export function CompletionPanel({
     || [
       "rodent_trapping", "rodent_exclusion", "rodent_sanitation",
       "rodent_inspection", "rodent_bait_station", "bed_bug",
+      // Station visits have no meaningful "areas treated" — the station
+      // map IS the coverage story (owner 2026-08-27). Liquid/foam/trench
+      // termite lanes keep the termite area list.
+      "termite_bait_station",
     ].includes(service.completionProfile?.findingsType);
 
   // Auto-run the AI photo review once enough closeout photos are captured. The
@@ -15386,21 +15367,22 @@ export function CompletionPanel({
             {!quickComplete && !areasTreatedHidden && (
               <Field label="Areas treated">
                 {" "}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {areaOptions.map((area) => {
-                    const selected = areasServiced.includes(area);
-                    return (
-                      <Chip
-                        key={area}
-                        selected={selected}
-                        onClick={() => toggleArea(area)}
-                      >
-                        {selected ? "" : ""}
-                        {area}
-                      </Chip>
-                    );
-                  })}
-                </div>
+                {/* Owner directive 2026-08-27: every multi-choice control is
+                    the checkbox-dropdown, no chip walls. Diff-toggle through
+                    toggleArea so its side effects stay intact. */}
+                <ProjectFindingFieldInput
+                  field={{ key: "areas_treated", label: "Areas treated", type: "multi_select", options: areaOptions }}
+                  id="cp-areas-treated-mobile"
+                  name="areasServiced"
+                  value={areasServiced.join(", ")}
+                  onChange={(value) => {
+                    const next = String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+                    const added = next.filter((a) => !areasServiced.includes(a));
+                    const removed = areasServiced.filter((a) => !next.includes(a));
+                    [...added, ...removed].forEach((area) => toggleArea(area));
+                  }}
+                  inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
               </Field>
             )}
             {/* The customer-facing report summary is now auto-generated from the
@@ -15410,35 +15392,20 @@ export function CompletionPanel({
             {!quickComplete && (
               <Field label="Customer interaction">
                 {" "}
-                <div
-                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
-                >
-                  {CUSTOMER_INTERACTION_OPTIONS.map((opt) => {
-                    const selected = customerInteraction === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() => setCustomerInteraction(opt.value)}
-                        style={{
-                          textAlign: "left",
-                          padding: "12px 16px",
-                          borderRadius: 12,
-                          background: selected ? M.ink : M.card,
-                          color: selected ? M.actionFg : M.ink,
-                          border: `1px solid ${selected ? M.ink : M.hairline}`,
-                          fontFamily: font,
-                          fontSize: 15,
-                          fontWeight: 500,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {selected ? "" : ""}
-                        {opt.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                {/* Single-choice → native select, same no-pills directive. */}
+                <ProjectFindingFieldInput
+                  field={{
+                    key: "customer_interaction",
+                    label: "Customer interaction",
+                    type: "select",
+                    options: CUSTOMER_INTERACTION_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
+                  }}
+                  id="cp-customer-interaction-mobile"
+                  name="customerInteraction"
+                  value={customerInteraction || ""}
+                  onChange={(value) => setCustomerInteraction(value || null)}
+                  inputStyle={{ width: "100%", boxSizing: "border-box" }}
+                />
                 {isCustomerConcernInteraction(customerInteraction) && (
                   <input
                     type="text"
@@ -17561,31 +17528,21 @@ export function CompletionPanel({
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Areas Treated</label>{" "}
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {areaOptions.map((area) => {
-                  const selected = areasServiced.includes(area);
-                  return (
-                    <button
-                      key={area}
-                      onClick={() => toggleArea(area)}
-                      style={{
-                        padding: "6px 14px",
-                        borderRadius: 20,
-                        fontSize: 12,
-                        fontWeight: 500,
-                        cursor: "pointer",
-                        background: selected ? D.teal + "22" : D.card,
-                        color: selected ? D.teal : D.muted,
-                        border: `1px solid ${selected ? D.teal : D.border}`,
-                        transition: "all 0.15s",
-                      }}
-                    >
-                      {selected ? "\u2713 " : ""}
-                      {area}
-                    </button>
-                  );
-                })}
-              </div>
+              {/* Owner directive 2026-08-27: checkbox-dropdown, no chip
+                  walls \u2014 desktop kept in lockstep with mobile. */}
+              <ProjectFindingFieldInput
+                field={{ key: "areas_treated", label: "Areas treated", type: "multi_select", options: areaOptions }}
+                id="cp-areas-treated-desktop"
+                name="areasServiced"
+                value={areasServiced.join(", ")}
+                onChange={(value) => {
+                  const next = String(value || "").split(",").map((s) => s.trim()).filter(Boolean);
+                  const added = next.filter((a) => !areasServiced.includes(a));
+                  const removed = areasServiced.filter((a) => !next.includes(a));
+                  [...added, ...removed].forEach((area) => toggleArea(area));
+                }}
+                inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
             </div>
           )}
           {/* Customer recap + SMS preview removed (desktop) — the report summary is
@@ -17596,33 +17553,20 @@ export function CompletionPanel({
             <div style={{ marginBottom: 20 }}>
               {" "}
               <label style={labelStyle}>Customer Interaction</label>{" "}
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {CUSTOMER_INTERACTION_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    onClick={() => setCustomerInteraction(opt.value)}
-                    style={{
-                      padding: "10px 14px",
-                      borderRadius: 10,
-                      fontSize: 13,
-                      fontWeight: 500,
-                      cursor: "pointer",
-                      textAlign: "left",
-                      background:
-                        customerInteraction === opt.value
-                          ? D.teal + "18"
-                          : D.card,
-                      color:
-                        customerInteraction === opt.value ? D.teal : D.text,
-                      border: `1px solid ${customerInteraction === opt.value ? D.teal : D.border}`,
-                      transition: "all 0.15s",
-                    }}
-                  >
-                    {customerInteraction === opt.value ? "\u2713 " : ""}
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
+              {/* Single-choice \u2192 native select, same no-pills directive. */}
+              <ProjectFindingFieldInput
+                field={{
+                  key: "customer_interaction",
+                  label: "Customer interaction",
+                  type: "select",
+                  options: CUSTOMER_INTERACTION_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
+                }}
+                id="cp-customer-interaction-desktop"
+                name="customerInteraction"
+                value={customerInteraction || ""}
+                onChange={(value) => setCustomerInteraction(value || null)}
+                inputStyle={{ width: "100%", boxSizing: "border-box" }}
+              />
               {isCustomerConcernInteraction(customerInteraction) && (
                 <input
                   type="text"

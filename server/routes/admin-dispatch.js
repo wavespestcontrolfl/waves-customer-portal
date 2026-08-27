@@ -12537,6 +12537,32 @@ router.post('/:serviceId/complete', async (req, res, next) => {
 
     if (serviceReportEmailEligible({ serviceReportV1Delivery, suppressTypedCustomerComms }) && serviceReportEmailEnabled) {
       const latestNotes = parseJsonObject(record.structured_notes);
+      // Auto-publish tech-captured visual moments to the customer report
+      // (owner 2026-08-27, dark ship — kill switch GATE_AUTO_PUBLISH_VISUAL_MOMENTS).
+      // Moments insert as internal_only and nothing promoted them, so the
+      // report's Service Highlights never rendered. Promotion runs BEFORE
+      // the email enqueue so the attached PDF carries them; post-commit and
+      // fail-soft — a promotion error never blocks the completion.
+      if (!isInternalOnlyCompletion) {
+        try {
+          const { gateEnvValue } = require('../config/feature-gates');
+          if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {
+            const promoted = await db('visual_service_moments')
+              .where({ job_id: svc.id, visibility_status: 'internal_only' })
+              .whereNull('deleted_at')
+              .update({
+                visibility_status: 'approved_customer',
+                // The customer caption falls back to the AI caption so a
+                // promoted moment never renders captionless.
+                customer_caption: db.raw('COALESCE(customer_caption, ai_caption)'),
+                updated_at: db.fn.now(),
+              });
+            if (promoted) logger.info(`[dispatch] auto-published ${promoted} visual moment(s) for ${svc.id}`);
+          }
+        } catch (vmErr) {
+          logger.warn(`[dispatch] visual-moment auto-publish failed (non-blocking): ${vmErr.message}`);
+        }
+      }
       const emailAlreadyHandled = ['queued', 'sending', 'sent', 'skipped'].includes(latestNotes.serviceReportV1EmailStatus);
       if (!emailAlreadyHandled) {
         try {

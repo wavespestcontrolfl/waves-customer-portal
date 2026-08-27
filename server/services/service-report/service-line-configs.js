@@ -237,15 +237,37 @@ function isCockroachServiceType(serviceType) {
   return COCKROACH_SERVICE_TYPE_RE.test(text);
 }
 
+// Termite visits with no liquid/foam application — station checks, bait
+// monitoring, cartridge/installation work, inspections, warranty/bond
+// renewals — have no re-entry concept: nothing is sprayed, so a dry-down
+// countdown on the report is wrong (owner rule 2026-08-27). Liquid,
+// pre-treat, trenching, spot and drill-and-foam termite forms keep the
+// line's 30/120 defaults. Same normalize-then-match approach as the
+// cockroach override above so keyed catalog values match too.
+const TERMITE_NO_REENTRY_SERVICE_TYPE_RE =
+  /\b(bait|station|monitor\w*|cartridge|installation|inspection|renewal|warranty|bond)\b/i;
+
+function isTermiteNoReentryServiceType(serviceType) {
+  const text = String(serviceType || '').replace(/[_-]+/g, ' ');
+  return TERMITE_NO_REENTRY_SERVICE_TYPE_RE.test(text);
+}
+
 // Advisory defaults for a visit, keyed by the raw service TYPE (not the
-// line id) so the cockroach override can fire. Non-cockroach types return
-// their line's defaults unchanged.
+// line id) so the cockroach and termite-station overrides can fire. Other
+// types return their line's defaults unchanged.
 function getAdvisoryDefaults(serviceType) {
   const config = getServiceLineConfig(serviceType);
   if (config.id === 'pest' && isCockroachServiceType(serviceType)) {
     return {
       ...config.advisoryDefaults,
       interior_reentry_min: COCKROACH_INTERIOR_REENTRY_MIN,
+    };
+  }
+  if (config.id === 'termite' && isTermiteNoReentryServiceType(serviceType)) {
+    return {
+      ...config.advisoryDefaults,
+      exterior_reentry_min: 0,
+      interior_reentry_min: 0,
     };
   }
   return config.advisoryDefaults;

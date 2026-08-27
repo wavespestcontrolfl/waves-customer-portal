@@ -492,6 +492,14 @@ function formatNextAppointmentLabel(nextAppointment) {
   return name ? `${name} · ${when}` : when;
 }
 
+// "Renews Mar 14, 2027" for the hero's termite-warranty cell. Payload field
+// is live-view only and gated with the portal bond card (owner 2026-08-27).
+export function formatTermiteBondRenewalLabel(termiteBond) {
+  const date = calendarDateFromDateOnlyValue(termiteBond?.renewsAt);
+  if (!date) return null;
+  return `Renews ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}`;
+}
+
 export function serviceReportDateTimeLabel(data = {}) {
   const serviceDate = formatDate(data.serviceDate);
   const serviceTime = visitTimeLabel(data);
@@ -2233,6 +2241,42 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
               <div className="sr-cell-note">Subject to change</div>
             </div>
           )}
+          {(() => {
+            // Termite warranty cell (owner 2026-08-27): the renewal date plus
+            // a deep link to the portal's My Plan bond card. The payload field
+            // only arrives on live termite-line views with the bond gate on.
+            const bondLabel = formatTermiteBondRenewalLabel(data.termiteBond);
+            return bondLabel ? (
+              <div className="sr-cell">
+                <div className="sr-cell-label">Termite warranty</div>
+                <div className="sr-cell-value">{bondLabel}</div>
+                <div className="sr-cell-note">
+                  <a href="/?tab=plan">View your warranty in the portal</a>
+                </div>
+              </div>
+            ) : null;
+          })()}
+          {(() => {
+            // Documents cell (owner 2026-08-27): titles tied to THIS visit,
+            // plus the customer's document count, linking the portal
+            // Documents tab. Live-view-only payload field.
+            const docs = data.relatedDocuments;
+            if (!docs?.totalCount) return null;
+            const linkedTitles = (docs.linked || []).map((d) => d.title).filter(Boolean);
+            return (
+              <div className="sr-cell">
+                <div className="sr-cell-label">Your documents</div>
+                <div className="sr-cell-value">
+                  {linkedTitles.length
+                    ? linkedTitles.join(' · ')
+                    : `${docs.totalCount} document${docs.totalCount === 1 ? '' : 's'} on file`}
+                </div>
+                <div className="sr-cell-note">
+                  <a href="/?tab=documents">View documents in the portal</a>
+                </div>
+              </div>
+            );
+          })()}
         </div>
         {data.techVisitCard && <TechnicianVisitLine data={data} />}
         {smartStatus.detail && <p className="smart-status-detail">{smartStatus.detail}</p>}
@@ -8820,6 +8864,22 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             {data.serviceLine === 'tree_shrub' && data.reportV2 && (
               <TreeShrubReportV2Section data={data.reportV2} print={mode === 'pdf' || mode === 'static'} />
             )}
+          </section>
+        )}
+
+        {/* Technician recommendations (owner 2026-08-27): the completion
+            form's recommendation lines finally reach the customer. Sourced
+            from data.recommendations (protocol recommendations + findings
+            recommendations, already banned-copy-screened upstream). Renders
+            for every layout — V2 dashboards own the SUMMARY slot, not this. */}
+        {(data.recommendations || []).length > 0 && (
+          <section data-glass="card" className="sr-section" id="recommendations">
+            <h2>What we recommend</h2>
+            <ul style={{ margin: 0, paddingLeft: 20, lineHeight: 1.6 }}>
+              {data.recommendations.map((rec, i) => (
+                <li key={`${i}-${rec}`}>{rec}</li>
+              ))}
+            </ul>
           </section>
         )}
 

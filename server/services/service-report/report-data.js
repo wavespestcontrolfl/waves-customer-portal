@@ -4248,17 +4248,85 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
           && !!rodentCatalogNames
           && rodentCatalogNames.has(String(row.service_type || '').trim().toLowerCase());
       }) || null;
-    if (nextApptRow && nextApptRow.scheduled_date) {
-      const rawDate = nextApptRow.scheduled_date;
+    // No upcoming visit on THIS report's service line → fall back to the
+    // customer's next visit of any line (owner 2026-08-27). The rendered
+    // label always carries the service name, so a pest visit on a termite
+    // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
+    // Same disclosable-status pool; the strict same-line pick above still
+    // wins whenever it exists.
+    const nextAnyRow = nextApptRow
+      || (Array.isArray(upcomingRows) ? upcomingRows[0] : null)
+      || null;
+    if (nextAnyRow && nextAnyRow.scheduled_date) {
+      const rawDate = nextAnyRow.scheduled_date;
       nextAppointment = {
-        serviceType: nextApptRow.service_type || null,
+        serviceType: nextAnyRow.service_type || null,
         scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
         // window_start only — the customer-facing arrival window is always
         // window_start + 2 hours (window_end is the internal job block).
-        windowStart: nextApptRow.window_start || null,
+        windowStart: nextAnyRow.window_start || null,
       };
     }
   } catch { /* best-effort */ }
+
+  // Termite warranty line (owner ask 2026-08-27): a termite-line report
+  // links the customer to their active bond on the portal My Plan tab with
+  // its renewal date. Rides the SAME gate as the portal card
+  // (GATE_PORTAL_TERMITE_BOND) so the report never links to a surface that
+  // won't render, and LIVE VIEWS ONLY — a renewal date frozen into a
+  // cached PDF goes stale across a renewal (same rule as nextAppointment).
+  // Fail-soft like the portal endpoint: any error just omits the line.
+  let termiteBond = null;
+  if (serviceLine === 'termite' && opts.mode === 'live') {
+    try {
+      const { gateEnvValue } = require('../../config/feature-gates');
+      const { dateOnlyString } = require('../../utils/date-only');
+      if (gateEnvValue('GATE_PORTAL_TERMITE_BOND')) {
+        const bondRow = await knex('termite_bonds')
+          .where({ customer_id: service.customer_id, status: 'active' })
+          .orderBy('renews_at', 'desc')
+          .first('service_type', 'term_years', 'started_at', 'renews_at')
+          .catch(() => null);
+        const renewsAt = bondRow ? dateOnlyString(bondRow.renews_at) : null;
+        if (bondRow && renewsAt) {
+          termiteBond = {
+            serviceType: bondRow.service_type || null,
+            termYears: Number(bondRow.term_years) || 1,
+            startedAt: dateOnlyString(bondRow.started_at),
+            renewsAt,
+          };
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
+  // Related documents (owner ask 2026-08-27): every LIVE report links the
+  // customer's portal Documents tab, listing the documents tied to THIS
+  // visit (linked_service_record_id) by title. Live-only for the same
+  // staleness reason as nextAppointment; fail-soft — errors omit the cell.
+  let relatedDocuments = null;
+  if (opts.mode === 'live') {
+    try {
+      const docRows = await knex('customer_documents')
+        .where({ customer_id: service.customer_id })
+        .select('id', 'title', 'document_type', 'expiration_date', 'linked_service_record_id')
+        .orderBy('created_at', 'desc')
+        .limit(200)
+        .catch(() => []);
+      const linked = docRows.filter(
+        (d) => d.linked_service_record_id && String(d.linked_service_record_id) === String(service.id),
+      );
+      if (docRows.length) {
+        relatedDocuments = {
+          totalCount: docRows.length,
+          linked: linked.slice(0, 3).map((d) => ({
+            title: d.title || d.document_type || 'Document',
+            documentType: d.document_type || null,
+          })),
+        };
+      }
+    } catch { /* best-effort */ }
+  }
 
   // Pest Visit Summary narrative (env-gated, additive): reweave the frozen
   // completion recap through the same grounded-narrative pattern the lawn
@@ -4675,6 +4743,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
+    termiteBond,
+    relatedDocuments,
     visitTimeline,
     serviceLocations,
     workflowEvents,

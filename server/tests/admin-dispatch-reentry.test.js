@@ -135,6 +135,56 @@ describe('service-line advisory defaults', () => {
       interior_reentry_min: 0,
     });
   });
+
+  // Owner rule 2026-08-27: termite visits with no liquid/foam application
+  // (station checks, bait monitoring, cartridge/installation, inspections,
+  // warranty/bond renewals) have no re-entry concept — nothing is sprayed,
+  // so both windows are 0 and the customer report shows no countdown.
+  test('termite station/monitoring/inspection/warranty types default to 0/0', () => {
+    for (const type of [
+      'Termite Bait Station System Service',
+      'Termite Bait Monitoring',
+      'Termite Cartridge Replacement Service',
+      'Termite Installation Setup Fee Service',
+      'Termite Inspection Service',
+      'Termite Warranty Renewal Service',
+      'Termite Bond (1 Year)',
+      // Keyed catalog values — separators normalize before matching.
+      'termite_bait',
+      'termite_monitoring',
+      'termite_active_bait_quarterly',
+      'termite_installation_setup',
+      'termite_inspection',
+      'termite_renewal',
+      'termite_bond_10yr',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 0,
+        interior_reentry_min: 0,
+      });
+    }
+  });
+
+  test('liquid/foam/trench termite forms keep the 30/120 line defaults', () => {
+    for (const type of [
+      'Termite Liquid Treatment Service',
+      'Slab Pre-Treat Termite Service',
+      'Termite Trenching Service',
+      'Termite Foam Service',
+      'Recurring Termite Foam Service',
+      'Bora-Care Wood Treatment Service',
+      'termite_liquid',
+      'termite_trenching',
+      'termite_spot_treatment',
+      'foam_drill',
+      'foam_recurring',
+    ]) {
+      expect(getAdvisoryDefaults(type)).toMatchObject({
+        exterior_reentry_min: 30,
+        interior_reentry_min: 120,
+      });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
