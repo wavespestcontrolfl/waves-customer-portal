@@ -394,6 +394,13 @@ function extractLinks(body) {
       const href = defs.get((m[2] || m[1]).toLowerCase());
       if (href) links.push({ anchor: m[1], href });
     }
+    // Shortcut references: a bare `[Label]` whose label has a definition and
+    // that is not itself an inline/full reference or the definition line.
+    const shortcut = /(?<!!)\[([^\]]+)\](?![\[(:])/g;
+    while ((m = shortcut.exec(s)) !== null) {
+      const href = defs.get(m[1].toLowerCase());
+      if (href) links.push({ anchor: m[1], href });
+    }
   }
   const html = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
   while ((m = html.exec(s)) !== null) links.push({ anchor: m[2].replace(/<[^>]+>/g, ''), href: m[1] });

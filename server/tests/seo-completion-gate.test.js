@@ -397,6 +397,15 @@ describe('seo-completion-gate', () => {
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
+  test('shortcut reference CTAs are classified', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service]\n\n[Schedule Service]: /contact/` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+  });
+
   test('angle-bracketed reference destinations are classified', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service][cta]\n\n[cta]: </contact/>` }),

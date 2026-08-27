@@ -33,7 +33,7 @@ describe('parseChain', () => {
   test('default when env unset', () => {
     // Image-native Nano Banana fallbacks (config/models.js) — the legacy
     // 'gemini' text-model slug and gpt-image-1 stay env-only.
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gemini-image-best', 'gemini-image']);
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gemini-image-best', 'gemini-image']);
   });
   test('respects env override', () => {
     expect(parseChain('gemini,gpt-image-2')).toEqual(['gemini', 'gpt-image-2']);

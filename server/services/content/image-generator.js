@@ -3,7 +3,7 @@
  * heroes + social squares.
  *
  * Provider chain via env BLOG_IMAGE_PROVIDER (default:
- * "gpt-image-2,gpt-image-1.5,gemini-image-best,gemini-image"). Each
+ * "gpt-image-2,gpt-image-1.5,gpt-image-1,gemini-image-best,gemini-image"). Each
  * provider is tried in order; on 404 / model-not-found / 5xx we fall
  * through to the next. On the first 2xx with image bytes we return.
  *
@@ -11,9 +11,11 @@
  * image model overall; the Gemini fallbacks are the image-NATIVE Nano
  * Banana line from config/models.js (gemini-3.1-flash-image-preview /
  * gemini-2.5-flash-image — env-overridable, e.g. MODEL_GEMINI_IMAGE=
- * gemini-3-pro-image for Nano Banana Pro). The legacy 'gemini' slug
- * (gemini-2.5-flash text model with image modality) and 'gpt-image-1'
- * are out of the default but stay in MODEL_MAP for env overrides.
+ * gemini-3-pro-image for Nano Banana Pro). gpt-image-1 stays as the LAST
+ * OpenAI fallback — an account without the newer models and no
+ * GEMINI_API_KEY must not lose its only working provider. The legacy
+ * 'gemini' slug (gemini-2.5-flash text model with image modality) is out
+ * of the default but stays in MODEL_MAP for env overrides.
  * Google's Imagen line retired 2026-08-17 — never add imagen-* here.
  *
  * Output shape — `data:` URL — matches the legacy generateFeaturedImage
@@ -37,7 +39,7 @@
 const logger = require('../logger');
 const { GEMINI_IMAGE_BEST, GEMINI_IMAGE_STABLE } = require('../../config/models');
 
-const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gemini-image-best,gemini-image';
+const DEFAULT_CHAIN = 'gpt-image-2,gpt-image-1.5,gpt-image-1,gemini-image-best,gemini-image';
 
 const MODEL_MAP = {
   'gpt-image-2':   { api: 'openai', model: 'gpt-image-2',   quality: 'high' },
