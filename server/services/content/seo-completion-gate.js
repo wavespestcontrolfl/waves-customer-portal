@@ -36,6 +36,7 @@ const P1_CODES = new Set([
   'P1_MISSING_SERVICE_LINK',
   'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC',
   'P1_MISSING_CONVERSION_CTA',
+  'P1_FORBIDDEN_CTA_WORDING',
   'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ',
   'P1_MISSING_PEST_PRACTICES',
 ]);
@@ -121,7 +122,7 @@ function evaluate(input = {}) {
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
     findings.push(finding('P1', 'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC', 'City-focused blog draft is missing a city page link in the body.', 'Add the matching local service page link.'));
   }
-  if (!hasLinkReason(contract, 'conversion') || !hasConversionCta(body)) {
+  if (!hasLinkReason(contract, 'conversion') || !hasConversionCta(body, brief)) {
     findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA with estimate/quote wording linking to contact, quote, or estimate paths.'));
   }
   {
@@ -251,18 +252,37 @@ function hasIncludedLinkReason(contract, reason) {
     && contract.includedInternalLinks.some((link) => link.reason === reason);
 }
 
-function hasConversionCta(body) {
+// Which service a CTA anchor names, if any — used to reject a wrong-service
+// CTA ("Get a Lawn Care Quote" on a termite post). Keys match
+// normalizeService's output.
+const CTA_ANCHOR_SERVICE_TERMS = {
+  pest: /\bpest\b/i,
+  lawn: /\blawn\b/i,
+  termite: /\btermite/i,
+  mosquito: /\bmosquito/i,
+  rodent: /\brodent|\brat\b|\bmice\b|\bmouse\b/i,
+  'tree-shrub': /\btree\b|\bshrub/i,
+};
+
+function hasConversionCta(body, brief = {}) {
   // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
   // not loose body wording — at least one link to a conversion path whose
   // anchor carries estimate/quote wording ("Get My Free Termite Estimate",
-  // "Request a Quote"). Discussion text stays independent: a termite post
-  // may talk about inspections all it wants; `[Schedule Service](/contact/)`
-  // or "Get an estimate. [Click here](/contact/)" no longer qualify.
+  // "Request a Quote"), and if the anchor names a service it must be the
+  // brief's own service. Discussion text stays independent: a termite post
+  // may talk about inspections all it wants; `[Schedule Service](/contact/)`,
+  // "Get an estimate. [Click here](/contact/)", and a lawn-care quote anchor
+  // on a termite post all fail to qualify.
   const s = String(body || '');
+  const briefService = brief.service ? normalizeService(brief.service) : null;
   const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
   let m;
   while ((m = conversionLink.exec(s)) !== null) {
-    if (/(estimat|quot|pric)/i.test(m[1])) return true;
+    const anchor = m[1];
+    if (!/(estimat|quot)/i.test(anchor)) continue;
+    const namesWrongService = briefService && Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+      .some(([svc, re]) => svc !== briefService && re.test(anchor));
+    if (!namesWrongService) return true;
   }
   return false;
 }

@@ -2159,7 +2159,7 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.evaluate({ body: 'No tables here.', frontmatter: {} }, { targetIsBlog: true }).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
   });
 
-  test('refresh grandfathers a table the prior body already carried — but not a new one', () => {
+  test('refresh grandfathers by COUNT — preserved tables pass, added tables block', () => {
     const grandfathered = guardrails.evaluate(
       { body: TABLE_BODY, frontmatter: {} },
       { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
@@ -2170,6 +2170,13 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
       { targetIsBlog: true, isRefresh: true, priorBody: 'old table-free body' },
     );
     expect(added.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Prior body had ONE table; the refresh keeping it AND adding a second
+    // still blocks — a legacy table never licenses new ones.
+    const secondAdded = guardrails.evaluate(
+      { body: `${TABLE_BODY}\nMore.\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n`, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(secondAdded.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
   });
 
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {

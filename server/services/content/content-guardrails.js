@@ -1823,25 +1823,32 @@ function tenureClaimFinding(text) {
 // at least one pipe) directly under a pipe header row; blockquote prefixes
 // are stripped first so quoted tables still count. Prose pipes and plain
 // --- dividers never form the pair.
-function hasRawMarkdownTable(text) {
+function countRawMarkdownTables(text) {
   const lines = String(text || '').split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
+  let count = 0;
   for (let i = 1; i < lines.length; i += 1) {
     const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
     const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
-    if (delimiter && headerAbove) return true;
+    if (delimiter && headerAbove) count += 1;
   }
-  return false;
+  return count;
+}
+
+function hasRawMarkdownTable(text) {
+  return countRawMarkdownTables(text) > 0;
 }
 
 // Blog bodies only (service/city page bodies are component-driven and the
 // autonomous lanes get the same rule from the quality gate's common hard
-// check). Refresh drafts GRANDFATHER a table the live prior body already
-// carried — parking every refresh of a legacy table post forever would
-// gate text the refresh merely preserves; writer ADDITIONS are still hard.
+// check). Refresh drafts GRANDFATHER tables the live prior body already
+// carried — by COUNT, same posture as the component/route grandfathers:
+// preserving legacy tables must not park the lane forever, but the writer
+// ADDING a table beyond what the prior body had is still a finding.
 function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
   if (!targetIsBlog) return null;
-  if (!hasRawMarkdownTable(body)) return null;
-  if (isRefresh && hasRawMarkdownTable(priorBody)) return null;
+  const count = countRawMarkdownTables(body);
+  if (count === 0) return null;
+  if (isRefresh && count <= countRawMarkdownTables(priorBody)) return null;
   return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
 }
 
@@ -3983,6 +3990,7 @@ module.exports = {
   // content-quality-gate's no_raw_markdown_tables hard check so the two
   // enforcement points can never drift.
   hasRawMarkdownTable,
+  countRawMarkdownTables,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,

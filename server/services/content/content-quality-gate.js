@@ -1024,9 +1024,13 @@ function checkFaqSectionPresent(draft, brief) {
 // grandfather: a table the prior live body already carried must not
 // permanently park the refresh lane — only ADDED tables block.
 function checkNoRawMarkdownTables(draft, _brief, context = {}) {
-  const { hasRawMarkdownTable } = require('./content-guardrails');
-  if (!hasRawMarkdownTable(draft.body)) return { ok: true };
-  if (context.previousVersion && hasRawMarkdownTable(context.previousVersion.body)) {
+  const { countRawMarkdownTables } = require('./content-guardrails');
+  const count = countRawMarkdownTables(draft.body);
+  if (count === 0) return { ok: true };
+  // Refresh grandfather by COUNT (mirrors the guardrails finding): a table
+  // the prior live body already carried must not park the lane, but ADDING
+  // one beyond the prior count still blocks.
+  if (context.previousVersion && count <= countRawMarkdownTables(context.previousVersion.body)) {
     return { ok: true };
   }
   return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };

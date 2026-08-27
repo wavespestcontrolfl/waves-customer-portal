@@ -202,6 +202,26 @@ describe('seo-completion-gate', () => {
     expect(anchored.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
   });
 
+  test('a wrong-service estimate anchor does not satisfy the CTA check', () => {
+    const wrongService = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Termites are active. [Get a Lawn Care Quote](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(wrongService.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    const rightService = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n[Get My Free Termite Estimate](/pest-control-quote/) today.`,
+      }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(rightService.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+  });
+
   test('blocks customer PII and unapproved hardcoded prices', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({
