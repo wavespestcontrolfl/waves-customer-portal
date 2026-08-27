@@ -289,17 +289,17 @@ const PEST_VERSUS_PAIRS = [
     verdict: 'The nest shape tells you who built it.',
   },
   {
-    // Diagnostics mirror the in-repo lawn protocol reference (service_protocols
-    // seed: chinch-damaged grass pulls up with no resistance; drought-stressed
-    // grass folds and stays rooted) — the pull test, not watering response.
+    // Customer-facing diagnostics stay cautious and UF/IFAS-consistent: chinch
+    // bugs are confirmed by finding them (flotation test at the patch edge),
+    // never by turf lifting out (that signals root loss — a different
+    // problem); drought is a coverage/soil-moisture check, not a lawn-wide
+    // pattern (uneven sprinklers show as localized dry spots per the lawn
+    // report guidance). Neither side is presented as conclusive.
     key: 'chinch_bug_vs_drought_stress',
     service: 'lawn care',
-    left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches spread outward', 'Grass pulls up with no resistance'] },
-    // "Dry spots where sprinklers miss" mirrors the lawn report's moisture
-    // guidance (uneven coverage shows as localized dry patches) — drought is
-    // NOT reliably lawn-wide, so coverage is the check, not distribution.
-    right: { name: 'Drought Stress', points: ['Dry spots where sprinklers miss', 'Blades fold; footprints linger', 'Grass stays firmly rooted'] },
-    verdict: 'The pull test settles it: chinch-damaged grass lifts right out.',
+    left: { name: 'Chinch Bug Damage', points: ['Starts along hot, sunny edges', 'Patches keep spreading outward', 'Float test at the edge finds the bugs'] },
+    right: { name: 'Drought Stress', points: ['Dry spots where sprinklers miss', 'Blades fold; footprints linger', 'Soil is dry at the patch edge'] },
+    verdict: 'Browning turf? Check sprinkler coverage first, then float-test the edge.',
   },
   {
     key: 'roof_rat_vs_norway_rat',
