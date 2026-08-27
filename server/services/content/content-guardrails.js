@@ -2224,8 +2224,11 @@ function extractRawMarkdownTables(text) {
     // item's INDENTED content — a same-level marker on the delimiter line
     // ("- A | B" then "- | -") is the next bullet.
     const siblingItems = Boolean(marked) && /^(?:[-*+]|\d+[.)])\s+/.test(lines[i]);
+    // A delimiter at a SHALLOWER depth (any number of dropped markers,
+    // zero included) lazily continues the header's paragraph; a DEEPER one
+    // starts a nested quote and never pairs.
     const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && !siblingItems
-      && (depths[i] === depths[i - 1] || (depths[i] === 0 && depths[i - 1] > 0))
+      && depths[i] <= depths[i - 1]
       && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
     if (!delimiter) continue;
     // Capture the whole block (header + delimiter + contiguous pipe rows),
@@ -2233,7 +2236,7 @@ function extractRawMarkdownTables(text) {
     // CONTENT rather than counts.
     let end = i + 1;
     while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== ''
-      && (depths[end] === depths[i - 1] || depths[end] === 0)) end += 1;
+      && depths[end] <= depths[i - 1]) end += 1;
     tables.push(lines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
     i = end;
   }

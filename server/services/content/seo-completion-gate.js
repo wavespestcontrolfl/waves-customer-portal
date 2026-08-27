@@ -283,7 +283,9 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   // name (the lawn-fertilization entry already excludes "root fertiliz").
   'tree-shrub': /\btree\b|\bshrub|\bpalms?\b|\bornamentals?\b|\bdeep[ -]?root/i,
   'bed-bug': /\bbed[ -]?bug/i,
-  cockroach: /\b(?:cock)?roach(?:es)?\b/i,
+  // "Palmetto bug" is the established Florida roach alias (blog-writer's
+  // TAG_ALIASES uses the same equivalence).
+  cockroach: /\b(?:cock)?roach(?:es)?\b|\bpalmetto[ -]?bugs?\b/i,
   ant: /\bants?\b/i,
   // Whole word only — "spiderwort" is a lawn WEED, not the spider service.
   spider: /\bspiders?\b/i,
@@ -396,7 +398,7 @@ function ctaBriefService(rawService) {
 // work/) is not a conversion link.
 function conversionEndpoints() {
   const { SERVICE_CONVERSION_LINK } = require('./content-brief-builder')._internals;
-  return new Set([...Object.values(SERVICE_CONVERSION_LINK || {}), '/contact/', '/pest-control-calculator/', '/pest-control-quote/', '/quote/', '/estimate/']);
+  return new Set([...Object.values(SERVICE_CONVERSION_LINK || {}), '/contact/', '/book/', '/pest-control-calculator/', '/pest-control-quote/', '/quote/', '/estimate/']);
 }
 function isConversionPath(href) {
   const path = String(href || '').replace(/[?#].*$/, '').replace(/\/?$/, '/').toLowerCase();
@@ -762,7 +764,7 @@ function conversionCtaLinks(body) {
       // Coordination is judged across the FULL anchor ("Get a Termite Quote
       // and Pool Cleaning Estimate"), not just the text before the first
       // keyword.
-      const parts = anchor.split(/\s*,\s*|\s+(?:and|&|or|\/)\s+/i);
+      const parts = anchor.split(/\s*,\s*|\s*\+\s*|\s+(?:and|&|or|\/|plus)\s+/i);
       if (parts.length > 1) {
         // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
         // not separate services; an unlisted noun ("Pool Cleaning") is.
@@ -887,7 +889,7 @@ const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+
 // /termite-control/) — the estimate/quote wording rule covers it too.
 // Descriptive service links (bare noun phrases, prose references,
 // editorial "Get ready …" shapes) stay exempt.
-const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
+const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE}|call|contact|text)\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
 const ESTIMATE_KW_RE = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
 function isServicePageRequestCta(href, anchor) {
   if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;

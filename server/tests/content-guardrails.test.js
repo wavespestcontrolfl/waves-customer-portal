@@ -2396,6 +2396,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // A delimiter-shaped SIBLING list item is the next bullet, not a
     // table — a nested table's delimiter is the item's INDENTED content.
     expect(guardrails.hasRawMarkdownTable('- A | B\n- | -')).toBe(false);
+    // Lazy continuation may drop only SOME quote markers — a depth-1
+    // delimiter still continues a depth-2 header's paragraph.
+    expect(guardrails.hasRawMarkdownTable('> > A | B\n> - | -')).toBe(true);
     // A fence opened on a QUOTED list continuation line ("> - item" then
     // ">   ~~~") scopes to the item's quote-relative column — content at
     // that column stays fenced…

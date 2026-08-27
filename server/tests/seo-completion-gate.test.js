@@ -1351,6 +1351,50 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(newlineInDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // /book/ is a live conversion route — a wording-free actionable anchor
+    // pointing there is the forbidden shape.
+    const bookRoute = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](/contact/) or [Schedule Service](/book/).' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(bookRoute.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // "+"/"plus" coordinate services like "and" — a wrong-service half
+    // after the first keyword is mixed wording; service descriptors stay
+    // filler.
+    const plusMixed = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'S. [Get a Termite Estimate + Lawn Quote](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(plusMixed.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const plusFiller = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'S. [Get a Termite Estimate + Free Quote](/contact/) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(plusFiller.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // "Palmetto bug" is the established Florida roach alias — a valid CTA
+    // on a Roaches post is neither missing nor mixed.
+    const palmetto = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'P. [Request a Palmetto Bug Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'cockroach' }),
+      shadowMode: true,
+    });
+    expect(palmetto.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(palmetto.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // CALL/CONTACT-led service-page anchors are actionable CTAs too — the
+    // wording rule covers them; call-for-estimate anchors stay compliant.
+    const callLed = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) or [Call Waves About Termite Service](/termite-control/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(callLed.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
   test('links inside comments and fenced code are not rendered CTAs', () => {
