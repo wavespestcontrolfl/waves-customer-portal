@@ -4116,16 +4116,16 @@ export function AnnualPrepayInvoiceModal({ customer, activeTerm, prepaidPlans = 
             : {}),
         }),
       });
+      // Advisory warnings (the promised first visit overlaps another job) —
+      // blocking on purpose, and BEFORE the delivery check: the invoice and
+      // term are already minted either way, and onSaved closes this modal.
+      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       if (result?.delivery && result.delivery.ok === false) {
         const reason = result.delivery.error || result.delivery.sms?.error || result.delivery.email?.error || "delivery failed";
         setError(`Invoice created, but delivery failed: ${reason}. Open Invoices to resend.`);
         setSaving(false);
         return;
       }
-      // Advisory warnings (the promised first visit overlaps another job) —
-      // blocking on purpose: onSaved closes this modal, so a toast would
-      // unmount with it.
-      if (Array.isArray(result?.warnings) && result.warnings.length) window.alert(result.warnings.join("\n\n"));
       await onSaved?.(result);
     } catch (err) {
       setError(err.message || "Annual prepay invoice failed");

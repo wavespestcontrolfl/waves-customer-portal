@@ -166,7 +166,14 @@ function computeLanes(services) {
       const endRaw = parseHHMM(s.windowEnd);
       const dur = effectiveDuration(s);
       const end = endRaw != null ? endRaw : (start != null ? start + dur : null);
-      return { svc: s, start: start ?? 0, end: end ?? 30 };
+      // Lanes are computed from the DISPLAYED interval: a visit timed before
+      // the grid's first row is pinned to that row (see the render clamp), so
+      // two early visits that don't overlap in real time still overlap on
+      // screen and need separate lanes.
+      const rawStart = start ?? 0;
+      const rawEnd = end ?? rawStart + 30;
+      const shift = Math.max(0, DAY_START_HOUR * 60 - rawStart);
+      return { svc: s, start: rawStart + shift, end: rawEnd + shift };
     })
     .sort((a, b) => a.start - b.start || a.end - b.end);
 

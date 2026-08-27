@@ -82,6 +82,10 @@ describe('TimeGridDay hour-aligned grid', () => {
           id: 'svc-predawn', customerName: 'Predawn Customer', status: 'confirmed',
           windowStart: '05:00', windowEnd: '06:00', windowDisplay: '5–6 AM',
           technicianId: 'tech-1', technicianName: 'Alex Tech',
+        }, {
+          id: 'svc-predawn-2', customerName: 'Night Customer', status: 'confirmed',
+          windowStart: '01:00', windowEnd: '02:00', windowDisplay: '1–2 AM',
+          technicianId: 'tech-1', technicianName: 'Alex Tech',
         }]}
         technicians={[{ id: 'tech-1', name: 'Alex Tech' }]}
         onChange={vi.fn()}
@@ -93,6 +97,12 @@ describe('TimeGridDay hour-aligned grid', () => {
     // BEFORE the grid's first row — it is pinned to the 6 AM row instead.
     expect(screen.getByTitle(/Early Customer/)).toBeInTheDocument();
     expect(screen.getByTitle(/Predawn Customer/)).toBeInTheDocument();
+    // Two pre-grid visits that don't overlap in real time DO overlap once
+    // pinned — they get separate lanes, never one block hiding the other.
+    const predawn = screen.getByTitle(/Predawn Customer/).closest('[style]');
+    const night = screen.getByTitle(/Night Customer/).closest('[style]');
+    expect(night).toBeInTheDocument();
+    expect(predawn.style.left).not.toBe(night.style.left);
     // No row is muted for being early — the former 8 AM floor is gone.
     const rows = container.querySelectorAll('[data-slot-min]');
     expect(rows.length).toBeGreaterThan(0);

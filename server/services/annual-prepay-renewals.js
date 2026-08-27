@@ -1136,13 +1136,6 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
       adoptedConcurrentRows.push(concurrentAdoptable);
       return null;
     }
-    if (overlapConflict) {
-      await fileCoverageException(term, 'window_conflict',
-        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
-    } else if (!windowStart && firstVisitWindowStart) {
-      await fileCoverageException(term, 'window_unverified',
-        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} could not be checked against the schedule while payment landed. The visit is on the schedule without a time — time it by hand.`);
-    }
     // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT) — TRY-lock:
     // activation already holds invoice/term row locks, and a merge-undo
     // holds customer-comms while FOR-UPDATE-ing journaled invoices, so a
@@ -1161,6 +1154,17 @@ async function ensureCoverageRowsForTerm(term, conn = db, { today = etDateString
     }
     if (await termOwnerMovedUnderFence(trx)) return null;
     const [row] = await trx('scheduled_services').insert(buildInsert(scheduledDate, windowStart)).returning('*');
+    // Filed only once the visit actually exists: fileCoverageException writes
+    // through the global connection and dedupes for 7 days, so a notice
+    // emitted before a deferred/aborted insert would outlive the rollback
+    // and describe a visit that is not on the calendar.
+    if (overlapConflict) {
+      await fileCoverageException(term, 'window_conflict',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} overlaps another job on the schedule. Both are kept on the calendar at their times — confirm the day's route.`);
+    } else if (!windowStart && firstVisitWindowStart) {
+      await fileCoverageException(term, 'window_unverified',
+        `The promised ${firstVisitWindowStart} arrival on ${scheduledDate} could not be checked against the schedule while payment landed. The visit is on the schedule without a time — time it by hand.`);
+    }
     return row;
   };
 
