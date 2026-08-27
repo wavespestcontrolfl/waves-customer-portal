@@ -50,7 +50,14 @@ const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024;
 // skipped, never a false "unverified"). To enable the company-admin check, add the
 // admin scope to LINKEDIN_SCOPES once the LinkedIn app is approved for it.
 const API_VERSION = process.env.LINKEDIN_API_VERSION || '202606';
-const SCOPES = (process.env.LINKEDIN_SCOPES || 'w_organization_social r_organization_social')
+// r_organization_social_feed: read engagement (likes/comments) on the page's
+// own posts via /rest/socialActions — the social engagement ingest. Owner
+// decision 2026-08-27. A token authorized BEFORE this scope was added lacks
+// it; linkedinEngagementReady() reports that and the ingest skips LinkedIn
+// until the page is re-authorized. If LinkedIn rejects the authorize URL
+// (app not approved for the scope), set LINKEDIN_SCOPES to the prior pair.
+const ENGAGEMENT_SCOPE = 'r_organization_social_feed';
+const SCOPES = (process.env.LINKEDIN_SCOPES || `w_organization_social r_organization_social ${ENGAGEMENT_SCOPE}`)
   .split(/[\s,]+/).filter(Boolean);
 const ACCESS_TOKEN_SKEW_MS = 5 * 60 * 1000; // refresh a bit before actual expiry
 
@@ -221,6 +228,37 @@ class LinkedInService {
       logger.warn(`[linkedin] Org verification skipped: ${err.message}`);
       return null;
     }
+  }
+
+  // ── Engagement read (socialActions) ───────────────────────────────────────
+  // Whether the stored grant can read engagement: connected AND its scope
+  // string carries r_organization_social_feed. Tokens minted before that scope
+  // joined SCOPES report { ready: false, reason } so the ingest skips LinkedIn
+  // with one warning instead of failing every target every sweep.
+  async linkedinEngagementReady() {
+    if (!this.configured) return { ready: false, reason: 'LinkedIn not configured' };
+    const stored = await this._getStoredTokens();
+    if (!stored.access_token) return { ready: false, reason: 'LinkedIn not connected' };
+    if (!String(stored.scope || '').split(/[\s,]+/).includes(ENGAGEMENT_SCOPE)) {
+      return { ready: false, reason: `LinkedIn token lacks ${ENGAGEMENT_SCOPE} — re-authorize the page in Settings → Social` };
+    }
+    return { ready: true };
+  }
+
+  // GET /rest/socialActions/{urn} → { likesSummary, commentsSummary }. Read
+  // only; used by the engagement ingest (social-engagement.js).
+  async fetchSocialActions(postUrn) {
+    const token = await this._getValidAccessToken();
+    const res = await fetch(`https://api.linkedin.com/rest/socialActions/${encodeURIComponent(postUrn)}`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'LinkedIn-Version': API_VERSION,
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) throw new Error(`LinkedIn socialActions ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return res.json();
   }
 
   // ── Valid access token (refresh when possible) ────────────────────────────
@@ -543,4 +581,4 @@ class LinkedInService {
 
 module.exports = new LinkedInService();
 module.exports.TOKEN_KEY = TOKEN_KEY;
-module.exports._test = { parseJsonObject, SCOPES, API_VERSION };
+module.exports._test = { parseJsonObject, SCOPES, API_VERSION, ENGAGEMENT_SCOPE };

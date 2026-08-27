@@ -203,6 +203,25 @@ describe('createPost article thumbnail (Images API)', () => {
     expect(linkedin._isTrustedImageUrl('not a url')).toBe(false);
   });
 
+  test('linkedinEngagementReady: requires connection AND the r_organization_social_feed grant', async () => {
+    const { ENGAGEMENT_SCOPE } = require('../services/linkedin')._test;
+    expect(ENGAGEMENT_SCOPE).toBe('r_organization_social_feed');
+    const stored = jest.spyOn(linkedin, '_getStoredTokens');
+    const wasConfigured = linkedin.configured;
+    linkedin.configured = true; // env-independent: exercise the grant checks, not the client-id check
+    try {
+      stored.mockResolvedValue({});
+      await expect(linkedin.linkedinEngagementReady()).resolves.toMatchObject({ ready: false, reason: expect.stringMatching(/not connected/) });
+      stored.mockResolvedValue({ access_token: 't', scope: 'w_organization_social r_organization_social' });
+      await expect(linkedin.linkedinEngagementReady()).resolves.toMatchObject({ ready: false, reason: expect.stringMatching(/lacks r_organization_social_feed/) });
+      stored.mockResolvedValue({ access_token: 't', scope: 'w_organization_social r_organization_social r_organization_social_feed' });
+      await expect(linkedin.linkedinEngagementReady()).resolves.toEqual({ ready: true });
+    } finally {
+      stored.mockRestore();
+      linkedin.configured = wasConfigured;
+    }
+  });
+
   test('an already-JPEG thumbnail is still re-encoded — EXIF/provenance metadata never reaches the PUT', async () => {
     const sharp = require('sharp');
     const tainted = await sharp({ create: { width: 4, height: 4, channels: 3, background: { r: 4, g: 57, b: 94 } } })
