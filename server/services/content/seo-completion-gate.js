@@ -381,8 +381,17 @@ function extractLinks(body) {
   const md = /(?<!!)\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
-  // [ref]: </contact/> — strip the brackets before classifying.
-  const dest = (h) => String(h || '').replace(/^<|>$/g, '');
+  // [ref]: </contact/> — strip the brackets; and an absolute first-party
+  // URL (hub or any spoke host, per the guardrails' hubHostSet) IS the
+  // site-relative path spelled long-form.
+  const { hubHostSet } = require('./content-guardrails');
+  const firstParty = hubHostSet();
+  const dest = (h) => {
+    const raw = String(h || '').replace(/^<|>$/g, '');
+    const abs = raw.match(/^https?:\/\/([^/\s]+)(\/[^\s]*)?$/i);
+    if (abs && firstParty.has(abs[1].toLowerCase())) return abs[2] || '/';
+    return raw;
+  };
   while ((m = md.exec(s)) !== null) links.push({ anchor: m[1], href: dest(m[2]) });
   // Reference-style links: [text][ref] / [text][] with a [ref]: /url definition.
   const defs = new Map();
@@ -402,8 +411,9 @@ function extractLinks(body) {
       if (href) links.push({ anchor: m[1], href });
     }
   }
-  const html = /<a\b[^>]*\bhref\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  while ((m = html.exec(s)) !== null) links.push({ anchor: m[2].replace(/<[^>]+>/g, ''), href: m[1] });
+  // Quoted OR unquoted href (`<a href=/contact/>` is legal HTML).
+  const html = /<a\b[^>]*\bhref\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>"']+))[^>]*>([\s\S]*?)<\/a>/gi;
+  while ((m = html.exec(s)) !== null) links.push({ anchor: m[4].replace(/<[^>]+>/g, ''), href: dest(m[1] || m[2] || m[3]) });
   return links;
 }
 

@@ -1840,7 +1840,9 @@ function blankNonRenderedMarkdown(text) {
   let listContentIndent = 0;
   let prevBlank = true;
   return raw.map((l) => {
-    const stripped = l.replace(/^\s*(?:>\s*)+/, '');
+    // A blockquote marker counts only after 0–3 leading spaces — 4+ spaces
+    // before ">" is an indented code block (CommonMark), handled below.
+    const stripped = l.replace(/^ {0,3}(?:>\s*)+/, '');
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
@@ -4067,6 +4069,9 @@ module.exports = {
   hasUnpreservedRawTable,
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
+  // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
+  // to read absolute Waves URLs as the site-relative paths they are.
+  hubHostSet,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,

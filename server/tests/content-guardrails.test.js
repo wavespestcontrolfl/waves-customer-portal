@@ -2217,6 +2217,8 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('{/* <table><tr><td>x</td></tr></table> */}')).toBe(false);
     // Inline code spans render literally, not as tables.
     expect(guardrails.hasRawMarkdownTable('Use `<table><tr><td>x</td></tr></table>` sparingly.')).toBe(false);
+    // 4 spaces before ">" is indented code, not a live blockquote table.
+    expect(guardrails.hasRawMarkdownTable('Example:\n\n    > | A | B |\n    > | --- | --- |\n')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

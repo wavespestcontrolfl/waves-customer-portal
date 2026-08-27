@@ -414,6 +414,22 @@ describe('seo-completion-gate', () => {
     expect(pestOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
   });
 
+  test('absolute first-party URLs and unquoted hrefs are classified as conversion links', () => {
+    const absolute = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. [Get My Free Pest Control Estimate](https://www.wavespestcontrol.com/contact/) today.' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(absolute.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    const unquoted = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\n<a href=/contact/>Schedule Service</a>` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(unquoted.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+  });
+
   test('shortcut reference CTAs are classified', () => {
     const result = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule Service]\n\n[Schedule Service]: /contact/` }),
