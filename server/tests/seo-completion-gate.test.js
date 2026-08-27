@@ -821,6 +821,20 @@ describe('seo-completion-gate', () => {
     expect(proseEstimate.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
     expect(proseEstimate.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // Numeric/punctuated qualifiers before the service still name it.
+    const acreSuffix = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Grass. [Get an Estimate for 1-Acre Lawn Care](/contact/) now.' }),
+      brief: baseBrief({ service: 'lawn-care' }),
+      shadowMode: true,
+    });
+    expect(acreSuffix.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    const stAugustine = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Grass. [Get an Estimate for St. Augustine Lawn Care](/contact/) now.' }),
+      brief: baseBrief({ service: 'lawn-care' }),
+      shadowMode: true,
+    });
+    expect(stAugustine.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
     // Numeric qualifiers do not launder inspection requests.
     const numericInspection = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: `${baseDraft().body}\n\n[Schedule a 30-minute Termite Inspection](/termite-inspection/)` }),

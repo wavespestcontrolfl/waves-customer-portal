@@ -545,7 +545,7 @@ function conversionCtaLinks(body) {
       // Property-context nouns after a determiner/possessive ("for your
       // lawn", "on the trees") describe WHERE, not a service, so the
       // place-shaped services (lawn, tree-shrub) are dropped in that form.
-      const after = anchor.slice(end).match(/^\s+(?:for|on|to|against)\s+((?:[a-z&-]+\s?){1,5})/i);
+      const after = anchor.slice(end).match(/^\s+(?:for|on|to|against)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
       if (after) {
         const phrase = after[1];
         // Place-shaped when a determiner sits directly before the place
@@ -693,6 +693,23 @@ function forbiddenCtaAnchor(body) {
     if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;
   }
   return null;
+}
+
+// Brief-INDEPENDENT CTA violations — inspection-request anchors and
+// wording-free actionable conversion anchors — shared with
+// content-guardrails so EVERY blog publish lane (manual publish-astro,
+// legacy BlogWriter, refresh) enforces the owner rule 2026-08-27. The
+// brief-aware service-tying checks stay in this gate, where a brief exists.
+function collectForbiddenCtaAnchors(body) {
+  const out = [];
+  for (const link of extractLinks(body)) {
+    const anchor = plainAnchor(link.anchor);
+    if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) { out.push(anchor); continue; }
+    if (!isConversionPath(link.href)) continue;
+    const kw = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i.test(anchor);
+    if (!kw && !isProseReferenceAnchor(anchor)) out.push(anchor);
+  }
+  return out;
 }
 
 function faqRequired(brief = {}) {
@@ -850,6 +867,7 @@ function escapeRegExp(value) {
 
 module.exports = {
   evaluate,
+  collectForbiddenCtaAnchors,
   summarizeFindings,
   P0_CODES,
   P1_CODES,

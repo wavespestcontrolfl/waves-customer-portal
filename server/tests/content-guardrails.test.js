@@ -2192,6 +2192,24 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(reflowed.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
   });
 
+  test('CTA-wording hard rule covers every blog lane (brief-independent half)', () => {
+    const ev = (body, opts = {}) => guardrails
+      .evaluate({ body, frontmatter: {} }, { targetIsBlog: true, ...opts })
+      .findings.some((f) => f.code === 'FORBIDDEN_CTA_WORDING');
+    // Inspection-request anchors and wording-free actionable conversion
+    // anchors are flagged on any blog body — no brief required.
+    expect(ev('Text [Request an Inspection](/termite-inspection/) more.')).toBe(true);
+    expect(ev('Text [Schedule Service](/contact/) more.')).toBe(true);
+    expect(ev('Text [Get My Free Termite Estimate](/contact/) more.')).toBe(false);
+    // Non-blog surfaces are exempt.
+    expect(guardrails.evaluate({ body: '[Schedule Service](/contact/)', frontmatter: {} }, {})
+      .findings.some((f) => f.code === 'FORBIDDEN_CTA_WORDING')).toBe(false);
+    // Refresh drafts grandfather anchors the prior body carried; writer
+    // ADDITIONS are still flagged.
+    expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old [Schedule Service](/contact/) text.' })).toBe(false);
+    expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+  });
+
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
     expect(guardrails.hasRawMarkdownTable(TABLE_BODY)).toBe(true);
     // A table inside a fenced code example is documentation, not a table.
@@ -2291,6 +2309,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     // Comment delimiters INSIDE code spans are code — the content between
     // them still renders.
     expect(guardrails.hasRawMarkdownTable('Use `<!--` to open.\n\n| A | B |\n| - | - |\n\nAnd `-->` closes.')).toBe(true);
+    // …and inside FENCES likewise: content between a fence-enclosed "<!--"
+    // and a later "-->" still renders.
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n~~~html\n<!--\n~~~\n| A | B |\n| - | - |\n-->')).toBe(true);
+    // A thematic break ends the list like a heading does.
+    expect(guardrails.hasRawMarkdownTable('- item\n***\n\n    | A | B |\n    | - | - |')).toBe(false);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);

@@ -1848,7 +1848,27 @@ function blankNonRenderedMarkdown(text) {
   const spanScan = new RegExp(SPAN_RE_SOURCE, 'g');
   let sm;
   while ((sm = spanScan.exec(raw)) !== null) spanIntervals.push([sm.index, sm.index + sm[0].length]);
-  const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b);
+  // …and FENCED regions likewise: a delimiter inside a fence is code. A
+  // rough top-level line scan suffices here — pass 3 remains the fence
+  // authority for masking.
+  const fenceIntervals = [];
+  {
+    let pos = 0; let openCh = null; let openLen = 0; let start = 0;
+    for (const line of raw.split('\n')) {
+      const strippedLine = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '');
+      if (openCh) {
+        const close = strippedLine.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
+        if (close && close[1][0] === openCh && close[1].length >= openLen) { fenceIntervals.push([start, pos + line.length]); openCh = null; }
+      } else {
+        const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+        if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) { openCh = opener[1][0]; openLen = opener[1].length; start = pos; }
+      }
+      pos += line.length + 1;
+    }
+    if (openCh) fenceIntervals.push([start, raw.length]);
+  }
+  const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b)
+    || fenceIntervals.some(([a, b]) => pos >= a && pos < b);
   const afterComments = raw
     .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi, (c, offset) => (inSpan(offset) ? c : c.replace(/[^\n]/g, '')));
   // Pass 2 — inline code spans (any backtick-run length, possibly across
@@ -1925,13 +1945,15 @@ function blankNonRenderedMarkdown(text) {
     // so dedent-based list-END rules apply only to UNQUOTED lines.
     // NESTED list markers sit up to 3 past the parent's content column
     // ("- outer" + "    - inner") — the content column moves with them.
-    const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    // An interrupting block (ATX heading or thematic break) ends the list
+    // even with no blank line — neither can lazily continue a list item.
+    // A dashes-only break ("- - -") is a break, not a list marker.
+    const fenceInterrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    const listItem = fenceInterrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     const markerAccepted = Boolean(listItem && listItem[1].length <= fenceListIndent + 3);
-    // An interrupting block (ATX heading) ends the list even with no blank
-    // line — a heading can never lazily continue a list item.
     if (markerAccepted) fenceListIndent = listItem[1].length + listItem[2].length;
     else if (!blank && depth === 0 && indent < fenceListIndent
-      && (fencePrevBlank || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(stripped))) fenceListIndent = 0;
+      && (fencePrevBlank || fenceInterrupting)) fenceListIndent = 0;
     fencePrevBlank = blank;
     // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
     // the item's content column, so "10. item" + a 4-space fence is a fence
@@ -1971,15 +1993,16 @@ function blankNonRenderedMarkdown(text) {
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
     // NESTED list markers sit up to 3 past the parent's content column —
-    // the content column moves with them ("- outer" + "    - inner").
-    const listItem = stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    // the content column moves with them ("- outer" + "    - inner"). An
+    // INTERRUPTING block (ATX heading or thematic break, dashes-only "- - -"
+    // included) ends the list even with no blank line.
+    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    const listItem = interrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
       listContext = true;
       listContentIndent = listItem[1].length + listItem[2].length;
     } else if (!blank && rawIndent < listContentIndent
-      && ((!indented && prevBlank) || /^ {0,3}#{1,6}(?:[ \t]|$)/.test(stripped))) {
-      // A dedented paragraph after a blank — or an INTERRUPTING block
-      // (ATX heading) even without one — ends the list.
+      && ((!indented && prevBlank) || interrupting)) {
       listContext = false;
     }
     prevBlank = blank;
@@ -2077,6 +2100,31 @@ function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false
   const violated = isRefresh ? hasUnpreservedRawTable(body, priorBody) : hasRawMarkdownTable(body);
   if (!violated) return null;
   return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
+}
+
+// CTA-wording hard rule (owner 2026-08-27), brief-INDEPENDENT half —
+// inspection-request anchors and wording-free actionable conversion
+// anchors — enforced HERE so every blog publish lane (manual
+// /blog/:id/publish-astro, legacy BlogWriter, refresh) carries it; the
+// brief-aware service-tying checks live in seo-completion-gate (lazy
+// require: that module requires this one at load). Refresh drafts
+// GRANDFATHER anchors the live prior body already carried — content-
+// compared, same posture as the raw-table grandfather.
+function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  if (!targetIsBlog) return null;
+  const { collectForbiddenCtaAnchors } = require('./seo-completion-gate');
+  const current = collectForbiddenCtaAnchors(String(body || ''));
+  if (current.length === 0) return null;
+  const prior = new Map();
+  if (isRefresh) {
+    for (const a of collectForbiddenCtaAnchors(String(priorBody || ''))) prior.set(a, (prior.get(a) || 0) + 1);
+  }
+  for (const a of current) {
+    const n = prior.get(a) || 0;
+    if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
+    prior.set(a, n - 1);
+  }
+  return null;
 }
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
@@ -4164,6 +4212,9 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // rule 2026-08-27). Body-only (a pipe table can't ship in a meta), with
     // the standard refresh grandfather.
     rawMarkdownTableFinding(body, { targetIsBlog, isRefresh, priorBody }),
+    // CTA-wording hard rule, brief-independent half — every blog lane, with
+    // the standard refresh grandfather (see forbiddenCtaWordingFinding).
+    forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody }),
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
