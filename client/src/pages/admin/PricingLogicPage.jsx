@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import {
@@ -1380,7 +1380,10 @@ function CalibrationGroup({ title, rows }) {
   );
 }
 
-export default function PricingLogicPage() {
+// `embedded` (under PricingHubPage): the hub owns the header card, so this
+// page hands its section tabs up via `onSecondaryNav` instead of rendering
+// its own header. Standalone rendering is unchanged.
+export default function PricingLogicPage({ embedded = false, onSecondaryNav } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const requestedSection = sectionFromSearchParams(searchParams);
   const [activeSection, setActiveSection] = useState(requestedSection);
@@ -1409,19 +1412,35 @@ export default function PricingLogicPage() {
     scrollToPricingSection(key);
   };
 
+  const sectionChangeRef = useRef(handleSectionChange);
+  sectionChangeRef.current = handleSectionChange;
+  useEffect(() => {
+    if (!embedded || !onSecondaryNav) return undefined;
+    onSecondaryNav({
+      sections: PRICING_SECTIONS,
+      activeKey: activeSection,
+      onChange: (key) => sectionChangeRef.current(key),
+      ariaLabel: "Pricing section",
+      navGridClassName: "grid-cols-2 md:grid-cols-5",
+    });
+    return () => onSecondaryNav(null);
+  }, [embedded, onSecondaryNav, activeSection]);
+
   return (
     <div style={{ padding: "0 0 60px", fontFamily: ROBOTO }}>
       {" "}
       <div style={{ maxWidth: 1300, margin: "0 auto" }}>
         {" "}
-        <AdminCommandHeader
-          title="Pricing"
-          icon={Calculator}
-          sections={PRICING_SECTIONS}
-          activeKey={activeSection}
-          onSectionChange={handleSectionChange}
-          navGridClassName="grid-cols-2 md:grid-cols-5"
-        />
+        {!embedded && (
+          <AdminCommandHeader
+            title="Pricing"
+            icon={Calculator}
+            sections={PRICING_SECTIONS}
+            activeKey={activeSection}
+            onSectionChange={handleSectionChange}
+            navGridClassName="grid-cols-2 md:grid-cols-5"
+          />
+        )}
         {focus === "margin" && (
           <div
             style={{

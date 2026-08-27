@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
@@ -63,7 +63,10 @@ function canAct(request) {
   return request?.contractType === "document_template" && !["signed", "cancelled", "voided"].includes(request.status);
 }
 
-export default function DocumentRequestsPage() {
+// `embedded` (under ContractsPage): the hub owns the header card, so this
+// page hands its status tabs + Refresh up via `onSecondaryNav` instead of
+// rendering its own header. Standalone rendering is unchanged.
+export default function DocumentRequestsPage({ embedded = false, onSecondaryNav } = {}) {
   const [status, setStatus] = useState("open");
   const [search, setSearch] = useState("");
   const [requests, setRequests] = useState([]);
@@ -171,8 +174,26 @@ export default function DocumentRequestsPage() {
     setToast("Signing link copied");
   };
 
+  const hubNavRef = useRef({});
+  hubNavRef.current = { setStatus, loadRequests };
+  useEffect(() => {
+    if (!embedded || !onSecondaryNav) return undefined;
+    onSecondaryNav({
+      sections: STATUS_TABS,
+      activeKey: status,
+      onChange: (key) => hubNavRef.current.setStatus(key),
+      ariaLabel: "Request status",
+      navGridClassName: "grid-cols-2 md:grid-cols-6",
+      actions: [
+        { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: () => hubNavRef.current.loadRequests(), disabled: loading },
+      ],
+    });
+    return () => onSecondaryNav(null);
+  }, [embedded, onSecondaryNav, status, loading]);
+
   return (
     <div className="mx-auto max-w-[1500px]">
+      {!embedded && (
       <AdminCommandHeader
         title="Document Requests"
         icon={FileClock}
@@ -184,6 +205,7 @@ export default function DocumentRequestsPage() {
           { label: "Refresh", icon: RefreshCw, variant: "secondary", onClick: loadRequests, disabled: loading },
         ]}
       />
+      )}
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="relative min-w-[260px] flex-1">

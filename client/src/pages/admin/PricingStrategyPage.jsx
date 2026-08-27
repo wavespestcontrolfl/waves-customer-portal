@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 // V2 token pass: teal/blue/purple fold to zinc-900. Semantic green/amber/red preserved.
@@ -82,7 +82,10 @@ const fmt = (n) =>
 
 const isMobile = typeof window !== "undefined" && window.innerWidth < 768;
 
-export default function PricingStrategyPage() {
+// `onSecondaryNav` (from PricingHubPage): the hub header owns the card, so
+// the strategy tabs are handed up to its second row instead of rendering
+// the local tab box. Standalone rendering is unchanged.
+export default function PricingStrategyPage({ embedded = false, onSecondaryNav } = {}) {
   const [tab, setTab] = useState("money-model");
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -108,20 +111,40 @@ export default function PricingStrategyPage() {
     { key: "ltv", label: "LTV Analysis" },
   ];
 
+  const hubOwnsHeader = embedded && Boolean(onSecondaryNav);
+  const setTabRef = useRef(setTab);
+  setTabRef.current = setTab;
+  const tabsSignature = tabs.map((t) => t.key).join("|");
+  useEffect(() => {
+    if (!hubOwnsHeader) return undefined;
+    onSecondaryNav({
+      sections: tabs.map((t) => ({ key: t.key, label: t.label })),
+      activeKey: tab,
+      onChange: (key) => setTabRef.current(key),
+      ariaLabel: "Strategy section",
+      navGridClassName: "grid-cols-2 md:grid-cols-5",
+    });
+    return () => onSecondaryNav(null);
+    // `tabs` is rebuilt every render; its keys (tabsSignature) are what matter.
+  }, [hubOwnsHeader, onSecondaryNav, tab, tabsSignature]);
+
   return (
     <div style={{ maxWidth: 1200, margin: "0 auto" }}>
       {" "}
       <div style={{ marginBottom: 20 }}>
         {" "}
-        <h1
-          style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}
-        >
-          Pricing Strategy
-        </h1>{" "}
+        {!embedded && (
+          <h1
+            style={{ fontSize: 28, fontWeight: 400, color: D.heading, margin: 0 }}
+          >
+            Pricing Strategy
+          </h1>
+        )}{" "}
         <div style={{ fontSize: 13, color: D.muted, marginTop: 4 }}>
           Hormozi-style value engineering, offer architecture, and money model
         </div>{" "}
       </div>{" "}
+      {!hubOwnsHeader && (
       <div
         style={{
           display: "flex",
@@ -158,6 +181,7 @@ export default function PricingStrategyPage() {
           </button>
         ))}
       </div>
+      )}
       {tab === "money-model" && (
         <MoneyModelTab dashboard={dashboard} loading={loading} />
       )}
