@@ -705,10 +705,7 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
           // Named-competitor content in the fix: only the threaded
           // eligibility lets it continue past the park.
           validateFixedBlogFile: () => ({ ok: true, requiresHumanReview: true }),
-          validateAutonomousRunGates: async () => ({
-            ok: true,
-            comparisonResult: { pass: true, findings: [], requiresHumanReview: true },
-          }),
+          validateAutonomousRunGates: async () => ({ ok: true }),
           autonomousRunner: {
             _loadReviewedBrief: async () => ({
               action_type: 'new_supporting_blog',
@@ -723,11 +720,10 @@ describe('round-5 hardening (Codex findings on 2ef3b27)', () => {
 
       const { result: eligible, db: eligibleDb } = await harness(true);
       expect(eligible.remediated).toBe(true);
-      // Post-push, the fix's fresh comparison verdict is persisted onto the
-      // run so the poller's merge-time revoke check sees a competitor the
-      // FIX introduced (the stored verdict was from the original draft).
+      // No verdict persistence (PR r3 P2): the poller's merge gate
+      // re-evaluates the current head itself.
       const stamped = eligibleDb._tables.autonomous_runs.find((x) => x.id === 'run-1');
-      expect(JSON.parse(stamped.comparison_table_result)).toMatchObject({ requiresHumanReview: true });
+      expect(stamped.comparison_table_result).toBeUndefined();
 
       // Category/spoke seed shape (shared bucket + operator_brief, no
       // TRUE-intercept marker) still parks.
@@ -1266,9 +1262,8 @@ describe('validateAutonomousRunGates', () => {
       deps.comparisonTableGate.evaluate = () => ({ pass: true, findings: [], requiresHumanReview: true });
       const r = await rem.validateAutonomousRunGates(MD, RUN_REF, deps);
       expect(r.ok).toBe(true);
-      // The FRESH verdict rides on the result (the caller persists it AFTER
-      // the fix commit lands — never here, before the push): hook r6.
-      expect(r.comparisonResult).toMatchObject({ requiresHumanReview: true });
+      // No verdict persistence anywhere in this validator (PR r3 P2: the
+      // poller's merge gate re-evaluates the current head itself).
       const row = deps.db._tables.autonomous_runs.find((x) => x.id === 'run-1');
       expect(row.comparison_table_result).toBeUndefined();
     } finally {

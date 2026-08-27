@@ -1255,12 +1255,7 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       return { ok: false, reason: `pre-publish visibility: ${(visResult && (visResult.error || JSON.stringify((visResult.findings || []).map((f) => f.code)).slice(0, 200))) || 'no result'}` };
     }
 
-    // comparisonResult rides along so the autonomous caller can persist THIS
-    // fix's verdict onto the run AFTER the push lands (hook r6 P1: the
-    // poller's merge-time revoke check reads it, and stamping before the
-    // push would mislabel a run whose fix never committed — or strand a
-    // stale true after a later competitor-free fix).
-    return { ok: true, comparisonResult };
+    return { ok: true };
   } catch (err) {
     return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };
   }
@@ -2213,9 +2208,6 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
   } catch (e) {
     logger.warn(`[codex-remediation] operator-FAQ exception derivation failed for PR #${pr && pr.number}: ${e.message} — evaluating gates without it`);
   }
-  // The comparison verdict of the LAST successful gate re-run, captured so
-  // onRemediated can persist it AFTER the fix commit lands (see below).
-  let lastComparisonVerdict = null;
   return runRemediationForPr({
     guardContext,
     prNumber: pr && pr.number,
@@ -2252,33 +2244,17 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // lane's row sync (runRemediationForPr parks when onRemediated throws):
     // a stale caption degrades to the title-only fallback, never a wrong
     // route — not worth parking a pushed fix over, so failures only warn.
+    // No comparison-verdict persistence here (PR r3 P2): the poller's merge
+    // gate independently re-evaluates every current-head blog file, so a
+    // stored verdict cannot protect the merge — persisting it only turned a
+    // transient DB failure into a post-push human-reconciliation park.
     onRemediated: run && run.id
-      ? async ({ frontmatterChanges }) => {
-        // Persist THIS fix's comparison verdict (true AND false — a later
-        // competitor-free fix must clear a stale true) onto the run: the
-        // poller's merge-time revoke check reads
-        // autonomous_runs.comparison_table_result, and the stored verdict is
-        // from the ORIGINAL draft, so a fix that INTRODUCED a named
-        // competitor would otherwise merge past a revoked gate (hook r5/r6
-        // P1s). Runs AFTER the push landed (this hook fires post-commit);
-        // a throw here post-push-parks the PR, which disarms the auto-merge
-        // — fail closed, never blind the revoke check.
-        if (lastComparisonVerdict) {
-          const stamped = await db('autonomous_runs').where({ id: run.id })
-            .update({ comparison_table_result: JSON.stringify(lastComparisonVerdict), updated_at: new Date() });
-          if (!stamped) throw new Error('named-competitor verdict persist failed (run row missing)');
-        }
-        return mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges);
-      }
+      ? ({ frontmatterChanges }) => mirrorFrontmatterToDraftPayload(db, run.id, pr && pr.number, frontmatterChanges)
       : null,
     // Re-run the runner's publish gates on the rewritten body before it can
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
-    revalidateFix: async (fixedMarkdown) => {
-      const r = await revalidate(fixedMarkdown, run, deps);
-      lastComparisonVerdict = (r && r.ok === true && r.comparisonResult) ? r.comparisonResult : null;
-      return r;
-    },
+    revalidateFix: (fixedMarkdown) => revalidate(fixedMarkdown, run, deps),
     // Last-instant queue re-check before the branch push (the poller's check
     // runs BEFORE the LLM round; this one closes the window during it).
     prePushCheck: deps.prePushCheck || null,
