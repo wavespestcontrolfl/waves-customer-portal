@@ -3080,7 +3080,24 @@ async function createSelfBooking(payload = {}) {
           const freshPriced = freshPlan
             ? freshPriceFor({ estimate: lockedDraft, serviceKey: RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }), bookingVisits: freshPlan.visits })
             : null;
+          // PROPERTY identity under the lock (codex #3504 r15): the plan/
+          // price compare above is blind to a /calculate refresh that kept
+          // the same service, cadence, and annual but moved the draft to
+          // ANOTHER address (the wizard reuses the draft row). The visit
+          // was booked at the customer row's on-file address (the booking
+          // gate refuses any other), so the locked draft must still quote
+          // THAT property — otherwise the activation would seed, scope,
+          // and stamp a series for a property the customer did not book.
+          // Uncertain parses read as a different property (fail closed).
+          const bookedCustomerRow = await trx('customers')
+            .where({ id: custId })
+            .first('address_line1', 'address_line2', 'city', 'state', 'zip');
+          const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
+          const quotedPropertyIsBooked = !!lockedDraft
+            && !!bookedCustomerRow
+            && estimateQuotesCustomerAddress(lockedDraft.address, bookedCustomerRow);
           if (!freshPlan
+            || !quotedPropertyIsBooked
             || freshPlan.pattern !== wizardSeriesPlan.pattern
             || freshPlan.visits !== wizardSeriesPlan.visits
             || !freshPriced
@@ -3254,29 +3271,28 @@ async function createSelfBooking(payload = {}) {
           // property and strip the legitimate second-property booking. The
           // property linkage only stamps behind GATE_CUSTOMER_PROPERTIES
           // (and deliberately leaves primary-address rows unstamped), so
-          // the parent carries the quoted address ITSELF, from the row-
-          // locked draft, before the children seed (copyIfPresent inherits
-          // it). Coordinates stay — the funnel geocoded this same address
-          // at booking. Unparseable ⇒ unstamped (the guard's live-draft
-          // refusal then falls to the primary-street heuristic: over-
-          // suppression, never a wrong match).
+          // the parent carries its address ITSELF before the children seed
+          // (copyIfPresent inherits it). The source is the BOOKED customer
+          // row's on-file address — the property the visit was actually
+          // booked at (r15) — which the drift check above has just proven
+          // the locked draft still quotes; never the draft text itself,
+          // which a refresh can rewrite. Coordinates stay — the funnel
+          // geocoded this same address at booking.
           if (!String(seriesParentRow.service_address_line1 || '').trim()) {
-            const { parseEstimateAddress } = require('../services/estimate-property-linkage');
-            const quotedParts = parseEstimateAddress(lockedDraft.address);
-            if (quotedParts && String(quotedParts.address_line1 || '').trim()) {
+            if (String(bookedCustomerRow?.address_line1 || '').trim()) {
               const addressStamp = {
-                service_address_line1: quotedParts.address_line1,
-                service_address_line2: quotedParts.address_line2 || null,
-                service_address_city: quotedParts.city || null,
-                service_address_state: quotedParts.state || 'FL',
-                service_address_zip: quotedParts.zip || null,
+                service_address_line1: bookedCustomerRow.address_line1,
+                service_address_line2: bookedCustomerRow.address_line2 || null,
+                service_address_city: bookedCustomerRow.city || null,
+                service_address_state: bookedCustomerRow.state || 'FL',
+                service_address_zip: bookedCustomerRow.zip || null,
               };
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
                 .update({ ...addressStamp, updated_at: trx.fn.now() });
               Object.assign(seriesParentRow, addressStamp);
             } else {
-              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id}: quoted address unparseable — parent stays unstamped (duplicate guard uses the primary-street heuristic)`);
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id}: booked customer row has no street — parent stays unstamped (duplicate guard uses the primary-street heuristic)`);
             }
           }
           // The PARENT is reserved at the program duration too (codex
@@ -3468,6 +3484,18 @@ async function createSelfBooking(payload = {}) {
           // address the plan was activated for, and a wizard re-run
           // serializes behind the commit. Shared accept-path mechanism;
           // never throws by contract (internally best-effort).
+          // ...but "never throws" is NOT "never aborts the transaction"
+          // (codex #3504 r15): the helper swallows its own SQL errors and
+          // returns null, which leaves THIS PostgreSQL transaction in the
+          // aborted state — the COMMIT below would then silently ROLLBACK
+          // while the request reports the series, fee stamp, and draft
+          // archive as activated. Run it inside an explicit SAVEPOINT and
+          // roll back to it when the sub-transaction cannot be released;
+          // the post-probe then proves the outer transaction is still
+          // live (an aborted one throws here → outer catch → rollback +
+          // fail-safe strip). Linkage stays non-blocking: the parent
+          // already carries the booked address (stamp above).
+          await trx.raw('SAVEPOINT wizard_activation_linkage');
           try {
             const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
             await linkAcceptedEstimateProperty({
@@ -3480,9 +3508,15 @@ async function createSelfBooking(payload = {}) {
               // still-unstamped series sharing it.
               onlyServiceIds: sweepExcludeIds,
             });
+            await trx.raw('RELEASE SAVEPOINT wizard_activation_linkage');
           } catch (linkErr) {
-            logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking): ${linkErr.message}`);
+            logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking, rolled back to savepoint): ${linkErr.message}`);
+            await trx.raw('ROLLBACK TO SAVEPOINT wizard_activation_linkage');
           }
+          // Transaction-health probe: throws if anything above left the
+          // transaction aborted, so the activation can never "commit" as
+          // a silent rollback.
+          await trx.raw('SELECT 1');
           return { seedResult };
         });
         return outcome;

@@ -809,7 +809,13 @@ async function findActiveRecurringSeries(conn, {
         this.where({ recurring_parent_id: parent.id }).orWhere({ id: parent.id });
       })
       .where('is_recurring', true)
-      .whereIn('status', ['pending', 'confirmed'])
+      // 'rescheduled' is a LIVE visit awaiting re-placement (the customer
+      // reschedule path leaves it on the books with that status when the
+      // streamline gates are off) — a fixed-length series whose last
+      // outstanding visit sits in that state is not lapsed, and reading
+      // it as lapsed let a second same-family billable series activate
+      // (codex #3504 r15).
+      .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
       .where('scheduled_date', '>=', etDateString())
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');

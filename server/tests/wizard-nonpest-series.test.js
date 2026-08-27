@@ -357,6 +357,36 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/return \{ stale: true \};/);
   });
 
+  test('the locked draft must still quote the BOOKED property, or the activation is stale (r15)', () => {
+    // codex #3504 r15: a same-plan/same-price refresh to another address
+    // passed the drift check, and the r14 stamp would then have routed
+    // the whole series to the second address.
+    expect(booking).toMatch(/const bookedCustomerRow = await trx\('customers'\)\s*\n\s*\.where\(\{ id: custId \}\)/);
+    expect(booking).toMatch(/quotedPropertyIsBooked = !!lockedDraft\s*\n\s*&& !!bookedCustomerRow\s*\n\s*&& estimateQuotesCustomerAddress\(lockedDraft\.address, bookedCustomerRow\)/);
+    expect(booking).toMatch(/if \(!freshPlan\s*\n\s*\|\| !quotedPropertyIsBooked/);
+    // The comparator itself fails closed on a different street / city / zip
+    // and passes the customer's own property (unit-tolerant).
+    const { estimateQuotesCustomerAddress } = require('../services/estimate-property-linkage');
+    const booked = { address_line1: '100 Main St', address_line2: null, city: 'Venice', state: 'FL', zip: '34285' };
+    expect(estimateQuotesCustomerAddress('100 Main St, Venice, FL 34285', booked)).toBe(true);
+    expect(estimateQuotesCustomerAddress('200 Other St, Venice, FL 34285', booked)).toBe(false);
+    expect(estimateQuotesCustomerAddress('100 Main St, Sarasota, FL 34236', booked)).toBe(false);
+  });
+
+  test('in-activation property linkage runs in a SAVEPOINT with a transaction-health probe (r15)', () => {
+    // codex #3504 r15: the helper swallows SQL errors → aborted trx →
+    // COMMIT silently rolls back while the request reports success.
+    expect(booking).toMatch(/await trx\.raw\('SAVEPOINT wizard_activation_linkage'\);/);
+    expect(booking).toMatch(/await trx\.raw\('RELEASE SAVEPOINT wizard_activation_linkage'\);/);
+    expect(booking).toMatch(/await trx\.raw\('ROLLBACK TO SAVEPOINT wizard_activation_linkage'\);/);
+    expect(booking).toMatch(/await trx\.raw\('SELECT 1'\);\s*\n\s*return \{ seedResult \};/);
+  });
+
+  test('a reschedule-pending visit keeps a fixed series ACTIVE in the duplicate guard (r15)', () => {
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled'\]\)\s*\n\s*\.where\('scheduled_date', '>=', etDateString\(\)\)/);
+  });
+
   test('replay activation keys on the live-draft marker (annual plans seed no children; insert-time correlation is not activation)', () => {
     expect(booking).toMatch(/draftStillLive\s*\n\s*&& !hasChildren/);
     expect(booking).toMatch(/whereNull\('archived_at'\)/);
@@ -721,7 +751,10 @@ describe('booking route wiring (source contracts)', () => {
     // quote (any address). An unstamped primary-address parent whose
     // source is that draft would re-home to whatever was quoted last and
     // strip the legitimate second-property booking.
-    expect(booking).toMatch(/parseEstimateAddress\(lockedDraft\.address\)/);
+    // r15: the stamp copies the BOOKED customer row's address (the
+    // property the visit was booked at), never the rewritable draft text.
+    expect(booking).toMatch(/service_address_line1: bookedCustomerRow\.address_line1,/);
+    expect(booking).not.toMatch(/parseEstimateAddress\(lockedDraft\.address\)/);
     expect(booking).toMatch(/if \(!String\(seriesParentRow\.service_address_line1 \|\| ''\)\.trim\(\)\) \{/);
     expect(booking).toMatch(/Object\.assign\(seriesParentRow, addressStamp\)/);
     // Stamp precedes seeding so children inherit it (copyIfPresent).
