@@ -385,6 +385,17 @@ describe('predictCompletionBilling — GATE_COMPLETION_AUTOPAY_CHARGE extension 
       .toEqual({ kind: 'auto_charge', amount: 50, conflictStampedPrice: false });
     expect(predictCompletionBilling({ ...perVisit, prepaidAmount: 120 }).kind).toBe('prepaid');
   });
+  test('no-cost visits never predict auto_charge even under the gate (mirror of the charge lane)', () => {
+    expect(predictCompletionBilling({
+      ...memberBase, isRecurring: false, estimatedPrice: 90.55, isCallback: true, completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+    expect(predictCompletionBilling({
+      ...memberBase, isRecurring: false, estimatedPrice: 90.55, serviceType: 'Pest Control Re-Service', completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+    expect(predictCompletionBilling({
+      ...memberBase, lane: 'annual_prepay', billingMode: 'annual_prepay', estimatedPrice: 150, isCallback: true, completionAutopayChargeEnabled: true,
+    }).kind).not.toBe('auto_charge');
+  });
   test('dues-covered visits stay covered_membership regardless of the gate', () => {
     expect(predictCompletionBilling({ ...memberBase, completionAutopayChargeEnabled: true }).kind)
       .toBe('covered_membership');

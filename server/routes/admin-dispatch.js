@@ -10940,7 +10940,14 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // otherwise pass the anchor — the same exclusions every explicit lane
     // applies, revalidated again under the locked visit row inside
     // verifyExtendedCompletionAnchor.
+    // An UNRESOLVED appointment-card lane fails the extended lane closed
+    // too (pre-push P0): apptCardOneTimeCharge=false because the lookup
+    // ERRORED is not "no consent row" — charging the mutable visit price
+    // could exceed a frozen accepted_amount we couldn't read. The money
+    // boundary additionally excludes any consent row under the visit lock
+    // (requireNoAppointmentCardLane on the charge below).
     const extendedChargeCandidate = extendedAutopayCharge && visitPerformed
+      && !apptCardLaneUnresolved
       && !svc.is_callback && !isAlwaysFreeServiceType(svc.service_type)
       && !!invoice?.id && !alreadyPaid && !invoice.payer_id && customerAutopayActive;
     let extendedLaneAnchor = null;
@@ -11055,7 +11062,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // whole rail leaves the exact no-chargeable-method posture — invoice
     // open and collectible, autoChargedReceiptPending/paymentFailedSmsContext
     // untouched — for explicit operator collection.
-    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge || extendedAutopayCharge) && visitPerformed && invoice?.id && !alreadyPaid
+    if (isBackfillCompletion && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid
       && customerAutopayActive) {
       logger.info(`[dispatch] backfill completion: completion auto-charge skipped for visit ${svc.id} — invoice ${invoice.id} left open for operator collection`);
     }
@@ -11063,7 +11070,7 @@ router.post('/:serviceId/complete', async (req, res, next) => {
       ? 'per_application_completion'
       : (apptCardOneTimeCharge ? 'appointment_card_completion' : 'autopay_completion');
     if (!isBackfillCompletion
-      && (perApplicationBilling || apptCardOneTimeCharge || extendedAutopayCharge) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
+      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id
       && !['paid', 'prepaid', 'void', 'processing'].includes(String(invoice.status || '').toLowerCase())
       && customerAutopayActive) {
       // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
@@ -11318,6 +11325,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // double-collect beside dues/prepay. Per-application keeps its
             // own semantics (false).
             requireOneTimeLane: apptCardOneTimeCharge,
+            // The extended lane must not charge past a FROZEN
+            // appointment-card consent it failed to classify (pre-push
+            // P0): any appointment_card_requests row appearing on the
+            // visit — gate off, lookup raced, or inserted after the
+            // unlocked admission check — refuses under the visit lock
+            // (COMPETING_CARD_CONSENT → office review); a visit the
+            // appt-card lane itself owns has apptCardOneTimeCharge=true
+            // and never sets this.
+            requireNoAppointmentCardLane: extendedAutopayCharge,
             // The extended lane's cap AUTHORITY is re-derived and
             // re-asserted under the charge's own customer/visit/invoice
             // locks (pre-push P0): a billing-mode flip into

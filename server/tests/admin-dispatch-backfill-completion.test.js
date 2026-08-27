@@ -2352,7 +2352,7 @@ describe('completion route wiring (source contracts)', () => {
     // for non-backfill completions. Invoice minting is untouched
     // (shouldInvoice runs earlier), so a backfill invoice still mints, open
     // and uncharged, for operator collection.
-    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge \|\| extendedAutopayCharge\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
+    expect(source).toMatch(/if \(!isBackfillCompletion\n\s*&& \(perApplicationBilling \|\| apptCardOneTimeCharge \|\| extendedChargeCandidate\) && visitPerformed && invoice\?\.id && !alreadyPaid && !invoice\.payer_id/);
     // autoChargedReceiptPending starts false and is only ever set inside the
     // gated rail — no charge, no combined receipt claim.
     expect(source).toMatch(/let autoChargedReceiptPending = false;/);
@@ -2416,6 +2416,12 @@ describe('completion route wiring (source contracts)', () => {
     expect(source).toMatch(/maxAuthorizedChargeCents: Math\.max\(0, Math\.round\(\(Number\(invoice\.total \|\| 0\) - Number\(invoice\.credit_applied \|\| 0\)\) \* 100\)\),/);
     const laneSource = fs.readFileSync(path.join(__dirname, '../services/billing-lane.js'), 'utf8');
     expect(laneSource).toMatch(/annualPrepayCoversVisit\(fullSvc, dbConn, \{ throwOnError: true \}\)/);
+    // Round 5-6: entry keys on the FULL candidate (no-cost + unresolved
+    // appt-lane exclusions included) and the money boundary excludes any
+    // appointment-card consent row under the visit lock.
+    expect(source).toMatch(/&& !apptCardLaneUnresolved\n\s*&& !svc\.is_callback && !isAlwaysFreeServiceType\(svc\.service_type\)/);
+    expect(source).toMatch(/requireNoAppointmentCardLane: extendedAutopayCharge,/);
+    expect(laneSource).toMatch(/reason: 'no_cost_visit'/);
   });
 
   test('backfill mints the digital card quietly — card.issued email suppressed', () => {
@@ -2784,7 +2790,7 @@ describe('completion route wiring (source contracts)', () => {
       'if (!isBackfillCompletion\n      && invoice?.id && !alreadyPaid && !invoice.payer_id',
       // completion saved-card / ACH auto-charge (per-application OR the
       // appointment-card one-time lane — one shared rail, one backfill gate)
-      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge || extendedAutopayCharge) && visitPerformed',
+      'if (!isBackfillCompletion\n      && (perApplicationBilling || apptCardOneTimeCharge || extendedChargeCandidate) && visitPerformed',
       // appointment-card one-time lane derivation (read-only, but its
       // backfill-skip log reads isBackfillCompletion so it must sit after
       // the re-derivation too)

@@ -32,6 +32,7 @@ const {
 const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
 const { customerOnAutopay, isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
 const { resolveBillingLane, predictCompletionBilling, monthlyDuesCollected } = require('../services/billing-lane');
+const { isAlwaysFreeServiceType } = require('../services/no-cost-visit-types');
 const DiscountEngine = require('../services/discount-engine');
 const { isReService } = require('../services/re-service');
 const { hasMembership } = require('../services/project-completion');
@@ -2724,7 +2725,7 @@ const ZONE_COORDS = {
 // existingCompletionInvoice) — so when one exists, the sheet's prediction
 // must mirror it, not recompute from the visit price/fee, or the card
 // quotes an amount (or a paying party) completion will ignore (Codex r7).
-function predictionFromAttachedInvoice(invoice, { autopayActive = false } = {}) {
+function predictionFromAttachedInvoice(invoice, { autopayActive = false, noCostVisit = false } = {}) {
   if (!invoice || invoice.status === 'void') return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
@@ -2742,6 +2743,7 @@ function predictionFromAttachedInvoice(invoice, { autopayActive = false } = {}) 
   // label. The cap can still route an over-anchor invoice to review at
   // completion — the closest honest label is still the charge attempt.
   const autoCharge = autopayActive
+    && !noCostVisit
     && require('../config/feature-gates').gates.completionAutopayCharge === true
     && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status);
   return { kind: autoCharge ? 'auto_charge' : 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
@@ -3060,7 +3062,7 @@ router.get('/', async (req, res, next) => {
         hasOverdue: openInvoices.overdue,
         duesPaidThisMonth,
         servicePausedAt: s.service_paused_at || null,
-        prediction: predictionFromAttachedInvoice(checkoutInvoice, { autopayActive }) || predictCompletionBilling({
+        prediction: predictionFromAttachedInvoice(checkoutInvoice, { autopayActive, noCostVisit: !!s.is_callback || isAlwaysFreeServiceType(s.service_type) }) || predictCompletionBilling({
           lane: lane.mode,
           billingMode: s.billing_mode || null,
           autopayActive,
@@ -3578,7 +3580,7 @@ router.get('/week', async (req, res, next) => {
           hasOverdue: openInvoices.overdue,
           duesPaidThisMonth,
           servicePausedAt: s.service_paused_at || null,
-          prediction: predictionFromAttachedInvoice(attachedInvoice, { autopayActive }) || predictCompletionBilling({
+          prediction: predictionFromAttachedInvoice(attachedInvoice, { autopayActive, noCostVisit: !!s.is_callback || isAlwaysFreeServiceType(s.service_type) }) || predictCompletionBilling({
             lane: lane.mode,
             billingMode: s.billing_mode || null,
             autopayActive,

@@ -248,7 +248,10 @@ function predictCompletionBilling({
     const amount = Number(estimatedPrice);
     if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
     return {
-      kind: (autopayActive && completionAutopayChargeEnabled) ? 'auto_charge' : 'invoice',
+      // No-cost exclusions mirror the charge lane (manual-audit P1): a
+      // callback/always-free visit never auto-charges, so never promise it.
+      kind: (autopayActive && completionAutopayChargeEnabled
+        && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
       amount: Math.max(0, amount - prepaid),
       conflictStampedPrice: false,
     };
@@ -291,7 +294,9 @@ function predictCompletionBilling({
   if (!(amount > 0)) return none;
   if (prepaid >= amount) return { kind: 'prepaid', amount: prepaid, conflictStampedPrice: false };
   return {
-    kind: (autopayActive && completionAutopayChargeEnabled) ? 'auto_charge' : 'invoice',
+    // Same no-cost exclusion as the annual branch (manual-audit P1).
+    kind: (autopayActive && completionAutopayChargeEnabled
+      && !isCallback && !isAlwaysFreeServiceType(serviceType)) ? 'auto_charge' : 'invoice',
     amount: Math.max(0, amount - prepaid),
     conflictStampedPrice: false,
   };
