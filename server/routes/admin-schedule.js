@@ -1699,7 +1699,13 @@ function calculateDiscountDollars(row, baseAmount, clientAmount) {
   let dollars = 0;
   if (row.discount_type === 'percentage' || row.discount_type === 'variable_percentage') {
     dollars = baseAmount * (amount / 100);
-    if (row.max_discount_dollars) dollars = Math.min(dollars, Number(row.max_discount_dollars));
+    // Any non-null cap counts, including an explicit $0 (admin-discounts.js
+    // accepts it) — same clamp calculateAppointmentDiscountDollars applies to
+    // children/edits, so the parent visit and its series agree (Codex #3531
+    // r11 P1: a truthy check read a numeric 0 cap as "uncapped").
+    if (row.max_discount_dollars != null && row.max_discount_dollars !== '' && Number.isFinite(Number(row.max_discount_dollars))) {
+      dollars = Math.min(dollars, Math.max(0, Number(row.max_discount_dollars)));
+    }
   } else if (row.discount_type === 'fixed_amount' || row.discount_type === 'variable_amount') {
     dollars = amount;
   } else if (row.discount_type === 'free_service') {
@@ -2118,7 +2124,9 @@ const PERCENT_EXCLUSION_KEY_ALIASES = Object.freeze({
   termite_bond_5yr: 'termite_bond',
   termite_bond_10yr: 'termite_bond',
   palm_injection_semiannual: 'palm_injection',
-  palm_treatment: 'palm_injection',
+  // palm_treatment is NOT here: it is the distinct archived nutritional/
+  // fertilization program (20260811000010 keeps it separate from the typed
+  // palm_injection lane), so it stays percent-discountable (Codex #3531 r11 P1).
 });
 // service_key → boolean verdict for every catalog row that HAS engine keys
 // (built by buildPercentExclusionCatalog). A row present here is judged by

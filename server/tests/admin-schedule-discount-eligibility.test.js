@@ -276,6 +276,8 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(lineExcludedFromPercentDiscount('termite_bond_1yr', catalog)).toBe(true);
     expect(lineExcludedFromPercentDiscount('termite_bond_5yr', catalog)).toBe(true);
     expect(lineExcludedFromPercentDiscount('palm_injection_semiannual', catalog)).toBe(true);
+    // the archived nutritional program is NOT an injection variant (r11 P1)
+    expect(lineExcludedFromPercentDiscount('palm_treatment', catalog)).toBe(false);
     expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(true);
     // unknown prefixed keys are NOT inferred
     expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(false);
@@ -380,6 +382,44 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(groups.fields.discount_id).toBe('preset-termite');
     expect(groups.fields.discount_service_category_filter).toBe('termite');
     expect(computePriceServiceGroupChanges(before, { ...updates, discount_id: 'preset-unscoped', discount_service_category_filter: null }).priceChanged).toBe(false);
+  });
+
+  test('parent creation honors the preset cap, including an explicit $0 (r11 P1)', async () => {
+    const capped = {
+      id: 'discount-capped',
+      name: '10% capped at $5',
+      discount_type: 'percentage',
+      amount: 10,
+      max_discount_dollars: 5,
+    };
+    db.mockReturnValueOnce(discountQuery(capped));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 200 },
+      estimatedPrice: 200,
+      serviceAddons: [],
+      discountId: capped.id,
+      discountType: capped.discount_type,
+      customer: { id: 'customer-1' },
+    });
+    expect(pricing.appointmentDiscount.discountDollars).toBe(5);
+    expect(pricing.finalPrice).toBe(195);
+
+    // a numeric 0 cap is a real cap, not "uncapped" — children clamp to $0
+    // via calculateVisitFinancialsForAddons, so the parent must too
+    const zeroCapped = { ...capped, id: 'discount-zero', max_discount_dollars: 0 };
+    db.mockReturnValueOnce(discountQuery(zeroCapped));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+    const zeroPricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 200 },
+      estimatedPrice: 200,
+      serviceAddons: [],
+      discountId: zeroCapped.id,
+      discountType: zeroCapped.discount_type,
+      customer: { id: 'customer-1' },
+    });
+    expect(zeroPricing.appointmentDiscount.discountDollars).toBe(0);
+    expect(zeroPricing.finalPrice).toBe(200);
   });
 
   test('honors a preset max_discount_dollars cap on edit like creation does', () => {
