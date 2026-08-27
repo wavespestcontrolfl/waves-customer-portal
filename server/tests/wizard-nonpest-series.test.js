@@ -413,6 +413,9 @@ describe('booking route wiring (source contracts)', () => {
     // slice with no completion marker starves older rows (r9 hook).
     expect(recoverySrc).toMatch(/orderBy\('ss\.created_at', 'asc'\)/);
     expect(recoverySrc).toMatch(/safety cap/);
+    // One replica per tick (r10): the heal pass can re-create a welcome
+    // enqueue and sms_sequences has no unique constraint.
+    expect(indexSrc).toMatch(/runExclusive\('wizard-series-recovery-sweep', async \(\) => \{/);
     // The stranded-strip predicate keeps NO upper age bound (r9 P2): an
     // outage must never expire an unrecovered billable row.
     expect(recoverySrc).not.toMatch(/youngerThanDays[\s\S]{0,400}findStrandedParents/);
@@ -507,13 +510,30 @@ describe('booking route wiring (source contracts)', () => {
     expect(cadenceCatalogKeyForProfile({ service: 'lawn_care', visitsPerYear: 9 }, false)).toBe('lawn_care_6week');
   });
 
-  test('activation runs the shared post-activation follow-through (property stamp, tier sync, tagger/welcome re-run)', () => {
-    // codex #3504 r6+r9: the logic lives in the recovery SERVICE (the heal
-    // sweep re-runs it durably); the route delegates with the trusted ids.
+  test('activation runs the shared post-activation follow-through (tier sync, tagger/welcome, lead conversion)', () => {
+    // codex #3504 r6+r9+r10: the logic lives in the recovery SERVICE (the
+    // heal sweep re-runs it durably); the route delegates with the
+    // trusted ids. Property linkage deliberately is NOT in the service —
+    // the reusable draft can carry a LATER quote's address, so it runs
+    // INSIDE the activation transaction against the row-locked draft.
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).toMatch(/linkAcceptedEstimateProperty\(\{\s*\n\s*estimateId: parent\.source_estimate_id,\s*\n\s*customerId: parent\.customer_id,/);
+    expect(recoverySrc).not.toMatch(/linkAcceptedEstimateProperty\(/);
     expect(recoverySrc).toMatch(/syncCustomerWaveGuardPlanFromScheduledServices\(\{ database: trx, customerId: parent\.customer_id \}\)/);
     expect(recoverySrc).toMatch(/onServiceScheduled\(parent\.id\)/);
+    expect(recoverySrc).toMatch(/convertLeadFromEvent\(\{\s*\n\s*source: 'recurring_service_booked',\s*\n\s*customerId: parent\.customer_id,\s*\n\s*enforceOriginating: true,/);
+    // In-activation linkage: inside the transaction, AFTER the draft
+    // archive (the draft is row-locked, so a wizard re-run for another
+    // address serializes behind this commit).
+    // ...and pinned to THIS activation's row ids: the reusable draft id
+    // also matches older still-unstamped series (r10 hook P0).
+    expect(booking).toMatch(/estimateId: pricing_estimate_id,\s*\n\s*customerId: custId,\s*\n\s*database: trx,[\s\S]{0,400}onlyServiceIds: sweepExcludeIds,/);
+    const linkageSrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'estimate-property-linkage.js'), 'utf8');
+    expect((linkageSrc.match(/\.where\(\{ source_estimate_id: estimateId \}\)\.modify\(scopeToActivation\)/g) || []).length).toBe(4);
+    const archiveAt = booking.indexOf("update({ archived_at: trx.fn.now(), updated_at: trx.fn.now() })");
+    const linkAt = booking.indexOf('await linkAcceptedEstimateProperty({');
+    const seedReturnAt = booking.indexOf('return { seedResult };');
+    expect(linkAt).toBeGreaterThan(archiveAt);
+    expect(seedReturnAt).toBeGreaterThan(linkAt);
     expect(booking).toMatch(/runActivationFollowThroughForParent\(\{\s*\n\s*id: parentRowId,\s*\n\s*customer_id: custId,\s*\n\s*source_estimate_id: pricing_estimate_id,/);
     // Both activation completions run it AWAITED — primary and replay —
     // and alreadyActivated retries heal a lost follow-through (codex
@@ -577,6 +597,29 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/row\.window_start = null;\s*\n\s*row\.window_end = null;/);
   });
 
+  test('seeded children reserve the CATALOG duration, not the coarse funnel duration', () => {
+    // codex #3504 r10: mosquito's funnel books 45min; the cadence catalog
+    // row reserves 60 — children seeded at 45 release their slot early.
+    expect(booking).toMatch(/let seededChildDuration = duration;/);
+    expect((booking.match(/seededChildDuration = Number\((palmCatalogRow|catalogRow)\.default_duration_minutes\);/g) || []).length).toBe(2);
+    expect(booking).toMatch(/durationMinutes: seededChildDuration,/);
+    // ...and their window spans that duration instead of inheriting the
+    // parent's shorter one.
+    expect(booking).toMatch(/childEndMin = timeToMin\(slot_start\) \+ seededChildDuration/);
+  });
+
+  test('the generic reminder self-heal registers windowless visits as PRE-CLOSED placeholders', () => {
+    // codex #3504 r10: the legacy path converted a null window to an
+    // ARMED 08:00 registration — texting a time nobody chose.
+    const reminders = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+    expect(reminders).toMatch(/async insertPreClosedPlaceholderRowInTx\(trx, \{ scheduledServiceId, customerId, apptTime, serviceLabel, source \}\)/);
+    expect(reminders).toMatch(/if \(!lockedVisit\.window_start\) \{[\s\S]{0,900}insertPreClosedPlaceholderRowInTx\(trx, \{/);
+    // registerAppointment's closeReminderWindows path shares the SAME
+    // insert (single implementation): the definition + exactly two call
+    // sites.
+    expect((reminders.match(/insertPreClosedPlaceholderRowInTx\(trx, \{/g) || []).length).toBe(3);
+  });
+
   test('windowless follow-ups register PRE-CLOSED reminder placeholders, never armed 72/24h sends for an unchosen time', () => {
     // codex #3504 r5: the registration loop's slot_start fallback would
     // otherwise arm reminders at the parent's time for a visit the office
@@ -604,7 +647,7 @@ describe('booking route wiring (source contracts)', () => {
     // codex #3504 hook P0: the auto-extend maintenance templates extension
     // visits off the PARENT's remainder-bearing first-visit price, so an
     // Ongoing wizard series would overbill every renewal cycle.
-    expect(booking).toMatch(/durationMinutes: duration,\s*\n\s*source: source \|\| 'self_booked',[\s\S]{0,1200}recurringOngoing: false,/);
+    expect(booking).toMatch(/durationMinutes: seededChildDuration,[\s\S]{0,1600}source: source \|\| 'self_booked',[\s\S]{0,1200}recurringOngoing: false,/);
     // The seeder honors the flag on both the parent mark and the children.
     const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
     expect(seeder.match(/recurring_ongoing: opts\.recurringOngoing !== false/g).length).toBeGreaterThanOrEqual(2);

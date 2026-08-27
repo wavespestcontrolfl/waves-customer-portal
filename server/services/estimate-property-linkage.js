@@ -260,9 +260,21 @@ async function refreshHasMultiHome(customerId, database = db) {
  * visits, refresh has_multi_home. Runs POST-COMMIT on the global pool.
  * Returns { propertyId, hasMultiHome } or null. Never throws.
  */
-async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db }) {
+async function linkAcceptedEstimateProperty({ estimateId, customerId, database = db, onlyServiceIds = null }) {
   try {
     if (!estimateId || !customerId) return null;
+    // Optional id scope (codex #3504 r10 hook P0): quote-wizard drafts are
+    // REVIVED and reused for later quotes, so `source_estimate_id` alone
+    // can also match an OLDER activation's still-unstamped rows (a
+    // primary-address series deliberately stays unstamped) — an unscoped
+    // stamp from a later quote would retarget that older series to the new
+    // address. Callers that know exactly which rows this linkage is FOR
+    // (the wizard activation passes its parent + just-seeded children)
+    // pin every visit update to those ids; accept-path callers, whose
+    // estimates are never reused, pass nothing and keep today's behavior.
+    const scopeToActivation = (qb) => {
+      if (Array.isArray(onlyServiceIds) && onlyServiceIds.length) qb.whereIn('id', onlyServiceIds);
+    };
     if (!customerPropertiesGateOn()) {
       // Gate OFF: no customer_properties writes — but a GROUPED accept still
       // stamps its booked visits' service address. service_address_* are
@@ -298,7 +310,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         // property_id with no address (an ID-matched ADOPTED visit —
         // codex #3431 r13): either shape would dispatch to the primary.
         await database('scheduled_services')
-          .where({ source_estimate_id: estimateId })
+          .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
           .whereNull('service_address_line1')
           .where((builder) => {
             builder.whereNull('property_id').orWhere('property_id', grouped.property_id);
@@ -352,7 +364,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
         if (estimateMatchesPrimary) return null;
       }
       await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
+        .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
         .whereNull('property_id')
         .whereNull('service_address_line1')
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
@@ -485,7 +497,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
           }
           if (estimate.estimate_group_id || stampUngrouped) {
             await database('scheduled_services')
-              .where({ source_estimate_id: estimateId })
+              .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
               .whereNull('property_id')
               .whereNull('service_address_line1')
               .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
@@ -542,7 +554,7 @@ async function linkAcceptedEstimateProperty({ estimateId, customerId, database =
     const property = await database('customer_properties').where({ id: propertyId }).first();
     if (property) {
       await database('scheduled_services')
-        .where({ source_estimate_id: estimateId })
+        .where({ source_estimate_id: estimateId }).modify(scopeToActivation)
         .whereNull('property_id')
         .whereNotIn('status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show'])
         .update({

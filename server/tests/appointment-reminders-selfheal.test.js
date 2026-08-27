@@ -91,7 +91,10 @@ describe('selfHealMissingReminderRows', () => {
     });
   });
 
-  test('defaults a missing window_start to 08:00', async () => {
+  test('a missing window_start heals as the PRE-CLOSED placeholder, never an armed 08:00 registration', async () => {
+    // codex #3504 r10: a windowless visit has no chosen time — the legacy
+    // armed-08:00 registration texted 72/24h reminders for a time nobody
+    // picked. The sync trigger re-arms the row when a real window is set.
     const visit = {
       id: 'svc-2',
       customer_id: 'cust-2',
@@ -103,11 +106,16 @@ describe('selfHealMissingReminderRows', () => {
     trxVisitRows = [visit];
     const register = jest.spyOn(AppointmentReminders, 'registerVisitReminderInTx')
       .mockResolvedValue({ id: 'rem-2' });
+    const placeholder = jest.spyOn(AppointmentReminders, 'insertPreClosedPlaceholderRowInTx')
+      .mockResolvedValue({ id: 'rem-2-preclosed' });
 
     await AppointmentReminders.selfHealMissingReminderRows();
 
-    expect(register).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), expect.objectContaining({
-      appointmentTime: '2026-08-02T08:00',
+    expect(register).not.toHaveBeenCalled();
+    expect(placeholder).toHaveBeenCalledWith(expect.objectContaining({ __isTrxConn: true }), expect.objectContaining({
+      scheduledServiceId: 'svc-2',
+      customerId: 'cust-2',
+      source: 'cron_selfheal',
     }));
   });
 

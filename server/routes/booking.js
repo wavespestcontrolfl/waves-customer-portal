@@ -3148,6 +3148,13 @@ async function createSelfBooking(payload = {}) {
             return { kept: matches[0] };
           }
           const activationFamilyKey = RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType });
+          // Children seed at the CATALOG row's duration when it resolves
+          // (codex #3504 r10): the coarse funnel duration (mosquito books
+          // 45min) undershoots the cadence catalog's owner-directed
+          // default (60min), releasing each follow-up's slot early and
+          // overlapping the next job. The parent's signed slot is not
+          // rewritten — only the seeded follow-ups.
+          let seededChildDuration = duration;
           if (activationFamilyKey === 'palm_injection') {
             // Recurring palm bills per-application against the RECURRING
             // catalog row: a name-only 'Palm Injections' visit resolves the
@@ -3163,7 +3170,10 @@ async function createSelfBooking(payload = {}) {
             // behavior).
             const palmCatalogRow = await trx('services')
               .where({ service_key: 'palm_injection_semiannual' })
-              .first('id');
+              .first('id', 'default_duration_minutes');
+            if (Number(palmCatalogRow?.default_duration_minutes) > 0) {
+              seededChildDuration = Number(palmCatalogRow.default_duration_minutes);
+            }
             if (!palmCatalogRow?.id) {
               throw new Error('recurring palm catalog row (palm_injection_semiannual) unavailable — aborting series activation');
             }
@@ -3196,8 +3206,11 @@ async function createSelfBooking(payload = {}) {
               false,
             );
             const catalogRow = cadenceKey
-              ? await trx('services').where({ service_key: cadenceKey }).first('id')
+              ? await trx('services').where({ service_key: cadenceKey }).first('id', 'default_duration_minutes')
               : null;
+            if (Number(catalogRow?.default_duration_minutes) > 0) {
+              seededChildDuration = Number(catalogRow.default_duration_minutes);
+            }
             if (catalogRow?.id) {
               const cadencePatch = { service_id: catalogRow.id, updated_at: trx.fn.now() };
               if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
@@ -3215,7 +3228,15 @@ async function createSelfBooking(payload = {}) {
             plannedCount: wizardSeriesPlan.visits,
             skipWeekends: true,
             weekendShift: 'forward',
-            durationMinutes: duration,
+            durationMinutes: seededChildDuration,
+            // Children's window must SPAN their duration — they inherit
+            // the parent's window otherwise, and a 60-min catalog visit
+            // inside the funnel's 45-min window would under-reserve
+            // exactly the way the raw funnel duration did.
+            ...(seededChildDuration !== duration ? (() => {
+              const childEndMin = timeToMin(slot_start) + seededChildDuration;
+              return { windowEnd: `${String(Math.floor(childEndMin / 60)).padStart(2, '0')}:${String(childEndMin % 60).padStart(2, '0')}` };
+            })() : {}),
             source: source || 'self_booked',
             // FIXED-length plan, never Ongoing (codex #3504 hook P0): the
             // auto-extend maintenance templates every extension visit off
@@ -3324,6 +3345,30 @@ async function createSelfBooking(payload = {}) {
             .where({ id: pricing_estimate_id, source: 'quote_wizard', status: 'draft' })
             .whereNull('archived_at')
             .update({ archived_at: trx.fn.now(), updated_at: trx.fn.now() });
+          // Property stamping ATOMIC with the activation (codex #3504 r10):
+          // the wizard draft row is REUSED — /calculate revives an archived
+          // draft and overwrites its address — so any post-commit heal that
+          // re-reads the draft could stamp THIS activated series with a
+          // LATER quote's address. The draft is row-locked (forUpdate
+          // above) in this transaction, so linking here reads the exact
+          // address the plan was activated for, and a wizard re-run
+          // serializes behind the commit. Shared accept-path mechanism;
+          // never throws by contract (internally best-effort).
+          try {
+            const { linkAcceptedEstimateProperty } = require('../services/estimate-property-linkage');
+            await linkAcceptedEstimateProperty({
+              estimateId: pricing_estimate_id,
+              customerId: custId,
+              database: trx,
+              // Pin the visit stamps to THIS activation's rows (codex
+              // #3504 r10 hook P0): the draft id is reused by later
+              // quotes, and an unscoped stamp could retarget an OLDER
+              // still-unstamped series sharing it.
+              onlyServiceIds: sweepExcludeIds,
+            });
+          } catch (linkErr) {
+            logger.warn(`[booking:confirm] in-activation property linkage failed for ${seriesParentRow.id} (non-blocking): ${linkErr.message}`);
+          }
           return { seedResult };
         });
         return outcome;

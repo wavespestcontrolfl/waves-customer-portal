@@ -1140,13 +1140,21 @@ httpServer.listen(PORT, () => {
     {
       const runWizardActivationSweep = async () => {
         try {
-          const { sweepStrandedWizardActivations, healActivatedFollowThroughs } = require('./services/wizard-series-activation-recovery');
-          await sweepStrandedWizardActivations({ limit: 10 });
-          // Second pass: re-run the idempotent post-activation
-          // follow-through (property stamps, tier sync, welcome) for
-          // recently activated parents — a worker death after the
-          // activation commit loses it with no other recovery path.
-          await healActivatedFollowThroughs();
+          // runExclusive: one replica per tick (codex #3504 r10) — the
+          // heal pass can re-create a missed welcome enqueue, and
+          // sms_sequences has no customer/sequence unique constraint, so
+          // two replicas racing the same parent could both pass the
+          // hasWelcomeSequence check and double-text the customer.
+          const { runExclusive } = require('./utils/cron-lock');
+          await runExclusive('wizard-series-recovery-sweep', async () => {
+            const { sweepStrandedWizardActivations, healActivatedFollowThroughs } = require('./services/wizard-series-activation-recovery');
+            await sweepStrandedWizardActivations({ limit: 10 });
+            // Second pass: re-run the idempotent post-activation
+            // follow-through (tier sync, welcome, lead conversion) for
+            // recently activated parents — a worker death after the
+            // activation commit loses it with no other recovery path.
+            await healActivatedFollowThroughs();
+          });
         } catch (err) {
           logger.error(`[wizard-series-recovery] sweep failed: ${err.message}`);
         }

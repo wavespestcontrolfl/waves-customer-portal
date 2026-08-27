@@ -1604,6 +1604,40 @@ const AppointmentReminders = {
    * roll back the visit/payment it rides with. Unlike registerAppointment() this
    * takes the caller's conn rather than opening its own transaction.
    */
+  // Windowless pre-closed placeholder INSERT — the single implementation
+  // behind registerAppointment's closeReminderWindows option AND the
+  // self-heal sweep's null-window branch (codex #3504 r10: the sweep's
+  // legacy path converted a null window to an ARMED 08:00 registration,
+  // promising a time nobody chose). All three flags — 72h, 24h, AND
+  // confirmation — close in this one INSERT (a register-then-close pair
+  // would leave a gap where a cron tick could send an 08:00-stamped
+  // text), and it deliberately skips the same-slot dedup: the placeholder
+  // never owns the slot, never merges its label into a real owner, never
+  // sends, and is never promoted. When a real window is later set, the
+  // sync trigger's time_changed branch clears the markers and re-arms.
+  async insertPreClosedPlaceholderRowInTx(trx, { scheduledServiceId, customerId, apptTime, serviceLabel, source }) {
+    const windowsClosedAt = new Date();
+    const [record] = await trx('appointment_reminders').insert({
+      scheduled_service_id: scheduledServiceId,
+      customer_id: customerId,
+      appointment_time: apptTime,
+      service_type: serviceLabel,
+      source,
+      confirmation_sent: true,
+      confirmation_sent_at: windowsClosedAt,
+      reminder_72h_sent: true,
+      reminder_72h_sent_at: windowsClosedAt,
+      reminder_24h_sent: true,
+      reminder_24h_sent_at: windowsClosedAt,
+      // Placeholder markers — suppressed_by_sibling removes the row from
+      // slot ownership; windows_preclosed keeps promotion and the sync
+      // trigger from ever arming it while the visit is windowless.
+      suppressed_by_sibling: true,
+      windows_preclosed: true,
+    }).returning('*');
+    return record;
+  },
+
   async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const apptTime = parseETDateTime(appointmentTime);
@@ -1815,31 +1849,9 @@ const AppointmentReminders = {
         // confirmation sweep. (suppressed_by_sibling is set explicitly, so
         // the legacy fingerprint trigger has nothing to re-derive.)
         if (closeReminderWindows) {
-          const windowsClosedAt = new Date();
-          const [record] = await trx('appointment_reminders').insert({
-            scheduled_service_id: scheduledServiceId,
-            customer_id: customerId,
-            appointment_time: apptTime,
-            service_type: serviceLabel,
-            source,
-            // Confirmation closes IN the insert, not via the post-transaction
-            // mark: a windowless visit has no time to confirm, and a crash
-            // between insert and mark would leave the row for the stranded-
-            // confirmation sweep, which would text an 08:00 confirmation —
-            // the exact send this placeholder exists to suppress.
-            confirmation_sent: true,
-            confirmation_sent_at: windowsClosedAt,
-            reminder_72h_sent: true,
-            reminder_72h_sent_at: windowsClosedAt,
-            reminder_24h_sent: true,
-            reminder_24h_sent_at: windowsClosedAt,
-            // Placeholder markers — suppressed_by_sibling removes the row
-            // from slot ownership; windows_preclosed keeps promotion and the
-            // sync trigger from ever arming it while the visit is windowless.
-            suppressed_by_sibling: true,
-            windows_preclosed: true,
-          }).returning('*');
-
+          const record = await this.insertPreClosedPlaceholderRowInTx(trx, {
+            scheduledServiceId, customerId, apptTime, serviceLabel, source,
+          });
           return { record, serviceLabel, inserted: true };
         }
 
@@ -2074,6 +2086,25 @@ const AppointmentReminders = {
               ? lockedVisit.scheduled_date.toISOString().slice(0, 10)
               : String(lockedVisit.scheduled_date || '').slice(0, 10);
             const windowStart = String(lockedVisit.window_start || '').slice(0, 5) || '08:00';
+            // A WINDOWLESS visit heals as the NON-DELIVERING pre-closed
+            // placeholder, never an armed 08:00 registration (codex #3504
+            // r10): nobody chose that time — conflict-demoted series
+            // children and other unplaced visits park windowless by
+            // convention, and the sync trigger re-arms the row the moment
+            // a real window is set.
+            if (!lockedVisit.window_start) {
+              const placeholderTime = parseETDateTime(`${datePart}T08:00`);
+              if (isNaN(placeholderTime.getTime())) return { skip: 'bad_date' };
+              const serviceLabel = await buildServiceLabel(svc.id, lockedVisit.service_type);
+              const record = await AppointmentReminders.insertPreClosedPlaceholderRowInTx(trx, {
+                scheduledServiceId: svc.id,
+                customerId: lockedVisit.customer_id,
+                apptTime: placeholderTime,
+                serviceLabel,
+                source: 'cron_selfheal',
+              });
+              return { record };
+            }
             const record = await AppointmentReminders.registerVisitReminderInTx(trx, {
               scheduledServiceId: svc.id,
               customerId: lockedVisit.customer_id,

@@ -146,25 +146,16 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   return { examined: stranded.length, stripped };
 }
 
-// Post-activation follow-through — property stamping, tier sync, and the
-// tagger/welcome re-run — shared by the confirm route (in-request) and the
-// heal sweep below. Every step is idempotent and individually best-effort:
-// linkage stamps only unstamped rows and never throws by contract, the
-// tier sync converges, and the tagger/welcome path dedupes.
+// Post-activation follow-through — tier sync, the tagger/welcome re-run,
+// and lead conversion — shared by the confirm route (in-request) and the
+// heal sweep below. Every step is idempotent and individually
+// best-effort. Property linkage deliberately does NOT run here (codex
+// #3504 r10): the wizard draft row is REUSED by later quotes for OTHER
+// addresses, so re-reading it after the fact could stamp this series with
+// a different property — the linkage runs INSIDE the activation
+// transaction, against the row-locked draft, in booking.js.
 async function runActivationFollowThroughForParent(parent, { database = db } = {}) {
   if (!parent?.id || !parent?.customer_id) return;
-  if (parent.source_estimate_id) {
-    try {
-      const { linkAcceptedEstimateProperty } = require('./estimate-property-linkage');
-      await linkAcceptedEstimateProperty({
-        estimateId: parent.source_estimate_id,
-        customerId: parent.customer_id,
-        database,
-      });
-    } catch (err) {
-      logger.warn(`[wizard-series-recovery] property linkage failed for parent=${parent.id} (non-blocking): ${err.message}`);
-    }
-  }
   try {
     const { syncCustomerWaveGuardPlanFromScheduledServices } = require('./self-booking-plan-sync');
     await database.transaction(async (trx) => {
@@ -177,6 +168,22 @@ async function runActivationFollowThroughForParent(parent, { database = db } = {
     await require('./appointment-tagger').onServiceScheduled(parent.id);
   } catch (err) {
     logger.warn(`[wizard-series-recovery] tagger re-run failed for parent=${parent.id} (non-blocking): ${err.message}`);
+  }
+  // Lead conversion rides the durable follow-through too (codex #3504
+  // r10): a worker death after the activation commit but before the
+  // route's conversion block would otherwise leave the quote-wizard lead
+  // pre-sale forever — the archived draft and recurring parent match no
+  // other repair path. Idempotent: enforceOriginating scopes it to the
+  // customer's own originating lead and an already-won lead no-ops.
+  try {
+    const { convertLeadFromEvent } = require('./lead-estimate-link');
+    await convertLeadFromEvent({
+      source: 'recurring_service_booked',
+      customerId: parent.customer_id,
+      enforceOriginating: true,
+    });
+  } catch (err) {
+    logger.warn(`[wizard-series-recovery] lead conversion failed for parent=${parent.id} (non-blocking): ${err.message}`);
   }
 }
 
