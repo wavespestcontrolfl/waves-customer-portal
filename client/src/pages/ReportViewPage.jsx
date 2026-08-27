@@ -2260,8 +2260,10 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // Documents cell (owner 2026-08-27): titles tied to THIS visit,
             // plus the customer's document count, linking the portal
             // Documents tab. Live-view-only payload field.
+            // Present on every live report (the Documents tab always holds
+            // this report itself); absent on pdf/static renders.
             const docs = data.relatedDocuments;
-            if (!docs?.hasDocuments) return null;
+            if (!docs) return null;
             const linkedTitles = (docs.linked || []).map((d) => d.title).filter(Boolean);
             return (
               <div className="sr-cell">

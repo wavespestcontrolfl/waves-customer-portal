@@ -9910,8 +9910,13 @@ router.post('/:serviceId/complete', async (req, res, next) => {
     // every other customer copy path — violators stay internal_only for
     // the existing admin review flow. Fail-soft: errors never block the
     // completion. Also invalidates the visual-moment PDF cache, matching
-    // the admin visibility endpoint's contract.
-    if (!isInternalOnlyCompletion && !isIncompleteVisit) {
+    // the admin visibility endpoint's contract. Publishes ONLY on a
+    // customer-delivered completion: typed internal_only/disabled modes
+    // keep their admin-review/suppression contract and quiet backfills send
+    // nothing (codex P1 r2) — isInternalOnlyCompletion alone only covers
+    // untyped consultations.
+    if (!isInternalOnlyCompletion && !isIncompleteVisit && !isBackfillCompletion
+      && typedDeliveryMode === 'auto_send') {
       try {
         const { gateEnvValue } = require('../config/feature-gates');
         if (gateEnvValue('GATE_AUTO_PUBLISH_VISUAL_MOMENTS')) {

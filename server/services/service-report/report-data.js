@@ -4328,18 +4328,17 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       const linked = docRows.filter(
         (d) => d.linked_service_record_id && String(d.linked_service_record_id) === String(service.id),
       );
-      // Presence only, no count: /api/documents also synthesizes rows
-      // (completed-service reports, project reports), so any number
-      // computed here would disagree with the Documents tab (codex P1).
-      if (docRows.length) {
-        relatedDocuments = {
-          hasDocuments: true,
-          linked: linked.slice(0, 3).map((d) => ({
-            title: d.title || d.document_type || 'Document',
-            documentType: d.document_type || null,
-          })),
-        };
-      }
+      // Always present on a live report: the Documents tab synthesizes a
+      // row for THIS completed report (and project reports), so the link
+      // never dead-ends even with no stored customer_documents. Stored
+      // rows only supply the linked titles; no count is ever computed here
+      // (it would disagree with the tab's synthesized rows — codex P1 r1/r2).
+      relatedDocuments = {
+        linked: linked.slice(0, 3).map((d) => ({
+          title: d.title || d.document_type || 'Document',
+          documentType: d.document_type || null,
+        })),
+      };
     } catch { /* best-effort */ }
   }
 

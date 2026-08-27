@@ -132,23 +132,22 @@ describe('relatedDocuments on the report payload', () => {
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
     }, 'token-docs', knex, { mode: 'live' });
-    expect(data.relatedDocuments).toMatchObject({ hasDocuments: true });
-    // Presence only — never a count (the Documents tab also synthesizes
-    // report rows, so any number computed here would disagree with it).
+    // Never a count (the Documents tab also synthesizes report rows, so
+    // any number computed here would disagree with it).
     expect(data.relatedDocuments.totalCount).toBeUndefined();
     expect(data.relatedDocuments.linked).toEqual([
       { title: 'WDO Notice of Inspection', documentType: 'wdo_inspection' },
     ]);
   });
 
-  test('no documents on file → null (the cell does not render)', async () => {
+  test('no stored documents → still present with no linked titles (the tab holds this report)', async () => {
     const knex = fixtureKnex(EMPTY_TABLES);
     const data = await buildReportV1Data({
       ...BASE_SERVICE,
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
     }, 'token-docs', knex, { mode: 'live' });
-    expect(data.relatedDocuments).toBeNull();
+    expect(data.relatedDocuments).toEqual({ linked: [] });
   });
 
   test('non-live mode → null', async () => {
