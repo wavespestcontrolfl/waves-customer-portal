@@ -4346,14 +4346,20 @@ describe('codex #3428 r1 — disclaimer strip is whole-string only', () => {
 });
 
 describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails in one day)', () => {
-  const validatorMiss = () => ({
-    ok: false,
-    reason: 'all_providers_failed',
-    failures: [
-      { provider: 'anthropic', model: 'a', reason: 'ungrounded_novel_term:one-time' },
-      { provider: 'openai', model: 'o', reason: 'ungrounded_novel_term:one-time' },
-    ],
-  });
+  // Mirrors the real dispatcher: each leg's JSON goes through the validate
+  // hook and the hook's verdict becomes that leg's failure reason.
+  const badJson = { priorities: ['Treat for zebra mussels'], watch_items: [], mentioned_terms: ['zebra mussel'] };
+  const validatorMiss = (json = badJson) => async (_policy, _payload, opts) => {
+    const reason = opts.validate({ json });
+    return {
+      ok: false,
+      reason: 'all_providers_failed',
+      failures: [
+        { provider: 'anthropic', model: 'a', reason },
+        { provider: 'openai', model: 'o', reason },
+      ],
+    };
+  };
   const rerunWith = (stored, extra = {}) => useDb(baseResponses({
     scheduled_services: [{
       ...SVC,
@@ -4364,7 +4370,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
   }));
 
   test('validator-rejected legs are counted and capped at 2 attempts per grounding hash', async () => {
-    global.__dispatch = jest.fn(async () => validatorMiss());
+    global.__dispatch = jest.fn(validatorMiss());
     const state1 = useDb(baseResponses());
     const first = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(first.via).toBe('template');
@@ -4389,7 +4395,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
   });
 
   test('a changed grounding resets the cap and retries the LLM', async () => {
-    global.__dispatch = jest.fn(async () => validatorMiss());
+    global.__dispatch = jest.fn(validatorMiss());
     const state1 = useDb(baseResponses());
     await PrevisitBrief.generateVisitBrief('svc-1');
     const capped = { ...storedBrief(state1).patch };
@@ -4433,7 +4439,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
 
   test('transient misses between validator rejections neither reset nor inflate the count', async () => {
     const outage = () => ({ ok: false, reason: 'all_providers_failed', failures: [{ provider: 'anthropic', model: 'a', reason: 'anthropic_529' }] });
-    global.__dispatch = jest.fn(async () => validatorMiss());
+    global.__dispatch = jest.fn(validatorMiss());
     let state = useDb(baseResponses());
     await PrevisitBrief.generateVisitBrief('svc-1');
     expect(storedBrief(state).brief.llm_attempts).toBe(1);
@@ -4445,7 +4451,7 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
       expect(storedBrief(state).brief.llm_attempts).toBe(1);
       expect(storedBrief(state).brief.llm_miss_kind).toBe('transient');
     }
-    global.__dispatch = jest.fn(async () => validatorMiss());
+    global.__dispatch = jest.fn(validatorMiss());
     state = rerunWith(storedBrief(state).patch);
     await PrevisitBrief.generateVisitBrief('svc-1');
     expect(storedBrief(state).brief.llm_attempts).toBe(2);
@@ -4467,5 +4473,52 @@ describe('deterministic-rejection attempt cap (08-27: 111 dual-provider re-fails
     const out = await PrevisitBrief.generateVisitBrief('svc-1');
     expect(out.via).toBe('template');
     expect(storedBrief(state).brief.llm_miss_kind).toBe('validator');
+  });
+  test('shape rejections from the validate hook are deterministic too (codex #3515 r1)', async () => {
+    global.__dispatch = jest.fn(validatorMiss({ priorities: 'not-an-array' }));
+    const state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    const b = storedBrief(state).brief;
+    expect(b.llm_miss_kind).toBe('validator');
+    expect(b.llm_attempts).toBe(1);
+  });
+
+  test('a reason string that merely LOOKS like a verdict without the hook stays transient', async () => {
+    global.__dispatch = jest.fn(async () => ({
+      ok: false,
+      reason: 'all_providers_failed',
+      failures: [{ provider: 'anthropic', model: 'a', reason: 'ungrounded_novel_term:one-time' }],
+    }));
+    const state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_miss_kind).toBe('transient');
+  });
+
+  test('a registry model swap restarts the cap for a capped visit (codex #3515 r1)', async () => {
+    const models = require('../config/models');
+    global.__dispatch = jest.fn(validatorMiss());
+    let state = useDb(baseResponses());
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    state = rerunWith(storedBrief(state).patch);
+    await PrevisitBrief.generateVisitBrief('svc-1');
+    expect(storedBrief(state).brief.llm_attempts).toBe(2);
+    const capped = storedBrief(state).patch;
+    state = rerunWith(capped);
+    global.__dispatch.mockClear();
+    expect((await PrevisitBrief.generateVisitBrief('svc-1')).reason).toBe('validator_capped');
+    expect(global.__dispatch).not.toHaveBeenCalled();
+
+    const before = models.TEXT_POLICIES.visitBrief.primary;
+    models.TEXT_POLICIES.visitBrief.primary = { provider: 'anthropic', model: 'swapped-model' };
+    try {
+      state = rerunWith(capped);
+      const out = await PrevisitBrief.generateVisitBrief('svc-1');
+      expect(out.generated).toBe(true);
+      expect(global.__dispatch).toHaveBeenCalledTimes(1);
+      expect(storedBrief(state).brief.llm_attempts).toBe(1);
+      expect(storedBrief(state).brief.llm_policy_fingerprint).toBe('anthropic:swapped-model|-');
+    } finally {
+      models.TEXT_POLICIES.visitBrief.primary = before;
+    }
   });
 });

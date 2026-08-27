@@ -78,10 +78,17 @@ const PROMPT_VERSION = 'previsit_brief_v3';
 // changes. Provider outages/truncation stay retryable (miss kind
 // 'transient').
 const VISIT_BRIEF_LLM_ATTEMPT_CAP = 2;
-// Reasons produced by validateBriefJson via the dispatch validate hook —
-// the deterministic class. A '(response truncated at max_tokens…)' tag on
-// the reason marks a budget problem, which stays transient.
-const VALIDATOR_REJECTION_RE = /^(?:ungrounded_|forbidden_genus|retired_company_name|noncanonical_company_name|truncated_product_term:)/;
+
+// The cap is only meaningful for the provider/model pair that produced the
+// rejections — a registry model swap (MODEL_WORKHORSE, OPENAI fallback) must
+// get a fresh run at a capped visit, so the fingerprint rides in the stored
+// template and a mismatch restarts the count (codex #3515 r1).
+function visitBriefPolicyFingerprint() {
+  const policy = MODELS.TEXT_POLICIES?.visitBrief || {};
+  return [policy.primary, policy.fallback]
+    .map((r) => (r ? `${r.provider || '?'}:${r.model || '?'}` : '-'))
+    .join('|');
+}
 
 // Statuses that are no longer an upcoming visit (mirrors
 // PREP_TERMINAL_STATUSES in appointment-tagger.js / the admin-schedule
@@ -2298,9 +2305,17 @@ async function generateBriefBody(grounding, deps = {}) {
     logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
     return fallback();
   }
+  // Every verdict the validate hook hands the dispatcher is remembered so
+  // the miss can be classified by PROVENANCE (did OUR validator reject this
+  // leg?) rather than by pattern-matching reason strings — shape rejections
+  // (not_an_object, priorities_not_array, empty_output…) are just as
+  // deterministic as grounding ones (codex #3515 r1).
+  const validatorVerdicts = new Set();
   const validate = (result) => {
     if (!result?.json) return 'no_json';
-    return validateBriefJson(result.json, grounding).reason || null;
+    const reason = validateBriefJson(result.json, grounding).reason || null;
+    if (reason) validatorVerdicts.add(reason);
+    return reason;
   };
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
@@ -2323,11 +2338,14 @@ async function generateBriefBody(grounding, deps = {}) {
     }, { validate });
     if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
-      // Every leg rejected by the validator (and none merely truncated) =
-      // deterministic for this grounding; provider errors stay transient.
+      // Every leg rejected by OUR validator (and none merely truncated —
+      // the dispatcher suffixes '(response truncated at max_tokens=…)' onto
+      // the verdict, a budget problem) = deterministic for this grounding;
+      // provider errors, no_json and truncation stay transient.
       const legReasons = (resp?.failures || []).map((f) => String(f?.reason || ''));
-      const deterministic = legReasons.length > 0
-        && legReasons.every((r) => VALIDATOR_REJECTION_RE.test(r) && !r.includes('response truncated'));
+      const fromValidator = (r) => !r.includes('response truncated')
+        && [...validatorVerdicts].some((v) => r === v || r.startsWith(`${v} `));
+      const deterministic = legReasons.length > 0 && legReasons.every(fromValidator);
       return fallback(deterministic ? 'validator' : 'transient');
     }
     // Defense in depth: the dispatcher already ran this validator per leg,
@@ -2410,10 +2428,13 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   // unchanged — stop spending dual-provider calls after the cap. A changed
   // grounding (or PROMPT_VERSION bump) changes the hash and retries fresh;
   // transient misses (provider down, truncation) never enter this branch.
+  const policyFingerprint = visitBriefPolicyFingerprint();
+  const sameCapLineage = existing?.grounding_hash === groundingHash
+    && existing?.generated_via === 'template'
+    && existing?.llm_policy_fingerprint === policyFingerprint;
   if (
     String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
-    && existing?.grounding_hash === groundingHash
-    && existing.generated_via === 'template'
+    && sameCapLineage
     && existing.llm_miss_kind === 'validator'
     && (existing.llm_attempts || 0) >= VISIT_BRIEF_LLM_ATTEMPT_CAP
   ) {
@@ -2454,9 +2475,9 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     // without adding to it, so outages can never walk a visit into the cap.
     ...(via === 'template' ? {
       llm_miss_kind: missKind || 'transient',
-      llm_attempts: (existing?.grounding_hash === groundingHash
-        && existing?.generated_via === 'template'
-        ? (existing.llm_attempts || 0) : 0) + (missKind === 'validator' ? 1 : 0),
+      llm_policy_fingerprint: policyFingerprint,
+      llm_attempts: (sameCapLineage ? (existing.llm_attempts || 0) : 0)
+        + (missKind === 'validator' ? 1 : 0),
     } : {}),
     // The ET calendar day and service identity this brief was generated
     // FOR. Any writer can reschedule the visit or rewrite its
