@@ -3017,10 +3017,15 @@ async function createSelfBooking(payload = {}) {
             // beside a recurring parent means the office took the series
             // over — seed nothing, archive nothing, and bell the office to
             // reconcile the still-live quote against their series.
-            const ownedDraft = await trx('estimates')
-              .where({ id: pricing_estimate_id, source: 'quote_wizard' })
-              .first('archived_at');
-            if (ownedDraft?.archived_at) return { alreadyActivated: true };
+            // PARENT-scoped evidence (codex #3504 r23): the shared draft's
+            // archived_at is cleared by any later wizard rerun, so it is
+            // not this parent's marker — its seeded children are (seeded
+            // in the same transaction as markParentRecurring; every
+            // seedable plan has ≥2 visits; rows persist even cancelled).
+            const activationChild = await trx('scheduled_services')
+              .where({ recurring_parent_id: seriesParentRow.id })
+              .first('id');
+            if (activationChild) return { alreadyActivated: true };
             await notifySeriesOfficeBellInTx(trx, {
               dedupeKey: `wizard-activation-foreign-recurring:${seriesParentRow.id}`,
               title: 'Self-booked plan: office series pre-empted activation',

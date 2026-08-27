@@ -323,7 +323,7 @@ describe('booking route wiring (source contracts)', () => {
     // r18: is_recurring counts as a completed activation ONLY with the
     // activation-archived draft; a live draft beside a recurring parent is
     // a staff-made series → stale + office bell, never alreadyActivated.
-    expect(booking).toMatch(/lockedParent && lockedParent\.is_recurring\) \{[\s\S]{0,1200}\.first\('archived_at'\);\s*\n\s*if \(ownedDraft\?\.archived_at\) return \{ alreadyActivated: true \};/);
+    expect(booking).toMatch(/lockedParent && lockedParent\.is_recurring\) \{[\s\S]{0,1400}\.where\(\{ recurring_parent_id: seriesParentRow\.id \}\)\s*\n\s*\.first\('id'\);\s*\n\s*if \(activationChild\) return \{ alreadyActivated: true \};/);
     expect(booking).toMatch(/wizard-activation-foreign-recurring:\$\{seriesParentRow\.id\}/);
     expect(booking).toMatch(/return \{ stale: true, foreignRecurring: true \};/);
     const recheckAt = booking.indexOf('alreadyActivated: true');
@@ -748,9 +748,11 @@ describe('booking route wiring (source contracts)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     // P0: a reused draft (updated_at after the booking) is a NEWER quote —
     // never archived by an older parent's reconcile.
-    expect(recoverySrc).toMatch(/const draftRepresentsParent = draftLive\s*\n\s*&& fresh\.created_at\s*\n\s*&& new Date\(freshDraft\.updated_at\)\.getTime\(\) <= new Date\(fresh\.created_at\)\.getTime\(\) \+ 2 \* 60 \* 1000;/);
-    expect(recoverySrc).toMatch(/\.first\('id', 'updated_at'\);/);
-    expect(recoverySrc).toMatch(/'created_at'\);/);
+    // r23 P0: ownership proof is CONTENT, not time — the live draft must
+    // reproduce the parent's kept first-visit price via the family plan.
+    expect(recoverySrc).toMatch(/return !!priced && Number\(priced\.amount\) === Number\(fresh\.estimated_price\);/);
+    expect(recoverySrc).toMatch(/String\(freshDraft\.customer_id \|\| ''\) !== String\(fresh\.customer_id \|\| ''\)\) return false;/);
+    expect(recoverySrc).not.toMatch(/updated_at\)\.getTime\(\)/);
     expect(recoverySrc).toMatch(/its booking link was left intact/);
     expect((recoverySrc.match(/\$\{draftRepresentsParent \? "The quote draft has been ARCHIVED/g) || []).length).toBe(3);
     // replay response patch
@@ -789,7 +791,8 @@ describe('booking route wiring (source contracts)', () => {
     // is_recurring alone (same rule as the request path, r18).
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     const healerBody = recoverySrc.slice(recoverySrc.indexOf('async function healActivatedFollowThroughs'), recoverySrc.indexOf('module.exports'));
-    expect(healerBody).toMatch(/\.where\('e\.source', 'quote_wizard'\)[\s\S]{0,900}\.whereNotNull\('e\.archived_at'\)/);
+    expect(healerBody).toMatch(/\.where\('e\.source', 'quote_wizard'\)[\s\S]{0,1200}\.whereExists\(function activationChild\(\) \{\s*\n\s*this\.select\(1\)\.from\('scheduled_services as c'\)\.whereRaw\('c\.recurring_parent_id = ss\.id'\);/);
+    expect(healerBody).not.toMatch(/whereNotNull\('e\.archived_at'\)/);
     // #3 completed dispositions retire the public handoff (archive the
     // draft) in the same transaction; unbilled/in-flight keep it live.
     expect(recoverySrc).toMatch(/completed_billed: \{\s*\n\s*retireHandoff: true,/);

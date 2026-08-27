@@ -162,7 +162,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const fresh = await trx('scheduled_services')
           .where({ id: parent.id })
           .forUpdate()
-          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at');
+          .first('id', 'is_recurring', 'payment_method_preference', 'status', 'source_estimate_id', 'created_at', 'estimated_price', 'service_type', 'customer_id');
         if (!fresh
           || fresh.is_recurring
           || fresh.payment_method_preference !== 'pay_at_visit'
@@ -179,19 +179,32 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
         const freshDraft = await trx('estimates')
           .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
           .whereNull('archived_at')
-          .first('id', 'updated_at');
+          .first();
         const draftLive = !!freshDraft;
-        // The draft PROVABLY still represents THIS parent only if it has
-        // not been touched since the booking committed (codex #3504 r22
-        // P0): /calculate reuses and rewrites the same row for the
-        // customer's next quote and bumps updated_at, while the booking
-        // transaction never writes the draft — so a draft whose updated_at
-        // trails the parent's created_at (2-minute clock tolerance) is the
-        // quote this visit was booked from; a later updated_at is a NEWER
-        // quote with its own live self-book link, which must survive.
-        const draftRepresentsParent = draftLive
-          && fresh.created_at
-          && new Date(freshDraft.updated_at).getTime() <= new Date(fresh.created_at).getTime() + 2 * 60 * 1000;
+        // The draft PROVABLY still represents THIS parent only when its
+        // CURRENT content reproduces the program this visit was priced
+        // under (codex #3504 r22 P0 + r23 P0): the shared row is revived
+        // and rewritten by every later /calculate, and neither archived_at
+        // nor updated_at is parent-scoped (a rerun inside any tolerance
+        // window still rewrites it). The parent's own kept estimated_price
+        // IS parent-scoped and immutable for a completed row: re-resolve
+        // the family plan + anchored first-visit amount from the live draft
+        // for the same customer — an exact match means the live quote is
+        // this program (retiring its link prevents the full-program
+        // rebook); anything else is a NEWER/different quote whose link
+        // must survive.
+        const draftRepresentsParent = (() => {
+          if (!draftLive || String(freshDraft.customer_id || '') !== String(fresh.customer_id || '')) return false;
+          try {
+            const { wizardPlanServiceKey, resolveWizardSeriesPlan, resolveBookingVisitPrice } = require('./booking-pay-at-visit');
+            const family = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: fresh.service_type });
+            const planKey = wizardPlanServiceKey(freshDraft, family);
+            const plan = resolveWizardSeriesPlan(freshDraft, planKey);
+            if (!plan) return false;
+            const priced = resolveBookingVisitPrice({ estimate: freshDraft, serviceKey: planKey, bookingVisits: plan.visits });
+            return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
+          } catch { return false; }
+        })();
         const draftNote = !draftLive
           ? ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.'
           : (draftRepresentsParent
@@ -390,14 +403,17 @@ async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 1
       .whereNotIn('ss.status', ['cancelled'])
       .where('e.source', 'quote_wizard')
       // Activation-OWNED evidence, not is_recurring alone (codex #3504
-      // r19): staff can make a committed parent recurring from the
-      // schedule editor before the plan activates, leaving the draft
-      // live and nothing seeded — the request path classifies that as a
-      // staff-owned series (r18) and this healer must not welcome/convert
-      // it as if the wizard plan had activated. The activation archives
-      // its draft in the same transaction as markParentRecurring, so the
-      // archived draft is the marker (same rule as the request path).
-      .whereNotNull('e.archived_at')
+      // r19), and PARENT-scoped (r23): the shared draft's archived_at is
+      // cleared by any later wizard rerun, so it cannot mark this parent.
+      // The activation seeds this parent's children in the same
+      // transaction as markParentRecurring (every seedable plan has ≥2
+      // visits), and child rows persist under recurring_parent_id even
+      // when cancelled — a recurring self-booked parent WITH a child is a
+      // series that exists; one without is the staff-flipped, never-
+      // activated shape (r18) and gets no follow-through.
+      .whereExists(function activationChild() {
+        this.select(1).from('scheduled_services as c').whereRaw('c.recurring_parent_id = ss.id');
+      })
       .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
       .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
       .modify((qb) => {
