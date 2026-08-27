@@ -21,6 +21,20 @@ jest.mock('../services/content-astro/github-client', () => ({
   closePr: jest.fn(),
   deleteRef: jest.fn(),
 }));
+// publishAstro's topic-targeting gate (owner rulings 2026-08-27) loads the
+// live blog corpus for NEW posts and fails closed without one — stub a
+// benign corpus so the pipeline tests reach the publisher behavior under test.
+// (The planner is an instance — mutate the actual module rather than
+// spreading it, so its prototype methods stay spy-able below.)
+jest.mock('../services/content/internal-link-planner', () => {
+  const actual = jest.requireActual('../services/content/internal-link-planner');
+  actual.loadAstroCorpusFromGitHub = jest.fn().mockResolvedValue([{
+    file: 'src/content/blog/quokka-habitat-notes.md',
+    url: '/quokka-habitat-notes/',
+    body: '---\ntitle: Quokka Habitat Notes\nslug: /quokka-habitat-notes/\nprimary_keyword: quokka habitat\n---\n\n## Quokka basics\n',
+  }]);
+  return actual;
+});
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
 }));

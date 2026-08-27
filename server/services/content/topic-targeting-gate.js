@@ -107,6 +107,11 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   'Largo', 'Destin', 'Navarre', 'Inverness', 'Clermont', 'Austin', 'Phoenix',
   'Savannah', 'Boston', 'Houston', 'Dallas', 'Cleveland', 'Richmond', 'Charleston',
 ]);
+// Washington and Virginia are common person names (Virginia runs the Waves
+// office), so they count only with state context: "in/near Washington",
+// "Washington state", or as the trailing geo of a query ("spokane
+// washington") when the word before them is not a person-name cue.
+const NAME_STATE_RE = /\b(?:in|near|around|across|serving)\s+(washington|virginia)\b|\b(washington|virginia)\s+state\b|\b(?!(?:ask|meet|with|from|by|and|contact|call|text|email|thanks|thank|our|the|hi|hello|dear)\b)[a-z]+,?\s+(washington|virginia)\s*$/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
@@ -198,6 +203,7 @@ function classifyGeoScope(text) {
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), t),
     ...findAll(OUT_OF_STATE_RE, t),
+    ...findAll(NAME_STATE_RE, t),
     ...findAll(CONTEXT_PLACE_RE, t),
     ...findAll(STATE_ABBR_RE, t).map((s) => s.toUpperCase()),
   ];
@@ -301,19 +307,22 @@ async function loadLiveIndex() {
   return indexCorpus(corpus);
 }
 
+function isLiveRow(post = {}) {
+  return post.astro_status === 'live' || post.astro_status === 'merged' || Boolean(post.astro_live_url);
+}
+
 /**
- * evaluateBlogPostRow(post, { index }) — a legacy `blog_posts` row (idea
- * lane, 5 a.m. generator, admin generator, calendar publish). A row already
- * live on the hub is a refresh and is exempt.
+ * evaluateBlogPostRow(post, { index | loadIndex, category }) — a legacy
+ * `blog_posts` row (idea lane, 5 a.m. generator, admin generator, calendar
+ * publish). A row already live on the hub is a refresh and is exempt — decided
+ * BEFORE the corpus is loaded, so a corpus outage never blocks a refresh.
  */
-function evaluateBlogPostRow(post = {}, { index, category = null } = {}) {
-  if (post.astro_status === 'live' || post.astro_status === 'merged' || post.astro_live_url) {
-    return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
-  }
+async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLiveIndex, category = null } = {}) {
+  if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
   return evaluate(
     { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', category },
-    { index, requireCorpus: true }
+    { index: index || await loadIndex(), requireCorpus: true }
   );
 }
 
@@ -509,6 +518,7 @@ module.exports = {
   evaluateDraftFraming,
   evaluateDraftTargeting,
   evaluateBlogPostRow,
+  isLiveRow,
   loadLiveIndex,
   isApplicable,
   classifyGeoScope,

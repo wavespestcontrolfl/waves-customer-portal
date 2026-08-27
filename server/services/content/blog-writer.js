@@ -185,7 +185,7 @@ class BlogWriter {
     // throw (fail closed; the caller logs and the row stays queued). A
     // block de-queues the row (status → idea, reason recorded) so the 5 a.m.
     // picker never wedges on it.
-    const topic = topicGate.evaluateBlogPostRow(post, { index: await topicGate.loadLiveIndex(), category: tagToCategory(post.tag) });
+    const topic = await topicGate.evaluateBlogPostRow(post, { category: tagToCategory(post.tag) });
     if (!topic.ok) {
       const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
       await db('blog_posts').where('id', blogPostId).update({

@@ -339,11 +339,22 @@ describe('evaluateDraftTargeting / evaluateBlogPostRow', () => {
     expect(r.stage).toBe('framing');
     expect(r.findings[0].code).toBe(gate.CODES.GEO_STATEWIDE);
   });
-  test('a blog_posts row already live on the hub is exempt; a new row is judged', () => {
-    const index = gate.indexCorpus(CORPUS);
-    expect(gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill', astro_status: 'live' }, { index }).skipped).toBe('already_live');
-    const r = gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill' }, { index, category: 'pest-control' });
+  test('a blog_posts row already live on the hub is exempt BEFORE the corpus loads; a new row is judged', async () => {
+    const loadIndex = jest.fn().mockRejectedValue(new Error('github_down'));
+    const live = await gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill', astro_status: 'live' }, { loadIndex });
+    expect(live.skipped).toBe('already_live');
+    expect(loadIndex).not.toHaveBeenCalled();
+    await expect(gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill' }, { loadIndex })).rejects.toThrow('github_down');
+    const r = await gate.evaluateBlogPostRow({ title: 'Taexx Refill Guide', keyword: 'taexx refill', slug: 'taexx-refill' }, { index: gate.indexCorpus(CORPUS), category: 'pest-control' });
     expect(r.ok).toBe(false);
     expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
+  });
+  test('Washington / Virginia count with state context, never as a person name', () => {
+    for (const t of ['pest control in Washington', 'termite treatment in Virginia', 'pest control spokane washington', 'Washington State termite season', 'exterminator richmond, virginia']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['ask virginia about your plan', 'Meet Virginia', 'Virginia: Our Office Manager', 'thanks virginia', 'call virginia']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
   });
 });

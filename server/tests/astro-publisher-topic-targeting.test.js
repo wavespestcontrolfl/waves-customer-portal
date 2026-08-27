@@ -10,7 +10,7 @@ const IN_WALL = {
   body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
 };
 
-function load({ post, corpus = [IN_WALL] }) {
+function load({ post, corpus = [IN_WALL], corpusError = null }) {
   jest.resetModules();
   const updates = [];
   const dbMock = jest.fn((table) => {
@@ -25,7 +25,7 @@ function load({ post, corpus = [IN_WALL] }) {
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
   jest.doMock('../services/content-astro/github-client', () => ({ getFile: jest.fn().mockResolvedValue(null), listDirectory: jest.fn().mockResolvedValue([]) }));
-  const loader = jest.fn().mockResolvedValue(corpus);
+  const loader = corpusError ? jest.fn().mockRejectedValue(new Error(corpusError)) : jest.fn().mockResolvedValue(corpus);
   jest.doMock('../services/content/internal-link-planner', () => ({ loadAstroCorpusFromGitHub: loader }));
   const pub = require('../services/content-astro/astro-publisher');
   return { pub, updates, loader };
@@ -48,12 +48,13 @@ describe('publishAstro — topic-targeting gate', () => {
     await expect(pub.publishAstro('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
   });
 
-  test('a post already live on the hub is a refresh — exempt from the gate', async () => {
-    const { pub, updates } = load({ post: { ...TAEXX_ROW, astro_status: 'live', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/lakewood-ranch-taexx/' } });
+  test('a post already live on the hub is a refresh — exempt from the gate even when the corpus is DOWN', async () => {
+    const { pub, updates } = load({ post: { ...TAEXX_ROW, astro_status: 'live', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/lakewood-ranch-taexx/' }, corpusError: 'github_down' });
     // Fails later on hero/GitHub plumbing this harness does not provide — what is pinned is that the failure is NOT the topic gate.
     const err = await pub.publishAstro('post_1').catch((e) => e);
     expect(err?.code).not.toBe('BLOG_TOPIC_TARGETING_BLOCKED');
-    expect(updates.some((u) => /TOPIC_/.test(String(u.patch.astro_publish_error || '')))).toBe(false);
+    expect(String(err?.message || '')).not.toMatch(/github_down/);
+    expect(updates.some((u) => /TOPIC_|github_down/.test(String(u.patch.astro_publish_error || '')))).toBe(false);
   });
 
   test('normalizeCategory is exported for the legacy blog_posts producers (single tag→category source)', () => {

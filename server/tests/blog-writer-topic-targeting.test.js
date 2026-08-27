@@ -117,8 +117,8 @@ describe('blog-writer generatePost — every persisted row is gated before write
     expect(dbMock._updates).toEqual([]);
   });
 
-  test('a row already live on the hub is a refresh — exempt, proceeds to the writer', async () => {
-    const { writer, dispatch } = load({ post: { ...TAEXX_ROW, astro_status: 'live' }, ideas: null });
+  test('a row already live on the hub is a refresh — exempt even with the corpus DOWN, proceeds to the writer', async () => {
+    const { writer, dispatch } = load({ post: { ...TAEXX_ROW, astro_status: 'live' }, ideas: null, corpusError: 'github_down' });
     dispatch.mockResolvedValue({ ok: false, error: 'stop_here' });
     await writer.generatePost('post_1').catch(() => null);
     expect(dispatch).toHaveBeenCalled();

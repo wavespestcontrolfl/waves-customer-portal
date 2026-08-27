@@ -978,10 +978,7 @@ async function publishAstro(postId) {
     //    the guardrails); an unavailable corpus is a transient fail-closed.
     {
       const topicGate = require('../content/topic-targeting-gate');
-      const topic = topicGate.evaluateBlogPostRow(post, {
-        index: await topicGate.loadLiveIndex(),
-        category: normalizeCategory(post.category, post.tag) || null,
-      });
+      const topic = await topicGate.evaluateBlogPostRow(post, { category: normalizeCategory(post.category, post.tag) || null });
       if (!topic.ok) {
         const tErr = new Error(`topic-targeting gate blocked publish: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
         tErr.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
