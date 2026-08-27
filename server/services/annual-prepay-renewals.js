@@ -3574,9 +3574,10 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     if ((retrying || []).length) {
       const stateRows = await conn('customers')
         .whereIn('id', [...new Set(retrying.map((row) => row.customer_id))])
-        .select('id', 'autopay_enabled', 'autopay_paused_until');
+        .select('id', 'autopay_enabled', 'autopay_paused_until', 'billing_mode', 'waveguard_tier', 'monthly_rate');
       retryStateByCustomer = new Map((stateRows || []).map((row) => [String(row.id), row]));
     }
+    const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
     const coveredOn = new Map();
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
@@ -3600,6 +3601,26 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       if (!row.stripe_payment_intent_id && meta.ambiguous_outcome) continue;
       const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
       if (isMonthly) {
+        // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
+        // obligation row for a customer whose lane is no longer monthly
+        // (explicit per_application/per_visit/one_time, or a NULL mode the
+        // resolver classifies non-monthly), with NO successfully paid
+        // monthly charge on file, is DISARMED without charging (likely
+        // mis-created; left for manual triage) — not a forthcoming card
+        // charge. A missing customer row skips the guard (keep the
+        // warning).
+        if (state.id != null) {
+          const laneNotMonthly = ['per_application', 'per_visit', 'one_time'].includes(state.billing_mode)
+            || (!state.billing_mode && resolveRetryLane(state).mode !== 'monthly_membership');
+          if (laneNotMonthly) {
+            const paidMonthly = await conn('payments')
+              .where({ customer_id: row.customer_id, status: 'paid' })
+              .where('description', 'like', '%WaveGuard Monthly%')
+              .whereNot({ id: row.id })
+              .first('id');
+            if (!paidMonthly) continue;
+          }
+        }
         const paidDate = dateOnly(row.payment_date);
         const obligationMonth = meta.billed_month || (paidDate ? paidDate.slice(0, 7) : null);
         if (obligationMonth) {
@@ -3679,22 +3700,23 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       // LIVE Auto Pay eligibility, exactly as completion asks it
       // (customerOnAutopay: enrollment flag + pause + chargeable-method
       // walk — a paused customer or one with no chargeable method gets a
-      // pay-link, not a card charge), with the pause evaluated PER VISIT:
-      // completion reads the pause at completion time, which cannot come
-      // before max(today, scheduled_date), so a pause covering that day
-      // (date-INCLUSIVE) yields a pay-link for THIS visit even when it
-      // lapses before the horizon; a pause that lapses before the visit's
-      // day leaves the charge live and is stripped rather than passed
-      // as-is (customerOnAutopay would read it as of NOW and wrongly
-      // clear a future visit). failClosed: an eligibility read error
-      // propagates to the outer catch and exempts nobody, instead of
-      // reading as "no chargeable method" and silently widening the
-      // exemption.
+      // pay-link, not a card charge). The pause suppresses THIS visit's
+      // charge only when it covers the visit's ENTIRE remaining
+      // completion window: completion rejects only terminal statuses, so
+      // a nonterminal visit can complete on ANY later day — a late
+      // completion after the pause lapses re-reads the then-current pause
+      // and charges — and the pause is date-INCLUSIVE, so covering every
+      // chargeable day inside [today, horizon] means paused_until >=
+      // horizon. A shorter pause leaves a chargeable day inside the
+      // window and keeps the warning; it is stripped from the eligibility
+      // call rather than passed as-is (customerOnAutopay would read it as
+      // of NOW and wrongly clear the later completion). failClosed: an
+      // eligibility read error propagates to the outer catch and exempts
+      // nobody, instead of reading as "no chargeable method" and silently
+      // widening the exemption.
       const pausedUntilYmd = dateOnly(v.customer_autopay_paused_until);
-      const visitYmd = dateOnly(v.scheduled_date);
-      const chargeDay = visitYmd && visitYmd > today ? visitYmd : today;
-      const pauseCoversChargeDay = !!(pausedUntilYmd && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntilYmd) && pausedUntilYmd >= chargeDay);
-      const autopayActive = !pauseCoversChargeDay && await customerOnAutopay({
+      const pauseCoversChargeWindow = !!(pausedUntilYmd && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntilYmd) && pausedUntilYmd >= horizon);
+      const autopayActive = !pauseCoversChargeWindow && await customerOnAutopay({
         id: v.customer_id,
         autopay_enabled: v.autopay_enabled,
         autopay_paused_until: null,
@@ -3735,10 +3757,26 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
       const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
       if (reused && ['paid', 'prepaid', 'processing'].includes(statusOf(reused))) continue;
+      // An explicit "stop collecting this invoice" instruction (disputed
+      // bill, check in the mail): the EXTENDED completion charge — the
+      // lane that charges existing reused invoices — passes
+      // refuseWhenDunningStopped and the Stripe transaction refuses the
+      // invoice, so no saved-card charge can occur. Scoped to non-
+      // per-application lanes because only the extended charge honors the
+      // stop (the per-application path does not pass the flag — keep that
+      // warning).
+      const dunningStopped = async (inv) => {
+        if (lane.mode === 'per_application') return false;
+        const seq = await conn('invoice_followup_sequences')
+          .where({ invoice_id: inv.id })
+          .first('status');
+        return !!(seq && String(seq.status || '').toLowerCase() === 'stopped');
+      };
       if (reused) {
         // An OPEN reused invoice charges only within completion's cap —
         // over the accepted amount it routes to office review instead.
         if (await openInvoiceClearlyOverCompletionCap(reused, v, conn)) continue;
+        if (await dunningStopped(reused)) continue;
       } else {
         // No direct invoice on the visit → completion consults the SIBLING
         // first-application invoice of the same estimate/date
@@ -3756,6 +3794,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
         if (!sibling.invoice && sibling.canceledSetupFee) continue;
         if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, conn)) continue;
+        if (sibling.invoice && await dunningStopped(sibling.invoice)) continue;
       }
       // Only an auto_charge touches the saved card at completion ('invoice'
       // — gate off or a priced callback — goes out as a pay-link).

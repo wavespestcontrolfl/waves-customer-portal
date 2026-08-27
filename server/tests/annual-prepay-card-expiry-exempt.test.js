@@ -47,7 +47,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
@@ -57,6 +57,7 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'customers') return chain(customers, calls.customers);
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
+    if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -186,7 +187,7 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
     expect(calls.customers).toEqual(expect.arrayContaining([
-      ['select', 'id', 'autopay_enabled', 'autopay_paused_until'],
+      ['select', 'id', 'autopay_enabled', 'autopay_paused_until', 'billing_mode', 'waveguard_tier', 'monthly_rate'],
     ]));
     // a pause lapsing INSIDE the window resumes the retry before the
     // horizon (isPaused is date-inclusive; retries resume the day after)
@@ -195,6 +196,24 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
       terms: coveredAlways(['c-prepaid']),
       payments: (own) => (isSiblingLookup(own) ? [] : armed({ description: 'Invoice WPC-1' })),
       customers: [{ id: 'c-prepaid', autopay_paused_until: TODAY }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('a monthly retry for a customer whose lane is no longer monthly (never paid monthly) is disarmed → stays exempt', async () => {
+    const isPaidMonthlyLookup = (own) => own.some((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].status === 'paid');
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      payments: (own) => (isSiblingLookup(own) || isPaidMonthlyLookup(own) ? [] : armed()),
+      customers: [{ id: 'c-prepaid', autopay_enabled: true, billing_mode: 'per_application' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // a paid monthly charge on file means the row is real pre-conversion
+    // debt — the sweep keeps retrying it → warning
+    route({
+      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed()),
+      customers: [{ id: 'c-prepaid', autopay_enabled: true, billing_mode: 'per_application' }],
     });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
@@ -268,25 +287,42 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     }
   });
 
-  test("a pause covering the visit's charge day (completion reads the pause then) → pay-link → stays exempt", async () => {
-    // pause through the horizon covers every visit day in the window
+  test("a pause suppresses a visit's charge only when it covers the ENTIRE completion window (>= horizon)", async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_paused_until: HORIZON })] });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
-    // a PARTIAL-window pause still covers a visit scheduled inside it
+    // a pause covering only the visit's scheduled day is NOT enough — the
+    // nonterminal visit can complete late, after the pause lapses but
+    // still inside the window, and completion re-reads the then-current
+    // pause and charges → warning
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ scheduled_date: TOMORROW, customer_autopay_paused_until: addDays(TODAY, 5) })] });
-    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
-    // a pause lapsing BEFORE the visit's day leaves the charge live → warning
-    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ scheduled_date: addDays(TODAY, 5), customer_autopay_paused_until: TOMORROW })] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
-  test('an OVERDUE nonterminal visit (past scheduled_date, en_route) is still judged; its charge day clamps to today', async () => {
+  test('an OVERDUE nonterminal visit (past scheduled_date, en_route) is still judged', async () => {
     // priced, uncovered, still completable → warning
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'en_route', scheduled_date: addDays(TODAY, -5) })] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
-    // completion cannot happen before today, so a pause through today covers it
-    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'en_route', scheduled_date: addDays(TODAY, -5), customer_autopay_paused_until: TODAY })] });
+    // a pause through the horizon covers it like any other visit
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'en_route', scheduled_date: addDays(TODAY, -5), customer_autopay_paused_until: HORIZON })] });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('an open reused invoice with dunning STOPPED cannot be charged by the extended lane → stays exempt', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({})],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '120.00' }],
+      dunningSequences: [{ status: 'stopped' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // the per-application charge path does not pass the stop guard → warning stays
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '120.00' }],
+      dunningSequences: [{ status: 'stopped' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
   test('a covered customer with no chargeable Auto Pay method cannot be auto-charged at completion → stays exempt', async () => {
