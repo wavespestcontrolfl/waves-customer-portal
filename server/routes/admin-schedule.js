@@ -2731,8 +2731,17 @@ const ZONE_COORDS = {
 // reads as NOT clear (conservative — demotes the promise, never invents
 // one). Skipped entirely when the gate/autopay can't label auto_charge
 // anyway, so the sheets add no queries while the lane is dark.
-async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayActive) {
+async function extendedChargeGuardsClear(invoice, scheduledServiceId, autopayActive, billingMode = null) {
   if (!invoice || !autopayActive) return false;
+  // Extended-lane blockers apply only to extended-lane candidates
+  // (pre-push P1 round 12): a per-application invoice is that rail's own
+  // auto-charge — it uses neither the stopped-dunning guard nor the
+  // consent exclusion, so demoting it here would mislabel a charge
+  // completion WILL run. (An appointment-card consent row still reads NOT
+  // clear below: the extended lane genuinely refuses beside any consent
+  // row, and that lane's own display semantics are unchanged from before
+  // this PR.)
+  if (billingMode === 'per_application') return true;
   if (require('../config/feature-gates').gates.completionAutopayCharge !== true) return false;
   try {
     const [dunningRow, consentRow] = await Promise.all([
@@ -3094,7 +3103,7 @@ router.get('/', async (req, res, next) => {
         servicePausedAt: s.service_paused_at || null,
         prediction: predictionFromAttachedInvoice(checkoutInvoice, {
           autopayActive,
-          chargeGuardsClear: await extendedChargeGuardsClear(checkoutInvoice, s.id, autopayActive),
+          chargeGuardsClear: await extendedChargeGuardsClear(checkoutInvoice, s.id, autopayActive, s.billing_mode || null),
           visitPayerBilled: !!s.billed_to_payer_id,
           chargeLikely: attachedInvoiceAutoChargeLikely({
             invoice: checkoutInvoice,
@@ -3630,7 +3639,7 @@ router.get('/week', async (req, res, next) => {
           servicePausedAt: s.service_paused_at || null,
           prediction: predictionFromAttachedInvoice(attachedInvoice, {
             autopayActive,
-            chargeGuardsClear: await extendedChargeGuardsClear(attachedInvoice, s.id, autopayActive),
+            chargeGuardsClear: await extendedChargeGuardsClear(attachedInvoice, s.id, autopayActive, s.billing_mode || null),
             visitPayerBilled: !!s.billed_to_payer_id,
             chargeLikely: attachedInvoiceAutoChargeLikely({
               invoice: attachedInvoice,
