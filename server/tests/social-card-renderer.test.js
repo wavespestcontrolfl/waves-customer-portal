@@ -213,10 +213,24 @@ describe('milestone card', () => {
     expect(svg).not.toMatch(/#007f83/i);
   });
 
-  test('milestone card omits the average when none is supplied and sizes for GBP', () => {
+  test('milestone stars depict the real average — fractional fill, never an implied 5.0', () => {
+    const svg = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 300, averageRating: 4.7 });
+    // Four full stars (clip width = full star width 37.2) and one 70% star.
+    expect((svg.match(/width="37.2"/g) || []).length).toBe(4);
+    expect(svg).toContain('width="26"'); // 37.2 * 0.7 = 26.04 → 26
+    expect(svg).toContain('clip-path="url(#star-clip-4)"');
+
+    const low = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 300, averageRating: 3.5 });
+    expect((low.match(/width="37.2"/g) || []).length).toBe(3);
+    expect(low).not.toContain('star-clip-4"><rect'); // fifth star: outline only
+  });
+
+  test('milestone card omits average AND star row when none is supplied; sizes for GBP', () => {
     const svg = Renderer.renderSocialCardSvg({ variant: 'milestone', count: 250, platform: 'gbp' });
     expect(svg).toContain('width="1200"');
     expect(svg).not.toContain('average rating');
+    expect(svg).not.toContain('star-clip');
+    expect(svg).not.toContain('#FFC400');
     expect(svg).toContain('>250</text>');
   });
 });

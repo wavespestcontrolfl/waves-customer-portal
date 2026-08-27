@@ -368,9 +368,21 @@ function renderMilestoneSvg(input = {}, logoDataUri = null) {
   const labelSize = Math.round(W * 0.05);
   const labelY = numberY + Math.round(labelSize * 1.3);
   const starsY = labelY + Math.round(labelSize * 1.5);
-  const stars = [0, 1, 2, 3, 4].map((i) => (
-    `<path transform="translate(${box.padL + 20 + i * 50} ${starsY})" d="M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z" fill="${COLORS.star}"/>`
-  )).join('');
+  // Stars depict the REAL average: each star is a light outline, with gold
+  // filled to the fractional share that star represents (4.7 → four full,
+  // one 70%). No average → no star row, so the card never implies a 5.0.
+  const STAR = 'M0 -18 L5.3 -5.5 L18.6 -5.5 L7.9 2.9 L12 15.7 L0 7.9 L-12 15.7 L-7.9 2.9 L-18.6 -5.5 L-5.3 -5.5 Z';
+  const hasAverage = Number.isFinite(avg) && avg > 0;
+  const stars = hasAverage ? [0, 1, 2, 3, 4].map((i) => {
+    const share = Math.max(0, Math.min(1, avg - i));
+    const x = box.padL + 20 + i * 50;
+    const fillW = Math.round(37.2 * share * 10) / 10;
+    return `
+      <path transform="translate(${x} ${starsY})" d="${STAR}" fill="${COLORS.white}" stroke="${COLORS.star}" stroke-width="2"/>
+      ${share > 0 ? `<clipPath id="star-clip-${i}"><rect x="${-18.6}" y="-20" width="${fillW}" height="40"/></clipPath>
+      <path transform="translate(${x} ${starsY})" d="${STAR}" fill="${COLORS.star}" clip-path="url(#star-clip-${i})"/>` : ''}
+    `;
+  }).join('') : '';
   const thanksY = box.panelY + box.panelH - 128;
   const thanksLines = wrapText(thanks, fitChars(box.padR - box.padL - 200, Math.round(W * 0.032), 0.56), 2);
 
