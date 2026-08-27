@@ -2725,7 +2725,7 @@ const ZONE_COORDS = {
 // existingCompletionInvoice) — so when one exists, the sheet's prediction
 // must mirror it, not recompute from the visit price/fee, or the card
 // quotes an amount (or a paying party) completion will ignore (Codex r7).
-function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false } = {}) {
+function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeLikely = false, visitPayerBilled = false } = {}) {
   if (!invoice || invoice.status === 'void') return null;
   const amount = invoice.total != null
     ? Math.max(0, Number(invoice.total) - Number(invoice.credit_applied || 0))
@@ -2746,8 +2746,13 @@ function predictionFromAttachedInvoice(invoice, { autopayActive = false, chargeL
   // (attachedInvoiceAutoChargeLikely — no-cost, dues-coverage, anchor and
   // over-cap checks), so the sheet never promises a charge the completion
   // guard deterministically refuses (pre-push P1 round 7).
+  // A payer assigned at the VISIT level after the invoice was pre-minted
+  // leaves invoice.payer_id null (pre-push P1 round 10) — completion's
+  // live payer resolution refuses the homeowner charge, so never promise
+  // it; the invoice label stays (the payer flows own the bill from there).
   const autoCharge = autopayActive
     && chargeLikely
+    && !visitPayerBilled
     && require('../config/feature-gates').gates.completionAutopayCharge === true
     && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status);
   return { kind: autoCharge ? 'auto_charge' : 'invoice', amount, conflictStampedPrice: false, source: 'attached_invoice' };
@@ -3068,6 +3073,7 @@ router.get('/', async (req, res, next) => {
         servicePausedAt: s.service_paused_at || null,
         prediction: predictionFromAttachedInvoice(checkoutInvoice, {
           autopayActive,
+          visitPayerBilled: !!s.billed_to_payer_id,
           chargeLikely: attachedInvoiceAutoChargeLikely({
             invoice: checkoutInvoice,
             autopayActive,
@@ -3602,6 +3608,7 @@ router.get('/week', async (req, res, next) => {
           servicePausedAt: s.service_paused_at || null,
           prediction: predictionFromAttachedInvoice(attachedInvoice, {
             autopayActive,
+            visitPayerBilled: !!s.billed_to_payer_id,
             chargeLikely: attachedInvoiceAutoChargeLikely({
               invoice: attachedInvoice,
               autopayActive,

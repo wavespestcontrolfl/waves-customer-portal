@@ -11013,6 +11013,9 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // round 9) — a stop instruction must not have credit consumed
             // or the invoice flipped prepaid past the charge guard.
             refuseWhenDunningStopped: true,
+            // Competing card-consent excluded before credit moves too
+            // (pre-push P0 round 10) — mirrors the charge boundary.
+            requireNoAppointmentCardLane: true,
             // The anchor AUTHORITY is re-derived under the credit apply's
             // own locks too (pre-push P0 round 2) — a price drop, mode
             // flip, or coverage stamp racing this window consumes nothing.

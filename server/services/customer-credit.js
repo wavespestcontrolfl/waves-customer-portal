@@ -231,7 +231,7 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false }, trx = null) {
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -301,6 +301,19 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
             || lockedSvc.is_recurring === true) {
             return { applied: 0, skipped: 'not_one_time_lane' };
           }
+        }
+        // Competing card-consent excluded under the visit lock (pre-push
+        // P0 round 10, mirror of chargeInvoiceWithSavedCard's
+        // requireNoAppointmentCardLane): an any-status
+        // appointment_card_requests row is a competing — possibly newer —
+        // card consent whose lane owns this visit's billing; credit must
+        // not be consumed (nor the invoice flipped prepaid) beside it.
+        if (requireNoAppointmentCardLane) {
+          const laneRow = await t('appointment_card_requests')
+            .where({ scheduled_service_id: requireSelfPayScheduledServiceId })
+            .forUpdate()
+            .first('id');
+          if (laneRow) return { applied: 0, skipped: 'competing_card_consent' };
         }
         // Extended-completion anchor revalidated UNDER these same locks
         // (pre-push P0 round 2, GATE_COMPLETION_AUTOPAY_CHARGE): the
