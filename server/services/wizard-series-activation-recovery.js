@@ -86,18 +86,30 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
 //    hold rail, never the application — so the customer received no
 //    application and owes no application invoice. The row strips exactly
 //    like an in-flight one and the office converts the FULL program.
+//  - completed whose only invoice is REFUNDED ⇒ a distinct state (codex
+//    #3504 r20, mirrors admin-dispatch's COMPLETION_TERMINAL_INVOICE_
+//    STATUSES): the refund may still fail at the bank and restore the
+//    original, so the office must NOT re-bill the application inside that
+//    window — the price stays for the record, the handoff retires (work
+//    was performed), and the bell parks the billing decision on a human.
 const COMPLETED_STATES = new Set(['completed']);
 const UNBILLED_TERMINAL_STATES = new Set(['skipped', 'no_show']);
-const DEAD_INVOICE_STATUSES = ['void', 'voided', 'cancelled', 'canceled', 'refunded'];
+// Collected nothing and nothing can restore them (a canceled PaymentIntent
+// is terminal) — invisible to the classification.
+const DEAD_INVOICE_STATUSES = ['void', 'voided', 'cancelled', 'canceled'];
+const REFUNDED_INVOICE_STATUSES = ['refunded'];
 
 async function classifyStrandedDisposition(trx, parentId, status) {
   if (UNBILLED_TERMINAL_STATES.has(status)) return 'terminal_unbilled';
   if (!COMPLETED_STATES.has(status)) return 'in_flight';
-  const liveInvoice = await trx('invoices')
+  const invoices = await trx('invoices')
     .where({ scheduled_service_id: parentId })
     .whereNotIn('status', DEAD_INVOICE_STATUSES)
-    .first('id');
-  return liveInvoice ? 'completed_billed' : 'completed_unbilled';
+    .select('id', 'status');
+  const statusOf = (row) => String(row?.status || '').toLowerCase();
+  if (invoices.some((row) => !REFUNDED_INVOICE_STATUSES.includes(statusOf(row)))) return 'completed_billed';
+  if (invoices.some((row) => REFUNDED_INVOICE_STATUSES.includes(statusOf(row)))) return 'completed_refunded';
+  return 'completed_unbilled';
 }
 
 const STRIP_PATCH = (trx, noteTail) => ({
@@ -173,6 +185,11 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             retireHandoff: true,
             patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
             bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program.`,
+          },
+          completed_refunded: {
+            retireHandoff: true,
+            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed and its application invoice was REFUNDED — do not re-bill until the refund is final; self-booking link retired (draft archived) — office unarchives and converts for the remaining program'),
+            bell: `${who} never activated (worker died mid-request). That first visit has since been completed and its application invoice was REFUNDED — do NOT bill the application again until the refund is final (a failed refund restores the original invoice). The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — when the refund settles, unarchive it and convert to schedule and bill the REMAINING program.`,
           },
           completed_unbilled: {
             retireHandoff: true,

@@ -738,6 +738,18 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r20: seeding blackout reads ride the caller connection; refunded invoices keep their own disposition', () => {
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/async function seedingBlackoutDates\(conn, parent, opts = \{\}\)/);
+    expect(seeder).toMatch(/getBlackoutLayers\(\s*\n\s*baseDate,\s*\n\s*etDateString\([^\n]*\),\s*\n\s*conn,\s*\n\s*\)/);
+    expect((seeder.match(/await seedingBlackoutDates\(conn, parent, opts\)/g) || []).length).toBe(2);
+    expect(seeder).not.toMatch(/getBlackoutDates\(/);
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/completed_refunded: \{\s*\n\s*retireHandoff: true,/);
+    expect(recoverySrc).toMatch(/do NOT bill the application again until the refund is final/);
+    expect(recoverySrc).toMatch(/DEAD_INVOICE_STATUSES = \['void', 'voided', 'cancelled', 'canceled'\]/);
+  });
+
   test('r19: lock order, healer evidence, retired handoff, accept-path linkage scope', () => {
     // #1 customer row FOR UPDATE precedes the recurring-series advisory
     // (converter order: customers → series advisory).
@@ -770,7 +782,7 @@ describe('booking route wiring (source contracts)', () => {
       const chain = {
         where: jest.fn(() => chain),
         whereNotIn: jest.fn(() => chain),
-        first: jest.fn(async () => rows[0] || null),
+        select: jest.fn(async () => rows),
       };
       return Object.assign(jest.fn(() => chain), { chain });
     };
@@ -779,10 +791,15 @@ describe('booking route wiring (source contracts)', () => {
     expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'en_route')).toBe('in_flight');
     expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'confirmed')).toBe('in_flight');
     // completed is billed ONLY with a live invoice on the visit.
-    const billed = trxWithInvoice([{ id: 'inv' }]);
+    const billed = trxWithInvoice([{ id: 'inv', status: 'paid' }]);
     expect(await classifyStrandedDisposition(billed, 'p1', 'completed')).toBe('completed_billed');
-    expect(billed.chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['void', 'refunded', 'cancelled']));
+    expect(billed.chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['void', 'cancelled']));
+    expect(billed.chain.whereNotIn).not.toHaveBeenCalledWith('status', expect.arrayContaining(['refunded']));
     expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'completed')).toBe('completed_unbilled');
+    // r20: a REFUNDED invoice is its own state — never "never invoiced"
+    // (the refund can fail and restore the original; no re-bill).
+    expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'inv', status: 'refunded' }]), 'p1', 'completed')).toBe('completed_refunded');
+    expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'a', status: 'refunded' }, { id: 'b', status: 'paid' }]), 'p1', 'completed')).toBe('completed_billed');
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: STRIP_PATCH\(/);
     expect(recoverySrc).toMatch(/bill the FULL plan/);

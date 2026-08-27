@@ -1049,14 +1049,24 @@ async function customerPrefersNoWeekends(conn, customerId) {
 // Blackout set over the whole seeding horizon (generous 15 months covers
 // every planned-count/pattern combination) — the sync builder nudges any
 // follow-up off a blocked date. Fail-open helper.
-async function seedingBlackoutDates(parent, opts = {}) {
+// Blackout reads run on the CALLER's connection (codex #3504 r20): the
+// seeder is called from inside booking/activation transactions that each
+// hold a pool connection, and a read through the global pool would need a
+// second one — at pool saturation every activation waits on every other
+// until the acquire timeout. getBlackoutLayers is the existing caller-
+// aware mechanism (savepoint-wrapped, throws on failure — a failed read
+// rolls its savepoint back instead of aborting the caller's transaction,
+// and this helper's catch keeps the fail-open contract).
+async function seedingBlackoutDates(conn, parent, opts = {}) {
   try {
-    const { getBlackoutDates } = require('./scheduling/blackout-dates');
+    const { getBlackoutLayers } = require('./scheduling/blackout-dates');
     const baseDate = dateOnly(opts.baseDate || parent.scheduled_date);
-    return await getBlackoutDates(
+    const layers = await getBlackoutLayers(
       baseDate,
       etDateString(addETDays(parseETDateTime(`${baseDate}T12:00`), 460)),
+      conn,
     );
+    return layers?.dates || null;
   } catch { return null; /* fail open */ }
 }
 
@@ -1077,7 +1087,7 @@ async function planFollowUpSeedDates(conn, parent, opts = {}) {
   const skipWeekends = stampSkipWeekends
     || await customerPrefersNoWeekends(conn, parent.customer_id);
   const existingDates = await existingSeriesDates(conn, parent, columns);
-  const blackoutDates = await seedingBlackoutDates(parent, opts);
+  const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
   return [...new Set(
     buildRecurringFollowUpRows(parent, { ...opts, pattern, skipWeekends, stampSkipWeekends, existingDates, blackoutDates })
       .map((row) => dateOnly(row.scheduled_date))
@@ -1106,7 +1116,7 @@ async function seedFollowUpsForParent(conn, parent, opts = {}) {
   });
 
   const existingDates = await existingSeriesDates(conn, parent, columns);
-  const blackoutDates = await seedingBlackoutDates(parent, opts);
+  const blackoutDates = await seedingBlackoutDates(conn, parent, opts);
   const builtRows = buildRecurringFollowUpRows(parent, {
     ...opts,
     pattern,
