@@ -426,3 +426,17 @@ describe('exterior scope vocabulary covers the new termite/mosquito area labels'
     });
   }
 });
+
+describe('interior scope vocabulary covers Attic', () => {
+  test('a mixed attic + exterior treatment keeps the interior wait', () => {
+    const normalized = normalizeAdvisoryForTreatmentScope({ exterior_reentry_min: 30, interior_reentry_min: 120 }, {
+      service: { areas_serviced: JSON.stringify(['Attic', 'Exterior walls']) },
+      applications: [
+        { application_area: 'Attic', application_method: 'spot_treatment' },
+        { application_area: 'Exterior walls', application_method: 'perimeter_spray' },
+      ],
+    });
+    expect(normalized.interior_reentry_min).toBe(120);
+    expect(normalized.exterior_reentry_min).toBe(30);
+  });
+});

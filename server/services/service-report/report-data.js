@@ -482,7 +482,9 @@ function treatmentScope({ service = {}, applications = [], zones = [] } = {}) {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ');
   // Area chips are a controlled vocabulary and remain a valid scope signal.
-  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet)\b/.test(text);
+  // attic covers the termite/rodent "Attic" area label (2026-08-27) — an
+  // indoor space whose treatment carries an interior wait (codex inline r8).
+  const textInterior = /\b(interior|inside|indoor|kitchen|bath|bathroom|baseboard|baseboards|bedroom|living room|laundry|utility room|pantry|closet|attic)\b/.test(text);
   // fence/trash cover the controlled pest-area chips "Fence line" and
   // "Trash area" — clearly exterior choices that previously fell through
   // and (under the explicit-exterior rule) would wrongly zero the
