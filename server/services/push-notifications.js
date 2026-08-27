@@ -33,6 +33,13 @@ try {
   vapidSetupError = err.message;
 }
 
+// Web Push Urgency header per trigger priority. Without it every push went
+// out as the default "normal", which Apple (iOS delivers web push through
+// APNs) is allowed to defer — device asleep or Low Power Mode held banners
+// back minutes, which is how inbound-SMS alerts arrived late. "high" asks
+// for immediate delivery; low-priority pushes stay deferrable on purpose.
+const URGENCY_BY_PRIORITY = { urgent: 'high', high: 'high', normal: 'normal', low: 'low' };
+
 async function sendSubscription(sub, notification) {
   // iOS (Capacitor) subscriptions deliver via APNs, not web-push. Routing here
   // keeps every caller (sendToCustomer / sendToAdmins / sendToAdminUsers)
@@ -70,7 +77,7 @@ async function sendSubscription(sub, notification) {
     await webpush.sendNotification(
       JSON.parse(sub.subscription_data),
       JSON.stringify(notification),
-      { timeout: 8000 },
+      { timeout: 8000, urgency: URGENCY_BY_PRIORITY[notification.priority] || 'normal' },
     );
     return { sent: true };
   } catch (err) {

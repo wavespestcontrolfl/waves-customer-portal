@@ -5,143 +5,14 @@ const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const NotificationService = require('../services/notification-service');
 const PushService = require('../services/push-notifications');
-const { computeDashboardAlerts, toNotifications } = require('../services/dashboard-alerts');
-const { COUNT_ESCALATION_COOLDOWN_MS } = require('../services/dashboard-alerts-cron');
+const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const { isBellPolicyEnabled } = require('../services/notification-bell-policy');
+// Live-overlay math (per-admin dismissals, cron-row dedup, the combined
+// unread count) lives in services/admin-unread.js — shared with the push
+// app-icon badge in notification-triggers so the two counts can't drift.
+const { liveAlertNotifications, isLiveDuplicate, getUnreadCountForAdmin } = require('../services/admin-unread');
 
 router.use(adminAuthenticate);
-
-// Window before a per-admin dismissal expires and the alert can re-show
-// in the bell. 24h matches the "I see it, snooze for the day" intuition;
-// the alert ALSO re-surfaces immediately if its count grows past what was
-// dismissed (escalation overrides snooze).
-const DISMISS_WINDOW_HOURS = 24;
-
-// Compute live dashboard alerts and shape them as notification rows so
-// the bell can render them alongside the persisted feed. Per-admin
-// dismissals are subtracted out — alerts the operator already
-// acknowledged stay hidden until either:
-//   - the alert's count grows past dismissed_at_count (escalation), or
-//   - DISMISS_WINDOW_HOURS elapse since dismissal (auto-expire).
-//
-// Returns { live, liveKeys } so callers can also dedupe persisted
-// dashboard_alert rows that mirror the live overlay (cron writes a
-// persisted bell row each time a new/escalated alert fires; the live
-// overlay is the source of truth for the current count, so the matching
-// persisted row at the same count is redundant).
-//
-// Logs and falls back to empty on any failure — flaky alert query must
-// never break the bell.
-async function liveAlertNotifications(adminUserId) {
-  let alerts = [];
-  try {
-    const result = await computeDashboardAlerts();
-    alerts = result.alerts || [];
-  } catch (err) {
-    logger.error(`[admin-notifications] computeDashboardAlerts failed: ${err.message}`);
-    return { live: [], liveKeys: new Set() };
-  }
-
-  // liveKeys covers all currently-active alerts at their current count,
-  // including dismissed ones — the cron's persisted row at the same
-  // (alertId, count) is the same notification, regardless of whether the
-  // overlay is currently visible to this admin.
-  const liveKeys = new Set(alerts.map((a) => `${a.id}:${a.count}`));
-
-  if (!adminUserId || alerts.length === 0) {
-    return { live: toNotifications(alerts), liveKeys };
-  }
-
-  // Pull the most-recent dismissal per alert for this admin within the
-  // active window. DISTINCT ON keeps one row per alert_id (the freshest).
-  let dismissals = [];
-  try {
-    dismissals = await db.raw(
-      `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_members, dismissed_at
-       FROM dashboard_alert_dismissed
-       WHERE admin_user_id = ?
-         AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
-       ORDER BY alert_id, dismissed_at DESC`,
-      [adminUserId, DISMISS_WINDOW_HOURS],
-    ).then((r) => r.rows || []);
-  } catch (err) {
-    if (/dismissed_members/i.test(String(err.message))) {
-      // Pre-migration tolerance, matching the insert retry in
-      // dismissLiveAlerts: before 20260702000001 adds dismissed_members,
-      // retry the legacy projection so count-based dismissals still hide
-      // alerts — a write-side fallback alone would record rows this read
-      // then fails to load, and the bell badge would bounce back anyway.
-      try {
-        dismissals = await db.raw(
-          `SELECT DISTINCT ON (alert_id) alert_id, dismissed_at_count, dismissed_at
-           FROM dashboard_alert_dismissed
-           WHERE admin_user_id = ?
-             AND dismissed_at > NOW() - (INTERVAL '1 hour' * ?)
-           ORDER BY alert_id, dismissed_at DESC`,
-          [adminUserId, DISMISS_WINDOW_HOURS],
-        ).then((r) => r.rows || []);
-      } catch (retryErr) {
-        logger.warn(`[admin-notifications] dismissals query failed (legacy retry): ${retryErr.message}`);
-      }
-    } else {
-      // Table may not exist yet on a freshly-deployed instance before
-      // migration runs. Don't break the bell.
-      logger.warn(`[admin-notifications] dismissals query failed: ${err.message}`);
-    }
-  }
-
-  const dismissedByAlert = new Map(
-    dismissals.map((d) => [d.alert_id, {
-      count: parseInt(d.dismissed_at_count || 0, 10),
-      at: d.dismissed_at ? new Date(d.dismissed_at).getTime() : 0,
-      members: d.dismissed_members
-        ? new Set(String(d.dismissed_members).split(',').filter(Boolean))
-        : null,
-    }]),
-  );
-
-  const visible = alerts.filter((a) => {
-    const dismissed = dismissedByAlert.get(a.id);
-    if (dismissed == null) return true; // never dismissed
-    // Slow-creep advisory alerts share the cron's count-escalation cooldown:
-    // after a dismissal, a bare +1 must not re-show them until the cooldown
-    // elapses — otherwise the bell badge bounces back on every new
-    // manual-billing customer / churn-score tick despite the cron holding
-    // quiet. Membership-aware re-show below still applies (new WORK is not
-    // slow creep).
-    const cooldownMs = COUNT_ESCALATION_COOLDOWN_MS[a.id] || 0;
-    const cooledDown = !dismissed.at || (Date.now() - dismissed.at) >= cooldownMs;
-    if (a.count > dismissed.count && cooledDown) return true; // escalation re-shows
-    // Membership-aware re-show for queue alerts: a member the dismissal did
-    // NOT cover (a different lead crossing the SLA, a new expiring estimate)
-    // is new work even at an unchanged or lower count — but a queue that
-    // merely shrank to a subset of what was dismissed stays hidden. Needs
-    // members on BOTH sides; aggregate alerts and pre-migration dismissal
-    // rows keep the count-only behavior.
-    if (Array.isArray(a.members) && a.members.length && dismissed.members) {
-      return a.members.some((id) => !dismissed.members.has(String(id)));
-    }
-    return false;
-  });
-
-  return { live: toNotifications(visible), liveKeys };
-}
-
-// True if a persisted notification was written by the dashboard-alerts
-// cron for the same (alertId, count) currently surfaced by the live
-// overlay. Older counts (escalation history) return false and stay
-// visible in the bell.
-function isLiveDuplicate(persisted, liveKeys) {
-  if (liveKeys.size === 0) return false;
-  let meta = persisted.metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { return false; }
-  }
-  if (!meta || meta.triggerKey !== 'dashboard_alert') return false;
-  const payload = meta.payload || {};
-  if (!payload.alertId || payload.alertCount == null) return false;
-  return liveKeys.has(`${payload.alertId}:${payload.alertCount}`);
-}
 
 function parseMetadata(value) {
   if (!value) return {};
@@ -220,28 +91,12 @@ router.get('/issues', requireAdmin, async (req, res, next) => {
 // badge doesn't double-count.
 router.get('/unread-count', async (req, res, next) => {
   try {
-    // Bell policy on: live overlay excluded from the badge too (dismissal
-    // endpoints below stay functional — they no-op when nothing is live).
-    // Non-admin roles never get the live overlay (owner-only finance
-    // alerts), which also skips the persisted-dashboard dedup subtraction —
-    // dashboard_alert rows are already hidden from their scoped count and
-    // must not be re-subtracted from it (codex P1).
-    const liveCtx = isBellPolicyEnabled() || req.techRole !== 'admin'
-      ? { live: [], liveKeys: new Set() }
-      : await liveAlertNotifications(req.technicianId);
-    let persistedCount = await NotificationService.getAdminUnreadCount({ role: req.techRole });
-    if (liveCtx.liveKeys.size > 0) {
-      try {
-        const unreadDashboardAlerts = await db('notifications')
-          .where({ recipient_type: 'admin', category: 'alert' })
-          .whereNull('read_at');
-        const dupes = unreadDashboardAlerts.filter((n) => isLiveDuplicate(n, liveCtx.liveKeys)).length;
-        persistedCount = Math.max(0, persistedCount - dupes);
-      } catch (err) {
-        logger.warn(`[admin-notifications] unread dedup query failed: ${err.message}`);
-      }
-    }
-    res.json({ count: persistedCount + liveCtx.live.length });
+    // `at` is the badge-ordering stamp: read from the DB clock inside the
+    // same per-admin serialized section that computed the count
+    // (admin-unread.js), so every ordering token — this, the read routes',
+    // the push payload's badgeAt — shares one clock and one total order.
+    const { count, at } = await getUnreadCountForAdmin({ adminUserId: req.technicianId, role: req.techRole });
+    res.json({ count, at });
   } catch (err) { next(err); }
 });
 
@@ -333,6 +188,10 @@ router.put('/read-all', async (req, res, next) => {
     // other roles, and its helper also marks persisted dashboard_alert
     // rows read — rows the fail-closed feed hides from them (codex P1).
     if (req.techRole === 'admin') await dismissLiveAlerts(req.technicianId);
+    // No badge-ordering stamp here: the client re-syncs the icon via a
+    // fresh /unread-count after the mutation (authoritative count AND
+    // stamp from the locked section) — a stamp on this response could
+    // clear the icon even when live-alert dismissal failed soft.
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -442,7 +301,7 @@ router.get('/diagnose', async (req, res, next) => {
 // PUT /api/admin/notifications/:id/read — mark one as read.
 // Live alert IDs (prefixed `live:<alertId>`) record a per-admin
 // dismissal at the alert's current count. The dismissal expires after
-// DISMISS_WINDOW_HOURS or sooner if the count grows past
+// DISMISS_WINDOW_HOURS (admin-unread.js) or sooner if the count grows past
 // dismissed_at_count (escalation re-shows the chip).
 router.put('/:id/read', async (req, res, next) => {
   try {
@@ -459,6 +318,7 @@ router.put('/:id/read', async (req, res, next) => {
     }
     // Scoped to admin notifications — an admin can't clear a customer's row by id.
     const updated = await NotificationService.markReadAdmin(id, { role: req.techRole });
+    // No badge-ordering stamp — see /read-all.
     res.json({ success: true, updated });
   } catch (err) { next(err); }
 });

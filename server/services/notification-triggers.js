@@ -724,7 +724,7 @@ async function triggerNotification(triggerKey, payload = {}) {
       // explicit documentation on owner-only triggers; techVisible is the
       // operative flag for both push recipients and bell visibility.
       if (!trigger.techVisible) recipientQuery = recipientQuery.where({ role: 'admin' });
-      activeAdmins = await recipientQuery.select('id');
+      activeAdmins = await recipientQuery.select('id', 'role');
     } catch (e) {
       logger.warn(`[notification-triggers] technicians query failed: ${e.message}`);
     }
@@ -786,10 +786,67 @@ async function triggerNotification(triggerKey, payload = {}) {
           })
         );
 
+        // App-icon badge (installed-PWA Badging API / APNs aps.badge): mirror
+        // EXACTLY what the bell's /unread-count returns — persisted unread
+        // plus live dashboard alerts after this admin's dismissals
+        // (admin-unread.js, shared with the route) — computed per recipient
+        // because dismissal state is per admin, and AFTER the bell write
+        // above so the triggering notification is included. The badge is
+        // garnish and the push is the product: the count runs the
+        // dashboard-alert aggregate battery (cold memo when the PWA is
+        // closed — exactly the inbound-SMS case) plus a per-admin ordering
+        // lock, so it is raced against a hard timeout and any
+        // failure/timeout OMITS the badge (icon left untouched) rather
+        // than delaying delivery or sending a wrong number. The snapshot's
+        // `at` stamp comes from the DB clock inside that lock (see
+        // admin-unread.js) so overlapping snapshots can't hand the older
+        // count the newer stamp — the service worker keeps the highest.
+        // Lazy require: admin-unread pulls in dashboard-alerts-cron, which
+        // requires this module back — a top-level require would cycle.
+        const { getUnreadCountForAdmin } = require('./admin-unread');
+        const BADGE_COUNT_TIMEOUT_MS = 1500;
+        const BADGE_TIMED_OUT = Symbol('badge-timeout');
+        // Admin-role recipients only: techVisible triggers (sms_reply) also
+        // push to technicians, but the app-icon badge is scoped to the
+        // installed Waves Admin PWA — techs keep the banner, no badge field.
+        const badgeByUser = new Map();
+        await Promise.all(
+          activeAdmins
+            .filter((u) => u.role === 'admin' && enabledUserIds.includes(u.id))
+            .map(async (user) => {
+              let timer;
+              // queued: this is the unbounded fan-out path, so it goes
+              // through admin-unread's process-wide chain; abandoned lets
+              // the chain drop this task unstarted once the race below
+              // has already given up on it.
+              let abandoned = false;
+              const snapshot = await Promise.race([
+                getUnreadCountForAdmin(
+                  { adminUserId: user.id, role: user.role },
+                  { queued: true, abandoned: () => abandoned },
+                ).catch((e) => {
+                  logger.warn(`[notification-triggers] badge count failed for admin ${user.id}: ${e.message}`);
+                  return null;
+                }),
+                new Promise((resolve) => { timer = setTimeout(resolve, BADGE_COUNT_TIMEOUT_MS, BADGE_TIMED_OUT); }),
+              ]);
+              clearTimeout(timer);
+              if (snapshot === BADGE_TIMED_OUT) {
+                abandoned = true;
+                logger.warn(`[notification-triggers] badge count timed out for admin ${user.id} — sending push without badge`);
+                return;
+              }
+              if (snapshot && Number.isInteger(snapshot.count) && Number.isFinite(snapshot.at)) {
+                badgeByUser.set(user.id, { count: snapshot.count, at: snapshot.at });
+              }
+            })
+        );
+
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {
             const wantsSound = wantsSoundByUser.get(adminUserId);
+            const badgeInfo = badgeByUser.get(adminUserId);
             return {
               title: built.title,
               body: built.body,
@@ -799,6 +856,7 @@ async function triggerNotification(triggerKey, payload = {}) {
               vibrate: wantsSound ? PRIORITY_VIBRATE[trigger.priority] : [0],
               silent: !wantsSound,
               renotify: triggerKey === 'sms_reply',
+              ...(badgeInfo ? { badge: badgeInfo.count, badgeAt: badgeInfo.at } : {}),
             };
           }
         );

@@ -278,9 +278,13 @@ const NotificationService = {
   },
 
   // Get unread count for admin
-  async getAdminUnreadCount({ role } = {}) {
+  // trx (optional): run on an existing transaction's connection — the
+  // badge ordering section (admin-unread.js) computes counts inside its
+  // advisory-lock transaction and must not borrow a second pool
+  // connection while holding one.
+  async getAdminUnreadCount({ role } = {}, trx = null) {
     const [{ count }] = await scopeAdminFeedToRole(
-      db('notifications').where({ recipient_type: 'admin' }),
+      (trx || db)('notifications').where({ recipient_type: 'admin' }),
       role,
     )
       .whereNull('read_at')

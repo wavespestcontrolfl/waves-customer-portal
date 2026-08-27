@@ -26,4 +26,26 @@ describe('customer service-worker update contract', () => {
     expect(source).toContain('candidate.origin === self.location.origin');
     expect(source).toContain('data: { url: destination }');
   });
+
+  it('mirrors the pushed unread count onto the app icon badge, gated on a numeric payload', () => {
+    expect(source).toContain('if (Number.isInteger(data.badge))');
+    expect(source).toContain("if (!('setAppBadge' in self.navigator)) return");
+    expect(source).toContain('self.navigator.setAppBadge(count)');
+    expect(source).toContain('self.navigator.clearAppBadge()');
+  });
+
+  it('drops an out-of-order badge and keeps its ordering state out of the app-cache sweep', () => {
+    // Overlapping pushes carry absolute count snapshots — a late delivery of
+    // an older snapshot must not overwrite a newer badge (codex #3541 P2),
+    // and the compare-and-apply spans awaits, so it must run under the
+    // cross-context Web Lock the page's syncAppBadge shares.
+    expect(source).toContain('self.navigator.locks.request(BADGE_LOCK, fn)');
+    expect(source).toContain("const BADGE_LOCK = 'waves-badge'");
+    expect(source).toContain('if (prev.seq > seq) return');
+    expect(source).toContain('if (prev.seq === seq && prev.count >= count) return');
+    expect(source).toContain("const BADGE_STATE_CACHE = 'waves-badge-state'");
+    // Must NOT start with APP_CACHE_PREFIX ('waves-customer-') or the
+    // activate sweep would wipe the ordering state on every SW update.
+    expect('waves-badge-state'.startsWith('waves-customer-')).toBe(false);
+  });
 });

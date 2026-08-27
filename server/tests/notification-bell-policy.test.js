@@ -599,7 +599,12 @@ describe('live dashboard-alert overlay under the bell policy', () => {
       const res = await fetch(`${baseUrl}/admin/notifications/unread-count`);
       const json = await res.json();
       expect(res.status).toBe(200);
-      expect(json).toEqual({ count: 3 });
+      // `at` is the badge-ordering stamp added for the app-icon badge
+      // (PR #3541): DB-clock µs under the ordering lock in prod, and
+      // EXPLICITLY null when the lock/transaction is unavailable (as in
+      // this mock env) — a count without a stamp is applied but never
+      // advances the client's ordering state.
+      expect(json).toEqual({ count: 3, at: null });
     });
     expect(computeDashboardAlerts).not.toHaveBeenCalled();
   });

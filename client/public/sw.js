@@ -141,9 +141,55 @@ self.addEventListener('fetch', event => {
   );
 });
 
+// Home-screen icon badge (Badging API — iOS 16.4+ installed PWAs):
+// data.badge is the server-computed unread count; data.badgeAt orders
+// overlapping pushes — counts are absolute snapshots, so a slower delivery
+// carrying an older (lower) snapshot must not overwrite a newer one. The
+// last-applied {seq, count} lives in the Cache API (SW scope has no
+// localStorage, and worker globals don't survive termination); the cache
+// name is outside APP_CACHE_PREFIX so activate's old-cache sweep never
+// clears it. The whole compare-and-apply runs under a Web Lock: the check
+// spans awaits, so two overlapping push handlers could otherwise both read
+// the old state before either writes, and the PAGE writes the same state
+// when it clears the badge on read (NotificationBell syncAppBadge, same
+// lock name + key) — a delayed push must not resurrect a count the admin
+// already cleared. 0 clears the badge; no numeric badge leaves it alone.
+const BADGE_STATE_CACHE = 'waves-badge-state';
+const BADGE_SEQ_KEY = '/__badge-seq';
+const BADGE_LOCK = 'waves-badge';
+function withBadgeLock(fn) {
+  // Browsers without Web Locks fall back to best-effort unserialized.
+  if (self.navigator.locks?.request) return self.navigator.locks.request(BADGE_LOCK, fn);
+  return fn();
+}
+async function applyAppBadge(count, seq) {
+  if (!('setAppBadge' in self.navigator)) return;
+  try {
+    await withBadgeLock(async () => {
+      if (Number.isFinite(seq)) {
+        const cache = await caches.open(BADGE_STATE_CACHE);
+        const prevRes = await cache.match(BADGE_SEQ_KEY);
+        let prev = { seq: 0, count: -1 };
+        if (prevRes) { try { prev = await prevRes.json(); } catch { /* corrupt → treat as empty */ } }
+        if (prev.seq > seq) return; // an older overlapping push arrived late — ignore it
+        // Equal stamps are ms ties between concurrent snapshots: keep the
+        // higher count — during a burst counts only grow; decreases come
+        // from reads, which stamp strictly newer via the page path.
+        if (prev.seq === seq && prev.count >= count) return;
+        await cache.put(BADGE_SEQ_KEY, new Response(JSON.stringify({ seq, count })));
+      }
+      if (count > 0) await self.navigator.setAppBadge(count);
+      else await self.navigator.clearAppBadge();
+    });
+  } catch { /* badge is garnish — never fail the push handler over it */ }
+}
+
 self.addEventListener('push', event => {
   const data = event.data?.json() || {};
   const requireInteraction = data.priority === 'urgent';
+  if (Number.isInteger(data.badge)) {
+    event.waitUntil(applyAppBadge(data.badge, Number(data.badgeAt)));
+  }
   let destination = '/';
   try {
     const candidate = new URL(data.url || '/', self.location.origin);

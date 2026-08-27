@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import useModalFocus from '../../hooks/useModalFocus';
 import { BiometricLockContext } from '../BiometricGate';
@@ -27,13 +27,20 @@ describe('CustomerDialogHost', () => {
 
     const dialog = await screen.findByRole('alertdialog', { name: 'Remove payment method?' });
     expect(dialog).toHaveAttribute('data-glass', 'modal');
-    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    // Focus and the document-level Escape listener are installed by
+    // useModalFocus's effect. On starved CI runners this test twice hit
+    // its 5s cap when the bare assertions below raced that effect — so
+    // wait for focus (proof the effect ran) and retry the Escape press
+    // instead of firing it exactly once.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus());
 
-    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => {
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
 
     await expect(result).resolves.toBe(false);
-    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
-  });
+  }, 15000);
 
   it('resolves alerts after the customer acknowledges them', async () => {
     render(<CustomerDialogHost />);

@@ -7,6 +7,54 @@ import api from '../utils/api';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
+// Local, unverified role hint from the staff JWT — gates nothing
+// security-sensitive (same pattern as push-subscribe.js): the server
+// already scopes counts and push badge fields to admin-role users; this
+// only keeps a technician's portal session from painting a badge onto
+// their home-screen icon, matching the push side's admin-only scope.
+function staffRoleFromToken() {
+  try {
+    const raw = localStorage.getItem('waves_admin_token');
+    if (!raw) return null;
+    const payload = JSON.parse(atob(raw.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return payload.role || null;
+  } catch {
+    return null;
+  }
+}
+
+// Mirror a server-confirmed unread count onto the home-screen app icon
+// (Badging API — iOS 16.4+ installed PWAs; no-op elsewhere). Only called
+// with counts the server returned or accepted a read-write for, so an
+// offline session never wipes a real badge. Also advances the service
+// worker's badge-ordering state under the same Web Lock (sw.js
+// applyAppBadge): a push issued before this count but delivered after —
+// the delayed-push case — must not resurrect a number the admin already
+// cleared by reading. `at` is the SERVER-clock stamp the response carried
+// (unread-count/read/read-all all return one) — the same clock domain as
+// the push payload's badgeAt, so device clock skew can never invert the
+// ordering; without a stamp the seq write is skipped and ordering
+// advances on the next stamped call. Never rejects; fire-and-forget.
+async function syncAppBadge(count, at) {
+  if (typeof navigator === 'undefined' || !('setAppBadge' in navigator)) return;
+  const apply = async () => {
+    try {
+      if (Number.isFinite(at) && typeof caches !== 'undefined') {
+        const cache = await caches.open('waves-badge-state');
+        await cache.put('/__badge-seq', new Response(JSON.stringify({ seq: at, count })));
+      }
+    } catch { /* ordering state is best-effort */ }
+    try {
+      if (count > 0) await navigator.setAppBadge(count);
+      else await navigator.clearAppBadge();
+    } catch { /* platform without a visible badge surface */ }
+  };
+  try {
+    if (navigator.locks?.request) await navigator.locks.request('waves-badge', apply);
+    else await apply();
+  } catch { /* badge sync must never surface to the bell */ }
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -54,13 +102,18 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       });
   };
 
-  // Poll unread count every 30 seconds
+  // Poll unread count every 30 seconds. Component-scoped so mark-read can
+  // re-sync the icon badge from the AUTHORITATIVE count (see markRead).
+  const fetchCount = () => {
+    requestJson(`${basePath}/unread-count`)
+      .then(d => {
+        setUnreadCount(d.count || 0);
+        if (type === 'admin' && staffRoleFromToken() === 'admin') syncAppBadge(d.count || 0, d.at);
+      })
+      .catch(() => {});
+  };
+
   useEffect(() => {
-    const fetchCount = () => {
-      requestJson(`${basePath}/unread-count`)
-        .then(d => setUnreadCount(d.count || 0))
-        .catch(() => {});
-    };
     fetchCount();
     const iv = setInterval(fetchCount, 30000);
     return () => clearInterval(iv);
@@ -207,7 +260,12 @@ export default function NotificationBell({ type = 'admin', customerId }) {
       await requestJson(`${basePath}/${id}/read`, { method: 'PUT' });
     } catch { return; }
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read_at: new Date().toISOString() } : n));
+    // Optimistic list counter only — the ICON badge is re-synced from the
+    // authoritative count below: a push landing between polls isn't in
+    // local state, and a stale local decrement carries a fresh ordering
+    // stamp that would beat the correct badge (codex round 14).
     setUnreadCount(prev => Math.max(0, prev - 1));
+    if (type === 'admin') fetchCount();
   };
 
   const markAllRead = async () => {
@@ -216,6 +274,11 @@ export default function NotificationBell({ type = 'admin', customerId }) {
     } catch { return; }
     setNotifications(prev => prev.map(n => ({ ...n, read_at: n.read_at || new Date().toISOString() })));
     setUnreadCount(0);
+    // Icon badge: refetch the authoritative post-mutation count — read-all
+    // can fail soft on live-alert dismissal while still returning success,
+    // and clearing the icon with a fresh stamp would beat the delayed push
+    // for those alerts (codex round 15). Same pattern as markRead.
+    if (type === 'admin') fetchCount();
   };
 
   // Group by time: Today, Yesterday, This Week, Older
