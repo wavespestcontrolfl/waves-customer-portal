@@ -1,0 +1,102 @@
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+
+const Engagement = require('../services/social-engagement');
+const Studio = require('../services/social-content-studio');
+
+describe('engagementTargets (platforms_posted → fetch targets)', () => {
+  test('keeps successful FB/IG/LinkedIn entries with ids; drops GBP, failures, blanks, and dupes', () => {
+    const post = {
+      platforms_posted: [
+        { platform: 'facebook', postId: '123_456', success: true, content: 'x' },
+        { platform: 'instagram', postId: '17912345678901234', success: true, mediaType: 'reel' },
+        { platform: 'linkedin', postId: null, success: true },            // LinkedIn can return no id
+        { platform: 'gbp', postId: 'accounts/1/locations/2/localPosts/3', success: true, location: 'venice' },
+        { platform: 'facebook', postId: '999', success: false, error: 'boom' },
+        { platform: 'instagram', postId: 'dupe', success: true },          // second IG entry ignored
+        'facebook',                                                        // legacy string entries
+      ],
+    };
+    expect(Engagement.engagementTargets(post)).toEqual([
+      { platform: 'facebook', platformPostId: '123_456', mediaType: null },
+      { platform: 'instagram', platformPostId: '17912345678901234', mediaType: 'reel' },
+    ]);
+  });
+
+  test('accepts the jsonb column as a JSON string and tolerates garbage', () => {
+    expect(Engagement.engagementTargets({ platforms_posted: JSON.stringify([{ platform: 'linkedin', postId: 'urn:li:share:1', success: true }]) }))
+      .toEqual([{ platform: 'linkedin', platformPostId: 'urn:li:share:1', mediaType: null }]);
+    expect(Engagement.engagementTargets({ platforms_posted: 'not json' })).toEqual([]);
+    expect(Engagement.engagementTargets({})).toEqual([]);
+  });
+});
+
+describe('platform response parsers', () => {
+  test('facebook: likes/comments summaries + shares count', () => {
+    expect(Engagement.parseFacebookEngagement({
+      likes: { summary: { total_count: 14 } }, comments: { summary: { total_count: 3 } }, shares: { count: 2 },
+    })).toEqual({ likes: 14, comments: 3, shares: 2, views: 0 });
+    expect(Engagement.parseFacebookEngagement({})).toEqual({ likes: 0, comments: 0, shares: 0, views: 0 });
+  });
+
+  test('instagram: like_count / comments_count', () => {
+    expect(Engagement.parseInstagramEngagement({ like_count: 19, comments_count: 4 }))
+      .toEqual({ likes: 19, comments: 4, shares: 0, views: 0 });
+  });
+
+  test('linkedin: likesSummary / commentsSummary (aggregated preferred, first-level fallback)', () => {
+    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: 5 }, commentsSummary: { aggregatedTotalComments: 2, totalFirstLevelComments: 1 } }))
+      .toEqual({ likes: 5, comments: 2, shares: 0, views: 0 });
+    expect(Engagement.parseLinkedInEngagement({ likesSummary: { totalLikes: '7' }, commentsSummary: { totalFirstLevelComments: 1 } }))
+      .toEqual({ likes: 7, comments: 1, shares: 0, views: 0 });
+  });
+
+  test('negative / non-numeric counts clamp to 0', () => {
+    expect(Engagement.parseInstagramEngagement({ like_count: -3, comments_count: 'many' }))
+      .toEqual({ likes: 0, comments: 0, shares: 0, views: 0 });
+  });
+});
+
+describe('scoreCounts', () => {
+  test('matches the competitor swipe-file formula (likes + 3·comments + 5·shares + views/100)', () => {
+    const counts = { likes: 10, comments: 4, shares: 2, views: 550 };
+    expect(Engagement.scoreCounts(counts)).toBe(38);
+    expect(Engagement.scoreCounts(counts)).toBe(Studio.engagementScore({
+      likesCount: counts.likes, commentsCount: counts.comments, sharesCount: counts.shares, viewsCount: counts.views,
+    }));
+  });
+});
+
+describe('fetchEngagement', () => {
+  const prevToken = process.env.FACEBOOK_ACCESS_TOKEN;
+  afterEach(() => {
+    if (prevToken === undefined) delete process.env.FACEBOOK_ACCESS_TOKEN;
+    else process.env.FACEBOOK_ACCESS_TOKEN = prevToken;
+  });
+
+  test('facebook: requests the summary fields and parses the counts; token never appears in errors', async () => {
+    process.env.FACEBOOK_ACCESS_TOKEN = 'secret-token';
+    const fetchFn = jest.fn(async (url) => {
+      expect(url).toContain('https://graph.facebook.com/v25.0/123_456?fields=likes.summary(true),comments.summary(true),shares');
+      return { ok: true, json: async () => ({ likes: { summary: { total_count: 8 } }, comments: { summary: { total_count: 1 } } }) };
+    });
+    await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '123_456' }, { fetchFn }))
+      .resolves.toEqual({ likes: 8, comments: 1, shares: 0, views: 0 });
+
+    const failing = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'Unsupported get request' } }) }));
+    await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '1' }, { fetchFn: failing }))
+      .rejects.toThrow(/Graph 400: Unsupported get request/);
+    await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '1' }, { fetchFn: failing }))
+      .rejects.not.toThrow(/secret-token/);
+  });
+
+  test('facebook/instagram without a token fails that target only', async () => {
+    delete process.env.FACEBOOK_ACCESS_TOKEN;
+    await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '1' }, { fetchFn: jest.fn() }))
+      .rejects.toThrow(/FACEBOOK_ACCESS_TOKEN/);
+  });
+
+  test('unsupported platform rejects', async () => {
+    await expect(Engagement.fetchEngagement({ platform: 'gbp', platformPostId: 'x' }, { fetchFn: jest.fn() })).rejects.toThrow(/no engagement source/);
+  });
+});

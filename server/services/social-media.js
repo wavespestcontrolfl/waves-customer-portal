@@ -49,6 +49,9 @@ const SOCIAL_FLAGS = {
   get linkedinEnabled() { return socialFlag('SOCIAL_LINKEDIN_ENABLED'); },
   get twitterEnabled() { return socialFlag('SOCIAL_TWITTER_ENABLED'); },
   get dryRun() { return socialFlag('SOCIAL_DRY_RUN'); },
+  // Daily engagement ingest for our own posts (social-engagement.js). Dark
+  // until set; read-only against the platform APIs, never touches publishing.
+  get engagementSync() { return socialFlag('SOCIAL_ENGAGEMENT_SYNC_ENABLED'); },
 };
 
 const PUBLISH_PLATFORMS = ['facebook', 'instagram', 'linkedin', 'gbp', 'twitter'];

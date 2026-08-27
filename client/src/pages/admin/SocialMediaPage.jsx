@@ -2490,7 +2490,7 @@ function AnalyticsTab() {
       </div>
     );
 
-  const { byPlatform = {}, weeklyTrend = [], summary = {} } = data;
+  const { byPlatform = {}, weeklyTrend = [], summary = {}, topPosts = [] } = data;
 
   return (
     <div>
@@ -2614,6 +2614,62 @@ function AnalyticsTab() {
             </div>
           ))}
         </div>{" "}
+      </div>
+      {/* Top posts — ranked by ingested engagement once the sync has data */}
+      <div style={{ ...sCard, marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            marginBottom: 12,
+          }}
+        >
+          <div style={{ fontSize: 15, fontWeight: 500, color: D.heading }}>
+            {summary.engagementRanked ? "Top Posts by Engagement" : "Recent Published Posts"}
+          </div>
+          <div style={{ fontSize: 11, color: D.muted }}>
+            {summary.engagementRanked
+              ? `${summary.engagementSyncedPosts} posts with engagement data`
+              : "No engagement data yet — enable SOCIAL_ENGAGEMENT_SYNC_ENABLED"}
+          </div>
+        </div>
+        {topPosts.length === 0 ? (
+          <div style={{ fontSize: 12, color: D.muted }}>No published posts</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: D.muted, textAlign: "left" }}>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Post</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500 }}>Published</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Likes</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Comments</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Shares</th>
+                <th style={{ padding: "6px 8px", fontWeight: 500, textAlign: "right" }}>Score</th>
+              </tr>
+            </thead>
+            <tbody>
+              {topPosts.map((p) => {
+                const e = p.engagement;
+                const num = (v) => (e ? v : "—");
+                return (
+                  <tr key={p.id} style={{ borderTop: `1px solid ${D.border}` }}>
+                    <td style={{ padding: "6px 8px", color: D.heading, maxWidth: 360, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {p.title || "(untitled)"}
+                    </td>
+                    <td style={{ padding: "6px 8px", color: D.muted, whiteSpace: "nowrap" }}>
+                      {p.publishedAt ? new Date(p.publishedAt).toLocaleDateString() : "—"}
+                    </td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.likes)}</td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.comments)}</td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace" }}>{num(e?.shares)}</td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'JetBrains Mono', monospace", color: D.heading, fontWeight: 600 }}>{num(e?.score)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
       </div>
       {/* Weekly Trend */}
       {weeklyTrend.length > 0 && (

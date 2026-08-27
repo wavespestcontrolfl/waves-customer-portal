@@ -1,0 +1,36 @@
+/**
+ * Per-platform engagement for our OWN published social posts (likes /
+ * comments / shares / views), pulled daily by the engagement-ingest cron
+ * from the Facebook Graph, Instagram Graph, and LinkedIn socialActions
+ * APIs. Until now the only engagement numbers in the portal were
+ * hand-entered competitor rows (competitor_social_posts) and the analytics
+ * "top posts" were just the most recent — the count column names mirror
+ * that table so own vs competitor posts compare side by side.
+ *
+ * One row per (post, platform); a publish event fans out to N platforms and
+ * platform post ids live in social_media_posts.platforms_posted, which is
+ * why this is a child table rather than columns on the post.
+ */
+exports.up = async function up(knex) {
+  await knex.schema.createTable('social_post_engagement', (t) => {
+    t.uuid('id').primary().defaultTo(knex.fn.uuid());
+    t.uuid('post_id').notNullable().references('id').inTable('social_media_posts').onDelete('CASCADE');
+    t.string('platform', 20).notNullable();
+    t.string('platform_post_id', 300).notNullable();
+    t.integer('likes_count').notNullable().defaultTo(0);
+    t.integer('comments_count').notNullable().defaultTo(0);
+    t.integer('shares_count').notNullable().defaultTo(0);
+    t.integer('views_count').notNullable().defaultTo(0);
+    t.integer('engagement_score').notNullable().defaultTo(0);
+    t.timestamp('fetched_at').notNullable().defaultTo(knex.fn.now());
+    t.text('last_error');
+    t.timestamps(true, true);
+    t.unique(['post_id', 'platform']);
+    t.index('engagement_score');
+    t.index('fetched_at');
+  });
+};
+
+exports.down = async function down(knex) {
+  await knex.schema.dropTableIfExists('social_post_engagement');
+};

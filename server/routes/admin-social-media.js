@@ -332,6 +332,19 @@ router.get('/stats', async (req, res, next) => {
 });
 
 // GET /api/admin/social-media/analytics — aggregated analytics
+// On-demand engagement sweep (same code the 5:15 AM ET cron runs) — lets the
+// owner backfill/verify without waiting for the tick. Read-only upstream.
+router.post('/engagement/sync', async (req, res, next) => {
+  try {
+    const { syncRecentEngagement } = require('../services/social-engagement');
+    const days = Number(req.body?.days);
+    const summary = await syncRecentEngagement({ lookbackDays: Number.isFinite(days) && days > 0 ? days : 30 });
+    res.json({ success: true, ...summary });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.get('/analytics', async (req, res, next) => {
   try {
     // Posts grouped by platform (cap at 2000 most-recent to avoid unbounded scans)
@@ -388,9 +401,18 @@ router.get('/analytics', async (req, res, next) => {
       if (stats.total > maxCount) { maxCount = stats.total; mostActivePlatform = platform; }
     }
 
-    // Top posts (most recent published)
-    const topPosts = posts
-      .filter(p => p.status === 'published')
+    // Top posts: ranked by ingested engagement when the sync has data
+    // (social-engagement.js), else the most recent published (the pre-ingest
+    // behaviour — keeps the tab populated before the flag is on).
+    const publishedPosts = posts.filter(p => p.status === 'published');
+    const engagement = await require('../services/social-engagement')
+      .engagementByPost(publishedPosts.map(p => p.id))
+      .catch(() => ({}));
+    const withEngagement = Object.keys(engagement).length;
+    const ranked = withEngagement
+      ? publishedPosts.filter(p => engagement[p.id]).sort((a, b) => engagement[b.id].score - engagement[a.id].score)
+      : publishedPosts;
+    const topPosts = ranked
       .slice(0, 10)
       .map(p => ({
         id: p.id,
@@ -398,6 +420,7 @@ router.get('/analytics', async (req, res, next) => {
         platforms: p.platforms_posted,
         publishedAt: p.published_at,
         sourceUrl: p.source_url,
+        engagement: engagement[p.id] || null,
       }));
 
     const weeklyTrend = Object.values(weeklyBuckets)
@@ -414,6 +437,8 @@ router.get('/analytics', async (req, res, next) => {
         successRate,
         postsPerWeek,
         mostActivePlatform,
+        engagementRanked: withEngagement > 0,
+        engagementSyncedPosts: withEngagement,
       },
     });
   } catch (err) { next(err); }
