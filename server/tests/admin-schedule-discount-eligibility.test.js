@@ -17,6 +17,7 @@ const {
   calculateVisitFinancialsForAddons,
   calculateStoredVisitFinancials,
   lineExcludedFromPercentDiscount,
+  isPercentDiscountType,
   loadStoredDiscountScope,
   clearAppointmentDiscountCatalogFields,
   appointmentDiscountInputChanged,
@@ -258,6 +259,10 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(lineExcludedFromPercentDiscount('termite_bond_1yr')).toBe(true);
     expect(lineExcludedFromPercentDiscount('termite_bond')).toBe(true);
     expect(lineExcludedFromPercentDiscount('rodent_bait')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('termite_bond_5yr')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('palm_injection_semiannual')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly')).toBe(true);
+    expect(lineExcludedFromPercentDiscount('bed_bug_treatment')).toBe(true);
     expect(lineExcludedFromPercentDiscount('termite_bait')).toBe(false);
     expect(lineExcludedFromPercentDiscount('pest_general_quarterly')).toBe(false);
     expect(lineExcludedFromPercentDiscount(null)).toBe(false);
@@ -285,6 +290,49 @@ describe('admin schedule appointment discount eligibility', () => {
       price: 260.07,
       appointmentDiscountDollars: 22.23,
     });
+  });
+
+  test('treats variable percentages like percentages for the exclusion', () => {
+    expect(isPercentDiscountType('percentage')).toBe(true);
+    expect(isPercentDiscountType('variable_percentage')).toBe(true);
+    expect(isPercentDiscountType('fixed_amount')).toBe(false);
+    const financials = calculateVisitFinancialsForAddons({
+      primaryNet: 100,
+      primaryServiceKey: 'pest_general_quarterly',
+      primaryServiceCategory: 'pest_control',
+      appointmentDiscount: {
+        discountType: 'variable_percentage',
+        discountAmount: 10,
+        serviceKeyFilter: null,
+        serviceCategoryFilter: null,
+      },
+    }, [{ price: 60, serviceKey: 'termite_bond_1yr', serviceCategory: 'termite' }]);
+    expect(financials).toEqual({ price: 150, appointmentDiscountDollars: 10 });
+  });
+
+  test('prices the initially created visit with the same bond exclusion as its children', async () => {
+    const discount = {
+      id: 'discount-silver',
+      name: 'WaveGuard Silver',
+      discount_type: 'percentage',
+      amount: 10,
+    };
+    db
+      .mockReturnValueOnce(discountQuery({ service_key: 'termite_bond_1yr', category: 'termite', base_price: 60 }))
+      .mockReturnValueOnce(discountQuery(discount));
+    DiscountEngine.manualEligibilityFailures.mockResolvedValue([]);
+
+    const pricing = await buildAppointmentPricing({
+      serviceRecord: { service_key: 'pest_general_quarterly', category: 'pest_control', base_price: 117 },
+      estimatedPrice: 117,
+      serviceAddons: [{ serviceId: 'bond-1', name: 'Termite Bond Service (1-Year Term)', price: 60 }],
+      discountId: discount.id,
+      discountType: discount.discount_type,
+      customer: { id: 'customer-1' },
+    });
+
+    expect(pricing.appointmentDiscount.discountDollars).toBe(11.7);
+    expect(pricing.finalPrice).toBe(165.3);
   });
 
   test('still spreads a fixed-dollar appointment discount across every line', () => {

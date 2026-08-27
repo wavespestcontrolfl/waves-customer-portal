@@ -1170,6 +1170,10 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
     scheduledDate: service.scheduledDate
       ? String(service.scheduledDate).split("T")[0]
       : "",
+    // Server-stamped from the stored primary service key: the line never
+    // takes a percentage appointment discount (termite bond, ...). Preview
+    // only — the server recomputes on save.
+    excludedFromPercentDiscount: service.excludedFromPercentDiscount === true,
     windowStart: service.windowStart || "",
     windowEnd: service.windowEnd || "",
     serviceType: service.serviceType || "",
@@ -2073,6 +2077,13 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
             discountType && discountAmount !== ""
               ? Number(discountAmount)
               : undefined,
+          // A catalog preset posts its id so the row keeps the discount's
+          // identity (name on the invoice line, service filters); "custom"
+          // stays an anonymous type/amount pair.
+          discountId:
+            discountType && discountPresetId && discountPresetId !== "custom"
+              ? discountPresetId
+              : undefined,
           estimatedPrice:
             form.price !== "" && !isNaN(parseFloat(form.price))
               ? parseFloat(form.price)
@@ -2336,12 +2347,22 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
           : sum + parseFloat(l.price),
       0,
     );
+  // Clamped the way calculateAppointmentDiscountDollars clamps on the server:
+  // a percentage never exceeds its eligible base, a flat amount never exceeds
+  // the subtotal.
   const manualDiscount =
     discountType && discountAmount !== ""
       ? discountType === "percentage"
-        ? percentDiscountBase * (Number(discountAmount) / 100)
-        : Number(discountAmount)
+        ? Math.min(
+            percentDiscountBase,
+            percentDiscountBase * (Number(discountAmount) / 100),
+          )
+        : Math.min(servicePrice, Number(discountAmount))
       : 0;
+  const selectedDiscountPreset =
+    discountPresetId && discountPresetId !== "custom"
+      ? discountPresets.find((d) => String(d.id) === String(discountPresetId))
+      : null;
   const appointmentTotal = Math.max(0, servicePrice - manualDiscount);
   const appointmentHistory = customerPanelHistory(customerData, service?.id);
   const cards = Array.isArray(customerData?.cards) ? customerData.cards : [];
@@ -3478,7 +3499,7 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     }}
                   >
                     {" "}
-                    <span>Custom Discount</span>
+                    <span>{selectedDiscountPreset?.name || "Custom Discount"}</span>
                     <strong>(${manualDiscount.toFixed(2)})</strong>{" "}
                   </div>
                 )}
