@@ -1828,10 +1828,19 @@ function extractRawMarkdownTables(text) {
   // a code example is documentation, not a live table. Blank those lines
   // out (keeping line count) before scanning.
   const raw = String(text || '').split('\n');
-  let inFence = false;
+  // CommonMark fences: a fence closes only on the SAME marker character with
+  // at least the opening run length — a ``` inside a ~~~ block is content.
+  let fence = null; // { ch, len }
   const lines = raw.map((l) => {
-    if (/^\s*(?:>\s*)*(?:```|~~~)/.test(l)) { inFence = !inFence; return ''; }
-    if (inFence) return '';
+    const fm = l.match(/^\s*(?:>\s*)*(`{3,}|~{3,})/);
+    if (fm) {
+      const ch = fm[1][0];
+      const len = fm[1].length;
+      if (!fence) { fence = { ch, len }; return ''; }
+      if (fence.ch === ch && len >= fence.len) { fence = null; return ''; }
+      return '';
+    }
+    if (fence) return '';
     // 4-space / tab indent is an indented code block, not a table row.
     if (/^(?: {4}|\t)/.test(l)) return '';
     return l.replace(/^\s*(?:>\s*)+/, '');

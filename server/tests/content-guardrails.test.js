@@ -2201,6 +2201,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('Example:\n\n    | A | B |\n    | --- | --- |\n')).toBe(false);
     // Raw HTML tables are tables too.
     expect(guardrails.hasRawMarkdownTable('Intro <table><tr><th>Method</th></tr><tr><td>DIY</td></tr></table>')).toBe(true);
+    // A ``` inside a ~~~ block does not close it; a table after the block still counts.
+    expect(guardrails.hasRawMarkdownTable('~~~\n```\n| A | B |\n| --- | --- |\n~~~\n')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('~~~\n```\n~~~\n| A | B |\n| --- | --- |\n')).toBe(true);
     // Icon-only headers are still table headers.
     expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
