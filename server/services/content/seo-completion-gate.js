@@ -126,9 +126,15 @@ function evaluate(input = {}) {
     findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA with estimate/quote wording linking to contact, quote, or estimate paths.'));
   }
   {
+    // Every CTA anchor must comply — one valid CTA does not excuse a
+    // forbidden one elsewhere in the body.
     const badAnchor = forbiddenCtaAnchor(body);
     if (badAnchor) {
       findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badAnchor}" uses inspection-request wording — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording, e.g. "Get My Free Termite Estimate".'));
+    }
+    const wrongService = wrongServiceCtaAnchor(body, brief);
+    if (wrongService) {
+      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${wrongService}" names a different service than this post's — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to this post\'s service, e.g. "Get My Free Termite Estimate" on a termite post.'));
     }
   }
   if (faqRequired(brief) && !contract.faq.length) {
@@ -299,36 +305,69 @@ function allowedAnchorServices(briefService) {
   return allowed;
 }
 
+// Canonicalize a brief's service for CTA-anchor validation. Specialty
+// topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
+// themselves — the family map above already grants them their real
+// conversion wording — while compound service IDs canonicalize through the
+// SAME alias table the brief builder uses (termite-inspection → termite,
+// lawn-fertilization → lawn), so an established brief service can never be
+// parked by a partial local normalization.
+function ctaBriefService(rawService) {
+  if (!rawService) return null;
+  const singular = String(rawService).toLowerCase().trim().replace(/\s+/g, '-').replace(/e?s$/, '');
+  if (CTA_ANCHOR_SERVICE_TERMS[singular]) return singular;
+  const { SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
+  const aliased = SERVICE_ID_ALIASES[singular] || SERVICE_ID_ALIASES[String(rawService).toLowerCase().trim()] || rawService;
+  return normalizeService(aliased).replace(/\s+/g, '-').replace(/e?s$/, '');
+}
+
+// All conversion-path links in the body, with anchor + estimate/quote flag
+// + the services the anchor names.
+function conversionCtaLinks(body) {
+  const s = String(body || '');
+  const out = [];
+  const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
+  let m;
+  while ((m = conversionLink.exec(s)) !== null) {
+    const anchor = m[1];
+    out.push({
+      anchor,
+      hasEstimateWording: /(estimat|quot)/i.test(anchor),
+      named: Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+        .filter(([, re]) => re.test(anchor))
+        .map(([svc]) => svc),
+    });
+  }
+  return out;
+}
+
 function hasConversionCta(body, brief = {}) {
   // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
   // not loose body wording — at least one link to a conversion path whose
   // anchor carries estimate/quote wording ("Get My Free Termite Estimate",
   // "Request a Quote"), and if the anchor names a service it must be the
-  // brief's own service. Discussion text stays independent: a termite post
-  // may talk about inspections all it wants; `[Schedule Service](/contact/)`,
-  // "Get an estimate. [Click here](/contact/)", and a lawn-care quote anchor
-  // on a termite post all fail to qualify.
-  const s = String(body || '');
-  // normalizeService lowercases and maps broad aliases; specialty topics
-  // fall through raw — hyphen-normalize so 'bed bugs' meets the map keys.
-  const briefService = brief.service
-    ? normalizeService(brief.service).replace(/\s+/g, '-').replace(/e?s$/, '')
-    : null;
+  // brief's own service (or its family). Discussion text stays independent:
+  // a termite post may talk about inspections all it wants;
+  // `[Schedule Service](/contact/)`, "Get an estimate. [Click here](/contact/)",
+  // and a lawn-care quote anchor on a termite post all fail to qualify.
+  const briefService = ctaBriefService(brief.service);
   const allowed = briefService ? allowedAnchorServices(briefService) : null;
-  const conversionLink = /\[([^\]]+)\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/gi;
-  let m;
-  while ((m = conversionLink.exec(s)) !== null) {
-    const anchor = m[1];
-    if (!/(estimat|quot)/i.test(anchor)) continue;
-    const named = Object.entries(CTA_ANCHOR_SERVICE_TERMS)
-      .filter(([, re]) => re.test(anchor))
-      .map(([svc]) => svc);
-    // Generic estimate/quote anchors qualify for any service; an anchor
-    // that NAMES services qualifies only if one of them is the brief's own
-    // service (or its family).
-    if (!allowed || named.length === 0 || named.some((svc) => allowed.has(svc))) return true;
-  }
-  return false;
+  return conversionCtaLinks(body).some((link) =>
+    link.hasEstimateWording
+    && (!allowed || link.named.length === 0 || link.named.some((svc) => allowed.has(svc))));
+}
+
+// EVERY conversion CTA anchor must comply — a wrong-service estimate/quote
+// anchor is a violation even when a valid CTA exists elsewhere in the body.
+function wrongServiceCtaAnchor(body, brief = {}) {
+  const briefService = ctaBriefService(brief.service);
+  if (!briefService) return null;
+  const allowed = allowedAnchorServices(briefService);
+  const bad = conversionCtaLinks(body).find((link) =>
+    link.hasEstimateWording
+    && link.named.length > 0
+    && !link.named.some((svc) => allowed.has(svc)));
+  return bad ? bad.anchor : null;
 }
 
 // Deterministic backstop to the writer prompt's CTA-wording rule (owner

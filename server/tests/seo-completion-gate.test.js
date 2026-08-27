@@ -171,7 +171,7 @@ describe('seo-completion-gate', () => {
     // Estimate/quote wording passes; merely DISCUSSING inspections is fine.
     const clean = SeoCompletionGate.evaluate({
       draft: baseDraft({
-        body: `${baseDraft().body}\n\nAn annual termite inspection catches problems early. [Get My Free Termite Estimate](/pest-control-quote/) today.`,
+        body: `${baseDraft().body}\n\nAn annual pest inspection catches problems early. [Get My Free Pest Control Estimate](/pest-control-quote/) today.`,
       }),
       brief: baseBrief(),
       shadowMode: true,
@@ -242,6 +242,34 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(familyOk.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+  });
+
+  test('compound service IDs canonicalize via SERVICE_ID_ALIASES (lawn-fertilization accepts a lawn quote)', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        // Standalone body: the base fixture carries a pest-named CTA that
+        // would (correctly) be wrong-service on a lawn brief.
+        body: 'Sarasota lawns need fall feeding. [Request a Lawn Care Quote](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'lawn-fertilization' }),
+      shadowMode: true,
+    });
+    expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
+  test('a wrong-service CTA anchor is a violation even when a valid CTA also exists', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: `${baseDraft().body}\n\n[Request a Quote](/pest-control-quote/) today.\n\n[Get a Lawn Care Quote](/pest-control-quote/) too.`,
+      }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    // The generic quote CTA satisfies presence…
+    expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    // …but the lawn anchor on a termite post is still flagged.
+    expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
   });
 
   test('blocks customer PII and unapproved hardcoded prices', () => {
