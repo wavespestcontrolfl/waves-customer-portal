@@ -64,11 +64,21 @@ Technicians land on `/admin/schedule`; the field app is `/tech`.
 
 ## Deactivate / offboard
 
-There is no UI. Set `active = false` on the `technicians` row (sanctioned
-prod path: `railway run --service Postgres -- node <script>` from the portal
-repo) — the auth middleware refuses inactive accounts, and push/socket
-sessions are revoked on the next auth check. Do not delete rows: visits,
-time entries, and reports reference the technician id.
+Use the existing deactivation endpoint — never a direct DB update, which
+would skip credential revocation:
+
+```bash
+curl -sS -X DELETE \
+  https://portal.wavespestcontrol.com/api/admin/timetracking/technicians/<id> \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+It runs the full offboard atomically: refuses if the tech has an active
+timer or is the final admin, sets `active = false`, bumps
+`auth_token_version` (revoking every issued JWT), clears pending
+password-reset tokens, deactivates push subscriptions, and disconnects
+sockets. The staff row is never deleted — visits, time entries, payroll,
+and reports reference the technician id.
 
 ## Related
 
