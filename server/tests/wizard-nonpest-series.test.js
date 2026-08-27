@@ -385,6 +385,28 @@ describe('booking route wiring (source contracts)', () => {
   test('a reschedule-pending visit keeps a fixed series ACTIVE in the duplicate guard (r15)', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
     expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled'\]\)\s*\n\s*\.where\('scheduled_date', '>=', etDateString\(\)\)/);
+    // r16: a rescheduled PARENT stays in the candidate set too — only a
+    // cancelled parent is excluded; the probe/ongoing flag decide activity.
+    expect(seeder).toMatch(/\.whereNull\('recurring_parent_id'\)[\s\S]{0,700}\.whereNotIn\('status', \['cancelled'\]\)\s*\n\s*\.select\('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status'\)/);
+    const guardBody = seeder.slice(seeder.indexOf('async function findActiveRecurringSeries'), seeder.indexOf('async function checkActiveSeriesLocked'));
+    expect(guardBody).not.toMatch(/whereNotIn\('status', \['cancelled', 'rescheduled'\]\)/);
+  });
+
+  test('a missing cadence catalog row keeps the funnel duration and stays name-resolved (fail-open, never a throw)', () => {
+    // codex #3504 r16 P2 rebuttal pin: the duration read is guarded by the
+    // optional chain IN the condition, so the block (and its plain deref)
+    // is unreachable when the row is absent; the warn branch runs instead.
+    expect(booking).toMatch(/if \(!\(Number\(authorityDuration\) > 0\) && Number\(catalogRow\?\.default_duration_minutes\) > 0\) \{\s*\n\s*seededChildDuration = Number\(catalogRow\.default_duration_minutes\);/);
+    expect(booking).toMatch(/\} else if \(cadenceKey\) \{\s*\n\s*logger\.warn\(`\[booking:confirm\] cadence catalog row \$\{cadenceKey\} missing/);
+    const catalogRow = null;
+    const authorityDuration = null;
+    let seededChildDuration = 45;
+    expect(() => {
+      if (!(Number(authorityDuration) > 0) && Number(catalogRow?.default_duration_minutes) > 0) {
+        seededChildDuration = Number(catalogRow.default_duration_minutes);
+      }
+    }).not.toThrow();
+    expect(seededChildDuration).toBe(45);
   });
 
   test('replay activation keys on the live-draft marker (annual plans seed no children; insert-time correlation is not activation)', () => {

@@ -656,7 +656,14 @@ async function findActiveRecurringSeries(conn, {
   const query = conn('scheduled_services')
     .where({ customer_id: customerId, is_recurring: true })
     .whereNull('recurring_parent_id')
-    .whereNotIn('status', ['cancelled', 'rescheduled'])
+    // Only a CANCELLED parent is out of the candidate set. A 'rescheduled'
+    // parent is a live first visit awaiting re-placement (customer
+    // reschedule path, streamline gates off) whose follow-ups stay
+    // active — excluding it here let a later booking activate a second
+    // same-family billable series over them (codex #3504 r16). Whether
+    // the series is still active is decided below by the ongoing flag /
+    // upcoming-row probe, exactly as for pending/confirmed parents.
+    .whereNotIn('status', ['cancelled'])
     .select('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status');
   if (columns.service_id) query.select('service_id');
   if (columns.property_id) query.select('property_id');
