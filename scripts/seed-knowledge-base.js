@@ -65,17 +65,14 @@ async function seedWikiFiles() {
 }
 
 async function seedTokenCredentials() {
-  // Platform keys match the rows the credential-health cron already writes
-  // (gbp_lwr … gbp_venice), so an established environment skips them instead
-  // of minting parallel trackers under legacy names.
+  // Meta/LinkedIn trackers only. The GBP rows are owned end-to-end by
+  // TokenHealthService (canonical gbp_lwr … gbp_venice keys, OAuth tokens in
+  // system_settings, stale-row pruning) — seeding them here minted rows with
+  // legacy names and unauthenticated auth links.
   const credentials = [
     { platform: 'facebook', credential_type: 'oauth-token', env_var_name: 'FACEBOOK_ACCESS_TOKEN', metadata: { refreshUrl: 'https://developers.facebook.com/tools/explorer/', ttl: '60 days', notes: 'Long-lived page access token. Must regenerate via Graph API Explorer -> Exchange for long-lived -> Get page token from /me/accounts.' } },
     { platform: 'instagram', credential_type: 'oauth-token', env_var_name: 'FACEBOOK_ACCESS_TOKEN', metadata: { notes: 'Uses same Meta token as Facebook. Also requires INSTAGRAM_ACCOUNT_ID and a public image URL for posting.' } },
     { platform: 'linkedin', credential_type: 'oauth-token', env_var_name: 'LINKEDIN_ACCESS_TOKEN', metadata: { refreshUrl: 'https://www.linkedin.com/developers/apps', ttl: '60 days (or 365 for some apps)', notes: 'LinkedIn OAuth 2.0 token. Regenerate via LinkedIn Developer Portal -> Auth tab -> Generate token.' } },
-    { platform: 'gbp_lwr', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_LWR', metadata: { authUrl: '/api/admin/settings/google/auth?location=lakewood-ranch', requires: ['GBP_CLIENT_ID_LWR', 'GBP_CLIENT_SECRET_LWR'], notes: 'Google OAuth refresh token. Use the auth URL to re-authorize. Must set Client ID and Secret first.' } },
-    { platform: 'gbp_parrish', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_PARRISH', metadata: { authUrl: '/api/admin/settings/google/auth?location=parrish', requires: ['GBP_CLIENT_ID_PARRISH', 'GBP_CLIENT_SECRET_PARRISH'] } },
-    { platform: 'gbp_sarasota', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_SARASOTA', metadata: { authUrl: '/api/admin/settings/google/auth?location=sarasota', requires: ['GBP_CLIENT_ID_SARASOTA', 'GBP_CLIENT_SECRET_SARASOTA'] } },
-    { platform: 'gbp_venice', credential_type: 'refresh-token', env_var_name: 'GBP_REFRESH_TOKEN_VENICE', metadata: { authUrl: '/api/admin/settings/google/auth?location=venice', requires: ['GBP_CLIENT_ID_VENICE', 'GBP_CLIENT_SECRET_VENICE'] } },
   ];
 
   let created = 0;

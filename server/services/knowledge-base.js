@@ -405,7 +405,10 @@ Flag if: outdated regulations, incorrect chemical rates, expired certifications,
       for (const loc of WAVES_LOCATIONS) {
         const envKey = LOC_KEYS[loc.id];
         const credential = {
-          platform: `gbp-${loc.id}`,
+          // Canonical key shared with TokenHealthService.KNOWN_PLATFORMS
+          // (gbp_lwr …) — the previous `gbp-${loc.id}` form minted duplicate
+          // rows the scheduled pruner then deleted, every admin check.
+          platform: `gbp_${envKey.toLowerCase()}`,
           credential_type: 'refresh-token',
           env_var_name: `GBP_REFRESH_TOKEN_${envKey}`,
         };
