@@ -6135,6 +6135,12 @@ ${shellTopBar()}
       <button type="button" class="mode-btn" data-mode-set="one_time" aria-pressed="false">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</button>
     </div>` : ''}
     ${recurringHeroPriceHtml}
+    ${/* One-time-only pages lead with the itemized card (owner 2026-08-27);
+        the hero price card survives ONLY as the fallback for a legacy /
+        in-flight tokenized estimate that stored a one-time total but no
+        billable rows — those links must never render without a price
+        (pre-push P0). */ ''}
+    ${isOneTimeOnly && !quoteRequired && !hasRealOneTime ? oneTimeOnlyHeroPriceHtml : ''}
     ${canChooseOneTime ? `
     <div class="choice-treatment" data-mode-only="one_time" hidden>
       <div class="choice-treatment-name">${escapeHtml(oneTimeToggleCopy?.oneTimeLabel || 'One-Time Pest Control')}</div>

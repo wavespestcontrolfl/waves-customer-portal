@@ -3807,11 +3807,11 @@ describe('public estimate one-time breakdown', () => {
     // Hero treatment name comes from the normalized rows too, so the nested shape
     // shows the Bora-Care name instead of falling back to "WaveGuard Bronze" or the
     // raw "bora_care" service key.
-    // No hero price card on one-time-only pages (owner 2026-08-27): the
-    // friendly name must come through the itemized card row instead.
-    expect(html).not.toContain('class="choice-treatment-name"');
-    expect(html).toContain('Bora-Care Wood Treatment');
-    expect(html).not.toContain('WaveGuard Bronze');
+    // This nested-only shape yields NO billable card rows, so the hero
+    // price card renders as the legacy fallback (pre-push P0 on #3521) —
+    // and its treatment name still resolves from the normalized rows.
+    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
+    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -8034,5 +8034,48 @@ describe('sanitizePublicOneTimeBreakdown — review-lane enums stay server-side 
     expect(sanitizePublicOneTimeBreakdown(null)).toBeNull();
     const noItems = { total: 0 };
     expect(sanitizePublicOneTimeBreakdown(noItems)).toBe(noItems);
+  });
+});
+
+describe('legacy one-time estimates with no billable rows keep a visible price (pre-push P0 on #3521)', () => {
+  test('a stored one-time total with no item rows falls back to the hero price card', () => {
+    const html = renderPage('legacy-onetime-no-rows-token', {
+      id: 'estimate-legacy-onetime',
+      status: 'sent',
+      customerName: 'Legacy Customer',
+      address: '9 Old Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 257, items: [], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).toContain('<span class="num" id="onetime-display">$257.00</span>');
+  });
+
+  test('an itemized one-time estimate never renders the hero price card', () => {
+    const html = renderPage('itemized-onetime-token', {
+      id: 'estimate-itemized-onetime',
+      status: 'sent',
+      customerName: 'Itemized Customer',
+      address: '10 New Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 257,
+      tier: 'One-Time',
+    }, {
+      result: {
+        recurring: { services: [] },
+        oneTime: { total: 257, items: [{ service: 'flea_treatment', name: 'Flea Cleanout', price: 257 }], specItems: [] },
+        specItems: [],
+      },
+    });
+    expect(html).not.toContain('id="onetime-display"');
+    expect(html).toContain('<td style="text-align:right">$257.00</td>');
   });
 });

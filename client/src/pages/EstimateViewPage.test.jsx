@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import TerminalStateCard from '../components/estimate/TerminalStateCard';
-import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
+import { CombinedRecurringPriceCard, EstimateAskBar, OneTimeBreakdownCard, OneTimePriceCard, OneTimeModeToggle, PlanTotalSummary, ReviewPhase, ServiceSection, SuccessCard, estimateAddServiceOffer, getServiceLabel, oneTimeExtrasForPaymentNote, oneTimePriceCopy, oneTimeRowIdentityKey, oneTimeToggleLabels, reportShowcaseVariantForServices } from './EstimateViewPage';
 
 afterEach(() => cleanup());
 
@@ -1610,5 +1610,18 @@ describe('ServiceSection termite station rental row', () => {
     );
 
     expect(screen.queryByLabelText('Termite station rental')).not.toBeInTheDocument();
+  });
+});
+
+describe('OneTimePriceCard fallback (pre-push P0 on #3521)', () => {
+  it('shows the stored one-time total when a legacy estimate has no breakdown rows', () => {
+    render(<OneTimePriceCard oneTimePrice={257} breakdown={{ total: 257, items: [] }} />);
+    expect(screen.getByText('$257.00')).toBeInTheDocument();
+    expect(screen.getByText('one-time')).toBeInTheDocument();
+  });
+
+  it('OneTimeBreakdownCard renders nothing for an empty breakdown (why the fallback exists)', () => {
+    const { container } = render(<OneTimeBreakdownCard breakdown={{ total: 257, items: [] }} />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

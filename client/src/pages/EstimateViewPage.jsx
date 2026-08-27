@@ -1643,6 +1643,26 @@ function EstimateAddServiceRequestCard({ offer, requestState, onRequest }) {
   );
 }
 
+// Fallback ONLY: a legacy / in-flight tokenized estimate that stored a
+// one-time total but no billable breakdown rows must still show its price
+// (pre-push P0 on #3521). Every itemized estimate renders
+// OneTimeBreakdownCard instead (owner 2026-08-27).
+export function OneTimePriceCard({ oneTimePrice, breakdown }) {
+  return (
+    <div style={estimateCard()}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <span style={{ fontFamily: FONTS.serif, fontSize: 34, fontWeight: 500, color: ESTIMATE_TEXT, lineHeight: 1, fontVariantNumeric: 'tabular-nums' }}>
+          {fmtMoney(oneTimePrice)}
+        </span>
+        <span style={{ fontSize: 15, fontWeight: 500, color: ESTIMATE_MUTED }}>one-time</span>
+      </div>
+      <div style={{ fontSize: 16, color: '#3F4A65', marginTop: 16, lineHeight: 1.5 }}>
+        {oneTimePriceCopy(breakdown)}
+      </div>
+    </div>
+  );
+}
+
 // Stable identity for a one-time breakdown row — the exclusion handshake
 // between the embedded per-service rows and the standalone card below.
 // The identity is the FULL row (service + label + amount + quote state),
@@ -5810,9 +5830,17 @@ function EstimateViewPageInner() {
     // is the headline and the approve CTA follows it. No headlineTotal —
     // with no price card above, a single-row breakdown must keep its
     // dollars or the page shows no price at all.
+    const hasOneTimeRows = (Array.isArray(pricing.oneTimeBreakdown?.items) ? pricing.oneTimeBreakdown.items : []).length > 0;
     return (
       <>
-        <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+        {hasOneTimeRows
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} />
+          : (
+            <OneTimePriceCard
+              oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}
+              breakdown={pricing.oneTimeBreakdown}
+            />
+          )}
         {!readOnly && canShowSlotPicker ? <GetServiceTodayCta slotMeta={glassContent ? selectedSlotMeta : null} /> : null}
         {!readOnly && !glassContent && renderFlags.showOneTimePestAddOns === true ? (
           services
