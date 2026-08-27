@@ -259,6 +259,52 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     });
   });
 
+  test('fresh-PI create params carry no activity stamp (idempotent replay must not see changed parameters)', async () => {
+    // A rolled-back mint retries /setup with the SAME deterministic
+    // idempotency key; a time-varying metadata value would make Stripe
+    // reject the replay. `created` is the fresh PI's activity.
+    const StripeService = require('../services/stripe');
+    await StripeService.createInvoicePaymentIntent(invoiceRow.id);
+    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    for (const [params] of stripeClient.paymentIntents.create.mock.calls) {
+      expect(params.metadata).not.toHaveProperty('pay_session_touched_at');
+    }
+  });
+
+  test('a rollback AFTER an abandoned sibling PI was canceled re-clears its stamps outside the transaction', async () => {
+    // The sibling release cancels at Stripe (irreversible) then clears
+    // stamps inside setup's transaction. If the locked verify then refuses
+    // (409 staleBalance), the transaction rolls back and the sibling would
+    // come back bound to a canceled PI — the catch must re-clear durably.
+    invoiceRow.stripe_payment_intent_id = null;
+    const mockClearStamps = jest.fn(async () => 1);
+    jest.doMock('../services/pay-combined', () => {
+      const actual = jest.requireActual('../services/pay-combined');
+      return {
+        ...actual,
+        clearPaymentIntentStamps: (...args) => mockClearStamps(...args),
+        combinedEligibleSiblings: jest.fn(async (_anchor, opts) => {
+          opts.onAbandonedReleased('pi_dead_sibling');
+          return [{ id: 'inv_old', invoice_number: 'INV-OLD', total: '435.00', credit_applied: 0, stripe_payment_intent_id: null }];
+        }),
+        verifyAllocationLocked: jest.fn(async () => {
+          const err = new Error('The account balance changed since this page loaded — refreshing to the latest amounts.');
+          err.statusCode = 409;
+          err.staleBalance = true;
+          throw err;
+        }),
+      };
+    });
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.createInvoicePaymentIntent(invoiceRow.id, { includeOpenBalance: true }))
+      .rejects.toMatchObject({ statusCode: 409, staleBalance: true });
+
+    // Compensation runs on the ROOT db handle (the trx is gone), for the
+    // released sibling PI, and nothing was minted.
+    expect(mockClearStamps).toHaveBeenCalledWith(dbMock, 'pi_dead_sibling');
+    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  });
+
   test('reusing an open PaymentIntent clears stale surcharge-finalization metadata', async () => {
     // A declined /finalize leaves surcharge_policy_version on the PI; Stripe
     // metadata updates MERGE, so without an explicit '' clear the reused PI
@@ -284,6 +330,10 @@ describe('StripeService.createInvoicePaymentIntent', () => {
         surcharge_policy_version: '',
         surcharge_rate_bps: '',
         card_funding: '',
+        // Activity lease for pay-combined's abandoned-sibling triage: a
+        // reused PI's immutable `created` may be weeks old, so every setup
+        // reuse must re-stamp "touched now".
+        pay_session_touched_at: expect.stringMatching(/^\d{10}$/),
       }),
     }));
   });
@@ -812,6 +862,9 @@ describe('StripeService.finalizeInvoicePayment stale surcharge clear', () => {
     const [, params] = stripeClient.paymentIntents.update.mock.calls[0];
     expect(params.amount).toBe(7717);
     expect(params.amount_details).toEqual({ surcharge: { amount: 217, enforce_validation: 'enabled' } });
+    // Finalize is the last server seam before confirm — refresh the
+    // abandoned-sibling activity lease here too.
+    expect(params.metadata.pay_session_touched_at).toMatch(/^\d{10}$/);
   });
 
   test('unset-rejected fallback verifies the PI is clean before confirming', async () => {
@@ -1119,6 +1172,10 @@ describe('StripeService.updateInvoicePaymentIntentMethod', () => {
         surcharge_policy_version: '',
         surcharge_rate_bps: '',
         card_funding: '',
+        // Tender selection is pay-page activity — refresh the abandoned-
+        // sibling lease so a page open >1h that the customer is now acting
+        // on is never canceled by a concurrent combined setup.
+        pay_session_touched_at: expect.stringMatching(/^\d{10}$/),
       }),
     }));
   });

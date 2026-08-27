@@ -19,9 +19,16 @@
  *   - admin-stopped-dunning invoices ("stop dunning" also means "don't force
  *     the customer to pay it here" — same signal the completion sweep and
  *     previsit-balance honor; owner confirmed 2026-08-16);
- *   - invoices that already carry a PaymentIntent (their own pay session or
- *     a saved-card claim owns them — a combined charge must never race an
- *     invoice someone is paying elsewhere).
+ *   - invoices that already carry a LIVE PaymentIntent (their own pay session
+ *     or a saved-card claim owns them — a combined charge must never race an
+ *     invoice someone is paying elsewhere). An ABANDONED PI — unconfirmed in
+ *     Stripe, no payment row, older than an hour — is not a live session
+ *     (every /pay page open mints a PI, so "ever opened, never paid" would
+ *     otherwise hide exactly the overdue invoices this flow exists to
+ *     collect): the GET preview includes such a sibling, and the setup seam
+ *     cancels the dead PI and clears its stamps before stamping the
+ *     combined one (mirrors the anchor's own stale-PI triage in
+ *     createInvoicePaymentIntent).
  * Any resolve failure or candidate-page truncation makes the sibling read
  * INCOMPLETE → the combined flow declines to engage (single-invoice
  * behavior, exactly as if the gate were off) rather than assert a total the
@@ -46,6 +53,55 @@ const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-help
 // MORE than 8 means the combined total could not be complete → decline to
 // engage rather than force a partial "total".
 const MAX_COMBINED_SIBLINGS = 8;
+// A sibling's bound PI with pay-page activity younger than this is presumed
+// to be a page the customer still has open (two tabs) — never canceled out
+// from under it. Activity = the newer of the PI's immutable `created` and
+// `metadata.pay_session_touched_at`, which createInvoicePaymentIntent
+// re-stamps on every setup reuse (single-invoice setup reuses an old
+// requires_payment_method PI in place, so `created` alone can be weeks old
+// on a page reopened a minute ago).
+const ABANDONED_SIBLING_PI_MIN_AGE_MS = 60 * 60 * 1000;
+const UNCONFIRMED_PI_STATUSES = ['requires_payment_method', 'requires_confirmation', 'requires_action'];
+const TERMINAL_PAYMENT_ROW_STATUSES = ['failed', 'canceled', 'cancelled', 'refunded'];
+
+/**
+ * Is the PI bound to this sibling an ABANDONED pay session (safe to release
+ * so the sibling can ride a combined charge)? Fails CLOSED — any doubt reads
+ * as "live, leave it to its own rail": a payment row that isn't terminal, an
+ * unreadable/unconfigured Stripe, a PI that doesn't own this invoice, money
+ * in flight (processing / succeeded / requires_capture / ACH micro-deposit
+ * verification), or pay-page activity on the PI within the last hour (the
+ * newer of `created` and `metadata.pay_session_touched_at`). Returns the Stripe PI
+ * when abandoned (already-canceled PIs count — their stamp cleanup is what's
+ * still owed), null otherwise.
+ */
+async function abandonedSiblingPaymentIntent(inv, { database = db } = {}) {
+  const piId = inv?.stripe_payment_intent_id ? String(inv.stripe_payment_intent_id) : null;
+  if (!piId) return null;
+  const StripeService = require('./stripe');
+  try {
+    const paymentRow = await database('payments').where({ stripe_payment_intent_id: piId }).first();
+    if (paymentRow && !TERMINAL_PAYMENT_ROW_STATUSES.includes(paymentRow.status)) return null;
+    const pi = await StripeService.retrievePaymentIntent(piId);
+    if (!pi) return null;
+    if (!paymentIntentOwnsInvoice(pi.metadata, inv.id)) return null;
+    if (pi.status === 'canceled') return pi;
+    if (!UNCONFIRMED_PI_STATUSES.includes(pi.status)) return null;
+    if (pi.status === 'requires_action' && pi.next_action?.type === 'verify_with_microdeposits') return null;
+    const createdMs = Number(pi.created) * 1000;
+    if (!Number.isFinite(createdMs) || createdMs <= 0) return null;
+    const touchedRaw = pi.metadata?.pay_session_touched_at;
+    const touchedMs = touchedRaw != null && touchedRaw !== '' ? Number(touchedRaw) * 1000 : 0;
+    // Unparseable stamp ⇒ can't prove inactivity ⇒ live.
+    if (!Number.isFinite(touchedMs) || touchedMs < 0) return null;
+    const lastActivityMs = Math.max(createdMs, touchedMs);
+    if (Date.now() - lastActivityMs < ABANDONED_SIBLING_PI_MIN_AGE_MS) return null;
+    return pi;
+  } catch (err) {
+    logger.warn(`[pay-combined] could not triage PI ${piId} on sibling ${inv.invoice_number}: ${err.message} — treating as live`);
+    return null;
+  }
+}
 
 const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 
@@ -55,7 +111,7 @@ const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null } = {}) {
   try {
     if (!isEnabled('payIncludeBalance')) return null;
     if (!anchorInvoice?.customer_id) return null;
@@ -126,14 +182,50 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     if (!candidates.length) return null;
 
     const stopped = await dunningStoppedInvoiceIds(candidates.map((inv) => inv.id), { database });
-    const eligible = candidates.filter((inv) => !stopped.has(String(inv.id))
-      // An attached PI means another pay session or a saved-card claim owns
-      // this invoice right now — leave it to that rail. The one exception is
-      // OUR OWN combined PI being re-set-up (page reload): siblings stamped
-      // with the anchor's current PI stay included, or every reload would
-      // shed them.
-      && (!inv.stripe_payment_intent_id
-        || (reusePaymentIntentId && String(inv.stripe_payment_intent_id) === String(reusePaymentIntentId))));
+    const eligible = [];
+    for (const inv of candidates) {
+      if (stopped.has(String(inv.id))) continue;
+      const bound = inv.stripe_payment_intent_id ? String(inv.stripe_payment_intent_id) : null;
+      // Unbound, or stamped with OUR OWN combined PI being re-set-up (page
+      // reload) — siblings stamped with the anchor's current PI stay
+      // included, or every reload would shed them.
+      if (!bound || (reusePaymentIntentId && bound === String(reusePaymentIntentId))) {
+        eligible.push(inv);
+        continue;
+      }
+      // Any other attached PI: another pay session or a saved-card claim
+      // owns this invoice right now — leave it to that rail — UNLESS that
+      // session is provably abandoned (see abandonedSiblingPaymentIntent).
+      const deadPi = await abandonedSiblingPaymentIntent(inv, { database });
+      if (!deadPi) continue;
+      if (releaseAbandonedPaymentIntents) {
+        // Setup seam: cancel the dead PI FIRST (a browser tab still holding
+        // its client secret must not be able to confirm it after this
+        // invoice's share moves onto the combined PI), then drop its stamps
+        // so the locked verify + sibling stamping below see an unbound row.
+        // A failed release just excludes the sibling this session — setup's
+        // combined breakdown is what the page renders, so the customer sees
+        // the smaller selection, never a mismatched total.
+        try {
+          if (deadPi.status !== 'canceled') {
+            const StripeService = require('./stripe');
+            await StripeService.cancelPaymentIntent(bound);
+          }
+          // The Stripe cancel above is irreversible; this stamp clear is
+          // transactional. Report the id so the caller can re-clear stamps
+          // OUTSIDE its transaction if it later rolls back — otherwise the
+          // sibling would come back bound to a canceled PI.
+          if (typeof onAbandonedReleased === 'function') onAbandonedReleased(bound);
+          await clearPaymentIntentStamps(database, bound);
+          inv.stripe_payment_intent_id = null;
+          logger.info(`[pay-combined] released abandoned PI ${bound} (${deadPi.status}) on sibling ${inv.invoice_number} for combined charge with ${anchorInvoice.invoice_number}`);
+        } catch (releaseErr) {
+          logger.warn(`[pay-combined] could not release abandoned PI ${bound} on sibling ${inv.invoice_number}: ${releaseErr.message} — excluded from this combined charge`);
+          continue;
+        }
+      }
+      eligible.push(inv);
+    }
     if (!eligible.length) return null;
     // Saved-card/orphan reconciliation fence per sibling (codex r13 P1): a
     // sibling with an unresolved charge attempt or orphaned charge may
@@ -1048,6 +1140,7 @@ module.exports = {
   MAX_COMBINED_SIBLINGS,
   amountDueCents,
   combinedEligibleSiblings,
+  abandonedSiblingPaymentIntent,
   buildAllocation,
   allocationTotalCents,
   encodeAllocation,

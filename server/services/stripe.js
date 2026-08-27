@@ -132,6 +132,13 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
     });
 }
 
+// Last pay-page activity on a PaymentIntent (epoch seconds), stamped into
+// metadata at every seam that UPDATES the PI (setup reuse, update-amount,
+// finalize) - never into an idempotent create, whose `created` already carries
+// the same information. pay-combined's abandoned-sibling triage reads it as the
+// lease that proves a bound PI is a dead session rather than a live page.
+const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
+
 async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
@@ -3312,6 +3319,10 @@ const StripeService = {
     // window where Stripe already carries a new amount/allocation the DB may
     // yet refuse (codex r5 P1). The catch cancels the PI when set.
     let mutatedReusedPiId = null;
+    // Abandoned sibling PIs canceled at Stripe during this setup. Their stamp
+    // clears ride the transaction; a rollback would re-bind the siblings to
+    // a canceled PI, so the catch re-clears them durably.
+    const releasedSiblingPiIds = [];
     try {
       const methodMode = 'cardonly';
       await db.transaction(async (trx) => {
@@ -3542,6 +3553,13 @@ const StripeService = {
             // an anchor-only PI the homeowner could still confirm (codex
             // r13 P1).
             throwOnPayerAnchor: true,
+            // A sibling bound to an ABANDONED pay session (unconfirmed PI,
+            // no payment row, >1h old) is released here — its dead PI is
+            // canceled and unstamped — so it can ride this combined charge
+            // instead of staying invisible forever (the GET preview already
+            // lists it under the same verdict).
+            releaseAbandonedPaymentIntents: true,
+            onAbandonedReleased: (piId) => releasedSiblingPiIds.push(piId),
           });
           if (siblings?.length) {
             combinedAllocation = PayCombined.buildAllocation(lockedInvoice, siblings);
@@ -3625,6 +3643,11 @@ const StripeService = {
             : `Invoice ${lockedInvoice.invoice_number} — ${lockedInvoice.title || 'Waves Pest Control'}`,
           metadata: {
             waves_invoice_id: invoiceId,
+            // NO pay_session_touched_at here: piParams feeds an IDEMPOTENT
+            // create (deterministic key below) and a time-varying value would
+            // make a retry after a rolled-back mint a changed-parameters
+            // rejection. A fresh PI's `created` is its activity; the reuse
+            // update adds the stamp (see updateParams).
             invoice_number: lockedInvoice.invoice_number,
             waves_customer_id: lockedInvoice.customer_id,
             base_amount: String(baseAmount),
@@ -3714,7 +3737,10 @@ const StripeService = {
               || (String(activeIntent.metadata?.combined_allocation || '') === String(piParams.metadata.combined_allocation || '')
                 && Number(activeIntent.amount) === baseCents)
             )) {
-            const updateParams = { ...piParams };
+            // Re-stamp activity on reuse so the sibling triage can tell
+            // "abandoned weeks ago" from "reopened just now" — `created` is
+            // immutable and single-invoice setup reuses old PIs in place.
+            const updateParams = { ...piParams, metadata: { ...piParams.metadata, pay_session_touched_at: paySessionTouchedAt() } };
             delete updateParams.currency;
             if (!stripeCustomerId) {
               updateParams.setup_future_usage = '';
@@ -3933,6 +3959,18 @@ const StripeService = {
       // clear every stamp, and unbind the anchor so the next setup mints
       // fresh. Runs for 409s too — a staleBalance refusal is exactly the
       // rolled-back-after-update case.
+      // Abandoned sibling PIs were canceled at Stripe inside the rolled-back
+      // transaction — the cancel stuck, the stamp clear did not. Re-clear
+      // outside the transaction so no sibling stays bound to a canceled PI
+      // (a bound row is edit-locked and, until the next setup triage,
+      // invisible to the combined flow again).
+      for (const piId of releasedSiblingPiIds) {
+        try {
+          await require('./pay-combined').clearPaymentIntentStamps(db, piId);
+        } catch (clearErr) {
+          logger.error(`[stripe] FAILED to clear stamps for canceled sibling PI ${piId} after rolled-back setup for invoice ${invoiceId}: ${clearErr.message} — sibling stays bound to a canceled PI until its next setup triage`);
+        }
+      }
       if (mutatedReusedPiId) {
         try {
           await stripe.paymentIntents.cancel(mutatedReusedPiId);
@@ -4115,6 +4153,7 @@ const StripeService = {
         // Refresh (or clear) the combined allocation alongside the amount —
         // the two must never disagree, and Stripe metadata updates MERGE.
         combined_allocation: combinedCtx ? PayCombined.encodeAllocation(combinedCtx.allocation) : '',
+        pay_session_touched_at: paySessionTouchedAt(),
         selected_method_category: String(selectedMethodCategory),
         save_card_opt_in: saveCard ? 'true' : 'false',
         // CLEAR any surcharge-finalization metadata (Stripe metadata updates
@@ -4614,6 +4653,7 @@ const StripeService = {
         // The allocation the settle paths will split this charge by — kept
         // in lockstep with the amount (empty string CLEARS a stale one).
         combined_allocation: finalizeCombinedCtx ? PayCombined.encodeAllocation(finalizeCombinedCtx.allocation) : '',
+        pay_session_touched_at: paySessionTouchedAt(),
         surcharge_rate_bps: String(rateBps),
         surcharge_policy_version: policyVersion,
         card_funding: funding || 'unknown',
