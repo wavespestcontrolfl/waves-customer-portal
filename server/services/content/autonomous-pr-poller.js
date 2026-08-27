@@ -1161,9 +1161,15 @@ async function maybeAutoMerge(run, pr) {
                 const frozen = (k === 'metaTitle' && !isBlogFile) || boundTargetingWant[k] === undefined;
                 if (frozen) {
                   if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) { drift = true; break; }
-                } else if (canonVal(boundTargetingWant[k]) !== canonVal(headFm[k])) {
-                  metaChanged = true;
+                  continue;
                 }
+                // publishRefresh only ever WRITES a non-empty trimmed string
+                // over an existing editable key — it never removes one and
+                // never emits a non-string (hook r12 P1). Anything else on
+                // the head is not publisher output.
+                const got = headFm[k];
+                if (typeof got !== 'string' || !got.trim() || got !== got.trim()) { drift = true; break; }
+                if (canonVal(boundTargetingWant[k]) !== canonVal(got)) metaChanged = true;
                 continue;
               }
               if (k === 'modified' || k === 'updated') continue; // re-checked below
@@ -1175,6 +1181,9 @@ async function maybeAutoMerge(run, pr) {
             // additions, no deletions) and only forward to a real date no
             // later than tomorrow — never an arbitrary or backdated stamp.
             if (!drift) {
+              // publishRefresh updates exactly ONE already-present freshness
+              // field (hook r12 P1) — two moving at once is not its output.
+              let freshnessChanged = 0;
               for (const k of ['modified', 'updated']) {
                 const want = boundTargetingWant[k];
                 const got = headFm[k];
@@ -1187,8 +1196,10 @@ async function maybeAutoMerge(run, pr) {
                   const b = Date.parse(String(want));
                   const h = Date.parse(String(got));
                   if (!Number.isFinite(h) || (Number.isFinite(b) && h < b) || h > Date.now() + 86400000) { drift = true; break; }
+                  freshnessChanged += 1;
                 }
               }
+              if (freshnessChanged > 1) drift = true;
             }
           } else {
             for (const k of boundTargetingKeys) {

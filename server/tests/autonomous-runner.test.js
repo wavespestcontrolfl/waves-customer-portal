@@ -1615,6 +1615,15 @@ function loadRunnerWith({
   });
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+  // The runner fires the owner email-approval notification via setImmediate
+  // after a pending-review park — the REAL module's require inside that
+  // callback lands after Jest teardown ("import after the Jest environment
+  // has been torn down", hook r12 P1). A resolved no-op keeps the drain
+  // clean; suites asserting notification behavior have their own harness.
+  jest.doMock('../services/content/email-approvals', () => ({
+    notifyParkedRun: jest.fn().mockResolvedValue(undefined),
+    _internals: { draftPreview: jest.fn().mockReturnValue('') },
+  }));
   jest.doMock('../services/content/opportunity-queue', () => queue);
   jest.doMock('../services/content/content-brief-builder', () => briefBuilder);
   jest.doMock('../services/content/agents/agent-dispatcher', () => dispatcher);
@@ -3057,7 +3066,10 @@ describe('named-competitor autopublish gate', () => {
     // uniqueness lane has its own coverage above.
     process.env.AUTONOMOUS_CONTENT_BLOG_UNIQUENESS = 'false';
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // Drain the runner's setImmediate-scheduled notification before Jest
+    // tears the environment down (hook r12 P1).
+    await new Promise((resolve) => { setImmediate(resolve); });
     for (const k of ENV_KEYS) {
       if (previousEnv[k] === undefined) delete process.env[k];
       else process.env[k] = previousEnv[k];
