@@ -1054,7 +1054,7 @@ export default function PestPressureSettingsPage() {
             display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: isMobile ? 0 : 16,
           }}
         >
-          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(24px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } : {}) }}>
+          <div style={{ background: D.white, borderRadius: 12, width: "100%", maxWidth: 480, padding: 24, boxShadow: "0 20px 60px rgba(0,0,0,0.25)", ...(isMobile ? { width: "100%", maxWidth: "none", height: "100%", maxHeight: "none", borderRadius: 0, boxSizing: "border-box", overflowY: "auto", paddingTop: "calc(24px + env(safe-area-inset-top, 0px))", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))", paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))", paddingRight: "calc(24px + env(safe-area-inset-right, 0px))" } : {}) }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <h2 style={{ margin: 0, fontSize: 18, fontWeight: 500, color: D.heading }}>Override Pest Pressure score</h2>
               <button type="button" onClick={closeOverrideModal} aria-label="Close" style={{ background: "none", border: 0, cursor: "pointer", color: D.muted }}>

@@ -1574,6 +1574,8 @@ function EditEntryModal({ entry, onClose, onSave }) {
                 overflowY: "auto",
                 paddingTop: "calc(20px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(20px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(20px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -3284,6 +3286,8 @@ function EarningsModal({ tech, onClose, showToast }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

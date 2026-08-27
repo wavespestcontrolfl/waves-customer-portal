@@ -148,6 +148,8 @@ function QAModal({ onClose }) {
                 overflowY: "auto",
                 paddingTop: "calc(28px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

@@ -6300,6 +6300,8 @@ function FollowUpModal({ estimate, onClose, onSent }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -6439,6 +6441,8 @@ function DeclineModal({ estimate, onClose, onSaved }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

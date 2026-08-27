@@ -573,6 +573,8 @@ function Modal({ title, onClose, children }) {
                 overflowY: "auto",
                 paddingTop: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(clamp(16px, 4vw, 24px) + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

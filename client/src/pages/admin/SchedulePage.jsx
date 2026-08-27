@@ -4194,6 +4194,8 @@ export function EditServiceModal({ service, technicians, onClose, onSaved, onMar
                     overflowY: "auto",
                     paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                     paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
                   }
                 : {}),
             }}
@@ -4518,6 +4520,8 @@ export function ProtocolPanel({ service, onClose }) {
               height: "100dvh",
               boxSizing: "border-box",
               paddingBottom: "env(safe-area-inset-bottom, 0px)",
+              paddingLeft: "env(safe-area-inset-left, 0px)",
+              paddingRight: "env(safe-area-inset-right, 0px)",
             }
           : {}),
       }}
@@ -6123,6 +6127,8 @@ export function RescheduleModal({ service, onClose, onRescheduled }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(24px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(24px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

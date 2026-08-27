@@ -2719,6 +2719,8 @@ function SendInvoiceModal({ invoice, isMobile, onClose, onSent, onError }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -3067,6 +3069,8 @@ function SendReceiptModal({ invoice, isMobile, onClose, onSent, onError }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -3380,6 +3384,8 @@ function ApplyCreditModal({ invoice, isMobile, onClose, onApplied, onError }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -3703,6 +3709,8 @@ function RecordPaymentModal({
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -4136,6 +4144,8 @@ function AnnualPrepayModal({ invoice, isMobile, onClose, onSaved, onError }) {
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}
@@ -4435,6 +4445,8 @@ function PaymentPlanModal({
                 overflowY: "auto",
                 paddingTop: "calc(24px + env(safe-area-inset-top, 0px))",
                 paddingBottom: "calc(28px + env(safe-area-inset-bottom, 0px))",
+                paddingLeft: "calc(28px + env(safe-area-inset-left, 0px))",
+                paddingRight: "calc(28px + env(safe-area-inset-right, 0px))",
               }
             : {}),
         }}

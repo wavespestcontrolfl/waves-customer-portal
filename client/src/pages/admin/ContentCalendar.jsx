@@ -560,6 +560,8 @@ export default function ContentCalendar() {
                     overflowY: "auto",
                     paddingTop: "calc(18px + env(safe-area-inset-top, 0px))",
                     paddingBottom: "calc(18px + env(safe-area-inset-bottom, 0px))",
+                    paddingLeft: "calc(18px + env(safe-area-inset-left, 0px))",
+                    paddingRight: "calc(18px + env(safe-area-inset-right, 0px))",
                   }
                 : {}),
             }}
