@@ -823,7 +823,13 @@ async function findActiveRecurringSeries(conn, {
       // it as lapsed let a second same-family billable series activate
       // (codex #3504 r15).
       .whereIn('status', ['pending', 'confirmed', 'rescheduled'])
-      .where('scheduled_date', '>=', etDateString())
+      // A 'rescheduled' placeholder stays active PAST its original date
+      // (codex #3504 r21): it is awaiting re-placement, and its date is
+      // the slot it left, not one it will be served on — the date bound
+      // applies to pending/confirmed rows only.
+      .where(function activeBound() {
+        this.where('scheduled_date', '>=', etDateString()).orWhere('status', 'rescheduled');
+      })
       .orderBy('scheduled_date', 'asc')
       .first('scheduled_date');
     const ongoing = columns.recurring_ongoing ? parent.recurring_ongoing === true : false;

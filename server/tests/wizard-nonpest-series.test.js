@@ -384,12 +384,12 @@ describe('booking route wiring (source contracts)', () => {
     expect(booking).toMatch(/await trx\.raw\('SAVEPOINT wizard_activation_linkage'\);/);
     expect(booking).toMatch(/await trx\.raw\('RELEASE SAVEPOINT wizard_activation_linkage'\);/);
     expect(booking).toMatch(/await trx\.raw\('ROLLBACK TO SAVEPOINT wizard_activation_linkage'\);/);
-    expect(booking).toMatch(/await trx\.raw\('SELECT 1'\);\s*\n\s*return \{ seedResult \};/);
+    expect(booking).toMatch(/await trx\.raw\('SELECT 1'\);\s*\n\s*return \{ seedResult, parentExtension \};/);
   });
 
   test('a reschedule-pending visit keeps a fixed series ACTIVE in the duplicate guard (r15)', () => {
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
-    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled'\]\)\s*\n\s*\.where\('scheduled_date', '>=', etDateString\(\)\)/);
+    expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled'\]\)[\s\S]{0,600}this\.where\('scheduled_date', '>=', etDateString\(\)\)\.orWhere\('status', 'rescheduled'\)/);
     // r16: a rescheduled PARENT stays in the candidate set too — only a
     // cancelled parent is excluded; the probe/ongoing flag decide activity.
     expect(seeder).toMatch(/\.whereNull\('recurring_parent_id'\)[\s\S]{0,700}\.whereNotIn\('status', \['cancelled'\]\)\s*\n\s*\.select\('id', 'service_type', 'recurring_pattern', 'scheduled_date', 'status'\)/);
@@ -630,7 +630,12 @@ describe('booking route wiring (source contracts)', () => {
     // still-live draft) and rings a deduped admin bell.
     const recovery = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recovery).toMatch(/whereNotNull\('ss\.self_booking_id'\)/);
-    expect(recovery).toMatch(/where\('e\.status', 'draft'\)/);
+    // r21: the claim is parent-scoped — the shared draft's status/archive
+    // state must NOT gate the predicate (a later activation archives it).
+    const findBody = recovery.slice(recovery.indexOf('function findStrandedParents'), recovery.indexOf('.limit(limit)'));
+    expect(findBody).toMatch(/where\('e\.source', 'quote_wizard'\)/);
+    expect(findBody).not.toMatch(/where\('e\.status', 'draft'\)/);
+    expect(findBody).not.toMatch(/whereNull\('e\.archived_at'\)/);
     expect(recovery).toMatch(/lockCustomerComms\(trx, parent\.customer_id\)/);
     // The FULL stranded predicate re-validates under the lock (codex
     // #3504 r6 hook): status, activation, children, and the live draft.
@@ -638,8 +643,9 @@ describe('booking route wiring (source contracts)', () => {
     // r13: every non-cancelled status is recoverable (by status class).
     expect(recovery).toMatch(/\['cancelled', 'canceled'\]\.includes\(String\(fresh\.status \|\| ''\)\)/);
     expect(recovery).toMatch(/freshChild/);
-    expect(recovery).toMatch(/freshDraft/);
-    expect(recovery).toMatch(/whereNull\('archived_at'\)/);
+    expect(recovery).toMatch(/const draftLive = !!freshDraft;/);
+    expect(recovery).not.toMatch(/if \(!freshDraft\) return false;/);
+    expect(recovery).toMatch(/body: byDisposition\.bell \+ draftNote,/);
     // The admin bell persists ATOMICALLY with the strip: a failed insert
     // rolls the strip back so the row stays sweepable (codex #3504 r6
     // hook).
@@ -736,6 +742,14 @@ describe('booking route wiring (source contracts)', () => {
     // pay-at-visit machinery, bells for the REMAINING program.
     expect(recoverySrc).toMatch(/KEEP_PRICE_PATCH = \(trx, noteTail\) => \(\{\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
+  });
+
+  test('r21: overdue reschedule placeholders stay active; extended reservation is echoed on the response', () => {
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/\.where\(function activeBound\(\) \{\s*\n\s*this\.where\('scheduled_date', '>=', etDateString\(\)\)\.orWhere\('status', 'rescheduled'\);/);
+    expect(booking).toMatch(/parentExtension = \{ end_time: extendedEnd, duration_minutes: seededChildDuration \};/);
+    expect(booking).toMatch(/return \{ seedResult, parentExtension \};/);
+    expect(booking).toMatch(/if \(seriesOutcome\?\.parentExtension\) Object\.assign\(booking, seriesOutcome\.parentExtension\);/);
   });
 
   test('r20: seeding blackout reads ride the caller connection; refunded invoices keep their own disposition', () => {

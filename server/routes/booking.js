@@ -2954,6 +2954,12 @@ async function createSelfBooking(payload = {}) {
     // locked-draft shape recheck, so the crash-retry replay can safely
     // re-run it for a parent that committed billable but never activated.
     const activateWizardSeries = async (seriesParentRow) => {
+      // Set when the parent's reservation is extended to the program
+      // duration (codex #3504 r21): the confirm response serializes the
+      // pre-activation booking row, so the caller patches end_time /
+      // duration_minutes from this or the customer sees the funnel's
+      // shorter reservation while the database holds the longer one.
+      let parentExtension = null;
       try {
         const outcome = await db.transaction(async (trx) => {
           // Rung 1 FIRST (scheduling/occupancy.js ORDERING CONTRACT — the
@@ -3361,6 +3367,7 @@ async function createSelfBooking(payload = {}) {
               }
               seriesParentRow.estimated_duration_minutes = seededChildDuration;
               seriesParentRow.window_end = extendedEnd;
+              parentExtension = { end_time: extendedEnd, duration_minutes: seededChildDuration };
             } else {
               await trx('scheduled_services')
                 .where({ id: seriesParentRow.id })
@@ -3549,7 +3556,7 @@ async function createSelfBooking(payload = {}) {
           // transaction aborted, so the activation can never "commit" as
           // a silent rollback.
           await trx.raw('SELECT 1');
-          return { seedResult };
+          return { seedResult, parentExtension };
         });
         return outcome;
       } catch (err) {
@@ -3980,6 +3987,9 @@ async function createSelfBooking(payload = {}) {
       // series, and fee land together or not at all — an unpriced booking
       // stays a single visit with the waiver-only disposition below.
       const seriesOutcome = await activateWizardSeries(serviceRow);
+      // Echo the extended reservation on the response object (r21) — the
+      // public shape allowlists end_time + duration_minutes.
+      if (seriesOutcome?.parentExtension) Object.assign(booking, seriesOutcome.parentExtension);
       if (seriesOutcome?.kept) duplicateSeriesKept = seriesOutcome.kept;
       else if (seriesOutcome?.seedResult || seriesOutcome?.alreadyActivated) {
         followUpRows = seriesOutcome.seedResult?.insertedRows || [];

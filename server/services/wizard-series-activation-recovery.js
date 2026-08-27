@@ -57,9 +57,18 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // lawn/mosquito/tree/palm activation. The family check in the sweep
     // loop stays as belt-and-braces for labels this pattern misses.
     .whereRaw("COALESCE(ss.service_type, '') !~* '\\ypest\\y'")
+    // The stranded claim is PARENT-scoped (codex #3504 r21): the wizard
+    // draft row is shared and reusable, so its archive state belongs to
+    // whichever booking last consumed it — a customer who re-runs the
+    // wizard and activates a second quote before this sweep archives the
+    // same row and would otherwise hide the original stranded parent
+    // forever. The row's own shape is the durable marker: self-booked,
+    // pay-at-visit, priced, auto-invoicing, not recurring, no children,
+    // wizard-sourced. Only a PLANNED activation ever stamps that shape
+    // (perVisitAmountForEstimate prices nothing without a resolved plan),
+    // so no legitimate single visit matches it. Draft liveness is read
+    // under the lock below for the bell copy only.
     .where('e.source', 'quote_wizard')
-    .where('e.status', 'draft')
-    .whereNull('e.archived_at')
     .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
     .whereNotExists(function child() {
       this.select(1)
@@ -165,11 +174,16 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           .whereNot('status', 'cancelled')
           .first('id');
         if (freshChild) return false;
+        // Draft liveness shapes the office copy only (r21): a consumed or
+        // archived draft still leaves THIS parent stranded and billable.
         const freshDraft = await trx('estimates')
           .where({ id: parent.source_estimate_id, source: 'quote_wizard', status: 'draft' })
           .whereNull('archived_at')
           .first('id');
-        if (!freshDraft) return false;
+        const draftLive = !!freshDraft;
+        const draftNote = draftLive
+          ? ''
+          : ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.';
         const who = `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)})`;
         const byDisposition = {
           // Both completed dispositions RETIRE the public handoff (codex
@@ -233,7 +247,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             recipientType: 'admin',
             category: 'alert',
             title: 'Self-booked plan never activated',
-            body: byDisposition.bell,
+            body: byDisposition.bell + draftNote,
             link: `/admin/customers/${parent.customer_id}`,
             bell: true,
             metadata: {
