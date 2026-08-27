@@ -19,10 +19,10 @@ const HORIZON = '2026-12-01';
 function chain(rowsFor, calls) {
   const q = {};
   const own = []; // this query's calls only — coverage is asked per date
-  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot']
-    .forEach((m) => { q[m] = jest.fn((...a) => { own.push([m, ...a]); calls.push([m, ...a]); if (typeof a[0] === 'function') a[0].call(q); return q; }); });
+  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
+    .forEach((m) => { q[m] = jest.fn((...a) => { own.push([m, ...a]); calls.push([m, ...a]); if (typeof a[0] === 'function') a[0].call(q, q); return q; }); });
   const resolve = async () => (typeof rowsFor === 'function' ? rowsFor(own) : rowsFor);
-  q.select = jest.fn(async () => resolve());
+  q.select = jest.fn(async (...a) => { own.push(['select', ...a]); calls.push(['select', ...a]); return resolve(); });
   q.distinct = jest.fn(async () => resolve());
   q.first = jest.fn(async () => (await resolve())[0] || null);
   q.then = (res, rej) => resolve().then(res, rej);
@@ -32,13 +32,20 @@ const asked = (own, col) => (own.find((c) => c[0] === 'where' && c[1] === col) |
 
 // terms: rows or fn(own) — coverage may depend on the date asked; payments: fn(own)
 // so the armed-retry select and the already-collected sibling lookup can differ.
-function route({ terms = [], payments = [], visits = [], throwOn = null }) {
-  const calls = { terms: [], payments: [], visits: [] };
+// visits rows double as the payer resolver's scheduled_services.first(...)
+// read (payer_id / po_number / self_pay_override come from the same row);
+// customers.first(...) is the resolver's customer-level fallback; invoices
+// is the completion-suppressor lookup.
+function route({ terms = [], payments = [], visits = [], invoices = [], throwOn = null }) {
+  const calls = { terms: [], payments: [], visits: [], invoices: [] };
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
     if (String(table).startsWith('annual_prepay_terms')) return chain(terms, calls.terms);
     if (table === 'payments') return chain(payments, calls.payments);
     if (String(table).startsWith('scheduled_services')) return chain(visits, calls.visits);
+    if (table === 'customers') return chain([], []);
+    if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
+    if (table === 'invoices') return chain(invoices, calls.invoices);
     throw new Error(`unexpected table ${table}`);
   });
   return calls;
@@ -46,7 +53,8 @@ function route({ terms = [], payments = [], visits = [], throwOn = null }) {
 const coveredAlways = (ids) => ids.map((customer_id) => ({ customer_id }));
 const baseVisit = (over) => ({
   id: 'v1', customer_id: 'c-prepaid', estimated_price: '120.00', is_callback: false, service_type: 'Quarterly Pest Control Service',
-  billed_to_payer_id: null, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, per_application_fee: null,
+  payer_id: null, po_number: null, self_pay_override: false, customer_payer_id: null,
+  prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, per_application_fee: null,
   is_recurring: true, billing_mode: 'annual_prepay', waveguard_tier: 'Bronze', monthly_rate: '28.00', autopay_enabled: true, ...over,
 });
 
@@ -123,8 +131,18 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
-  test('a visit that cannot charge the card (payer-billed / callback / gate off → pay-link invoice) leaves the customer exempt', async () => {
-    for (const over of [{ billed_to_payer_id: 'payer-1' }, { is_callback: true }, { autopay_enabled: false }]) {
+  test('selects only real columns (per_application_fee / payer_id from customers; no ss.billed_to_payer_id)', async () => {
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'confirmed' })] });
+    await getCardExpiryExemptCustomerIds(HORIZON);
+    const sel = calls.visits.find((c) => c[0] === 'select');
+    expect(sel).toBeDefined();
+    expect(sel).toEqual(expect.arrayContaining(['c.per_application_fee', 'c.payer_id as customer_payer_id']));
+    expect(sel).not.toEqual(expect.arrayContaining(['ss.billed_to_payer_id']));
+    expect(sel).not.toEqual(expect.arrayContaining(['ss.per_application_fee']));
+  });
+
+  test('a visit that cannot charge the card (payer-billed via visit or customer / callback / gate off → pay-link invoice) leaves the customer exempt', async () => {
+    for (const over of [{ payer_id: 7 }, { customer_payer_id: 9 }, { is_callback: true }, { autopay_enabled: false }]) {
       route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit(over)] });
       expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
     }
@@ -136,6 +154,21 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       visits: [baseVisit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '84.00', annual_prepay_term_id: 'term-1' })],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('an auto_charge visit whose existing invoice is already paid / prepaid / processing / refunded is settled — stays exempt', async () => {
+    for (const status of ['paid', 'prepaid', 'processing', 'refunded']) {
+      route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status }] });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    }
+    // an open (sent) invoice is what completion will charge → keep the warning
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status: 'sent' }] });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('a malformed annual_prepay_invoice stamp (no amount / no term) fails toward the warning — nobody exempt', async () => {
+    route({ terms: coveredAlways(['c-prepaid', 'c-other']), visits: [baseVisit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: null, annual_prepay_term_id: null })] });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
   test('a bare annual_prepay_term_id link without the completion stamp is NOT coverage — priced visit keeps the warning', async () => {

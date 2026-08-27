@@ -3498,7 +3498,13 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     // (b) still-completable visits inside the window, judged by the shared
     // completion predicate with the schedule sheet's inputs.
     const { predictCompletionBilling, resolveBillingLane } = require('./billing-lane');
+    const { resolveForInvoice } = require('./payer');
+    const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('./invoice');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
+    // Real columns only: the payer is resolved by the payer authority
+    // (scheduled_services.payer_id → self-pay override → customers.payer_id,
+    // payer.resolveForInvoice — the same resolver completion uses), and
+    // per_application_fee lives on customers.
     const visits = await conn('scheduled_services as ss')
       .join('customers as c', 'c.id', 'ss.customer_id')
       .whereIn('ss.customer_id', [...covered])
@@ -3507,17 +3513,24 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       .where('ss.scheduled_date', '<=', horizon)
       .select(
         'ss.id', 'ss.customer_id', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
-        'ss.billed_to_payer_id', 'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id',
-        'ss.per_application_fee', 'ss.is_recurring',
+        'ss.prepaid_amount', 'ss.prepaid_method', 'ss.annual_prepay_term_id', 'ss.is_recurring',
         'c.billing_mode', 'c.waveguard_tier', 'c.monthly_rate', 'c.autopay_enabled',
+        'c.per_application_fee', 'c.payer_id as customer_payer_id',
       );
     for (const v of visits || []) {
       const customerId = String(v.customer_id);
       if (!covered.has(customerId)) continue;
-      let annualCoverageValidated = null;
-      if (v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD) {
-        try { annualCoverageValidated = await annualPrepayCoversVisit(v, conn, { throwOnError: true }); } catch (e) { annualCoverageValidated = null; }
-      }
+      // Strict validation, and its failure PROPAGATES to the outer catch:
+      // a malformed stamp (no amount / no term) or a failed coverage query
+      // must fail toward the warning, not fall back to trusting the stamp
+      // (predictCompletionBilling treats null as "trust the stamp").
+      const annualCoverageValidated = v.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+        ? await annualPrepayCoversVisit(v, conn, { throwOnError: true })
+        : null;
+      const payer = await resolveForInvoice({
+        database: conn, customerId: v.customer_id, customer: { id: v.customer_id, payer_id: v.customer_payer_id },
+        scheduledServiceId: v.id, throwOnError: true,
+      });
       const lane = resolveBillingLane({ billing_mode: v.billing_mode, waveguard_tier: v.waveguard_tier, monthly_rate: v.monthly_rate });
       const prediction = predictCompletionBilling({
         lane: lane.mode,
@@ -3529,16 +3542,27 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         isRecurring: !!v.is_recurring,
         isCallback: !!v.is_callback,
         serviceType: v.service_type,
-        payerBilled: !!v.billed_to_payer_id,
+        payerBilled: !!payer?.payerId,
         prepaidAmount: v.prepaid_amount,
         prepaidMethod: v.prepaid_method || null,
         annualCoverageValidated,
         completionAutopayChargeEnabled,
       });
-      // Only an auto_charge touches the saved card at completion. 'invoice'
-      // (gate off, or a priced callback) goes out as a pay-link — no
-      // card-on-file charge, so the expiring card is not what breaks.
-      if (prediction.kind === 'auto_charge') covered.delete(customerId);
+      if (prediction.kind !== 'auto_charge') continue;
+      // Completion REUSES an existing non-cancelled invoice for the visit
+      // (admin-dispatch completionSuppressorInvoiceLookup — a route-module
+      // helper, so the 3-line lookup is mirrored here with the same status
+      // set) and marks paid / prepaid / processing / refunded ones as
+      // already settled: no second card charge, no warning.
+      const existingInvoice = await conn('invoices')
+        .where({ scheduled_service_id: v.id })
+        .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+        .orderBy('created_at', 'desc')
+        .first('id', 'status');
+      if (existingInvoice && ['paid', 'prepaid', 'processing', 'refunded'].includes(String(existingInvoice.status || '').toLowerCase())) continue;
+      // Only an auto_charge touches the saved card at completion ('invoice'
+      // — gate off or a priced callback — goes out as a pay-link).
+      covered.delete(customerId);
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
