@@ -39,6 +39,7 @@
  *   GATE_APPT_CARD_COMPLETION_CHARGE=true (auto-charge one-time visit completions against the /secure-consented card)
  *   GATE_CARD_HOLD_RESCHEDULE_ADOPT=true (completion DETECTS a same-estimate card hold stranded on a cancelled/rescheduled visit and bells the office — no auto-charge)
  *   GATE_CARD_HOLD_PARK_ON_CANCEL=true (cancelling a visit with a one-time card hold PARKS the hold for the rebooked visit instead of releasing it; fees/offboarding/revocation unchanged)
+ *   GATE_PEST_STRANDED_RECOVERY=<ISO timestamp> (stranded-activation recovery sweep covers PEST parents created at/after this epoch; set AFTER a rollout completes so old-instance bookings from the Railway overlap can never match; unset/invalid = pest excluded — owner ruling 2026-08-27)
  *   GATE_COMPLETION_AUTOPAY_CHARGE=true (completion auto-charge extends to EVERY autopay customer's collectible self-pay completion invoice — hard-capped at the visit's accepted price or membership dues rate; no anchor or above-anchor → office review bell, never an uncapped charge)
  *   GATE_COMPLETION_COMMS_GUARD=true (flag completions with open customer comms — admin bell + dispatch alert, never blocks)
  *   GATE_RESCHEDULE_INTENT_FLAGS=true (real-time reschedule/away SMS flag rows + owner bell/push — owner silenced the lane 2026-08-15)
@@ -1672,6 +1673,12 @@ const gates = {
   // flip needs no redeploy. Kill switch: unset the var.
   stopsAway: gateEnvValue('GATE_STOPS_AWAY'),
 
+  // Pest stranded-activation recovery (owner ruling 2026-08-27): the value is
+  // an ISO timestamp EPOCH, not a boolean — consumers read it at CALL time via
+  // gateEnvTimestamp() (flip needs no redeploy); this entry mirrors it as a
+  // boolean for status/inspection. Kill switch: unset.
+  pestStrandedRecovery: gateEnvTimestamp('GATE_PEST_STRANDED_RECOVERY') != null,
+
   // Best-time hints (2026-08-14): advisory "Best times this day" chips on
   // the admin date/time pickers (edit, reschedule, create), ranked by the
   // existing find-time drive-detour engine. Warn-only by design — picking a
@@ -1707,6 +1714,16 @@ function gateEnvValue(envName) {
   return ['1', 'true', 'on'].includes(String(process.env[envName] || '').toLowerCase());
 }
 
+// Timestamp-valued gate parsed at CALL time (rollout EPOCHS such as
+// GATE_PEST_STRANDED_RECOVERY): a valid ISO timestamp → Date; unset or
+// unparseable → null (fail closed — an invalid value never enables anything).
+function gateEnvTimestamp(envName) {
+  const raw = String(process.env[envName] || '').trim();
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function isEnabled(gate) {
   const enabled = gates[gate];
   if (enabled === undefined) {
@@ -1723,5 +1740,5 @@ function logGateStatus() {
   }
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp };
 // gates 1775330914

@@ -122,12 +122,10 @@ async function findStrandedParents(database, { olderThanMinutes, limit, cursor =
 //    window — the price stays for the record, the handoff retires (work
 //    was performed), and the bell parks the billing decision on a human.
 // ISO timestamp (or null) from GATE_PEST_STRANDED_RECOVERY — see the
-// findStrandedParents predicate. Invalid values read as unset (fail closed).
+// findStrandedParents predicate. Read through the canonical feature-gate
+// registry (config/feature-gates gateEnvTimestamp: call-time, fail-closed).
 function pestRecoveryEpoch() {
-  const raw = String(process.env.GATE_PEST_STRANDED_RECOVERY || '').trim();
-  if (!raw) return null;
-  const d = new Date(raw);
-  return Number.isNaN(d.getTime()) ? null : d;
+  return require('../config/feature-gates').gateEnvTimestamp('GATE_PEST_STRANDED_RECOVERY');
 }
 
 const COMPLETED_STATES = new Set(['completed']);

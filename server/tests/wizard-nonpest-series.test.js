@@ -999,6 +999,14 @@ describe('booking route wiring (source contracts)', () => {
     } finally {
       if (saved === undefined) delete process.env.GATE_PEST_STRANDED_RECOVERY; else process.env.GATE_PEST_STRANDED_RECOVERY = saved;
     }
+    // Registered in the canonical gate registry (hook P1): read via
+    // feature-gates gateEnvTimestamp, listed for status/inspection.
+    expect(recoverySrc).toMatch(/require\('\.\.\/config\/feature-gates'\)\.gateEnvTimestamp\('GATE_PEST_STRANDED_RECOVERY'\)/);
+    expect(recoverySrc).not.toMatch(/process\.env\.GATE_PEST_STRANDED_RECOVERY/);
+    const gatesSrc = fs.readFileSync(path.join(__dirname, '..', 'config', 'feature-gates.js'), 'utf8');
+    expect(gatesSrc).toMatch(/pestStrandedRecovery: gateEnvTimestamp\('GATE_PEST_STRANDED_RECOVERY'\) != null,/);
+    expect(gatesSrc).toMatch(/GATE_PEST_STRANDED_RECOVERY=<ISO timestamp>/);
+    expect(typeof require('../config/feature-gates').gateEnvTimestamp).toBe('function');
     expect(recoverySrc).toMatch(/qb\.whereRaw\("COALESCE\(ss\.service_type, ''\) !~\* '\\\\ypest\\\\y'"\);\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(epoch\) qb\.orWhere\('ss\.created_at', '>=', epoch\);/);
     expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control'\) \{\s*\n\s*const epoch = pestRecoveryEpoch\(\);\s*\n\s*if \(!epoch \|\| !parent\.created_at \|\| new Date\(parent\.created_at\) < epoch\) continue;/);
     const backfillSrc0 = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000002_pest_recovery_backfill.js'), 'utf8');
