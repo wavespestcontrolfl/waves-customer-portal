@@ -148,7 +148,9 @@ function makeGh(over = {}) {
     async listIssueComments() { return over.issueComments || []; },
     async listPrReviews() { return over.reviews || []; },
     async getFile() { return { content: over.fileContent ?? 'ORIGINAL BODY', sha: 'file-sha-1' }; },
-    async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa' } }; },
+    // The created commit's PARENT is the pre-push tip — the r18 parent CAS
+    // requires it to equal the pinned parent on pinned lanes.
+    async putFile(args) { calls.putFile.push(args); return { commit: { sha: 'newcommit999aaa', parents: [{ sha: over.pushParent || HEAD }] } }; },
     // Post-push flows read the pushed commit; tests on the PINNED lanes
     // pass over.preHead so the r17 pre-push parent recheck sees the pinned
     // parent before the push.
@@ -1723,6 +1725,25 @@ describe('frontmatter whitelist round trip (meta_description + hero_image.alt)',
     expect(r.skipped).toBe(true);
     expect(r.reason).toMatch(/advanced off the pinned parent/);
     expect(gh._calls.putFile).toHaveLength(0);
+  });
+
+  test("a fix commit whose PARENT is not the pinned SHA parks post-push — parent CAS (PR r18 P1)", async () => {
+    process.env.AUTONOMOUS_CODEX_REMEDIATION = 'true';
+    const db = makeDb({
+      autonomous_runs: [{ id: 'run-1', action_type: 'new_supporting_blog', draft_payload: JSON.stringify({ autopublish_head_sha: 'abc1234def5678' }) }],
+    });
+    const gh = makeGh({ preHead: 'abc1234def5678', pushParent: 'foreignparent7', reviewComments: [finding({ path: 'src/content/blog/pest-control/roaches.mdx' })] });
+    const pr = { number: 7, state: 'open', head: { sha: 'abc1234def5678', ref: 'content/autonomous-x' } };
+    gh.getPr = async () => ({ ...pr, head: { ...pr.head, sha: gh._calls.putFile.length ? 'newcommit999aaa' : pr.head.sha } });
+    const r = await maybeRemediateAutonomousPr(pr, { id: 'run-1', action_type: 'new_supporting_blog' }, {
+      db, gh, callAnthropic: makeCall('FIXED'), validateFixedBlogFile: PASS,
+      validateAutonomousRunGates: async () => ({ ok: true }),
+    });
+    expect(r.parked).toBe(true);
+    expect(r.reason).toMatch(/foreign parent/);
+    // The head was NOT re-pinned — a governed merge of it waits for a human.
+    const row = db._tables.autonomous_runs.find((x) => x.id === 'run-1');
+    expect(JSON.parse(row.draft_payload).autopublish_head_sha).toBe('abc1234def5678');
   });
 
   test('a competitor-REMOVING fix keeps the bypass marker STICKY — the persisted verdict stays flagged (PR r15 P1)', async () => {

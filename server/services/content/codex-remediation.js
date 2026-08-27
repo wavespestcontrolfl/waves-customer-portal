@@ -1892,6 +1892,20 @@ async function runRemediationForPr(ctx = {}, deps = {}) {
     || (commit && commit.content && commit.content.sha)
     || (await gh.getBranchSha(branch));
 
+  // Parent CAS (PR r18 P1): putFile only CAS-checks the target FILE's blob,
+  // so a foreign push touching another file in the tip-read→putFile window
+  // still becomes this commit's parent. The Contents API returns the created
+  // commit's parents — on the pinned lanes the fix commit's parent MUST be
+  // the pinned parent, or the re-pin would bless every foreign change.
+  // Missing parent info fails closed. The commit already exists on the
+  // branch, so this parks post-push for a human instead of skipping.
+  if (expectedParentSha) {
+    const newParent = String(commit?.commit?.parents?.[0]?.sha || '').toLowerCase();
+    if (newParent !== String(expectedParentSha).toLowerCase()) {
+      return park(db, prNumber, `fix commit ${shortSha(newHead)} landed on a foreign parent (${newParent ? shortSha(newParent) : 'unknown'} != pinned ${shortSha(expectedParentSha)}) — human reconciliation required`, onPark, newHead || headSha, PARK_POST_PUSH);
+    }
+  }
+
   // Record the round the INSTANT the push lands, before any post-push
   // revalidation that can park. Previously this lived at the end of the
   // function, so every park between here and there discarded the fact that a
