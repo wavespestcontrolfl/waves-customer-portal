@@ -275,6 +275,16 @@ describe('calculateSourceROI — channelSpend (the poolable share of cost)', () 
     expect(r.channelSpend).toBe(750);
   });
 
+  test('monthly_cost still applies when only one-off costs were logged (mixed configuration)', async () => {
+    mockDbConfig = {
+      lead_sources: { id: 'g', name: 'Google Ads — Pest (call-extension)', source_type: 'google_ads', monthly_cost: 300 },
+      leads: [], lead_source_costs: [{ cost_amount: 40, cost_category: 'setup' }], invoices: [], service_records: [],
+    };
+    const r = await calculateSourceROI('g', start, end);
+    expect(r.channelSpend).toBe(300);
+    expect(r.totalCost).toBe(340);
+  });
+
   test('the monthly_cost fallback is channel spend', async () => {
     mockDbConfig = {
       lead_sources: { id: 'g', name: 'Google Ads — Pest (call-extension)', source_type: 'google_ads', monthly_cost: 300 },

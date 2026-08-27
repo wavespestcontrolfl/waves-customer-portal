@@ -312,10 +312,15 @@ async function calculateSourceROI(leadSourceId, startDate, endDate, { revenueSou
     .reduce((sum, c) => sum + parseFloat(c.cost_amount || 0), 0);
 
   // If no explicit costs logged, estimate from source monthly_cost
-  if (totalCost === 0 && source.monthly_cost > 0) {
+  // The source's configured monthly_cost stands in for the recurring budget
+  // whenever NO shared-budget category was logged for the window — even if
+  // one-off row-specific costs (setup, domain_renewal, …) were. Gating it on
+  // totalCost === 0 let a single setup line suppress the whole recurring
+  // budget (channelSpend 0 → the pooled rows report $0 spend).
+  if (channelSpend === 0 && source.monthly_cost > 0) {
     const months = Math.max(1, Math.ceil((new Date(end) - new Date(start)) / (30 * 86400000)));
-    totalCost = parseFloat(source.monthly_cost) * months;
-    channelSpend = totalCost; // the row's recurring budget IS the shared spend
+    channelSpend = parseFloat(source.monthly_cost) * months;
+    totalCost += channelSpend;
   }
 
   // Revenue attributable to THIS source's conversions — per won-lead, strictly

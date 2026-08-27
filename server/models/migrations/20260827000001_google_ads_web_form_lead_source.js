@@ -24,12 +24,12 @@
 //      leads, so these blocks are often gone; the next signals cover those);
 //   3. the webhook's funnel row: ad_service_attribution.lead_source =
 //      'google_ads' keyed by lead_id;
-//   4. ONLY when the lead carries no attribution of its own — neither an
-//      extracted_data.attribution block NOR a linked ad_service_attribution
-//      funnel row naming a different source (e.g. 'facebook') — the linked
-//      customer's first-touch utm_data (source google / medium cpc). Same
-//      precedence rule as 20260626000008_backfill_gbp_web_leads_per_city: a
-//      customer's stale first touch must never override lead-level evidence.
+//   4. ONLY when the lead carries no attribution block of its own, the
+//      linked customer's first-touch utm_data (source google / medium cpc).
+// Precedence: explicit lead-level evidence for ANOTHER source (attribution
+// block or funnel row naming e.g. 'facebook') disqualifies the lead from
+// every arm above — click ids included — mirroring the live classifier and
+// 20260626000008_backfill_gbp_web_leads_per_city.
 // Scope: WEB channels only — 'form' (lead-webhook), 'website_quote'
 // (public-quote / public-property-lookup) and 'web' (lead-estimate-link),
 // i.e. exactly the paths that run the two resolvers patched alongside this
@@ -79,6 +79,18 @@ exports.up = async function up(knex) {
     .whereNull('deleted_at')
     .whereIn('first_contact_channel', WEB_CHANNELS)
     .where((qb) => qb.whereNull('lead_source_id').orWhereIn('lead_source_id', otherGoogleAdsRows))
+    // Explicit lead-level evidence for ANOTHER source wins over every arm
+    // below, click ids included — the live classifier evaluates Facebook /
+    // Nextdoor UTMs before Google click ids, and Facebook-keyed leads are
+    // known to carry a lingering gclid (admin-dashboard.js). Mirror that.
+    .whereRaw("COALESCE(extracted_data->'attribution'->'leadSource'->>'source', 'google_ads') = 'google_ads'")
+    .modify((qb) => {
+      if (hasFunnelLeadId) {
+        qb.whereNotExists(knex('ad_service_attribution as a2')
+          .whereRaw('a2.lead_id = leads.id')
+          .whereNot('a2.lead_source', 'google_ads'));
+      }
+    })
     .where((qb) => {
       // NULLIF(BTRIM()) — an empty / whitespace-only click id is not paid
       // evidence (the live classifier tests truthiness, not presence).
@@ -97,15 +109,8 @@ exports.up = async function up(knex) {
       }
       if (hasCustomerUtm) {
         qb.orWhere((q2) => {
+          // (contradictory funnel rows are already excluded above)
           q2.whereRaw("extracted_data->'attribution' IS NULL");
-          if (hasFunnelLeadId) {
-            // A funnel row for this lead that says anything other than
-            // google_ads is lead-level evidence that CONTRADICTS the
-            // customer's first touch — the fallback must not apply.
-            q2.whereNotExists(knex('ad_service_attribution as a2')
-              .whereRaw('a2.lead_id = leads.id')
-              .whereNot('a2.lead_source', 'google_ads'));
-          }
           q2.whereExists(knex('customers as c')
             .whereRaw('c.id = leads.customer_id')
             .whereRaw("LOWER(COALESCE(c.utm_data->>'source', '')) = 'google'")
@@ -113,7 +118,10 @@ exports.up = async function up(knex) {
         });
       }
     })
-    .update({ lead_source_id: row.id, updated_at: knex.fn.now() });
+    // lead_source_id ONLY — updated_at is the pipeline's last-activity
+    // timestamp (stale-lead queue, opportunity ordering); an attribution
+    // correction is not activity (same as the GBP per-city backfill).
+    .update({ lead_source_id: row.id });
    
   console.log(`[google_ads_web_form] backfilled ${updated} lead(s) onto "${WEB_FORM_NAME}"`);
 };
