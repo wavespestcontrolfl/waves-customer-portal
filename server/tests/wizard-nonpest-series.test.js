@@ -295,6 +295,52 @@ describe('booking route wiring (source contracts)', () => {
     expect(typeof require('../services/scheduling/occupancy').acquireOccupancyLock).toBe('function');
   });
 
+  test('the duplicate-series guard is scoped to the quoted property via the shared scope builder', () => {
+    // codex #3504 r4: customer+family alone reads a property-A series as a
+    // duplicate of the property-B plan and strips the new parent's pricing.
+    expect(booking).toMatch(/buildSeriesAddressScope\(trx, lockedDraft, custId\)/);
+    expect(booking).toMatch(/excludeParentId: seriesParentRow\.id,\s*\n\s*serviceAddressScope: seriesAddressScope,/);
+    const converter = require('../services/estimate-converter');
+    expect(typeof converter.buildSeriesAddressScope).toBe('function');
+  });
+
+  test('buildSeriesAddressScope: no address and no property link → null (legacy guard)', async () => {
+    const { buildSeriesAddressScope } = require('../services/estimate-converter');
+    await expect(buildSeriesAddressScope(null, { id: 'x' }, 'cust')).resolves.toBeNull();
+    await expect(buildSeriesAddressScope(null, null, 'cust')).resolves.toBeNull();
+  });
+
+  test('a palm plan stamps the RECURRING catalog identity before seeding, and aborts without it', () => {
+    // codex #3504 r4 (converter palm doctrine, #3349 r15): a name-only
+    // 'Palm Injections' row completion-resolves the ONE-TIME profile and
+    // invoices work the plan already billed.
+    expect(booking).toMatch(/service_key: 'palm_injection_semiannual'/);
+    expect(booking).toMatch(/palm_injection_semiannual\) unavailable — aborting series activation/);
+    const stampAt = booking.indexOf("where({ service_key: 'palm_injection_semiannual' })");
+    const seedAt = booking.indexOf('await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow');
+    expect(stampAt).toBeGreaterThan(0);
+    expect(seedAt).toBeGreaterThan(stampAt);
+    // Children inherit the identity from the parent row (seeder contract).
+    const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder).toMatch(/copyIfPresent\(row, parent, \[\s*\n\s*'create_invoice_on_complete',[\s\S]{0,400}'service_id',/);
+  });
+
+  test('a colliding seeded occurrence demotes to the WINDOWLESS placeholder (inert to occupancy), never a persisted overlap', () => {
+    // codex #3504 r4: clearing only the technician left the row occupying
+    // the slot in the tech-blind model.
+    expect(booking).toMatch(/technician_id: null,\s*\n\s*window_start: null,\s*\n\s*window_end: null,\s*\n\s*notes: trx\.raw[\s\S]{0,200}office to place/);
+  });
+
+  test('wizard series seed as FIXED-length plans, never Ongoing (auto-extend would rebill the remainder price)', () => {
+    // codex #3504 hook P0: the auto-extend maintenance templates extension
+    // visits off the PARENT's remainder-bearing first-visit price, so an
+    // Ongoing wizard series would overbill every renewal cycle.
+    expect(booking).toMatch(/durationMinutes: duration,\s*\n\s*source: source \|\| 'self_booked',[\s\S]{0,1200}recurringOngoing: false,/);
+    // The seeder honors the flag on both the parent mark and the children.
+    const seeder = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    expect(seeder.match(/recurring_ongoing: opts\.recurringOngoing !== false/g).length).toBeGreaterThanOrEqual(2);
+  });
+
   test('fee-exempt seeded bookings still correlate the parent and retire the draft', () => {
     expect(booking).toMatch(/whereNull\('source_estimate_id'\)\s*\n\s*\.update\(\{ source_estimate_id: pricing_estimate_id/);
     expect(booking).toMatch(/source: 'quote_wizard', status: 'draft' \}\)\s*\n\s*\.whereNull\('archived_at'\)/);

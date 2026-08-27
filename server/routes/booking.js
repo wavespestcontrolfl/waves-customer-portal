@@ -2997,11 +2997,26 @@ async function createSelfBooking(payload = {}) {
             logger.warn(`[booking:confirm] wizard-series plan drifted under lock for ${seriesParentRow.id} — seeding skipped, parent pricing stripped (price-less single visit kept)`);
             return { stale: true };
           }
+          // Per-property duplicate scope from the TRUSTED locked draft
+          // (codex #3504 r4): without it the customer+family guard reads a
+          // multi-property customer's property-A series as a duplicate of
+          // the property-B plan just quoted and strips the new parent's
+          // pricing. Shared builder with every estimate-converter guard
+          // call; a scope-build failure falls back to null — the exact
+          // legacy guard (over-suppression, never a double series).
+          let seriesAddressScope = null;
+          try {
+            const { buildSeriesAddressScope } = require('../services/estimate-converter');
+            seriesAddressScope = await buildSeriesAddressScope(trx, lockedDraft, custId);
+          } catch (scopeErr) {
+            logger.warn(`[booking:confirm] series address scope build failed for ${seriesParentRow.id} (legacy guard applies): ${scopeErr.message}`);
+          }
           const { matches, guardError } = await RecurringAppointmentSeeder.checkActiveSeriesLocked(trx, {
             customerId: custId,
             serviceId: seriesParentRow.service_id || null,
             serviceType: seriesParentRow.service_type || resolvedServiceType,
             excludeParentId: seriesParentRow.id,
+            serviceAddressScope: seriesAddressScope,
           });
           if (guardError) logger.warn(`[booking:confirm] duplicate-series guard failed (wizard-series seeding proceeds): ${guardError.message}`);
           if (matches.length > 0) {
@@ -3022,6 +3037,37 @@ async function createSelfBooking(payload = {}) {
             await stampDisclosedSetupFee(trx, { allowStamp: false, stampServiceRow: seriesParentRow });
             return { kept: matches[0] };
           }
+          if (RecurringAppointmentSeeder.serviceKeyFor({ service_type: resolvedServiceType }) === 'palm_injection') {
+            // Recurring palm bills per-application against the RECURRING
+            // catalog row: a name-only 'Palm Injections' visit resolves the
+            // ONE-TIME palm_injection completion profile, whose typed
+            // completion invoices work the plan already billed — the exact
+            // money bug the converter's palm doctrine fails closed on
+            // (codex #3349 r15; #3504 r4). Stamp the semiannual catalog id
+            // on the parent BEFORE seeding so every child inherits it
+            // (seeder copyIfPresent: service_id + service_key_snapshot);
+            // catalog row missing ⇒ the plan cannot bill correctly ⇒ abort
+            // (rollback + the outer catch's fail-safe strip — the visit
+            // survives price-less and office-scheduled, pre-feature
+            // behavior).
+            const palmCatalogRow = await trx('services')
+              .where({ service_key: 'palm_injection_semiannual' })
+              .first('id');
+            if (!palmCatalogRow?.id) {
+              throw new Error('recurring palm catalog row (palm_injection_semiannual) unavailable — aborting series activation');
+            }
+            const palmPatch = { service_id: palmCatalogRow.id, updated_at: trx.fn.now() };
+            // Snapshot moves with the id (codex #3485 r6): a later catalog
+            // outage (ON DELETE SET NULL) must leave the key, not a
+            // mutable-label resolution. Column-guarded like the converter's
+            // relink patch.
+            if (await trx.schema.hasColumn('scheduled_services', 'service_key_snapshot')) {
+              palmPatch.service_key_snapshot = 'palm_injection_semiannual';
+              seriesParentRow.service_key_snapshot = 'palm_injection_semiannual';
+            }
+            await trx('scheduled_services').where({ id: seriesParentRow.id }).update(palmPatch);
+            seriesParentRow.service_id = palmCatalogRow.id;
+          }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {
             pattern: wizardSeriesPlan.pattern,
             plannedCount: wizardSeriesPlan.visits,
@@ -3029,6 +3075,17 @@ async function createSelfBooking(payload = {}) {
             weekendShift: 'forward',
             durationMinutes: duration,
             source: source || 'self_booked',
+            // FIXED-length plan, never Ongoing (codex #3504 hook P0): the
+            // auto-extend maintenance templates every extension visit off
+            // the PARENT's estimated_price — the remainder-bearing first
+            // visit of the anchored split — so an Ongoing wizard series
+            // would renew future cycles at N × the first-visit price and
+            // overbill the quoted annual by the remainder every year. The
+            // quote authorizes exactly `visits` visits at the quoted
+            // annual; when the plan finishes, the maintenance queues the
+            // standard plan_ending alert and the office renews at current
+            // pricing.
+            recurringOngoing: false,
             ...(followUpVisitPrice != null ? { estimatedPrice: followUpVisitPrice } : {}),
           });
           // Conflict guard for every seeded occurrence: the seeder only
@@ -3083,10 +3140,20 @@ async function createSelfBooking(payload = {}) {
               excludeServiceIds: sweepExcludeIds,
             });
             if (clashes.length > 0) {
+              // Demote the colliding occurrence to the documented
+              // WINDOWLESS placeholder (findConflictingVisits: a
+              // window_start-NULL row "stays inert") — clearing only the
+              // technician left the row occupying the slot in the
+              // tech-blind model, so the overlap persisted for every
+              // availability/conflict consumer (codex #3504 r4). The visit
+              // keeps its date and the plan keeps its count; the office
+              // assigns a real window from the flag note.
               await trx('scheduled_services')
                 .where({ id: row.id })
                 .update({
                   technician_id: null,
+                  window_start: null,
+                  window_end: null,
                   notes: trx.raw("COALESCE(notes, '') || ' — auto-seeded follow-up: time conflicts with an existing visit; office to place'"),
                   updated_at: trx.fn.now(),
                 });
