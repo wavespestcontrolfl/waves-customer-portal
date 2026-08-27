@@ -47,35 +47,13 @@
 const WEB_FORM_NAME = 'Google Ads — Web Form';
 const WEB_CHANNELS = ['form', 'website_quote', 'web'];
 
-exports.up = async function up(knex) {
-  if (!(await knex.schema.hasTable('lead_sources'))) {
-    throw new Error('lead_sources table missing — run 20260401000095_lead_attribution first.');
-  }
 
-  let row = await knex('lead_sources').where({ name: WEB_FORM_NAME }).first();
-  if (!row) {
-    [row] = await knex('lead_sources')
-      .insert({
-        name: WEB_FORM_NAME,
-        source_type: 'google_ads',
-        channel: 'paid',
-        cost_type: 'paid',
-        is_active: true,
-        notes: 'Web-form submissions arriving with a Google click id (gclid/wbraid/gbraid). '
-          + 'Separate from the call-extension row so form vs call conversions stay distinguishable in ROI.',
-      })
-      .returning('*');
-  }
-
-  if (!(await knex.schema.hasTable('leads'))) return;
-  const hasFunnelLeadId = (await knex.schema.hasTable('ad_service_attribution'))
-    && (await knex.schema.hasColumn('ad_service_attribution', 'lead_id'));
-  const hasCustomerUtm = (await knex.schema.hasTable('customers'))
-    && (await knex.schema.hasColumn('customers', 'utm_data'));
-
+// The backfill UPDATE, exported so its predicate can be asserted in a jest
+// test (rendered SQL) without a database.
+function buildBackfillQuery(knex, rowId, { hasFunnelLeadId, hasCustomerUtm }) {
   const otherGoogleAdsRows = knex('lead_sources').select('id')
-    .where({ source_type: 'google_ads' }).whereNot({ id: row.id });
-  const updated = await knex('leads')
+    .where({ source_type: 'google_ads' }).whereNot({ id: rowId });
+  return knex('leads')
     .whereNull('deleted_at')
     .whereIn('first_contact_channel', WEB_CHANNELS)
     .where((qb) => qb.whereNull('lead_source_id').orWhereIn('lead_source_id', otherGoogleAdsRows))
@@ -86,7 +64,13 @@ exports.up = async function up(knex) {
     .whereRaw("COALESCE(extracted_data->'attribution'->'leadSource'->>'source', 'google_ads') = 'google_ads'")
     // quote-wizard top-level UTM naming another source is the same kind of
     // lead-level evidence (facebook / gbp / nextdoor …).
-    .whereRaw("COALESCE(NULLIF(LOWER(extracted_data->'utm'->>'source'), ''), 'google') = 'google'")
+    .whereRaw("COALESCE(NULLIF(LOWER(BTRIM(extracted_data->'utm'->>'source')), ''), 'google') = 'google'")
+    // …and the legacy GBP tuple (source=google, medium=organic, campaign=gbp)
+    // is GBP, not paid search — both live classifiers test isGbpUtmCampaign
+    // (config/locations.js) BEFORE click ids. Mirror that.
+    .whereRaw("NOT (LOWER(BTRIM(COALESCE(extracted_data->'utm'->>'source', ''))) = 'google'"
+      + " AND LOWER(BTRIM(COALESCE(extracted_data->'utm'->>'medium', ''))) = 'organic'"
+      + " AND LOWER(BTRIM(COALESCE(extracted_data->'utm'->>'campaign', ''))) = 'gbp')")
     .modify((qb) => {
       if (hasFunnelLeadId) {
         qb.whereNotExists(knex('ad_service_attribution as a2')
@@ -128,11 +112,42 @@ exports.up = async function up(knex) {
     // lead_source_id ONLY — updated_at is the pipeline's last-activity
     // timestamp (stale-lead queue, opportunity ordering); an attribution
     // correction is not activity (same as the GBP per-city backfill).
-    .update({ lead_source_id: row.id });
+    .update({ lead_source_id: rowId });
    
+}
+
+exports.up = async function up(knex) {
+  if (!(await knex.schema.hasTable('lead_sources'))) {
+    throw new Error('lead_sources table missing — run 20260401000095_lead_attribution first.');
+  }
+
+  let row = await knex('lead_sources').where({ name: WEB_FORM_NAME }).first();
+  if (!row) {
+    [row] = await knex('lead_sources')
+      .insert({
+        name: WEB_FORM_NAME,
+        source_type: 'google_ads',
+        channel: 'paid',
+        cost_type: 'paid',
+        is_active: true,
+        notes: 'Web-form submissions arriving with a Google click id (gclid/wbraid/gbraid). '
+          + 'Separate from the call-extension row so form vs call conversions stay distinguishable in ROI.',
+      })
+      .returning('*');
+  }
+
+  if (!(await knex.schema.hasTable('leads'))) return;
+  const hasFunnelLeadId = (await knex.schema.hasTable('ad_service_attribution'))
+    && (await knex.schema.hasColumn('ad_service_attribution', 'lead_id'));
+  const hasCustomerUtm = (await knex.schema.hasTable('customers'))
+    && (await knex.schema.hasColumn('customers', 'utm_data'));
+
+  const updated = await buildBackfillQuery(knex, row.id, { hasFunnelLeadId, hasCustomerUtm });
   console.log(`[google_ads_web_form] backfilled ${updated} lead(s) onto "${WEB_FORM_NAME}"`);
 };
 
 // Non-destructive by design (matches 20260425000003_seed_lead_sources): the
 // row may already carry operator-entered cost data and backfilled FKs.
 exports.down = async function down() {};
+
+exports.buildBackfillQuery = buildBackfillQuery;
