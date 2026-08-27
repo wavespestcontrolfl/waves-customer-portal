@@ -1,6 +1,6 @@
 /**
  * Per-platform engagement for our OWN published social posts (likes /
- * comments / shares / views), pulled daily by the engagement-ingest cron
+ * comments / shares), pulled daily by the engagement-ingest cron
  * from the Facebook Graph, Instagram Graph, and LinkedIn socialActions
  * APIs. Until now the only engagement numbers in the portal were
  * hand-entered competitor rows (competitor_social_posts) and the analytics
@@ -20,7 +20,6 @@ exports.up = async function up(knex) {
     t.integer('likes_count').notNullable().defaultTo(0);
     t.integer('comments_count').notNullable().defaultTo(0);
     t.integer('shares_count').notNullable().defaultTo(0);
-    t.integer('views_count').notNullable().defaultTo(0);
     t.integer('engagement_score').notNullable().defaultTo(0);
     t.timestamp('fetched_at').notNullable().defaultTo(knex.fn.now());
     // NULL until the first successful fetch — a row created by a failed

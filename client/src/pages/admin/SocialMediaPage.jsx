@@ -2638,6 +2638,7 @@ function AnalyticsTab() {
         {topPosts.length === 0 ? (
           <div style={{ fontSize: 14, color: D.muted }}>No published posts</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
             <thead>
               <tr style={{ color: D.muted, textAlign: "left" }}>
@@ -2670,6 +2671,7 @@ function AnalyticsTab() {
               })}
             </tbody>
           </table>
+          </div>
         )}
       </div>
       {/* Weekly Trend */}

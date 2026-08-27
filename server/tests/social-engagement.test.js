@@ -35,27 +35,27 @@ describe('platform response parsers', () => {
   test('facebook: likes/comments summaries + shares count', () => {
     expect(Engagement.parseFacebookEngagement({
       likes: { summary: { total_count: 14 } }, comments: { summary: { total_count: 3 } }, shares: { count: 2 },
-    })).toEqual({ likes: 14, comments: 3, shares: 2, views: 0 });
-    expect(Engagement.parseFacebookEngagement({})).toEqual({ likes: 0, comments: 0, shares: 0, views: 0 });
+    })).toEqual({ likes: 14, comments: 3, shares: 2 });
+    expect(Engagement.parseFacebookEngagement({})).toEqual({ likes: 0, comments: 0, shares: 0 });
   });
 
   test('instagram: like_count / comments_count', () => {
     expect(Engagement.parseInstagramEngagement({ like_count: 19, comments_count: 4 }))
-      .toEqual({ likes: 19, comments: 4, shares: 0, views: 0 });
+      .toEqual({ likes: 19, comments: 4, shares: 0 });
   });
 
   test('negative / non-numeric counts clamp to 0', () => {
     expect(Engagement.parseInstagramEngagement({ like_count: -3, comments_count: 'many' }))
-      .toEqual({ likes: 0, comments: 0, shares: 0, views: 0 });
+      .toEqual({ likes: 0, comments: 0, shares: 0 });
   });
 });
 
 describe('scoreCounts', () => {
-  test('matches the competitor swipe-file formula (likes + 3·comments + 5·shares + views/100)', () => {
-    const counts = { likes: 10, comments: 4, shares: 2, views: 550 };
-    expect(Engagement.scoreCounts(counts)).toBe(38);
+  test('matches the competitor swipe-file weights (likes + 3·comments + 5·shares; no views term)', () => {
+    const counts = { likes: 10, comments: 4, shares: 2 };
+    expect(Engagement.scoreCounts(counts)).toBe(32);
     expect(Engagement.scoreCounts(counts)).toBe(Studio.engagementScore({
-      likesCount: counts.likes, commentsCount: counts.comments, sharesCount: counts.shares, viewsCount: counts.views,
+      likesCount: counts.likes, commentsCount: counts.comments, sharesCount: counts.shares, viewsCount: 0,
     }));
   });
 });
@@ -74,7 +74,7 @@ describe('fetchEngagement', () => {
       return { ok: true, json: async () => ({ likes: { summary: { total_count: 8 } }, comments: { summary: { total_count: 1 } } }) };
     });
     await expect(Engagement.fetchEngagement({ platform: 'facebook', platformPostId: '123_456' }, { fetchFn }))
-      .resolves.toEqual({ likes: 8, comments: 1, shares: 0, views: 0 });
+      .resolves.toEqual({ likes: 8, comments: 1, shares: 0 });
 
     const failing = jest.fn(async () => ({ ok: false, status: 400, json: async () => ({ error: { message: 'Unsupported get request' } }) }));
     await expect(Engagement.fetchEngagement({ platform: 'instagram', platformPostId: '1' }, { fetchFn: failing }))

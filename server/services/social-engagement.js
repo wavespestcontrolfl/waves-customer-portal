@@ -8,12 +8,10 @@ const logger = require('./logger');
 // before this existed) so formats can be judged on what actually gets
 // engagement, not on delivery.
 //
-// Views are NOT ingested in v1: Reels/video view counts live behind the
-// per-media insights endpoints (different metric names per media type and
-// API version), so views_count stays 0 and the score contract here is
-// likes + comments + shares. The column and the views term in scoreCounts
-// are kept so the numbers stay comparable with competitor_social_posts and
-// a later insights fetch slots in without a schema change.
+// Metrics are likes / comments / shares only. View counts are deliberately
+// not part of this contract: Reels/video plays sit behind per-media insights
+// endpoints with type- and version-specific metric names — add them with
+// that integration, not as a permanently-zero column.
 //
 // Sources: Facebook Graph (page posts + videos) and Instagram Graph (media).
 // GBP exposes no per-post metrics. LinkedIn is deliberately out of v1: its
@@ -33,11 +31,11 @@ function toCount(value) {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
 
-// Same formula the competitor swipe file uses (social-content-studio
-// engagementScore) — kept inline to avoid pulling the studio module into
-// the cron path; the studio test pins both to the same numbers.
-function scoreCounts({ likes = 0, comments = 0, shares = 0, views = 0 } = {}) {
-  return Math.round(toCount(likes) + toCount(comments) * 3 + toCount(shares) * 5 + toCount(views) / 100);
+// Same weights the competitor swipe file uses (social-content-studio
+// engagementScore, minus its views term) — kept inline to avoid pulling the
+// studio module into the cron path; the test pins both to the same numbers.
+function scoreCounts({ likes = 0, comments = 0, shares = 0 } = {}) {
+  return toCount(likes) + toCount(comments) * 3 + toCount(shares) * 5;
 }
 
 // ── pure parsers (unit-tested) ──────────────────────────────────────────────
@@ -72,7 +70,6 @@ function parseFacebookEngagement(json = {}) {
     likes: toCount(json?.likes?.summary?.total_count),
     comments: toCount(json?.comments?.summary?.total_count),
     shares: toCount(json?.shares?.count),
-    views: 0,
   };
 }
 
@@ -81,7 +78,6 @@ function parseInstagramEngagement(json = {}) {
     likes: toCount(json?.like_count),
     comments: toCount(json?.comments_count),
     shares: 0,
-    views: 0,
   };
 }
 
@@ -146,7 +142,6 @@ async function upsertEngagement(postId, target, counts, error = null) {
       likes_count: toCount(counts.likes),
       comments_count: toCount(counts.comments),
       shares_count: toCount(counts.shares),
-      views_count: toCount(counts.views),
       engagement_score: scoreCounts(counts),
       last_success_at: now,
     })
@@ -154,28 +149,53 @@ async function upsertEngagement(postId, target, counts, error = null) {
     .merge();
 }
 
-// Sweep-style (safe under runExclusive's skip-on-contention): every
-// published post inside the lookback window is refreshed each run. Idempotent.
-// onStart fires once preflight (table check + post query) has succeeded —
-// the manual-sync route uses it to answer 202 only for a sweep that will
-// actually fetch.
-async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = fetch, onStart = null } = {}) {
-  const summary = { posts: 0, targets: 0, synced: 0, failed: 0, skipped: 0 };
+// Sweep-style (safe under runExclusive's skip-on-contention): EVERY
+// published post inside the lookback window is refreshed each run, walked
+// newest-first in keyset batches of `batchSize` so a long backfill window
+// reaches its oldest posts (no fixed cap). Idempotent.
+// onStart fires once preflight (table check + first batch query) has
+// succeeded — the manual-sync route uses it to answer 202 only for a sweep
+// that will actually fetch.
+async function syncRecentEngagement({ lookbackDays = 30, batchSize = 200, fetchFn = fetch, onStart = null } = {}) {
+  const summary = { posts: 0, targets: 0, synced: 0, failed: 0 };
   if (!(await db.schema.hasTable('social_post_engagement'))) {
     throw new Error('social_post_engagement table missing — run migrations');
   }
   const since = new Date(Date.now() - Math.max(1, Math.min(365, Number(lookbackDays) || 30)) * 86400000);
-  const posts = await db('social_media_posts')
-    .where({ status: 'published' })
-    .where((qb) => qb.where('published_at', '>=', since).orWhere((q) => q.whereNull('published_at').andWhere('created_at', '>=', since)))
-    // Same fallback the predicate uses — a NULL published_at (legacy /
-    // tech-authored rows) must not sort first and eat the cap.
-    .orderByRaw('COALESCE(published_at, created_at) DESC')
-    .limit(Math.max(1, Math.min(1000, Number(limit) || 200)))
-    .select('id', 'platforms_posted');
-  summary.posts = posts.length;
-  if (typeof onStart === 'function') onStart();
+  const size = Math.max(1, Math.min(1000, Number(batchSize) || 200));
+  let cursor = null; // { ts, id } of the last row of the previous batch
+  let started = false;
+  for (;;) {
+    const batch = await db('social_media_posts')
+      .where({ status: 'published' })
+      .where((qb) => qb.where('published_at', '>=', since).orWhere((q) => q.whereNull('published_at').andWhere('created_at', '>=', since)))
+      // Keyset on the same fallback the predicate uses — a NULL published_at
+      // (legacy / tech-authored rows) must not sort first and eat a batch.
+      .modify((qb) => {
+        if (cursor) qb.whereRaw('(COALESCE(published_at, created_at), id) < (?, ?)', [cursor.ts, cursor.id]);
+      })
+      .orderByRaw('COALESCE(published_at, created_at) DESC, id DESC')
+      .limit(size)
+      .select('id', 'platforms_posted', db.raw('COALESCE(published_at, created_at) AS sort_ts'));
+    if (!started) { started = true; if (typeof onStart === 'function') onStart(); }
+    if (!batch.length) break;
+    summary.posts += batch.length;
+    await sweepBatch(batch, { fetchFn, summary });
+    if (batch.length < size) break;
+    const last = batch[batch.length - 1];
+    cursor = { ts: last.sort_ts, id: last.id };
+  }
+  logger.info(`[social-engagement] sweep: ${summary.synced}/${summary.targets} targets across ${summary.posts} posts (${summary.failed} failed)`);
+  // Per-target failures are soft, but a sweep where EVERY target failed (dead
+  // token, provider down) must not read as a healthy run — throw after the
+  // sweep so runExclusive's job_health records the failure streak.
+  if (summary.targets > 0 && summary.synced === 0) {
+    throw new Error(`engagement sweep refreshed 0/${summary.targets} targets — check FACEBOOK_ACCESS_TOKEN / provider status`);
+  }
+  return summary;
+}
 
+async function sweepBatch(posts, { fetchFn, summary }) {
   for (const post of posts) {
     for (const target of engagementTargets(post)) {
       summary.targets += 1;
@@ -190,27 +210,19 @@ async function syncRecentEngagement({ lookbackDays = 30, limit = 200, fetchFn = 
       }
     }
   }
-  logger.info(`[social-engagement] sweep: ${summary.synced}/${summary.targets} targets across ${summary.posts} posts (${summary.failed} failed)`);
-  // Per-target failures are soft, but a sweep where EVERY target failed (dead
-  // token, provider down) must not read as a healthy run — throw after the
-  // sweep so runExclusive's job_health records the failure streak.
-  if (summary.targets > 0 && summary.synced === 0) {
-    throw new Error(`engagement sweep refreshed 0/${summary.targets} targets — check FACEBOOK_ACCESS_TOKEN / provider status`);
-  }
-  return summary;
 }
 
 // Per-post rollup for the analytics endpoint: { [post_id]: { likes, comments,
-// shares, views, score, platforms: { fb: {...} } } } for the given post ids.
+// shares, score, platforms: { fb: {...} } } } for the given post ids.
 async function engagementByPost(postIds = []) {
   const out = {};
   if (!postIds.length || !(await db.schema.hasTable('social_post_engagement'))) return out;
   // Only rows that have EVER fetched successfully count as data.
   const rows = await db('social_post_engagement').whereIn('post_id', postIds).whereNotNull('last_success_at');
   for (const r of rows) {
-    const agg = out[r.post_id] || (out[r.post_id] = { likes: 0, comments: 0, shares: 0, views: 0, score: 0, platforms: {}, fetchedAt: null });
-    const counts = { likes: r.likes_count, comments: r.comments_count, shares: r.shares_count, views: r.views_count };
-    agg.likes += counts.likes; agg.comments += counts.comments; agg.shares += counts.shares; agg.views += counts.views;
+    const agg = out[r.post_id] || (out[r.post_id] = { likes: 0, comments: 0, shares: 0, score: 0, platforms: {}, fetchedAt: null });
+    const counts = { likes: r.likes_count, comments: r.comments_count, shares: r.shares_count };
+    agg.likes += counts.likes; agg.comments += counts.comments; agg.shares += counts.shares;
     agg.score += r.engagement_score;
     agg.platforms[r.platform] = { ...counts, score: r.engagement_score, error: r.last_error || null, lastSuccessAt: r.last_success_at };
     // Age of the DATA (last successful fetch), not of the last attempt —
