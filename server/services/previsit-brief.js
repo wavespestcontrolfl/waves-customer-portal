@@ -68,7 +68,27 @@ const WDO_BRIEF_TYPE = 'wdo_inspection';
 // v2 (codex #3423 r15): the grounding-validator tightening must invalidate
 // cached v1 briefs — an unchanged grounding hash would keep serving
 // pre-tightening bodies (e.g. a cached retired-name mention) forever.
-const PROMPT_VERSION = 'previsit_brief_v2';
+const PROMPT_VERSION = 'previsit_brief_v3';
+
+// Deterministic validator rejections repeat on every retry while the
+// grounding (and prompt version) are unchanged — the same facts produce the
+// same ungrounded phrasing, and prod burned ~111 dual-provider calls in one
+// day (08-25) re-failing the same visits every :19/:49 tick. After this many
+// LLM attempts per grounding hash the template stands until the grounding
+// changes. Provider outages/truncation stay retryable (miss kind
+// 'transient').
+const VISIT_BRIEF_LLM_ATTEMPT_CAP = 2;
+
+// The cap is only meaningful for the provider/model pair that produced the
+// rejections — a registry model swap (MODEL_WORKHORSE, OPENAI fallback) must
+// get a fresh run at a capped visit, so the fingerprint rides in the stored
+// template and a mismatch restarts the count (codex #3515 r1).
+function visitBriefPolicyFingerprint() {
+  const policy = MODELS.TEXT_POLICIES?.visitBrief || {};
+  return [policy.primary, policy.fallback]
+    .map((r) => (r ? `${r.provider || '?'}:${r.model || '?'}` : '-'))
+    .join('|');
+}
 
 // Statuses that are no longer an upcoming visit (mirrors
 // PREP_TERMINAL_STATUSES in appointment-tagger.js / the admin-schedule
@@ -842,6 +862,7 @@ Rules:
 - Never name a pest or organism target that is not in the facts. Never mention Ganoderma or Thielaviopsis.
 - Never include gate codes, garage codes, lockbox codes, or any credential — you have not been given them and must not guess.
 - Plain, terse field language. No greetings, no markdown, no headings.
+- Closed vocabulary: copy service names, cadence/plan labels ("one-time", "recurring", "quarterly"), tier names, and status words VERBATIM from the facts — never introduce one that the facts do not literally contain, and never paraphrase a service into a different label. When unsure whether a word appears in the facts, use one that does.
 - mentioned_terms: list EVERY product name and EVERY pest/organism/disease you mention anywhere in your response, lowercased. Empty array only if you mention none. A term you mention but do not list makes the response invalid.
 - If the facts include no prior visit, last_visit_summary MUST be the empty string — never write "no prior visits" prose or describe past work.
 
@@ -2274,7 +2295,9 @@ function validateBriefJson(json, grounding) {
 }
 
 async function generateBriefBody(grounding, deps = {}) {
-  const fallback = () => ({ via: 'template', body: templateBriefBody(grounding) });
+  // missKind rides back to the generator so deterministic validator
+  // rejections can be attempt-capped; anything else keeps retrying.
+  const fallback = (missKind = 'transient') => ({ via: 'template', body: templateBriefBody(grounding), missKind });
   if (!process.env.ANTHROPIC_API_KEY && !process.env.OPENAI_API_KEY) return fallback();
   // An unreadable catalog means NO response can be validated — fail closed
   // to the template without spending an LLM call at all.
@@ -2282,9 +2305,17 @@ async function generateBriefBody(grounding, deps = {}) {
     logger.warn('[previsit-brief] catalog vocabulary unavailable — output unvalidatable; using deterministic template');
     return fallback();
   }
+  // Every verdict the validate hook hands the dispatcher is remembered so
+  // the miss can be classified by PROVENANCE (did OUR validator reject this
+  // leg?) rather than by pattern-matching reason strings — shape rejections
+  // (not_an_object, priorities_not_array, empty_output…) are just as
+  // deterministic as grounding ones (codex #3515 r1).
+  const validatorVerdicts = new Set();
   const validate = (result) => {
     if (!result?.json) return 'no_json';
-    return validateBriefJson(result.json, grounding).reason || null;
+    const reason = validateBriefJson(result.json, grounding).reason || null;
+    if (reason) validatorVerdicts.add(reason);
+    return reason;
   };
   const callModel = deps.callModel
     || ((payload, opts) => dispatchWithFallback(MODELS.TEXT_POLICIES.visitBrief, {
@@ -2307,7 +2338,15 @@ async function generateBriefBody(grounding, deps = {}) {
     }, { validate });
     if (!resp || !resp.ok || !resp.json) {
       logger.warn(`[previsit-brief] LLM miss (${resp?.reason || 'no json'}); using deterministic template`);
-      return fallback();
+      // Every leg rejected by OUR validator (and none merely truncated —
+      // the dispatcher suffixes '(response truncated at max_tokens=…)' onto
+      // the verdict, a budget problem) = deterministic for this grounding;
+      // provider errors, no_json and truncation stay transient.
+      const legReasons = (resp?.failures || []).map((f) => String(f?.reason || ''));
+      const fromValidator = (r) => !r.includes('response truncated')
+        && [...validatorVerdicts].some((v) => r === v || r.startsWith(`${v} `));
+      const deterministic = legReasons.length > 0 && legReasons.every(fromValidator);
+      return fallback(deterministic ? 'validator' : 'transient');
     }
     // Defense in depth: the dispatcher already ran this validator per leg,
     // but injected/mocked call paths may not — never trust an unvalidated
@@ -2315,7 +2354,7 @@ async function generateBriefBody(grounding, deps = {}) {
     const verdict = validateBriefJson(resp.json, grounding);
     if (verdict.reason) {
       logger.warn(`[previsit-brief] LLM output rejected (${verdict.reason}); using deterministic template`);
-      return fallback();
+      return fallback('validator');
     }
     return { via: 'llm', body: verdict.body };
   } catch (err) {
@@ -2384,8 +2423,25 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
   ) {
     return { skipped: true, reason: 'unchanged', brief: existing };
   }
+  // Deterministic-rejection cap: a template stored because the validator
+  // rejected every leg re-fails identically while the grounding hash is
+  // unchanged — stop spending dual-provider calls after the cap. A changed
+  // grounding (or PROMPT_VERSION bump) changes the hash and retries fresh;
+  // transient misses (provider down, truncation) never enter this branch.
+  const policyFingerprint = visitBriefPolicyFingerprint();
+  const sameCapLineage = existing?.grounding_hash === groundingHash
+    && existing?.generated_via === 'template'
+    && existing?.llm_policy_fingerprint === policyFingerprint;
+  if (
+    String(svc.pre_service_brief_type || '') === VISIT_BRIEF_TYPE
+    && sameCapLineage
+    && existing.llm_miss_kind === 'validator'
+    && (existing.llm_attempts || 0) >= VISIT_BRIEF_LLM_ATTEMPT_CAP
+  ) {
+    return { skipped: true, reason: 'validator_capped', brief: existing };
+  }
 
-  const { via, body } = await generateBriefBody(grounding, deps);
+  const { via, body, missKind } = await generateBriefBody(grounding, deps);
 
   // The LLM leg can run minutes. The CAS below only defends against
   // OTHER brief writers — preferences, protocol guidance, or the visit
@@ -2413,6 +2469,16 @@ async function generateVisitBrief(scheduledServiceId, { dbh = db, deps = {} } = 
     version: VISIT_BRIEF_TYPE,
     grounding_hash: groundingHash,
     generated_via: via,
+    // Attempt bookkeeping for the deterministic-rejection cap above:
+    // llm_attempts counts VALIDATOR rejections only, accumulating across
+    // same-hash template re-stores; a transient miss preserves the count
+    // without adding to it, so outages can never walk a visit into the cap.
+    ...(via === 'template' ? {
+      llm_miss_kind: missKind || 'transient',
+      llm_policy_fingerprint: policyFingerprint,
+      llm_attempts: (sameCapLineage ? (existing.llm_attempts || 0) : 0)
+        + (missKind === 'validator' ? 1 : 0),
+    } : {}),
     // The ET calendar day and service identity this brief was generated
     // FOR. Any writer can reschedule the visit or rewrite its
     // service_type directly (update-details is only ONE mover; estimate
