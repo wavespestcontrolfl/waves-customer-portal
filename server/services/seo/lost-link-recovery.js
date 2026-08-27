@@ -16,6 +16,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 
 const NON_OUTREACH_TYPES = new Set(['directory', 'citation', 'social']);
+// The only link_types the outreach worker claims (link-prospect-worker OUTREACH_TYPES).
+const OUTREACH_TYPES = new Set(['editorial', 'resource', 'guest_post', 'haro']);
 // Board states that mean "someone is already on this" — never reopened here.
 const IN_FLIGHT_STATUSES = new Set(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
 
@@ -82,9 +84,14 @@ async function queueOne(loss, out, scoreMod) {
       // outreach_sent_at as "already sent" and the worker rejects rows whose
       // lifetime `attempts` hit MAX_ATTEMPTS — so both restart, with the prior
       // values kept in quality_signals (prior_outreach_sent_at, prior_attempts).
+      // link_type is nullable (creation paths store null when scoring failed) and
+      // the worker claims only OUTREACH_TYPES — a reopen must leave a claimable type.
+      const reopenType = OUTREACH_TYPES.has(exists.link_type) ? exists.link_type
+        : OUTREACH_TYPES.has(loss.link_type) ? loss.link_type : 'resource';
       await db('seo_link_prospects').where({ id: exists.id }).update({
         status: 'prospect',
         priority: 'high',
+        link_type: reopenType,
         claimed_at: null, claimed_by: null,
         attempts: 0,
         outreach_status: 'none', outreach_send_token: null, outreach_attempted_at: null, outreach_sent_at: null,

@@ -233,6 +233,18 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
   });
 
+  test('if the recovery prospect cannot be resolved, the row stays lost for the next scan to retry', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
+    const { updates, events } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'seo_link_prospects') throw new Error('prospects db down'); return impl(table); });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ recovered: 0, unresolvedRecoveries: 1, scanned: 1 }));
+    expect(updates.filter(u => u.ids === 'bl-9')).toHaveLength(0); // no lost→active flip
+    expect(events).toHaveLength(0);
+  });
+
   test('pages until total_count regardless of page count (no 5-page freeze)', async () => {
     const mk = (i) => ({ url_from: `https://s${i}.example/a`, url_to: 'https://wavespestcontrol.com/', domain_from: `s${i}.example`, domain_from_rank: 1, dofollow: true });
     const all = Array.from({ length: 14 }, (_, i) => mk(i));
@@ -383,6 +395,16 @@ describe('lost-link recovery', () => {
     expect(r).toEqual({ resolved: 2 });
     expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', target_page: 'https://wavespestcontrol.com/x/', status: 'prospect' });
     expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', first_live_at: new Date('2026-09-06T08:00:00Z'), backlink_id: 'bl-1' }));
+  });
+
+  test('a reopened row with a null/unclaimable link_type gets a worker-claimable outreach type', async () => {
+    const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-null', status: 'lost', notes: null, link_type: null }; if (op === 'update') { updates.push(st.payload); return 1; } } });
+    await recovery.queueLostDomains([{ ...loss, link_type: 'editorial' }], { scorer: { scoreCandidates: jest.fn() } });
+    expect(updates[0].link_type).toBe('editorial');
+    updates.length = 0;
+    await recovery.queueLostDomains([{ ...loss, link_type: 'unknown' }], { scorer: { scoreCandidates: jest.fn() } });
+    expect(updates[0].link_type).toBe('resource');
   });
 
   test('fail-soft fallback link_type is coerced to a worker-claimable type', async () => {

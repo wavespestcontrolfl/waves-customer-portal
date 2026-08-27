@@ -106,7 +106,7 @@ class BacklinkMonitor {
     const activeMap = new Map(activeLinks.map(l => [`${l.source_url}::${l.target_url}`, l]));
     const seenKeys = new Set();
 
-    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0;
+    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0, unresolvedRecoveries = 0;
 
     for (const link of links) {
       const toxicity = this.scoreToxicity(link);
@@ -127,15 +127,22 @@ class BacklinkMonitor {
         const newStatus = existing.status === 'disavowed' ? 'disavowed' : 'active';
         const patch = { ...record, status: newStatus, updated_at: now };
         if (existing.status === 'lost') {
-          patch.lost_at = null; patch.lost_reason = null;
-          recovered++;
-          await this.recordEvent(existing.id, 'recovered', { previous_lost_reason: existing.lost_reason || null });
           // A recovery prospect queued for this link (still un-pitched) is now
-          // moot — resolve it so the drafter never asks for a link that is live.
+          // moot — resolve it BEFORE the row flips back to active. If that
+          // fails the row stays lost (and unstamped) so the next scan retries;
+          // flipping first would leave the prospect claimable forever.
           try {
             const { resolveRecoveredLink } = require('./lost-link-recovery');
             await resolveRecoveredLink({ ...existing, source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to }, now);
-          } catch (err) { logger.warn(`Backlink scan: recovery prospect resolve failed for ${link.domain_from}: ${err.message}`); }
+          } catch (err) {
+            unresolvedRecoveries++;
+            logger.warn(`Backlink scan: recovery prospect resolve failed for ${link.domain_from} — row left lost for retry: ${err.message}`);
+            scanned++;
+            continue;
+          }
+          patch.lost_at = null; patch.lost_reason = null; patch.recovery_queued_at = null;
+          recovered++;
+          await this.recordEvent(existing.id, 'recovered', { previous_lost_reason: existing.lost_reason || null });
         }
         if (existing.is_dofollow != null && existing.is_dofollow !== isDofollow) {
           relChanges++;
@@ -285,7 +292,7 @@ class BacklinkMonitor {
     logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
     return {
       scanned, newCritical, scanComplete, missed,
-      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, recovered,
+      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, recovered, unresolvedRecoveries,
       lostDomains: lostDomains.length, highValueLost: alertable.length, recoveryQueued,
     };
   }
