@@ -94,11 +94,23 @@ async function queueOne(loss, out, scoreMod) {
     const targetPage = targetPageOf(loss.target_url);
     if (!domain) { out.skipped++; return; }
 
+    // Recovery is DOMAIN-scoped (one representative loss per domain, resolved at
+    // domain scope when any link returns): if the domain already has a row in
+    // flight for ANY Waves page, a second claimable prospect would start parallel
+    // outreach to the same inbox. Suppress; the existing row is the conversation.
+    const inFlight = await db('seo_link_prospects').where({ target_domain: domain })
+      .whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
+    if (inFlight && IN_FLIGHT_STATUSES.has(inFlight.status)) {
+      out.skipped++;
+      out.reasons.push({ domain, reason: `already on board (${inFlight.status}${inFlight.target_page ? ` for ${targetPathOf(inFlight.target_page)}` : ''})` });
+      return;
+    }
+
     // (target_domain, target_page) is unique on the board. A link we acquired
     // through the pipeline already has a row, and the outbound verifier moves
-    // it to 'lost' when the inbound link disappears — that row is REOPENED as a
-    // fresh prospect (the worker only claims status='prospect'). Rows still in
-    // flight, or rejected by the owner, are left alone.
+    // it to 'lost' when the inbound link disappears — that EXACT-page row is
+    // REOPENED as a fresh prospect (the worker only claims status='prospect').
+    // Rows rejected by the owner are left alone.
     const exists = await db('seo_link_prospects').where({ target_domain: domain }).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an

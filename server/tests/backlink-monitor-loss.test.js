@@ -439,6 +439,21 @@ describe('lost-link recovery', () => {
     expect(r.results.map(x => x.outcome)).toEqual(['error', 'queued']);
   });
 
+  test('a domain with an in-flight row for ANOTHER Waves page is not queued again (no parallel outreach to one inbox)', async () => {
+    const ops = [];
+    makeDb({ seo_link_prospects: (op, st) => {
+      ops.push({ op, ins: st.ins });
+      // domain-wide in-flight probe (whereIn status) → a contacted row on a sibling page
+      if (op === 'first' && st.ins.some(i => i[0] === 'status')) return { id: 'p-sib', status: 'contacted', target_page: 'https://www.wavespestcontrol.com/other/' };
+      if (op === 'first') throw new Error('exact-page lookup must not run once the domain is in flight');
+      if (op === 'insert') throw new Error('must not insert');
+      return null;
+    } });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r).toEqual({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'already on board (contacted for /other/)' }], results: [{ domain: 'blog.example', backlink_id: 'bl-1', outcome: 'skipped' }] });
+    expect(ops[0].ins[0]).toEqual(['status', expect.arrayContaining(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed'])]);
+  });
+
   test('a lost signup-lane placement (citation) is not reopened into the outreach board', async () => {
     const updates = [];
     makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-cit', status: 'lost', notes: null, link_type: 'citation' }; if (op === 'update') { updates.push(st.payload); return 1; } if (op === 'insert') throw new Error('must not insert'); } });
