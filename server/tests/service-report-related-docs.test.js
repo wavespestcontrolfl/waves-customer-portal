@@ -155,6 +155,43 @@ describe('legacy no-spray termite advisories', () => {
     expect(data.advisory.interior_reentry_min).toBe(0);
   });
 
+  test('a legacy methodless termiticide row (inferred station_check) is treatment evidence', async () => {
+    const knex = fixtureKnex({
+      ...EMPTY_TABLES,
+      service_products: [{
+        id: 'sp1', service_record_id: 'record-1', product_name: 'Termidor SC',
+        epa_reg_number: '7969-210', product_category: 'termiticide', application_method: null,
+      }],
+    });
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 120 }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    // Interior guidance survives (the legacy rewrite did not run); the
+    // exterior side is governed by the existing treatment-scope
+    // normalization (no exterior spray zone on a station_check row).
+    expect(data.advisory.interior_reentry_min).toBe(120);
+  });
+
+  test('an EXPLICIT station check on a bait product is not treatment evidence', async () => {
+    const knex = fixtureKnex({
+      ...EMPTY_TABLES,
+      service_products: [{
+        id: 'sp1', service_record_id: 'record-1', product_name: 'Trelona ATBS',
+        epa_reg_number: '499-557', product_category: 'termite bait', application_method: 'station_check',
+      }],
+    });
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 120 }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+  });
+
   test('a treatment-applied protocol action keeps the stored guidance', async () => {
     const knex = fixtureKnex(EMPTY_TABLES);
     const data = await buildReportV1Data({

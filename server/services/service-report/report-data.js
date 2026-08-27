@@ -3767,7 +3767,18 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // Spray evidence at read time: a spray-class application row, or a
   // treatment-applied protocol action scope persisted at completion
   // (products are optional on inspection/bait lanes — codex inline r4).
-  const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method))
+  // Mirrors ServiceReportDocument.isProductApplication (uncapped codex P1 r6):
+  // a legacy termite product with NO recorded method infers station_check,
+  // but an EPA-registered / pesticide-class product on such a row is a real
+  // application — an EXPLICIT station_check (methodInferred === false) is a
+  // deliberate device inspection and never counts.
+  const isInferredPesticideApplication = (app) => app.method === 'station_check'
+    && app.methodInferred !== false
+    && (
+      !!String(app.product?.epa_reg || '').trim()
+      || /pestic|termitic|insectic|herbic|fungic|rodentic/i.test(`${app.product?.product_type || ''} ${app.product?.category || ''}`)
+    );
+  const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method) || isInferredPesticideApplication(app))
     || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
       .some((s) => s && s.treatmentApplied === true);
   const storedAdvisory = parseJsonObject(service.advisory);
