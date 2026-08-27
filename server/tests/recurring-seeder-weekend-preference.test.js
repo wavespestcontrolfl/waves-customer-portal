@@ -120,7 +120,10 @@ describe('every admin-schedule generator consults the preference (source pins)',
   test('all seven consult sites present', () => {
     // import + create route + plan helper + cadence-rewrite + spawn +
     // reconcile + maintenance + alert action
-    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(8);
+    expect((src.match(/customerPrefersNoWeekends/g) || []).length).toBe(9);
+    // Edited parents persist the EFFECTIVE value (rebooker projects series
+    // moves off the parent flag alone).
+    expect(src).toContain('updates.skip_weekends = effectiveEditSkip;');
     expect(src).toContain('|| (isRecurring && recurringPattern ? await customerPrefersNoWeekends(db, customerId) : false)');
     expect(src).toContain('const prefNoWeekends = await customerPrefersNoWeekends(conn, before.customer_id);');
     // Edit paths: the preference ORs over the form's routinely-submitted

@@ -6465,7 +6465,20 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         if (cols.recurring_nth) updates.recurring_nth = (editMonthAnchorOpts.nth != null && editMonthAnchorOpts.nth !== '' && !isNaN(parseInt(editMonthAnchorOpts.nth))) ? parseInt(editMonthAnchorOpts.nth) : null;
         if (cols.recurring_weekday) updates.recurring_weekday = (editMonthAnchorOpts.weekday != null && editMonthAnchorOpts.weekday !== '' && !isNaN(parseInt(editMonthAnchorOpts.weekday))) ? parseInt(editMonthAnchorOpts.weekday) : null;
         if (cols.recurring_interval_days) updates.recurring_interval_days = (recurringIntervalDays != null && recurringIntervalDays !== '' && !isNaN(parseInt(recurringIntervalDays))) ? parseInt(recurringIntervalDays) : null;
-        if (cols.skip_weekends && skipWeekends !== undefined) updates.skip_weekends = !!skipWeekends;
+        if (cols.skip_weekends && skipWeekends !== undefined) {
+          // B6 (hook P1): persist the EFFECTIVE value — the edit form
+          // routinely submits false, and the write paths stamp children
+          // with the preference-ORed skip; a raw-false parent would
+          // diverge, and rebooker.js projects future series moves off the
+          // parent flag alone.
+          let effectiveEditSkip = !!skipWeekends;
+          if (!effectiveEditSkip) {
+            const rowForPref = await db('scheduled_services')
+              .where({ id: req.params.id }).first('customer_id').catch(() => null);
+            effectiveEditSkip = await customerPrefersNoWeekends(db, rowForPref?.customer_id);
+          }
+          updates.skip_weekends = effectiveEditSkip;
+        }
         if (cols.weekend_shift && weekendShift !== undefined) updates.weekend_shift = weekendShift === 'back' ? 'back' : 'forward';
         if (cols.discount_type && discountType !== undefined) updates.discount_type = discountType || null;
         if (cols.discount_amount && discountAmount !== undefined) updates.discount_amount = (discountAmount != null && discountAmount !== '') ? Number(discountAmount) : null;
