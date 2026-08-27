@@ -25,7 +25,7 @@ const TOMORROW = addDays(TODAY, 1);
 function chain(rowsFor, calls) {
   const q = {};
   const own = []; // this query's calls only — coverage is asked per date
-  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
+  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereExists', 'from', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
     .forEach((m) => { q[m] = jest.fn((...a) => { own.push([m, ...a]); calls.push([m, ...a]); if (typeof a[0] === 'function') a[0].call(q, q); return q; }); });
   const resolve = async () => (typeof rowsFor === 'function' ? rowsFor(own) : rowsFor);
   q.select = jest.fn(async (...a) => { own.push(['select', ...a]); calls.push(['select', ...a]); return resolve(); });
@@ -48,11 +48,17 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
+  // the payment-pending hold query (getPaymentPendingCustomerIds) is the
+  // only annual_prepay_terms query that JOINs invoices — route it to its
+  // own rows so coverage terms never read as pending commitments
+  const termsRows = (own) => (own.some((c) => c[0] === 'join' && String(c[1]).startsWith('invoices'))
+    ? pendingTerms
+    : (typeof terms === 'function' ? terms(own) : terms));
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
-    if (String(table).startsWith('annual_prepay_terms')) return chain(terms, calls.terms);
+    if (String(table).startsWith('annual_prepay_terms')) return chain(termsRows, calls.terms);
     if (table === 'payments') return chain(payments, calls.payments);
     if (String(table).startsWith('scheduled_services')) return chain(visits, calls.visits);
     if (table === 'customers') return chain(customers, calls.customers);
@@ -107,6 +113,12 @@ describe('getCardExpiryExemptCustomerIds — coverage window', () => {
     ]));
     // no lower date bound: overdue nonterminal visits stay in scope
     expect(calls.visits.find((c) => c[0] === 'where' && c[1] === 'ss.scheduled_date' && c[2] === '>=')).toBeUndefined();
+    // a COMPLETED visit with an unfinished resumable completion attempt
+    // (crash/503 between the durable commit and the charge) stays in scope
+    expect(calls.visits).toEqual(expect.arrayContaining([
+      ['from', 'service_completion_attempts as sca'],
+      ['whereIn', 'sca.status', ['side_effects_pending', 'side_effects_running']],
+    ]));
   });
 
   test('a term that does not span the window (starts after today, or ends before the horizon) is not exempt', async () => {
@@ -208,6 +220,17 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
+  test('a monthly retry held by a pending prepay commitment (sweep guard 5) → stays exempt', async () => {
+    // without the hold this retry would keep the warning (obligation date
+    // not covered, no sibling)
+    route({
+      terms: (own) => (asked(own, 't.term_end') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed()),
+      pendingTerms: [{ customer_id: 'c-prepaid' }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
   test('a monthly retry for a customer whose lane is no longer monthly (never paid monthly) is disarmed → stays exempt', async () => {
     const isPaidMonthlyLookup = (own) => own.some((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && c[1].status === 'paid');
     route({
@@ -258,7 +281,7 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
   test('selects only real columns (per_application_fee / payer_id from customers; no ss.billed_to_payer_id)', async () => {
     const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ status: 'confirmed' })] });
     await getCardExpiryExemptCustomerIds(HORIZON);
-    const sel = calls.visits.find((c) => c[0] === 'select');
+    const sel = calls.visits.filter((c) => c[0] === 'select').find((c) => c.includes('ss.id'));
     expect(sel).toBeDefined();
     expect(sel).toEqual(expect.arrayContaining(['c.per_application_fee', 'c.payer_id as customer_payer_id']));
     expect(sel).not.toEqual(expect.arrayContaining(['ss.billed_to_payer_id']));

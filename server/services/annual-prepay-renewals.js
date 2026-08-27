@@ -3618,6 +3618,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     }
     const { resolveBillingLane: resolveRetryLane } = require('./billing-lane');
     const coveredOn = new Map();
+    let pendingHoldIds = null;
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
@@ -3640,6 +3641,12 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       if (!row.stripe_payment_intent_id && meta.ambiguous_outcome) continue;
       const isMonthly = String(row.description || '').includes('WaveGuard Monthly');
       if (isMonthly) {
+        // GUARD 5 mirror: a pending annual-prepay commitment holds the
+        // monthly ladder (skip, stay armed) until it activates or cancels
+        // — while it stands, the sweep cannot charge this row. Same
+        // authority the sweep consults (getPaymentPendingCustomerIds).
+        if (pendingHoldIds == null) pendingHoldIds = await getPaymentPendingCustomerIds(today, conn);
+        if (pendingHoldIds.has(customerId)) continue;
         // The sweep's billing-lane guard (GUARD 3b mirror): a monthly
         // obligation row for a customer whose lane is no longer monthly
         // (explicit per_application/per_visit/one_time, or a NULL mode the
@@ -3710,7 +3717,23 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
     const visits = await conn('scheduled_services as ss')
       .join('customers as c', 'c.id', 'ss.customer_id')
       .whereIn('ss.customer_id', [...covered])
-      .whereNotIn('ss.status', CARD_EXPIRY_TERMINAL_VISIT_STATUSES)
+      .where(function stillChargeable() {
+        this.whereNotIn('ss.status', CARD_EXPIRY_TERMINAL_VISIT_STATUSES)
+          // A COMPLETED visit whose completion attempt still has
+          // unfinished resumable billing side effects (crash/503 between
+          // the durable completion commit and the invoice/charge) is
+          // still chargeable — the resume path permits completed→
+          // completed and continues the billing. Terminal 'completed'
+          // hides the visit only once no such attempt remains.
+          .orWhere(function completedUnfinishedBilling() {
+            this.where('ss.status', 'completed').whereExists(function unfinishedAttempt() {
+              this.from('service_completion_attempts as sca')
+                .whereRaw('sca.service_id = ss.id')
+                .whereIn('sca.status', ['side_effects_pending', 'side_effects_running'])
+                .select('sca.id');
+            });
+          });
+      })
       .where('ss.scheduled_date', '<=', horizon)
       .select(
         'ss.id', 'ss.customer_id', 'ss.estimated_price', 'ss.is_callback', 'ss.service_type',
