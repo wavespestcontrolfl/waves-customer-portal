@@ -594,6 +594,27 @@ describe('seo-completion-gate', () => {
     });
     expect(requestClause.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
 
+    const spacedDest = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Swarmers. [Get a Termite Estimate]( /contact/ ) today.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(spacedDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    const doubleBackslash = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Ants. \\\\![Get My Free Pest Control Estimate](/contact/)' }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(doubleBackslash.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+
+    const informational = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: `${baseDraft().body}\n\nRead [our estimate process](/blog/how-estimates-work/) first.` }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(informational.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     const context = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Bites at dusk. [Get a Mosquito Estimate for Your Lawn](/contact/) today.' }),
       brief: baseBrief({ service: 'mosquito-control' }),

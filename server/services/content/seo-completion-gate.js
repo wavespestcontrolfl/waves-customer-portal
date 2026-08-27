@@ -362,7 +362,22 @@ function ctaBriefService(rawService) {
 
 // All conversion-path links in the body, with anchor + estimate/quote flag
 // + the services the anchor names.
-const CONVERSION_PATH_RE = /^\/(?:contact|[^\s)"']*quote|[^\s)"']*estimate|pest-control-calculator)/i;
+// Canonical conversion ENDPOINTS only — the SERVICE_CONVERSION_LINK routes
+// (/pest-control-calculator/, /contact/) plus the quote/estimate entry
+// pages the writer is steered to (/pest-control-quote/, the city
+// /pest-control-quote-{city}-fl/ pages, /quote/, /estimate/). An
+// informational path that merely CONTAINS "estimate" (/blog/how-estimates-
+// work/) is not a conversion link.
+function conversionEndpoints() {
+  const { SERVICE_CONVERSION_LINK } = require('./content-brief-builder')._internals;
+  return new Set([...Object.values(SERVICE_CONVERSION_LINK || {}), '/contact/', '/pest-control-calculator/', '/pest-control-quote/', '/quote/', '/estimate/']);
+}
+function isConversionPath(href) {
+  const path = String(href || '').replace(/[?#].*$/, '').replace(/\/?$/, '/').toLowerCase();
+  if (!path.startsWith('/')) return false;
+  if (conversionEndpoints().has(path)) return true;
+  return /^\/pest-control-quote-[a-z0-9-]+-fl\/$/.test(path);
+}
 
 // Markdown links AND literal HTML anchors (the passive-HTML allowlist admits
 // <a>, so a forbidden CTA could otherwise hide in one).
@@ -380,7 +395,10 @@ function extractLinks(body) {
   // `(?<!!)` — a Markdown image `![alt](src)` is not a link.
   // (?<!(?<!\\)!) — an UNESCAPED "!" means image syntax; "\\![link]" is a
   // literal "!" followed by a real link.
-  const md = /(?<!(?<!\\)!)\[([^\]]+)\]\(([^)\s]+)[^)]*\)/g;
+  // Escape parity: "!" preceded by an EVEN run of backslashes (incl. zero)
+  // is a live image marker; an odd run escapes it. Whitespace is allowed
+  // inside the parentheses ("( /contact/ )").
+  const md = /(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\]\(\s*<?([^)\s>]+)>?[^)]*\)/g;
   let m;
   // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
   // [ref]: </contact/> — strip the brackets; and an absolute first-party
@@ -403,7 +421,7 @@ function extractLinks(body) {
   const def = /^\s{0,3}\[([^\]]+)\]:\s*(\S+)/gm;
   while ((m = def.exec(s)) !== null) defs.set(label(m[1]), dest(m[2]));
   if (defs.size) {
-    const ref = /(?<!(?<!\\)!)\[([^\]]+)\]\[([^\]]*)\]/g;
+    const ref = /(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\]\[([^\]]*)\]/g;
     while ((m = ref.exec(s)) !== null) {
       const href = defs.get(label(m[2] || m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -412,7 +430,7 @@ function extractLinks(body) {
     // that is not itself an inline/full reference or the definition line.
     // (?<![\]!]) — skip the label half of a full reference (`[text][label]`)
     // and image syntax; (?![\[(:]) — skip inline/full references and definitions.
-    const shortcut = /(?<!\])(?<!(?<!\\)!)\[([^\]]+)\](?![\[(:])/g;
+    const shortcut = /(?<!\])(?<!(?<!\\)(?:\\\\)*!)\[([^\]]+)\](?![\[(:])/g;
     while ((m = shortcut.exec(s)) !== null) {
       const href = defs.get(label(m[1]));
       if (href) links.push({ anchor: m[1], href });
@@ -441,7 +459,7 @@ function plainAnchor(raw) {
 function conversionCtaLinks(body) {
   const out = [];
   for (const link of extractLinks(body)) {
-    if (!CONVERSION_PATH_RE.test(link.href)) continue;
+    if (!isConversionPath(link.href)) continue;
     // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.

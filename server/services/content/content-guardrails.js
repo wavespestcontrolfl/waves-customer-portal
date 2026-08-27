@@ -1832,32 +1832,36 @@ function tenureClaimFinding(text) {
 // so line-based scanners stay aligned. Single source for the table scanner
 // below AND the completion gate's CTA-link extraction.
 function blankNonRenderedMarkdown(text) {
-  // Raw <pre> blocks are preformatted text — masked like fenced code.
-  const raw = String(text || '')
-    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''))
-    .split('\n');
+  // Pass 1 — comments and <pre> (whole-text, newline-preserving).
+  const afterComments = String(text || '')
+    .replace(/<!--[\s\S]*?-->|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre>/gi, (c) => c.replace(/[^\n]/g, ''));
+  // Pass 2 — fenced code, per line (a backtick fence's info string may not
+  // contain a backtick, so this runs BEFORE code-span masking).
   let fence = null; // { ch, len }
-  let listContext = false;
-  let listContentIndent = 0;
-  let prevBlank = true;
-  return raw.map((l) => {
-    // A blockquote marker counts only after 0–3 leading spaces — 4+ spaces
-    // before ">" is an indented code block (CommonMark), handled below.
-    // Only the marker plus ONE optional space is prefix — remaining spaces
-    // are content ("> " + 4 spaces = indented code inside the quote).
-    // Nested markers may carry up to three spaces before the inner ">"
-    // ("> " + "  > "); the LAST marker keeps only one optional space so
-    // remaining indentation stays content.
+  const fenced = afterComments.split('\n').map((l) => {
     const stripped = l.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/, '');
     if (fence) {
       const close = stripped.match(/^ {0,3}(`{3,}|~{3,})\s*$/);
       if (close && close[1][0] === fence.ch && close[1].length >= fence.len) fence = null;
       return '';
     }
+    if (/^(?: {4}|\t)/.test(stripped)) return l; // indented lines resolved in pass 4
     const open = stripped.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
-    // A backtick fence's info string may not contain a backtick (CommonMark)
-    // — such a line is inline code, not a fence opener.
     if (open && !(open[1][0] === '`' && open[2].includes('`'))) { fence = { ch: open[1][0], len: open[1].length }; return ''; }
+    return l;
+  }).join('\n');
+  // Pass 3 — code spans, which may cross line endings (1–2 backticks;
+  // 3+ were fence candidates above). Length-preserving mask.
+  const spanned = fenced.replace(/(?<!`)(`{1,2})(?!`)(?:[^`]|`(?!\1))*?\1(?!`)/g, (c) => c.replace(/[^\n]/g, ' '));
+  // Pass 4 — blockquote prefixes, indented code (list-aware), per line.
+  let listContext = false;
+  let listContentIndent = 0;
+  let prevBlank = true;
+  return spanned.split('\n').map((l) => {
+    // Nested markers may carry up to three spaces before the inner ">"
+    // ("> " + "  > "); the LAST marker keeps only one optional space so
+    // remaining indentation stays content.
+    const stripped = l.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)+/, '');
     const blank = stripped.trim() === '';
     const indented = /^(?: {4}|\t)/.test(stripped);
     const listItem = stripped.match(/^( {0,3}(?:[-*+]|\d+[.)])\s+)/);
@@ -1869,11 +1873,18 @@ function blankNonRenderedMarkdown(text) {
       const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
       if (indent >= listContentIndent + 4) return '';
     }
-    // Inline code spans render literally — mask them (length-preserving).
-    return stripped.replace(/^\s+/, '').replace(/(`+)[^`\n]*?\1/g, (m) => ' '.repeat(m.length));
+    return stripped.replace(/^\s+/, '');
   }).join('\n');
 }
 
+// GFM: a table is recognized only when header and delimiter rows have the
+// same number of cells.
+function cellCount(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').length;
+}
+
+// GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
+// (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
 function isDelimiterRow(line) {
   const cells = line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
   return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
@@ -1892,7 +1903,7 @@ function extractRawMarkdownTables(text) {
   for (let i = 1; i < lines.length; i += 1) {
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
-    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]);
+    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && cellCount(lines[i]) === cellCount(lines[i - 1]);
     // Header = a pipe row with at least one non-empty cell — icon-only
     // headings ("| ✅ | ❌ |") are still headings.
     const headerAbove = lines[i - 1].includes('|') && /[^\s|]/.test(lines[i - 1]);
