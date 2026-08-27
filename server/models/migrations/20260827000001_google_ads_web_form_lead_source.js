@@ -16,11 +16,12 @@
 // Backfill: NULL-source leads that the live path would classify google_ads.
 // Evidence, in the order the live code produces it (any one suffices):
 //   1. a Google click id on the lead (gclid/wbraid/gbraid — auto-tagging);
-//   2. the lead's OWN recorded classification, extracted_data.attribution
-//      .leadSource.source = 'google_ads' (covers manually tagged
-//      utm_source=google&utm_medium=cpc with no click id — note: lead-response
-//      triage REPLACES extracted_data on non-call leads, so this block is
-//      often gone; the next two signals cover those);
+//   2. the lead's OWN recorded classification — the webhook's
+//      extracted_data.attribution.leadSource.source = 'google_ads', or the
+//      quote wizard's top-level extracted_data.utm source=google/medium=cpc
+//      (covers manually tagged utm_source=google&utm_medium=cpc with no click
+//      id — note: lead-response triage REPLACES extracted_data on non-call
+//      leads, so these blocks are often gone; the next signals cover those);
 //   3. the webhook's funnel row: ad_service_attribution.lead_source =
 //      'google_ads' keyed by lead_id;
 //   4. ONLY when the lead carries no attribution of its own — neither an
@@ -84,7 +85,11 @@ exports.up = async function up(knex) {
       qb.whereRaw("NULLIF(BTRIM(gclid), '') IS NOT NULL")
         .orWhereRaw("NULLIF(BTRIM(wbraid), '') IS NOT NULL")
         .orWhereRaw("NULLIF(BTRIM(gbraid), '') IS NOT NULL")
-        .orWhereRaw("extracted_data->'attribution'->'leadSource'->>'source' = 'google_ads'");
+        .orWhereRaw("extracted_data->'attribution'->'leadSource'->>'source' = 'google_ads'")
+        // quote-wizard leads (public-property-lookup / public-quote) persist
+        // the raw UTM at top-level extracted_data.utm — a google/cpc lead
+        // abandoned before any customer or funnel row exists has only this.
+        .orWhereRaw("LOWER(COALESCE(extracted_data->'utm'->>'source', '')) = 'google' AND LOWER(COALESCE(extracted_data->'utm'->>'medium', '')) = 'cpc'");
       if (hasFunnelLeadId) {
         qb.orWhereExists(knex('ad_service_attribution as a')
           .whereRaw('a.lead_id = leads.id')

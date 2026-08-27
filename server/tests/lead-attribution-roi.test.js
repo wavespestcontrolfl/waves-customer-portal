@@ -256,12 +256,42 @@ describe('calculateSourceROI — window- and conversion-bounded revenue', () => 
   });
 });
 
-describe('allocatePooledChannelCost — Google Ads ad spend is one budget across its rows', () => {
-  // totalCost = row-specific costs + adSpend; only adSpend is pooled.
-  const row = (name, totalLeads, conversions, totalRevenue, adSpend, ownCost = 0, source_type = 'google_ads') => {
-    const totalCost = ownCost + adSpend;
+describe('calculateSourceROI — channelSpend (the poolable share of cost)', () => {
+  const start = new Date('2026-06-01T00:00:00Z');
+  const end = new Date('2026-06-30T23:59:59Z');
+  beforeEach(() => { mockDbConfig = {}; mockWhereCalls = []; });
+
+  test('default-category monthly_fee and ad_spend pool; setup/other do not', async () => {
+    mockDbConfig = {
+      lead_sources: { id: 'g', name: 'Google Ads — Pest (call-extension)', source_type: 'google_ads', monthly_cost: 0 },
+      leads: [], lead_source_costs: [
+        { cost_amount: 500, cost_category: 'monthly_fee' }, // Log Cost UI default
+        { cost_amount: 250, cost_category: 'ad_spend' },
+        { cost_amount: 40, cost_category: 'setup' },
+      ], invoices: [], service_records: [],
+    };
+    const r = await calculateSourceROI('g', start, end);
+    expect(r.totalCost).toBe(790);
+    expect(r.channelSpend).toBe(750);
+  });
+
+  test('the monthly_cost fallback is channel spend', async () => {
+    mockDbConfig = {
+      lead_sources: { id: 'g', name: 'Google Ads — Pest (call-extension)', source_type: 'google_ads', monthly_cost: 300 },
+      leads: [], lead_source_costs: [], invoices: [], service_records: [],
+    };
+    const r = await calculateSourceROI('g', start, end);
+    expect(r.totalCost).toBe(300);
+    expect(r.channelSpend).toBe(300);
+  });
+});
+
+describe('allocatePooledChannelCost — Google Ads channel spend is one budget across its rows', () => {
+  // totalCost = row-specific (one-off) costs + channelSpend; only channelSpend is pooled.
+  const row = (name, totalLeads, conversions, totalRevenue, channelSpend, ownCost = 0, source_type = 'google_ads') => {
+    const totalCost = ownCost + channelSpend;
     return {
-      source: { name, source_type }, totalLeads, conversions, totalRevenue, totalCost, adSpend,
+      source: { name, source_type }, totalLeads, conversions, totalRevenue, totalCost, channelSpend,
       costPerLead: totalLeads ? totalCost / totalLeads : 0,
       costPerAcquisition: conversions ? totalCost / conversions : 0,
       roi: totalCost > 0 ? ((totalRevenue - totalCost) / totalCost) * 100 : (totalRevenue > 0 ? 9999 : 0),
@@ -269,28 +299,28 @@ describe('allocatePooledChannelCost — Google Ads ad spend is one budget across
   };
 
   test('re-allocates ad spend across google_ads rows by lead share; row-specific costs stay put', () => {
-    const call = row('Google Ads — Pest (call-extension)', 2, 1, 400, 900, 50); // $50 monthly_fee is the call row's own
+    const call = row('Google Ads — Pest (call-extension)', 2, 1, 400, 900, 50); // $50 one-off 'setup' is the call row's own
     const form = row('Google Ads — Web Form', 6, 3, 1200, 0);
     const other = row('Main Site (wavespestcontrol.com)', 10, 2, 800, 0, 0, 'main_site');
     const out = allocatePooledChannelCost([call, form, other]);
     expect(out).toHaveLength(3);
     // 900 pooled ad spend, 8 leads → 112.5/lead: call 225 (+50 own), form 675
-    expect(call.adSpend).toBe(225);
+    expect(call.channelSpend).toBe(225);
     expect(call.totalCost).toBe(275);
-    expect(form.adSpend).toBe(675);
+    expect(form.channelSpend).toBe(675);
     expect(form.totalCost).toBe(675);
-    expect(call.adSpend + form.adSpend).toBe(900);
+    expect(call.channelSpend + form.channelSpend).toBe(900);
     expect(form.roi).toBe(Math.round(((1200 - 675) / 675) * 1000) / 10);
     expect(form.costPerLead).toBe(112.5);
     expect(form.costPerAcquisition).toBe(225);
-    expect(call.pooledCostAllocation).toEqual({ pooledAdSpend: 900, share: 0.25 });
+    expect(call.pooledCostAllocation).toEqual({ pooledChannelSpend: 900, share: 0.25 });
     // Non-pooled source types untouched.
     expect(other.totalCost).toBe(0);
     expect(other.pooledCostAllocation).toBeUndefined();
   });
 
-  test('non-ad-spend cost on a google_ads row is NOT pooled', () => {
-    const call = row('Google Ads — Pest (call-extension)', 1, 0, 0, 0, 120); // monthly_fee only
+  test('one-off row-specific cost on a google_ads row is NOT pooled', () => {
+    const call = row('Google Ads — Pest (call-extension)', 1, 0, 0, 0, 120); // 'setup' only
     const form = row('Google Ads — Web Form', 3, 1, 500, 0);
     allocatePooledChannelCost([call, form]);
     expect(call.totalCost).toBe(120);
