@@ -3,7 +3,7 @@ const { deriveIrrigationInchesPerWeek } = require('@waves/irrigation-runtime');
 const db = require('../../models/db');
 const logger = require('../logger');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
-const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod } = require('./service-line-configs');
+const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -3764,14 +3764,33 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
         }
         : {}),
     });
+  // Spray evidence at read time: a spray-class application row, or a
+  // treatment-applied protocol action scope persisted at completion
+  // (products are optional on inspection/bait lanes — codex inline r4).
+  const readTimeSprayEvidence = applications.some((app) => isSprayApplicationMethod(app.method))
+    || parseJsonArray(parseJsonObject(service.structured_notes).protocolActionScopesCompleted)
+      .some((s) => s && s.treatmentApplied === true);
+  const storedAdvisory = parseJsonObject(service.advisory);
+  // Legacy no-spray termite records (bait/monitoring/inspection completed
+  // before the 0/0 rule) persisted the old 30/120 line defaults, and the
+  // stored advisory wins the spread below — so permanent historical
+  // reports would keep a countdown for a visit that applied nothing.
+  // Zero each side that was NOT explicitly adjusted by a person (per-side
+  // reentry_adjusted marker) when the identity is no-spray and nothing
+  // proves treatment (codex inline r4).
+  if (config.id === 'termite' && !readTimeSprayEvidence && isTermiteNoReentryServiceType(service.service_type)) {
+    const adjusted = storedAdvisory.reentry_adjusted && typeof storedAdvisory.reentry_adjusted === 'object'
+      ? storedAdvisory.reentry_adjusted
+      : {};
+    if (!adjusted.exterior && storedAdvisory.exterior_reentry_min != null) storedAdvisory.exterior_reentry_min = 0;
+    if (!adjusted.interior && storedAdvisory.interior_reentry_min != null) storedAdvisory.interior_reentry_min = 0;
+  }
   const advisory = normalizeAdvisoryForTreatmentScope({
     // Type-aware defaults (cockroach-family visits default to a 120-min
     // interior window — owner rule 2026-08-11); the STORED advisory still
     // wins whenever the completion persisted one.
-    ...getAdvisoryDefaults(service.service_type, {
-      applicationsRecorded: applications.some((app) => isSprayApplicationMethod(app.method)),
-    }),
-    ...parseJsonObject(service.advisory),
+    ...getAdvisoryDefaults(service.service_type, { applicationsRecorded: readTimeSprayEvidence }),
+    ...storedAdvisory,
     ...(service.irrigation_recommendation ? { irrigation: service.irrigation_recommendation } : {}),
   }, {
     service,
@@ -4195,6 +4214,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     && process.env.GATE_RODENT_REPORT_REFRESH === 'true';
 
   let nextAppointment = null;
+  let sameLineNextAppointment = null;
   try {
     const reportTodayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
     // Same disclosable statuses as findReportFollowupAppointment: pending /
@@ -4277,19 +4297,24 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // report reads unambiguously ("Quarterly Pest Control · Wed, Nov 18").
     // Same disclosable-status pool; the strict same-line pick above still
     // wins whenever it exists.
-    const nextAnyRow = nextApptRow
-      || (Array.isArray(upcomingRows) ? upcomingRows[0] : null)
-      || null;
-    if (nextAnyRow && nextAnyRow.scheduled_date) {
-      const rawDate = nextAnyRow.scheduled_date;
-      nextAppointment = {
-        serviceType: nextAnyRow.service_type || null,
+    const toNextAppointment = (row) => {
+      if (!row || !row.scheduled_date) return null;
+      const rawDate = row.scheduled_date;
+      return {
+        serviceType: row.service_type || null,
         scheduledDate: rawDate instanceof Date ? rawDate.toISOString().slice(0, 10) : String(rawDate).slice(0, 10),
         // window_start only — the customer-facing arrival window is always
         // window_start + 2 hours (window_end is the internal job block).
-        windowStart: nextAnyRow.window_start || null,
+        windowStart: row.window_start || null,
       };
-    }
+    };
+    // The narrative builders below were written under the same-line
+    // invariant (they keep only the date/window), so they receive the
+    // strict same-line pick ONLY; the hero cell gets the cross-line
+    // fallback, whose label carries the service name (codex inline r4).
+    sameLineNextAppointment = toNextAppointment(nextApptRow);
+    nextAppointment = sameLineNextAppointment
+      || toNextAppointment(Array.isArray(upcomingRows) ? upcomingRows[0] : null);
   } catch { /* best-effort */ }
 
   // Termite warranty line (owner ask 2026-08-27): a termite-line report
@@ -4299,20 +4324,23 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
   // won't render, and LIVE VIEWS ONLY — a renewal date frozen into a
   // cached PDF goes stale across a renewal (same rule as nextAppointment).
   // Fail-soft like the portal endpoint: any error just omits the line.
-  let termiteBond = null;
+  let termiteBonds = null;
   if (serviceLine === 'termite' && opts.mode === 'live') {
     try {
       // Shared with /api/property/termite-bond so the hero cell and the
-      // My Plan card it links to can never disagree (codex inline).
+      // My Plan card it links to can never disagree (codex inline). EVERY
+      // active bond is carried — the My Plan card renders each one, and
+      // collapsing to the farthest renewal would misrepresent the warranty
+      // this report belongs to (codex inline r4).
       const { activeTermiteBondsForCustomer } = require('../termite-bonds');
-      const [bond] = await activeTermiteBondsForCustomer(service.customer_id, knex);
-      if (bond) {
-        termiteBond = {
+      const bonds = await activeTermiteBondsForCustomer(service.customer_id, knex);
+      if (bonds.length) {
+        termiteBonds = bonds.map((bond) => ({
           serviceType: bond.serviceType || null,
           termYears: bond.termYears,
           startedAt: bond.startedAt,
           renewsAt: bond.renewsAt,
-        };
+        }));
       }
     } catch { /* best-effort */ }
   }
@@ -4486,7 +4514,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       areasServiced: areaLabels,
       pestPressure,
       findings,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => structured.customerRecap || '');
   }
 
@@ -4529,7 +4557,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       stationCountDisputed,
       applications,
       photos: photoPayload,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => null);
     if (narrated && narrated !== visitSummary) {
       visitSummary = narrated;
@@ -4590,7 +4618,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
       stationCountDisputed,
       applications,
       photos: photoPayload,
-      nextAppointment,
+      nextAppointment: sameLineNextAppointment,
     }).catch(() => null);
     if (narrated && narrated !== visitSummary) {
       visitSummary = narrated;
@@ -4762,7 +4790,7 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
     // the gate dark keeps today's static pins bit-for-bit.
     termiteStationPins: termiteStationPinsFlag({ stationMap, mode: opts.mode }),
     nextAppointment,
-    termiteBond,
+    termiteBonds,
     relatedDocuments,
     visitTimeline,
     serviceLocations,

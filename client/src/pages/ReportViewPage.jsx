@@ -51,6 +51,7 @@ import ServiceReportDocument from './ServiceReportDocument';
 import { useWavesShell } from '../components/brand/WavesShellContext';
 import { useGlassSurface } from '../glass/glass-engine';
 import PestPressureCard from '../components/PestPressureCard';
+import { etDateString } from '../lib/timezone';
 import ActivityCard from '../components/ActivityCard';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
@@ -492,12 +493,17 @@ function formatNextAppointmentLabel(nextAppointment) {
   return name ? `${name} · ${when}` : when;
 }
 
-// "Renews Mar 14, 2027" for the hero's termite-warranty cell. Payload field
-// is live-view only and gated with the portal bond card (owner 2026-08-27).
-export function formatTermiteBondRenewalLabel(termiteBond) {
+// "Renews Mar 14, 2027" — or "Renewal due Mar 14, 2026" once that ET day
+// has passed, the same distinction the portal My Plan bond card draws
+// (bond rows are not auto-retired after their date — codex inline r4).
+// Payload field is live-view only and gated with the portal bond card
+// (owner 2026-08-27). `todayEt` is injectable for tests.
+export function formatTermiteBondRenewalLabel(termiteBond, todayEt = etDateString()) {
   const date = calendarDateFromDateOnlyValue(termiteBond?.renewsAt);
   if (!date) return null;
-  return `Renews ${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })}`;
+  const pretty = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+  const renewsIso = String(termiteBond.renewsAt).slice(0, 10);
+  return renewsIso < String(todayEt || '') ? `Renewal due ${pretty}` : `Renews ${pretty}`;
 }
 
 export function serviceReportDateTimeLabel(data = {}) {
@@ -2245,11 +2251,17 @@ function ServiceStatusCard({ data, mode, resultOverride = null }) {
             // Termite warranty cell (owner 2026-08-27): the renewal date plus
             // a deep link to the portal's My Plan bond card. The payload field
             // only arrives on live termite-line views with the bond gate on.
-            const bondLabel = formatTermiteBondRenewalLabel(data.termiteBond);
-            return bondLabel ? (
+            const bondLines = (data.termiteBonds || [])
+              .map((bond) => ({ bond, label: formatTermiteBondRenewalLabel(bond) }))
+              .filter((entry) => entry.label);
+            return bondLines.length ? (
               <div className="sr-cell">
-                <div className="sr-cell-label">Termite warranty</div>
-                <div className="sr-cell-value">{bondLabel}</div>
+                <div className="sr-cell-label">{bondLines.length > 1 ? 'Termite warranties' : 'Termite warranty'}</div>
+                {bondLines.map(({ bond, label }, i) => (
+                  <div className="sr-cell-value" key={`${i}-${bond.renewsAt}`}>
+                    {bondLines.length > 1 && bond.serviceType ? `${bond.serviceType} · ` : ''}{label}
+                  </div>
+                ))}
                 <div className="sr-cell-note">
                   <a href="/?tab=plan">View your warranty in the portal</a>
                 </div>

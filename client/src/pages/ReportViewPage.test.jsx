@@ -61,7 +61,13 @@ describe('ReportViewPage date formatting', () => {
 
 describe('ReportViewPage termite warranty cell label', () => {
   it('formats the renewal date for the hero cell', () => {
-    expect(formatTermiteBondRenewalLabel({ renewsAt: '2027-03-14' })).toBe('Renews Mar 14, 2027');
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2027-03-14' }, '2026-08-27')).toBe('Renews Mar 14, 2027');
+  });
+
+  it('labels a past renewal date as due, like the portal bond card', () => {
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2026-03-14' }, '2026-08-27')).toBe('Renewal due Mar 14, 2026');
+    // The renewal day itself still reads as upcoming.
+    expect(formatTermiteBondRenewalLabel({ renewsAt: '2026-08-27' }, '2026-08-27')).toBe('Renews Aug 27, 2026');
   });
 
   it('returns null for absent or malformed bond data (cell does not render)', () => {

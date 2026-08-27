@@ -320,6 +320,7 @@ module.exports = {
   isRodentAdjacentServiceType,
   isCockroachServiceType,
   isSprayApplicationMethod,
+  isTermiteNoReentryServiceType,
   getAdvisoryDefaults,
   detectServiceLine,
   getServiceLineConfig,

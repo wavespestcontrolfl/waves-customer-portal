@@ -78,11 +78,9 @@ describe('termiteBond on the report payload', () => {
       service_line: 'termite',
       service_type: 'Termite Bait Station System Service',
     }, 'token-bond', knex, { mode: 'live' });
-    expect(data.termiteBond).toMatchObject({
-      termYears: 1,
-      startedAt: '2026-03-14',
-      renewsAt: '2027-03-14',
-    });
+    expect(data.termiteBonds).toEqual([
+      expect.objectContaining({ termYears: 1, startedAt: '2026-03-14', renewsAt: '2027-03-14' }),
+    ]);
   });
 
   test('gate off → no bond even with an active row', async () => {
@@ -92,7 +90,7 @@ describe('termiteBond on the report payload', () => {
       service_line: 'termite',
       service_type: 'Termite Bait Station System Service',
     }, 'token-bond', knex, { mode: 'live' });
-    expect(data.termiteBond).toBeNull();
+    expect(data.termiteBonds).toBeNull();
   });
 
   test('non-live mode → no bond (renewal dates must not freeze into PDFs)', async () => {
@@ -103,7 +101,7 @@ describe('termiteBond on the report payload', () => {
       service_line: 'termite',
       service_type: 'Termite Bait Station System Service',
     }, 'token-bond', knex, { mode: 'pdf' });
-    expect(data.termiteBond).toBeNull();
+    expect(data.termiteBonds).toBeNull();
   });
 
   test('non-termite line → no bond', async () => {
@@ -114,7 +112,59 @@ describe('termiteBond on the report payload', () => {
       service_line: 'pest',
       service_type: 'Quarterly Pest Control Service',
     }, 'token-bond', knex, { mode: 'live' });
-    expect(data.termiteBond).toBeNull();
+    expect(data.termiteBonds).toBeNull();
+  });
+
+  test('every active bond is carried, not just the farthest renewal', async () => {
+    process.env.GATE_PORTAL_TERMITE_BOND = 'true';
+    const knex = fixtureKnex({ ...EMPTY_TABLES, termite_bonds: [
+      { ...bondRow, service_type: 'Termite Bond (5 Year)', term_years: 5, renews_at: '2031-03-14' },
+      bondRow,
+    ] });
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+    }, 'token-bond', knex, { mode: 'live' });
+    expect(data.termiteBonds).toHaveLength(2);
+    expect(data.termiteBonds.map((b) => b.renewsAt)).toEqual(['2031-03-14', '2027-03-14']);
+  });
+});
+
+describe('legacy no-spray termite advisories', () => {
+  test('a stored 30/120 advisory on a bait visit with no spray evidence reads back as 0/0', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 120 }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory).toMatchObject({ exterior_reentry_min: 0, interior_reentry_min: 0 });
+  });
+
+  test('a technician-adjusted side is preserved', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Bait Station System Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 45, interior_reentry_min: 120, reentry_adjusted: { exterior: true } }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory.exterior_reentry_min).toBe(45);
+    expect(data.advisory.interior_reentry_min).toBe(0);
+  });
+
+  test('a treatment-applied protocol action keeps the stored guidance', async () => {
+    const knex = fixtureKnex(EMPTY_TABLES);
+    const data = await buildReportV1Data({
+      ...BASE_SERVICE,
+      service_line: 'termite',
+      service_type: 'Termite Inspection Service',
+      advisory: JSON.stringify({ exterior_reentry_min: 30, interior_reentry_min: 120 }),
+      structured_notes: JSON.stringify({ protocolActionScopesCompleted: [{ label: 'Spot-treated a mud tube', scope: 'exterior', treatmentApplied: true }] }),
+    }, 'token-legacy', knex, { mode: 'live' });
+    expect(data.advisory.exterior_reentry_min).toBe(30);
   });
 });
 

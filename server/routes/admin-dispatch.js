@@ -7014,11 +7014,15 @@ router.post('/:serviceId/complete', async (req, res, next) => {
             // Evidence = a label re-entry interval on any applied product, or
             // an explicitly spray-class application method — bait cartridges
             // and station checks are not evidence (uncapped codex P1).
+            // A treatment-applied protocol action is evidence too: products are
+            // optional on inspection/bait lanes, so an interior/exterior action
+            // marked treatmentApplied must keep the guidance (codex inline r4).
             const lineAdvisoryDefaults = getAdvisoryDefaults(svc.service_type, {
               applicationsRecorded: productReentryMin != null
                 || (Array.isArray(products) && products.some((p) => isSprayApplicationMethod(
                   p?.applicationMethod || p?.method || p?.application_method,
-                ))),
+                )))
+                || reportProtocolActionScopes.some((s) => s.treatmentApplied),
             });
             let advisoryDefaultsForVisit = productReentryMin != null
               ? {
