@@ -1621,6 +1621,19 @@ const AppointmentReminders = {
   // booking time — a placeholder stamped with the heal/cron time would
   // read as a late booking and falsely close the 72h reminder.
   async insertPreClosedPlaceholderRowInTx(trx, { scheduledServiceId, customerId, apptTime, serviceLabel, source, createdAt }) {
+    // Same serialization + per-service idempotency as registerVisitReminderInTx
+    // (codex #3504 r26): the self-heal can select a just-committed windowless
+    // follow-up while the booking response path registers the same row, and
+    // scheduled_service_id is not unique — two placeholders would both re-arm
+    // when a real window is set and double-send. The same-SLOT dedup stays
+    // deliberately skipped (the placeholder never owns the slot).
+    await trx.raw('select pg_advisory_xact_lock(hashtext(?))', [
+      `appointment-reminder:${customerId}:${apptTime.toISOString()}`,
+    ]);
+    const existing = await trx('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId })
+      .first('id');
+    if (existing) return existing;
     const windowsClosedAt = new Date();
     const [record] = await trx('appointment_reminders').insert({
       scheduled_service_id: scheduledServiceId,

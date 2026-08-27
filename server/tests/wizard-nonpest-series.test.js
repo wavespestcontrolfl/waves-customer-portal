@@ -744,13 +744,27 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
   });
 
+  test('r26: reconciled marker (not billing mutation) leaves the claim; unconfirmed price leaves billing untouched; sweep defers to in-flight completions; placeholder insert is idempotent', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/\.whereNull\('ss\.wizard_recovery_reconciled_at'\)/);
+    expect(recoverySrc).toMatch(/const BILLING_UNTOUCHED_PATCH = \(trx, noteTail\) => \(\{\s*\n\s*notes: trx\.raw/);
+    expect(recoverySrc).not.toMatch(/BILLING_UNTOUCHED_PATCH = \(trx, noteTail\) => \(\{[\s\S]{0,200}payment_method_preference/);
+    expect((recoverySrc.match(/wizard_recovery_reconciled_at: trx\.fn\.now\(\),/g) || []).length).toBe(3);
+    expect(recoverySrc).toMatch(/if \(!hasGenerationColumn \|\| !hasReconciledColumn\) \{[\s\S]{0,400}return \{ examined: 0, stripped: 0, skipped: 'schema' \};/);
+    expect(recoverySrc).toMatch(/\.whereIn\('status', \['pending', 'side_effects_pending', 'side_effects_running'\]\)\s*\n\s*\.first\('id'\);\s*\n\s*if \(inFlightCompletion\) return false;/);
+    const migSrc = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20260827000001_source_estimate_generation.js'), 'utf8');
+    expect(migSrc).toMatch(/t\.timestamp\('wizard_recovery_reconciled_at', \{ useTz: true \}\)\.nullable\(\);/);
+    const reminders = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
+    expect(reminders).toMatch(/async insertPreClosedPlaceholderRowInTx\([\s\S]{0,900}pg_advisory_xact_lock\(hashtext\(\?\)\)', \[\s*\n\s*`appointment-reminder:\$\{customerId\}:\$\{apptTime\.toISOString\(\)\}`,[\s\S]{0,300}\.where\(\{ scheduled_service_id: scheduledServiceId \}\)\s*\n\s*\.first\('id'\);\s*\n\s*if \(existing\) return existing;/);
+  });
+
   test('r25: sweep preserves staff billing edits; in-progress final visits stay active; activation binds to the parent generation', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/\.where\('ss\.create_invoice_on_complete', true\)/);
     expect(recoverySrc).toMatch(/\|\| fresh\.create_invoice_on_complete !== true/);
     expect(recoverySrc).toMatch(/const mintedPriceConfirmed = \(\(\) => \{\s*\n\s*if \(!draftRepresentsParent\) return false;/);
-    expect(recoverySrc).toMatch(/in_flight: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
-    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
+    expect(recoverySrc).toMatch(/in_flight: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : BILLING_UNTOUCHED_PATCH\)\(/);
+    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : BILLING_UNTOUCHED_PATCH\)\(/);
     const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
     expect(seeder).toMatch(/\.whereIn\('status', \['pending', 'confirmed', 'rescheduled', 'en_route', 'on_site'\]\)/);
     expect(seeder).toMatch(/\.orWhere\('status', 'rescheduled'\)\s*\n\s*\.orWhere\('status', 'en_route'\)\s*\n\s*\.orWhere\('status', 'on_site'\);/);
@@ -862,7 +876,7 @@ describe('booking route wiring (source contracts)', () => {
     expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'inv', status: 'refunded' }]), 'p1', 'completed')).toBe('completed_refunded');
     expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'a', status: 'refunded' }, { id: 'b', status: 'paid' }]), 'p1', 'completed')).toBe('completed_billed');
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
-    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : KEEP_PRICE_PATCH\)\(/);
+    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: \(mintedPriceConfirmed \? STRIP_PATCH : BILLING_UNTOUCHED_PATCH\)\(/);
     expect(recoverySrc).toMatch(/bill the FULL plan/);
     expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*retireHandoff: true,\s*\n\s*patch: KEEP_PRICE_PATCH\(/);
   });

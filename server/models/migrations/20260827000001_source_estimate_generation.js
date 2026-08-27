@@ -17,6 +17,14 @@
  * parent's stamped generation" is immutable, parent-owned proof that the
  * live draft is the exact generation this visit was booked from. NULL
  * (pre-column rows, non-wizard pricing) fails closed: never retire.
+ *
+ * wizard_recovery_reconciled_at (codex #3504 r26): the stranded-activation
+ * sweep's durable "I already reconciled this row" marker. Reconciling used
+ * to take the row out of the sweep's claim by clearing its pay-at-visit
+ * billing fields — which also erased a staff-approved reprice's intended
+ * auto-invoice. With the marker, a reconcile that cannot prove the price
+ * is the activation-minted amount leaves billing UNTOUCHED (office
+ * verifies) and still leaves the claim.
  */
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('scheduled_services'))) return;
@@ -24,6 +32,11 @@ exports.up = async function up(knex) {
   await knex.schema.alterTable('scheduled_services', (t) => {
     t.timestamp('source_estimate_generation', { useTz: true }).nullable();
   });
+  if (!(await knex.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at'))) {
+    await knex.schema.alterTable('scheduled_services', (t) => {
+      t.timestamp('wizard_recovery_reconciled_at', { useTz: true }).nullable();
+    });
+  }
 };
 
 exports.down = async function down(knex) {
@@ -32,4 +45,9 @@ exports.down = async function down(knex) {
   await knex.schema.alterTable('scheduled_services', (t) => {
     t.dropColumn('source_estimate_generation');
   });
+  if (await knex.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at')) {
+    await knex.schema.alterTable('scheduled_services', (t) => {
+      t.dropColumn('wizard_recovery_reconciled_at');
+    });
+  }
 };

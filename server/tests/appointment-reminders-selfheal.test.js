@@ -199,8 +199,12 @@ describe('selfHealMissingReminderRows', () => {
     const insertRow = {
       insert: jest.fn().mockReturnThis(),
       returning: jest.fn().mockResolvedValue([{ id: 'rem-10' }]),
+      // r26: per-service existence recheck under the registration lock.
+      where: jest.fn().mockReturnThis(),
+      first: jest.fn().mockResolvedValue(null),
     };
     const trx = jest.fn(() => insertRow);
+    trx.raw = jest.fn().mockResolvedValue();
     await AppointmentReminders.insertPreClosedPlaceholderRowInTx(trx, {
       scheduledServiceId: 'svc-10',
       customerId: 'cust-10',

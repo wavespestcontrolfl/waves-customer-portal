@@ -43,6 +43,8 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     // staff edit that clears the invoice flag takes the row out of the
     // claim rather than getting overwritten by the reconcile.
     .where('ss.create_invoice_on_complete', true)
+    // Reconciled rows leave the claim by the durable marker (r26).
+    .whereNull('ss.wizard_recovery_reconciled_at')
     .where((qb) => qb.where('ss.is_recurring', false).orWhereNull('ss.is_recurring'))
     .whereNull('ss.recurring_parent_id')
     // EVERY non-cancelled status (codex #3504 r13): a stranded parent can
@@ -125,26 +127,43 @@ async function classifyStrandedDisposition(trx, parentId, status) {
   return 'completed_unbilled';
 }
 
+// Every patch stamps wizard_recovery_reconciled_at (codex #3504 r26,
+// migration 20260827000001): the durable marker is what takes the row out
+// of the claim — never a billing-field mutation — so a reconcile that
+// cannot prove the price is the minted amount can leave billing alone.
 const STRIP_PATCH = (trx, noteTail) => ({
   estimated_price: null,
   payment_method_preference: null,
   create_invoice_on_complete: false,
   notes: trx.raw("COALESCE(notes, '') || ?", [noteTail]),
+  wizard_recovery_reconciled_at: trx.fn.now(),
   updated_at: trx.fn.now(),
 });
 const KEEP_PRICE_PATCH = (trx, noteTail) => ({
   payment_method_preference: null,
   create_invoice_on_complete: false,
   notes: trx.raw("COALESCE(notes, '') || ?", [noteTail]),
+  wizard_recovery_reconciled_at: trx.fn.now(),
+  updated_at: trx.fn.now(),
+});
+// Billing UNTOUCHED — note + marker only (possible staff edit).
+const BILLING_UNTOUCHED_PATCH = (trx, noteTail) => ({
+  notes: trx.raw("COALESCE(notes, '') || ?", [noteTail]),
+  wizard_recovery_reconciled_at: trx.fn.now(),
   updated_at: trx.fn.now(),
 });
 
 async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, limit = 10 } = {}) {
-  const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
-  // Column-guarded (migration 20260827000001): a pre-migration schema has
-  // no generation marker ⇒ no draft can ever be proven this parent's ⇒
-  // handoff retirement stays off (fail closed), everything else runs.
+  // Both marker columns ship in migration 20260827000001 (runs pre-deploy).
+  // Without them the sweep cannot reconcile safely (no generation proof,
+  // no durable reconciled marker) — touch nothing, loudly (fail closed).
   const hasGenerationColumn = await database.schema.hasColumn('scheduled_services', 'source_estimate_generation');
+  const hasReconciledColumn = await database.schema.hasColumn('scheduled_services', 'wizard_recovery_reconciled_at');
+  if (!hasGenerationColumn || !hasReconciledColumn) {
+    logger.error('[wizard-series-recovery] scheduled_services is missing source_estimate_generation / wizard_recovery_reconciled_at (migration 20260827000001 not applied) — stranded sweep SKIPPED');
+    return { examined: 0, stripped: 0, skipped: 'schema' };
+  }
+  const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
   let stripped = 0;
   for (const parent of stranded) {
     // The PEST funnel is OUT OF SCOPE (codex #3504 r12): its duplicate-kept
@@ -178,6 +197,17 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           || fresh.create_invoice_on_complete !== true
           || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
+        // A completion whose post-commit side effects (the completion
+        // invoice among them) are still pending/running must settle
+        // first (codex #3504 r26): classifying now would read a
+        // completed-but-not-yet-invoiced visit as unbilled and tell the
+        // office to bill it by hand while the completion is about to
+        // mint the invoice. Defer — the row is re-noticed next tick.
+        const inFlightCompletion = await trx('service_completion_attempts')
+          .where({ service_id: parent.id })
+          .whereIn('status', ['pending', 'side_effects_pending', 'side_effects_running'])
+          .first('id');
+        if (inFlightCompletion) return false;
         const disposition = await classifyStrandedDisposition(trx, parent.id, String(fresh.status || ''));
         const freshChild = await trx('scheduled_services')
           .where({ recurring_parent_id: parent.id })
@@ -229,9 +259,13 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             return !!priced && Number(priced.amount) === Number(fresh.estimated_price);
           } catch { return false; }
         })();
+        // Unconfirmed price on a still-billable row = possible staff edit
+        // (r26): leave the WHOLE billing state alone (price, pay-at-visit
+        // preference, auto-invoice flag) — the durable marker takes the
+        // row out of the claim; the office verifies the billing.
         const priceKeptNote = mintedPriceConfirmed
           ? ''
-          : ' (per-application price KEPT on the visit — it could not be confirmed as the plan\'s minted amount, so it may be a staff edit; office reviews before billing)';
+          : ' (BILLING LEFT UNTOUCHED — the per-application price could not be confirmed as the plan\'s minted amount, so it may be a staff edit; office verifies price and auto-invoice before the visit bills)';
         const draftNote = !draftLive
           ? ' NOTE: the original quote draft has since been consumed by a later booking or archived — reconcile this visit against the customer\'s CURRENT series/quote rather than that draft.'
           : (draftRepresentsParent
@@ -264,11 +298,11 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit). ${draftRepresentsParent ? "The quote draft has been ARCHIVED so the customer's booking link cannot re-book the full program — unarchive it and convert to schedule and bill the REMAINING program." : 'Convert for the REMAINING program from the office.'}`,
           },
           terminal_unbilled: {
-            patch: (mintedPriceConfirmed ? STRIP_PATCH : KEEP_PRICE_PATCH)(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, ${mintedPriceConfirmed ? 'pricing stripped' : 'pay-at-visit cleared'}${priceKeptNote}; office converts the live quote for the FULL program`),
+            patch: (mintedPriceConfirmed ? STRIP_PATCH : BILLING_UNTOUCHED_PATCH)(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, ${mintedPriceConfirmed ? 'pricing stripped' : 'billing left as-is'}${priceKeptNote}; office converts the live quote for the FULL program`),
             bell: `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed and none was invoiced. The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the FULL plan.`,
           },
           in_flight: {
-            patch: (mintedPriceConfirmed ? STRIP_PATCH : KEEP_PRICE_PATCH)(trx, ` — series activation never completed (worker died mid-booking); ${mintedPriceConfirmed ? 'pricing stripped' : 'pay-at-visit cleared'}${priceKeptNote}, office converts from the live quote`),
+            patch: (mintedPriceConfirmed ? STRIP_PATCH : BILLING_UNTOUCHED_PATCH)(trx, ` — series activation never completed (worker died mid-booking); ${mintedPriceConfirmed ? 'pricing stripped' : 'billing left as-is'}${priceKeptNote}, office converts from the live quote`),
             bell: `${who} committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
           },
         }[disposition];
