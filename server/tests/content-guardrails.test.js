@@ -2159,7 +2159,7 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.evaluate({ body: 'No tables here.', frontmatter: {} }, { targetIsBlog: true }).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
   });
 
-  test('refresh grandfathers by COUNT — preserved tables pass, added tables block', () => {
+  test('refresh grandfathers by table CONTENT — preserved tables pass; added or swapped tables block', () => {
     const grandfathered = guardrails.evaluate(
       { body: TABLE_BODY, frontmatter: {} },
       { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
@@ -2177,6 +2177,19 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
       { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
     );
     expect(secondAdded.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Same COUNT but different table content — deleting the legacy table
+    // and swapping in a new one is NOT grandfathered.
+    const swapped = guardrails.evaluate(
+      { body: 'Intro.\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n', frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(swapped.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Whitespace-only reflow of the SAME table stays grandfathered.
+    const reflowed = guardrails.evaluate(
+      { body: 'Intro.\n\n| Method   | Cost |\n| ---   | --- |\n| DIY   | $10 |\n', frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(reflowed.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
   });
 
   test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {

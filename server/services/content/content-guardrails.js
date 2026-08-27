@@ -1823,32 +1823,55 @@ function tenureClaimFinding(text) {
 // at least one pipe) directly under a pipe header row; blockquote prefixes
 // are stripped first so quoted tables still count. Prose pipes and plain
 // --- dividers never form the pair.
-function countRawMarkdownTables(text) {
+function extractRawMarkdownTables(text) {
   const lines = String(text || '').split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
-  let count = 0;
+  const tables = [];
   for (let i = 1; i < lines.length; i += 1) {
     const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
     const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
-    if (delimiter && headerAbove) count += 1;
+    if (!delimiter || !headerAbove) continue;
+    // Capture the whole block (header + delimiter + contiguous pipe rows),
+    // whitespace-normalized, so refresh grandfathering can compare table
+    // CONTENT rather than counts.
+    let end = i + 1;
+    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== '') end += 1;
+    tables.push(lines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
+    i = end;
   }
-  return count;
+  return tables;
 }
 
 function hasRawMarkdownTable(text) {
-  return countRawMarkdownTables(text) > 0;
+  return extractRawMarkdownTables(text).length > 0;
+}
+
+// True when `body` contains a raw table that the prior body did NOT carry —
+// content-compared (normalized block multiset), so a refresh that deletes a
+// legacy table and adds a DIFFERENT one is still a violation even at equal
+// counts; only genuinely preserved legacy tables are grandfathered.
+function hasUnpreservedRawTable(body, priorBody) {
+  const current = extractRawMarkdownTables(body);
+  if (current.length === 0) return false;
+  const prior = new Map();
+  for (const t of extractRawMarkdownTables(priorBody)) prior.set(t, (prior.get(t) || 0) + 1);
+  for (const t of current) {
+    const n = prior.get(t) || 0;
+    if (n === 0) return true;
+    prior.set(t, n - 1);
+  }
+  return false;
 }
 
 // Blog bodies only (service/city page bodies are component-driven and the
 // autonomous lanes get the same rule from the quality gate's common hard
-// check). Refresh drafts GRANDFATHER tables the live prior body already
-// carried — by COUNT, same posture as the component/route grandfathers:
-// preserving legacy tables must not park the lane forever, but the writer
-// ADDING a table beyond what the prior body had is still a finding.
+// check). Refresh drafts GRANDFATHER only tables the live prior body
+// already carried — content-compared, same posture as the component/route
+// grandfathers: preserving a legacy table must not park the lane forever,
+// but the writer ADDING or SWAPPING IN a table is still a finding.
 function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
   if (!targetIsBlog) return null;
-  const count = countRawMarkdownTables(body);
-  if (count === 0) return null;
-  if (isRefresh && count <= countRawMarkdownTables(priorBody)) return null;
+  const violated = isRefresh ? hasUnpreservedRawTable(body, priorBody) : hasRawMarkdownTable(body);
+  if (!violated) return null;
   return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
 }
 
@@ -3990,7 +4013,8 @@ module.exports = {
   // content-quality-gate's no_raw_markdown_tables hard check so the two
   // enforcement points can never drift.
   hasRawMarkdownTable,
-  countRawMarkdownTables,
+  hasUnpreservedRawTable,
+  extractRawMarkdownTables,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,

@@ -256,6 +256,17 @@ describe('seo-completion-gate', () => {
     });
     expect(result.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(result.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Commercial variants accept their residential family's wording.
+    const commercial = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Commercial turf programs differ. [Request a Commercial Lawn Quote](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'commercial-lawn' }),
+      shadowMode: true,
+    });
+    expect(commercial.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(commercial.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
   });
 
   test('a wrong-service CTA anchor is a violation even when a valid CTA also exists', () => {

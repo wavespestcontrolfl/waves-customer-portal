@@ -292,6 +292,11 @@ const CTA_SERVICE_FAMILY = {
   tick: 'pest',
   wasp: 'pest',
   wdo: 'termite',
+  // Commercial variants convert with their residential family's wording
+  // ("Request a Commercial Lawn Quote") — CTA vocabulary only; the
+  // brief-builder's conversion-path aliases are untouched.
+  'commercial-lawn': 'lawn',
+  'commercial-pest': 'pest',
 };
 
 function allowedAnchorServices(briefService) {
@@ -302,10 +307,6 @@ function allowedAnchorServices(briefService) {
   for (const [svc, fam] of Object.entries(CTA_SERVICE_FAMILY)) {
     if (fam === briefService) allowed.add(svc);
   }
-  // "Pest control" is the company's generic term — "Get My Free Pest
-  // Control Estimate" is legitimate CTA wording on ANY service's post
-  // (every lane converts through the pest-control quote paths).
-  allowed.add('pest');
   return allowed;
 }
 
