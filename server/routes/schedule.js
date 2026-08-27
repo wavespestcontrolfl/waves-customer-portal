@@ -344,6 +344,22 @@ router.post('/:id/reschedule', async (req, res, next) => {
       return { service, deduped };
     });
 
+    // Legacy flip only (!keepOnBooks): the visit just left the books as
+    // 'rescheduled' with staff expected to rebook it — PARK any one-time
+    // card hold so the consent follows the rebooked visit (owner ruling
+    // 2026-08-26; gated inside the service — GATE_CARD_HOLD_PARK_ON_CANCEL
+    // off leaves this flow byte-identical). Best-effort: a customer-facing
+    // request must never fail on hold bookkeeping.
+    if (!keepOnBooks && outcome && !outcome.error && !outcome.statusCode) {
+      try {
+        const CardHolds = require('../services/estimate-card-holds');
+        await CardHolds.handleCardHoldCancellation({ scheduledServiceId: req.params.id, intent: 'reschedule_request' });
+      } catch (holdErr) {
+        require('../services/logger').warn(`[schedule] reschedule-request hold park failed for ${req.params.id}: ${holdErr.message}`);
+      }
+    }
+
+
     if (outcome.error) {
       return res.status(outcome.statusCode).json({ error: outcome.error });
     }
