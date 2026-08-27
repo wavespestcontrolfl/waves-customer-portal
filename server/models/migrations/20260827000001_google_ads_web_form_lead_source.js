@@ -23,11 +23,12 @@
 //      often gone; the next two signals cover those);
 //   3. the webhook's funnel row: ad_service_attribution.lead_source =
 //      'google_ads' keyed by lead_id;
-//   4. ONLY when the lead carries no attribution block of its own, the linked
-//      customer's first-touch utm_data (source google / medium cpc) — same
-//      precedence rule as 20260626000008_backfill_gbp_web_leads_per_city:
-//      a customer's stale first touch must never override a lead that
-//      recorded a different source.
+//   4. ONLY when the lead carries no attribution of its own — neither an
+//      extracted_data.attribution block NOR a linked ad_service_attribution
+//      funnel row naming a different source (e.g. 'facebook') — the linked
+//      customer's first-touch utm_data (source google / medium cpc). Same
+//      precedence rule as 20260626000008_backfill_gbp_web_leads_per_city: a
+//      customer's stale first touch must never override lead-level evidence.
 // Scope: WEB channels only — 'form' (lead-webhook), 'website_quote'
 // (public-quote / public-property-lookup) and 'web' (lead-estimate-link),
 // i.e. exactly the paths that run the two resolvers patched alongside this
@@ -90,12 +91,21 @@ exports.up = async function up(knex) {
           .where('a.lead_source', 'google_ads'));
       }
       if (hasCustomerUtm) {
-        qb.orWhere((q2) => q2
-          .whereRaw("extracted_data->'attribution' IS NULL")
-          .whereExists(knex('customers as c')
+        qb.orWhere((q2) => {
+          q2.whereRaw("extracted_data->'attribution' IS NULL");
+          if (hasFunnelLeadId) {
+            // A funnel row for this lead that says anything other than
+            // google_ads is lead-level evidence that CONTRADICTS the
+            // customer's first touch — the fallback must not apply.
+            q2.whereNotExists(knex('ad_service_attribution as a2')
+              .whereRaw('a2.lead_id = leads.id')
+              .whereNot('a2.lead_source', 'google_ads'));
+          }
+          q2.whereExists(knex('customers as c')
             .whereRaw('c.id = leads.customer_id')
             .whereRaw("LOWER(COALESCE(c.utm_data->>'source', '')) = 'google'")
-            .whereRaw("LOWER(COALESCE(c.utm_data->>'medium', '')) = 'cpc'")));
+            .whereRaw("LOWER(COALESCE(c.utm_data->>'medium', '')) = 'cpc'"));
+        });
       }
     })
     .update({ lead_source_id: row.id, updated_at: knex.fn.now() });
