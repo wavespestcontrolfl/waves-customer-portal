@@ -10,15 +10,18 @@ const Verifier = require('../services/seo/link-prospect-verifier');
 
 // Only a definitive crawl may demote a live/indexed prospect: DataForSEO absence
 // is temporary churn, and a crawl that could not read the page proves nothing.
-function makeDb() {
+function makeDb({ updateRows = 1 } = {}) {
   const updates = [];
   db.mockImplementation(() => {
-    const b = {};
-    for (const m of ['where', 'whereRaw', 'whereIn', 'whereNotIn', 'whereNull', 'orWhere', 'orderBy', 'orderByRaw']) b[m] = jest.fn(() => b);
+    const b = { wheres: [], raws: [], nulls: [] };
+    for (const m of ['whereIn', 'whereNotIn', 'orWhere', 'orderBy', 'orderByRaw']) b[m] = jest.fn(() => b);
+    b.where = jest.fn((...a) => { b.wheres.push(a); return b; });
+    b.whereRaw = jest.fn((sql) => { b.raws.push(sql); return b; });
+    b.whereNull = jest.fn((c) => { b.nulls.push(c); return b; });
     b.limit = jest.fn(() => Promise.resolve([]));   // reconcileFromProfile → no active row
     b.first = jest.fn(() => Promise.resolve(null)); // reconcileByDomain → no active row
     b.select = jest.fn(() => Promise.resolve([]));
-    b.update = jest.fn((p) => { updates.push(p); return Promise.resolve(1); });
+    b.update = jest.fn((p) => { updates.push({ patch: p, wheres: b.wheres, raws: b.raws, nulls: b.nulls }); return Promise.resolve(updateRows); });
     return b;
   });
   db.raw = jest.fn((sql, bind) => ({ __raw: sql, bind }));
@@ -58,45 +61,77 @@ describe('verifyOne demotion guard', () => {
     fetchPage.mockResolvedValue({ status: 200, html: '<html><body>long page, link past the cap</body></html>', contentType: 'text/html', truncated: true });
     expect(await Verifier.verifyOne(live)).toBe('unverified');
     expect(updates).toHaveLength(1);
-    expect(updates[0]).not.toHaveProperty('status');
-    expect(updates[0]).toHaveProperty('last_live_check');
+    expect(updates[0].patch).not.toHaveProperty('status');
+    expect(updates[0].patch).toHaveProperty('last_live_check');
   });
 
   test('live row + bot-challenge crawl → stays live', async () => {
     const updates = makeDb();
     fetchPage.mockResolvedValue({ status: 200, html: '<html><title>Just a moment...</title><body>cf-challenge</body></html>', contentType: 'text/html', truncated: false });
     expect(await Verifier.verifyOne(live)).toBe('unverified');
-    expect(updates[0]).not.toHaveProperty('status');
+    expect(updates[0].patch).not.toHaveProperty('status');
   });
 
   test('live row + fetch failure (redirect budget / DNS / SSRF-blocked) → stays live', async () => {
     const updates = makeDb();
     fetchPage.mockResolvedValue({ status: 0, html: '', error: 'too_many_redirects', blocked: false, truncated: false });
     expect(await Verifier.verifyOne(live)).toBe('unverified');
-    expect(updates[0]).not.toHaveProperty('status');
+    expect(updates[0].patch).not.toHaveProperty('status');
     fetchPage.mockRejectedValue(new Error('ENOTFOUND'));
     expect(await Verifier.verifyOne(live)).toBe('unverified');
-    expect(updates[1]).not.toHaveProperty('status');
+    expect(updates[1].patch).not.toHaveProperty('status');
   });
 
   test('live row + COMPLETE 2xx HTML without the link + domain miss → lost (definitive)', async () => {
     const updates = makeDb();
     fetchPage.mockResolvedValue({ status: 200, html: '<html><body><p>No links to Waves here at all.</p></body></html>', contentType: 'text/html', truncated: false });
     expect(await Verifier.verifyOne(live)).toBe('lost');
-    expect(updates[0]).toEqual(expect.objectContaining({ status: 'lost' }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'lost' }));
   });
 
   test('live row + 404 → lost (definitive)', async () => {
     const updates = makeDb();
     fetchPage.mockResolvedValue({ status: 404, html: '<html><body>Not found</body></html>', contentType: 'text/html', truncated: false });
     expect(await Verifier.verifyOne(live)).toBe('lost');
-    expect(updates[0]).toEqual(expect.objectContaining({ status: 'lost' }));
+    expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'lost' }));
   });
 
   test('a never-live "placed" row on an unverifiable crawl is just pending (unchanged behaviour)', async () => {
     const updates = makeDb();
     fetchPage.mockResolvedValue({ status: 200, html: '<html><body>x</body></html>', contentType: 'text/html', truncated: true });
     expect(await Verifier.verifyOne({ ...live, status: 'placed' })).toBe('pending');
-    expect(updates[0]).not.toHaveProperty('status');
+    expect(updates[0].patch).not.toHaveProperty('status');
+  });
+});
+
+describe('markLive on an un-pitched prospect (lost-link recovery row under daily verification)', () => {
+  const PAGE = '<html><body><a href="https://wavespestcontrol.com/x/">Waves</a></body></html>';
+  const recoveryRow = { ...live, status: 'prospect', source: 'lost_recovery', outreach_status: 'drafted' };
+  beforeEach(() => { fetchPage.mockReset(); });
+
+  test('crawl finds the link → promoted live ONLY via the unsent-state guard, draft withdrawn', async () => {
+    const updates = makeDb();
+    fetchPage.mockResolvedValue({ status: 200, html: PAGE, contentType: 'text/html', truncated: false });
+    expect(await Verifier.verifyOne(recoveryRow)).toBe('live');
+    const u = updates[0];
+    expect(u.patch).toEqual(expect.objectContaining({ status: 'live', outreach_status: 'none', outreach_send_token: null, claimed_at: null, claimed_by: null }));
+    expect(u.wheres).toEqual(expect.arrayContaining([[{ id: 'p1' }], [{ status: 'prospect' }]]));
+    expect(u.raws.join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
+    expect(u.nulls).toContain('outreach_sent_at');
+  });
+
+  test('send in flight (guard matches 0 rows) → row untouched, left for reconciliation, no indexing push', async () => {
+    const updates = makeDb({ updateRows: 0 });
+    fetchPage.mockResolvedValue({ status: 200, html: PAGE, contentType: 'text/html', truncated: false });
+    expect(await Verifier.verifyOne({ ...recoveryRow, outreach_status: 'sending' })).toBe('pending');
+    expect(updates).toHaveLength(1); // the guarded update only — nothing else written
+  });
+
+  test('an already-live row is NOT guarded (re-verify path unchanged)', async () => {
+    const updates = makeDb();
+    fetchPage.mockResolvedValue({ status: 200, html: PAGE, contentType: 'text/html', truncated: false });
+    expect(await Verifier.verifyOne(live)).toBe('live');
+    expect(updates[0].wheres).toEqual([[{ id: 'p1' }]]);
+    expect(updates[0].patch).not.toHaveProperty('outreach_status');
   });
 });

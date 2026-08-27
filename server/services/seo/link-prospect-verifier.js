@@ -409,7 +409,24 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   if (parseQuality(prospect.quality_signals).pending) {
     patch.quality_signals = db.raw("quality_signals - 'pending'");
   }
-  await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
+  // An un-pitched 'prospect' (e.g. a lost-link recovery row enrolled here via
+  // live_url) is promoted with the SAME unsent-state guard as
+  // resolveRecoveredLink: only none/drafted + never sent. A parked draft is
+  // withdrawn; a row whose send is in flight ('sending') or already sent is left
+  // to the send finalizer / operator reconciliation — a 0-row update here means
+  // exactly that, and the row is not touched.
+  let q = db('seo_link_prospects').where({ id: prospect.id });
+  if (prospect.status === 'prospect') {
+    q = q.where({ status: 'prospect' })
+      .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
+      .whereNull('outreach_sent_at');
+    Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
+  }
+  const n = await q.update(patch);
+  if (!n) {
+    logger.info(`[link-verifier] ${prospect.id} (${prospect.target_domain}) link is live but the row is mid-send — left for reconciliation`);
+    return 'pending';
+  }
   // Hand pushForIndexing the POST-patch view so its already-indexed guard and URL
   // dedupe see the reset state, not the stale snapshot. (omega_* still read from
   // its own atomic claim against the live column.)
