@@ -1026,7 +1026,10 @@ function checkFaqSectionPresent(draft, brief) {
 // (a plain `---` divider carries no pipe), so neither false-positives.
 function checkNoRawMarkdownTables(draft) {
   const body = String(draft.body || '');
-  const lines = body.split('\n');
+  // Markdown containers (blockquotes, nested blockquotes) prefix each line
+  // with "> " — a table inside one is still a table, so strip the prefixes
+  // before matching.
+  const lines = body.split('\n').map((l) => l.replace(/^\s*(?:>\s*)+/, ''));
   for (let i = 1; i < lines.length; i += 1) {
     const delimiter = /^\s*\|?[\s:|-]*-{2,}[\s:|-]*\|?\s*$/.test(lines[i]) && lines[i].includes('|');
     const headerAbove = lines[i - 1].includes('|') && /[A-Za-z0-9]/.test(lines[i - 1]);
