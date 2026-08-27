@@ -309,7 +309,15 @@ function wizardDraftSelfServeBookable(row) {
   const summary = data.engineResult?.summary || {};
   const recurringAnnual = Number(summary.recurringAnnualAfterDiscount ?? summary.recurringAnnual ?? data.annual ?? 0);
   const oneTimeTotal = Number(summary.oneTimeTotal ?? data.oneTimeTotal ?? 0);
-  if (recurringAnnual > 0 && oneTimeTotal > 0) return false;
+  // Specialty-priced add-ons (lawn plugging, top dressing, lawn-pest work)
+  // and installation charges ride the engine's summary as their OWN totals,
+  // not oneTimeTotal (codex #3504 r12): a recurring line alongside any of
+  // them is mixed billing too — activating the recurring plan alone would
+  // archive the draft with the add-on's dollars neither scheduled nor
+  // billed nor left for office conversion.
+  const specialtyTotal = Number(summary.specialtyTotal ?? data.specialtyTotal ?? 0);
+  const installationTotal = Number(summary.installationTotal ?? data.installationTotal ?? 0);
+  if (recurringAnnual > 0 && (oneTimeTotal > 0 || specialtyTotal > 0 || installationTotal > 0)) return false;
   const lineItems = data.engineResult?.lineItems || [];
   if (lineItems.some((l) => l && l.service === 'bed_bug')) return false;
   // A recurring draft must contain at least one funnel-mappable recurring

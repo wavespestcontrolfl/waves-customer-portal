@@ -61,6 +61,15 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
   let stripped = 0;
   for (const parent of stranded) {
+    // The PEST funnel is OUT OF SCOPE (codex #3504 r12): its duplicate-kept
+    // disposition deliberately leaves the newly booked visit billable and
+    // returns before seeding or archiving the draft, so a legitimate kept
+    // pest visit matches this exact stranded shape and would be stripped
+    // as if a worker had died. (A genuinely stranded pest activation is a
+    // pre-existing exposure of that path, not this lane's.) Wizard-series
+    // families strip on kept, so they never present this shape.
+    const familyKey = require('./recurring-appointment-seeder').serviceKeyFor({ service_type: parent.service_type });
+    if (familyKey === 'pest_control' || /\bpest\b/i.test(String(parent.service_type || ''))) continue;
     try {
       const didStrip = await database.transaction(async (trx) => {
         // Re-validate the ENTIRE stranded predicate under the comms lock

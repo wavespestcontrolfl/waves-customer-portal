@@ -631,11 +631,43 @@ describe('booking route wiring (source contracts)', () => {
     expect(recoverySrc).toMatch(/parentRow\?\.is_recurring\s*\n\s*&& String\(parentRow\.status \|\| ''\) !== 'cancelled'/);
   });
 
-  test('seeded children reserve the CATALOG duration, not the coarse funnel duration', () => {
-    // codex #3504 r10: mosquito's funnel books 45min; the cadence catalog
-    // row reserves 60 — children seeded at 45 release their slot early.
-    expect(booking).toMatch(/let seededChildDuration = duration;/);
-    expect((booking.match(/seededChildDuration = Number\((palmCatalogRow|catalogRow)\.default_duration_minutes\);/g) || []).length).toBe(2);
+  test('a mixed quote (recurring + specialty/installation add-on) is not self-serve bookable', () => {
+    // codex #3504 r12: specialty add-ons ride summary.specialtyTotal, not
+    // oneTimeTotal — activating the recurring plan alone would archive
+    // the draft with the add-on neither scheduled nor billed.
+    const { wizardDraftSelfServeBookable } = require('../services/booking-pay-at-visit');
+    const base = (summary) => ({
+      source: 'quote_wizard', status: 'draft', archived_at: null,
+      estimate_data: { engineResult: { summary, lineItems: [{ service: 'lawn_care', annual: 900 }] } },
+    });
+    expect(wizardDraftSelfServeBookable(base({ recurringAnnual: 900, oneTimeTotal: 0, specialtyTotal: 0 }))).toBe(true);
+    expect(wizardDraftSelfServeBookable(base({ recurringAnnual: 900, oneTimeTotal: 0, specialtyTotal: 350 }))).toBe(false);
+    expect(wizardDraftSelfServeBookable(base({ recurringAnnual: 900, oneTimeTotal: 0, installationTotal: 500 }))).toBe(false);
+  });
+
+  test('the recovery sweep never touches the PEST funnel (duplicate-kept pest visits stay billable by design)', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/if \(familyKey === 'pest_control' \|\| \/\\bpest\\b\/i\.test\(String\(parent\.service_type \|\| ''\)\)\) continue;/);
+  });
+
+  test('the welcome enqueue is check-and-insert ATOMIC under a per-customer advisory lock', () => {
+    // codex #3504 r12: a confirmation racing its own replay could both
+    // pass hasWelcomeSequence and enqueue two welcome sequences.
+    const welcome = fs.readFileSync(path.join(__dirname, '..', 'services', 'new-recurring-welcome-sms.js'), 'utf8');
+    expect(welcome).toMatch(/async function hasWelcomeSequence\(customerId, conn = db\)/);
+    expect(welcome).toMatch(/pg_advisory_xact_lock\(hashtext\(\?\)\)', \[`new-recurring-welcome:\$\{customer\.id\}`\]\);\s*\n\s*if \(await hasWelcomeSequence\(customer\.id, trx\)\) return 'already_sent';\s*\n\s*await trx\('sms_sequences'\)\.insert\(data\);/);
+  });
+
+  test('seeded children reserve the converter DURATION AUTHORITY first, then the catalog default, never the coarse funnel duration', () => {
+    // codex #3504 r10+r12: mosquito's funnel books 45min while its catalog
+    // row reserves 60; but lawn's catalog default is 45 and CONTRADICTS
+    // the 60-minute slot authority (durationMinutesForRecurringService).
+    expect(booking).toMatch(/authorityDuration = durationMinutesForRecurringService\(\s*\n\s*\{ service: activationFamilyKey \},/);
+    expect(booking).toMatch(/let seededChildDuration = Number\(authorityDuration\) > 0 \? Number\(authorityDuration\) : duration;/);
+    expect((booking.match(/if \(!\(Number\(authorityDuration\) > 0\) && Number\((palmCatalogRow|catalogRow)\?\.default_duration_minutes\) > 0\)/g) || []).length).toBe(2);
+    const { durationMinutesForRecurringService } = require('../services/estimate-converter');
+    expect(durationMinutesForRecurringService({ service: 'lawn_care' }, 'every_6_weeks', { service_type: 'Lawn Care' })).toBe(60);
+    expect(durationMinutesForRecurringService({ service: 'tree_shrub' }, 'every_6_weeks', { service_type: 'Tree & Shrub' })).toBe(60);
     expect(booking).toMatch(/durationMinutes: seededChildDuration,/);
     // ...and their window spans that duration instead of inheriting the
     // parent's shorter one.

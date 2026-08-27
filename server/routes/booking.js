@@ -3154,7 +3154,20 @@ async function createSelfBooking(payload = {}) {
           // default (60min), releasing each follow-up's slot early and
           // overlapping the next job. The parent's signed slot is not
           // rewritten — only the seeded follow-ups.
-          let seededChildDuration = duration;
+          // The converter's duration AUTHORITY comes first (codex #3504
+          // r12): lawn/palm/tree book flat 60-minute slots and their
+          // catalog identity links are deliberately duration-silent — the
+          // lawn rows' 45-minute catalog default CONTRADICTS the slot
+          // authority and would release each follow-up early. Only a
+          // family the authority leaves null (mosquito) falls through to
+          // the stamped catalog row's default, then to the funnel duration.
+          const { durationMinutesForRecurringService } = require('../services/estimate-converter');
+          const authorityDuration = durationMinutesForRecurringService(
+            { service: activationFamilyKey },
+            wizardSeriesPlan.pattern,
+            { service_type: resolvedServiceType },
+          );
+          let seededChildDuration = Number(authorityDuration) > 0 ? Number(authorityDuration) : duration;
           if (activationFamilyKey === 'palm_injection') {
             // Recurring palm bills per-application against the RECURRING
             // catalog row: a name-only 'Palm Injections' visit resolves the
@@ -3171,7 +3184,7 @@ async function createSelfBooking(payload = {}) {
             const palmCatalogRow = await trx('services')
               .where({ service_key: 'palm_injection_semiannual' })
               .first('id', 'default_duration_minutes');
-            if (Number(palmCatalogRow?.default_duration_minutes) > 0) {
+            if (!(Number(authorityDuration) > 0) && Number(palmCatalogRow?.default_duration_minutes) > 0) {
               seededChildDuration = Number(palmCatalogRow.default_duration_minutes);
             }
             if (!palmCatalogRow?.id) {
@@ -3208,7 +3221,7 @@ async function createSelfBooking(payload = {}) {
             const catalogRow = cadenceKey
               ? await trx('services').where({ service_key: cadenceKey }).first('id', 'default_duration_minutes')
               : null;
-            if (Number(catalogRow?.default_duration_minutes) > 0) {
+            if (!(Number(authorityDuration) > 0) && Number(catalogRow?.default_duration_minutes) > 0) {
               seededChildDuration = Number(catalogRow.default_duration_minutes);
             }
             if (catalogRow?.id) {
