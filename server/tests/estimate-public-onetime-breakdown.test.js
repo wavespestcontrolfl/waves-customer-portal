@@ -3807,11 +3807,12 @@ describe('public estimate one-time breakdown', () => {
     // Hero treatment name comes from the normalized rows too, so the nested shape
     // shows the Bora-Care name instead of falling back to "WaveGuard Bronze" or the
     // raw "bora_care" service key.
-    // This nested-only shape yields NO billable card rows, so the hero
-    // price card renders as the legacy fallback (pre-push P0 on #3521) —
-    // and its treatment name still resolves from the normalized rows.
-    expect(html).toContain('class="choice-treatment-name">Bora-Care Wood Treatment');
-    expect(html).not.toContain('class="choice-treatment-name">WaveGuard Bronze');
+    // The nested-only shape now itemizes through the normalized rows
+    // (codex #3521 r5 P2): the card leads with the friendly name, and the
+    // fallback hero stays off.
+    expect(html).not.toContain('class="choice-treatment-name"');
+    expect(html).toMatch(/<tr><td>Bora-Care/);
+    expect(html).not.toContain('id="onetime-display"');
     expect(html).not.toContain('>bora_care<');
   });
 
@@ -8055,7 +8056,12 @@ describe('legacy one-time estimates with no billable rows keep a visible price (
         specItems: [],
       },
     });
-    expect(html).toContain('<span class="num" id="onetime-display">$257.00</span>');
+    // The price is visible either way: the normalizer synthesizes an
+    // "Other one-time services" row from the stored total when the estimate
+    // carries no rows (same as the React page), and when it cannot, the
+    // hero price card renders as the fallback. Never a page with no price.
+    expect(html).toContain('$257.00');
+    expect(html).toMatch(/id="onetime-display">\$257\.00<|<tr><td>Other one-time services/);
   });
 
   test('an itemized one-time estimate never renders the hero price card', () => {
