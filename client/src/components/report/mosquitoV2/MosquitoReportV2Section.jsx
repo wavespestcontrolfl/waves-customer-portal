@@ -9,18 +9,20 @@
 // owns (Products Applied + "why selected", Re-entry / readiness, Ask Waves,
 // photos, Report Tools). The hero's supporting metric is the at-a-glance version
 // of the pressure reading. The composed order tells the mosquito story:
-// how you're protected → where we treated / what can breed → your one move →
-// the weather-driven outlook (kept here, unlike pest, because weather IS the
-// mosquito story).
+// how you're protected (status + reading + trend + narrative, ONE block) →
+// your one move → the weather-driven outlook (kept here, unlike pest,
+// because weather IS the mosquito story). The "Where we protected" habitat
+// diagram is retired (owner 2026-08-27): the technician-traced satellite map
+// in the Service Coverage card is the real where-we-treated picture, and the
+// habitat legend duplicated it.
 
 import {
   MosquitoStatusHero,
-  MosquitoHabitatMap,
   MosquitoNextStep,
   MosquitoOutlook,
 } from './MosquitoReportV2';
 
-export default function MosquitoReportV2Section({ data, print = false, token = null, mode = 'live' }) {
+export default function MosquitoReportV2Section({ data, print = false, token = null, mode = 'live', pressureTrendSlot = null }) {
   if (!data) return null;
   return (
     // No inset: cards align edge-to-edge with the report's .sr-section cards
@@ -33,8 +35,8 @@ export default function MosquitoReportV2Section({ data, print = false, token = n
         aiSummary={data.aiSummary}
         token={token}
         mode={mode}
+        pressureTrendSlot={pressureTrendSlot}
       />
-      {data.habitat ? <MosquitoHabitatMap habitat={data.habitat} print={print} /> : null}
       {data.primaryMove ? <MosquitoNextStep primaryMove={data.primaryMove} /> : null}
       {data.outlook ? <MosquitoOutlook outlook={data.outlook} /> : null}
     </div>

@@ -4419,7 +4419,10 @@ function ServiceCoverageCard({
       {showSummary && !showTraced && <ServiceCoverageSummary summary={coverage.summary} />}
 
       {showMap || showList ? (
-        <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}`}>
+        <div className={`service-coverage-card-grid${showMap ? ' has-map' : ' list-only'}${showList ? ' has-list' : ' map-only'}${showTraced ? ' traced-stacked' : ''}`}>
+          {/* Traced satellite maps stack: the animated map leads, the zone
+              list follows (owner 2026-08-27) — the side-by-side grid shrank
+              the map to a thumbnail beside the list. */}
           {showMap ? (
             showTraced ? (
               <TracedTreatmentZoneMap traced={tracedMap} live={live} variant={tracedVariant} />
@@ -5483,6 +5486,13 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
     serviceType: visitTimelineServiceType,
   });
   const hasPestPressure = Boolean(data.pestPressure && data.pestPressure.showOnCustomerReport !== false && data.pestPressure.enabled !== false);
+  // Engagement cards are INTERWOVEN, not stacked at the bottom: review ask
+  // high (under the status card), cross-sell mid, referral after the
+  // treatment record. Lawn/tree V2 and pest already place the review ask
+  // high; mosquito follows the pest layout (owner 2026-08-27: "evenly
+  // spaced — see the recurring pest control report"). The two review
+  // mounts are mutually exclusive on this flag.
+  const reviewAskOnTop = Boolean(data.reportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
   const hasReentry = Boolean(dynamicContext.reentry);
   // Bed bug: the typed narrative owns the report's ONE summary surface even
   // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
@@ -5539,9 +5549,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
       // Pest reports drop the generic lettered coverage card (owner
       // 2026-07-30: "we don't use this") — the card returns only when the
       // tech traced a real spray map, which renders in this same slot.
-      || data.serviceLine === 'pest'
-      // Mosquito V2's habitat diagram replaces the lettered map the same way.
-      || Boolean(data.mosquitoReportV2))
+      // Mosquito V2 KEEPS the coverage card (owner 2026-08-27): its habitat
+      // diagram is retired, so the traced yard map + lettered zone list is
+      // the mosquito where-we-treated picture.
+      || data.serviceLine === 'pest')
       && !data.treatmentMap?.traced?.snapshotUrl);
 
   // Returns 'copied' when the clipboard fallback ran so the action bar can
@@ -6141,6 +6152,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         .service-coverage-card-grid.map-only {
           grid-template-columns: 1fr;
           grid-template-areas: "map";
+        }
+        .service-coverage-card-grid.traced-stacked {
+          grid-template-columns: 1fr;
+          grid-template-areas: "map" "list";
         }
         .service-coverage-map-panel {
           grid-area: map;
@@ -8715,9 +8730,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* V2 + pest: a review ask up top, location-synced to the closest GBP
             (ReviewRequestCard picks the office review URL). Self-gates on
             eligibility / already-reviewed. Pest gets the top placement like
-            lawn V2 (owner 2026-07-05); the bottom card below is suppressed
-            for pest to match. */}
-        {(data.reportV2 || data.serviceLine === 'pest') && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
+            lawn V2 (owner 2026-07-05), mosquito too (owner 2026-08-27); the
+            bottom card below is suppressed for them to match. */}
+        {reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
         <TodaysResultCard
           typedReport={data.typedReport}
@@ -8795,7 +8810,24 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             duplicated. */}
         {data.mosquitoReportV2 && (
           <div id="visit-summary">
-            <MosquitoReportV2Section data={data.mosquitoReportV2} print={mode === 'pdf' || mode === 'static'} token={token} mode={mode} />
+            <MosquitoReportV2Section
+              data={data.mosquitoReportV2}
+              print={mode === 'pdf' || mode === 'static'}
+              token={token}
+              mode={mode}
+              /* Pressure trend rides INSIDE the hero (owner 2026-08-27: one
+                 block, pest-hero parity) — the standalone card below is
+                 suppressed whenever this slot is filled. */
+              pressureTrendSlot={dynamicContext.pressureTrend && data.mosquitoReportV2?.status ? (
+                <PressureTrendCard
+                  context={dynamicContext.pressureTrend}
+                  neighborhood={dynamicContext.neighborhoodPressure}
+                  mode={mode}
+                  token={token}
+                  embedded
+                />
+              ) : null}
+            />
           </div>
         )}
 
@@ -8948,8 +8980,9 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
 
         {/* Standalone trend card: only for layouts that embed it nowhere
             else — the gauge card hosts it on recurring reports, and the pest
-            V2 hero hosts it on dashboard reports (owner 2026-07-30). */}
-        {dynamicContext.pressureTrend && !pressureGaugeVisible && !data.pestReportV2?.status && (
+            / mosquito V2 heroes host it on dashboard reports (owner
+            2026-07-30 / 2026-08-27). */}
+        {dynamicContext.pressureTrend && !pressureGaugeVisible && !data.pestReportV2?.status && !data.mosquitoReportV2?.status && (
           <PressureTrendCard
             context={dynamicContext.pressureTrend}
             neighborhood={dynamicContext.neighborhoodPressure}
@@ -9150,7 +9183,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         )}
 
         {/* V2 and pest show the review ask up top — don't also render the bottom one (dup CTA + dup events). */}
-        {!data.reportV2 && data.serviceLine !== 'pest' && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
+        {!reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="bottom" />}
 
 
 

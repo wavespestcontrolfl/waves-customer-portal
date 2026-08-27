@@ -131,14 +131,15 @@ describe('ReportViewPage — Mosquito Report V2 (flag-gated dashboard)', () => {
     // must not render alongside it, and the anchor exists exactly once.
     expect(screen.queryByText('Visit Summary')).toBeNull();
     expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
-    // Habitat map + next step + outlook cards render. ("Standing water"
-    // legitimately appears twice: the SVG node label and its legend row.)
-    expect(await screen.findAllByText('Standing water')).toHaveLength(2);
+    // Next step + outlook cards render. The "Where we protected" habitat
+    // diagram is retired (owner 2026-08-27) — no habitat legend rows.
+    expect(screen.queryByText('Where we protected')).toBeNull();
     await screen.findByText('Tip and toss standing water once a week');
     await screen.findByText('Mosquito outlook for July');
-    // The hero carries the pressure reading; the standalone meter and the
-    // lettered coverage map are suppressed (the habitat diagram replaces it).
-    expect(container.querySelectorAll('#map')).toHaveLength(0);
+    // The hero carries the pressure reading (standalone meter suppressed);
+    // the lettered coverage card STAYS for mosquito — it is the
+    // where-we-treated picture now that the habitat diagram is gone.
+    expect(container.querySelectorAll('#map')).toHaveLength(1);
   });
 
   it('mosquito visit without the payload keeps the legacy layout', async () => {

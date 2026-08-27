@@ -50,6 +50,14 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
   // whole treated landscape — turf AND beds — so the caption says so
   // instead of claiming a lawn-only area.
   const yardCapture = traced.captureMode === 'yard';
+  // Yard captures wash the treated footprint blue (owner 2026-08-27: the
+  // report must show "the animation with the blue overlay"). Unlike lawn
+  // outlines, a mosquito yard treatment covers EVERYTHING inside the
+  // boundary — turf, beds, lanai, and the structure's resting surfaces — so
+  // the interior fill is a truthful area claim here, not a roof-as-turf
+  // misread (the codex P1 #3038 objection was lawn-specific). Closed loops
+  // only: an open trace has no interior.
+  const yardWash = yardCapture && Boolean(traced.closedLoop);
   // Interior-spray captures (owner 2026-07-29) flood the traced footprint
   // with the brand-blue wash — only rows captured that way, and only closed
   // loops, get the fill (same area-claim rule as lawn).
@@ -133,8 +141,14 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 <feGaussianBlur stdDeviation="6" />
               </filter>
             </defs>
+            {/* Outline palette runs one step darker than the spray mist
+                (owner 2026-08-27: "make the blue slightly darker"). */}
             <style>{`
               @keyframes outlineDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+              /* Yard wash floods in as the outline finishes drawing, then
+                 breathes with the boundary. */
+              @keyframes yardWashIn { from { fill-opacity: 0; } to { fill-opacity: 0.34; } }
+              .treated-yard-wash { animation: yardWashIn 1.6s ease-out 1.2s both; }
               /* The treated area breathes: a slow, calm pulse — no smoke, no
                  emitter. Draw-in plays once, then the pulse takes over. */
               @keyframes outlinePulse {
@@ -144,16 +158,20 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
               .treated-outline-line { animation: outlineDraw 2.4s ease-in-out both; }
               .treated-outline-pulse { animation: outlinePulse 3.6s ease-in-out 2.4s infinite; }
             `}</style>
-            {/* NO interior fill — the loop commonly wraps the yard with the
-                house inside it, and a filled polygon would shade the roof as
-                treated turf (codex P1 #3038 r3). The boundary + pulse carry
-                the treated-area story. */}
+            {/* NO interior fill for LAWN captures — the loop commonly wraps
+                the yard with the house inside it, and a filled polygon would
+                shade the roof as treated turf (codex P1 #3038 r3). The
+                boundary + pulse carry the treated-area story. Mosquito YARD
+                captures are the exception (yardWash above). */}
             <g className="treated-outline-pulse">
+              {yardWash && (
+                <path className="treated-yard-wash" d={pathD} fill="#0668A3" fillOpacity="0.34" stroke="none" />
+              )}
               <path
                 className="treated-outline-line"
                 d={pathD}
                 fill="none"
-                stroke="#7CC7F0"
+                stroke="#5FB6E8"
                 strokeOpacity="0.5"
                 strokeWidth="22"
                 strokeLinecap="round"
@@ -179,7 +197,7 @@ export default function TracedTreatmentZoneMap({ traced, live = true, variant = 
                 className="treated-outline-line"
                 d={pathD}
                 fill="none"
-                stroke="#0A7EC2"
+                stroke="#0668A3"
                 strokeOpacity="0.95"
                 strokeWidth="7"
                 strokeLinecap="round"
