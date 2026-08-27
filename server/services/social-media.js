@@ -1231,14 +1231,56 @@ async function uploadImageToS3(base64Data, filename) {
   }
 }
 
+// Strip container metadata from a generated MP4 (the video counterpart of
+// toCleanSocialJpeg): global + per-stream tags, chapters, and any XMP/udta
+// provenance boxes an AI video provider attaches. Streams are copied, not
+// re-encoded (no quality loss, sub-second). Same ffmpeg resolution as the
+// recap transcoder (FFMPEG_PATH, else PATH). Rejects when ffmpeg is missing
+// or fails — the caller fails CLOSED. Pixel-level watermarks (e.g. SynthID)
+// are not metadata and are out of scope.
+async function stripVideoMetadata(buffer) {
+  const { spawn } = require('node:child_process');
+  const fsp = require('node:fs/promises');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'waves-video-strip-'));
+  const inPath = path.join(dir, 'in.mp4');
+  const outPath = path.join(dir, 'out.mp4');
+  try {
+    await fsp.writeFile(inPath, buffer);
+    await new Promise((resolve, reject) => {
+      const proc = spawn(process.env.FFMPEG_PATH || 'ffmpeg', [
+        '-y', '-i', inPath,
+        '-map_metadata', '-1', '-map_metadata:s', '-1', '-map_chapters', '-1',
+        '-c', 'copy', '-movflags', '+faststart', outPath,
+      ], { stdio: ['ignore', 'ignore', 'pipe'] });
+      let err = '';
+      proc.stderr.on('data', (d) => { err += d; });
+      proc.on('error', reject);
+      proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}: ${err.slice(-300)}`))));
+    });
+    return await fsp.readFile(outPath);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ── S3 Video Upload (for FB video posts / IG Reels — requires public HTTPS URL) ──
-// Same bucket/CDN as images; the MP4 passes through untouched (no sharp).
+// Same bucket/CDN as images. The MP4 is metadata-stripped first; a strip
+// failure returns null (no upload) — a Reel never ships with provider
+// metadata, it just doesn't ship that day.
 // CDN is checked BEFORE the PUT so a misconfigured deploy can't orphan objects.
 async function uploadVideoToS3(buffer, filename) {
   if (!config.s3.accessKeyId || !config.s3.bucket) return null;
   const cdnDomain = process.env.SOCIAL_MEDIA_CDN_DOMAIN;
   if (!cdnDomain) {
     logger.error('[social] SOCIAL_MEDIA_CDN_DOMAIN not set — private S3 URLs are not publicly fetchable');
+    return null;
+  }
+  try {
+    buffer = await stripVideoMetadata(buffer);
+  } catch (err) {
+    logger.error(`[social] video metadata strip failed — not hosting the video (set FFMPEG_PATH or install ffmpeg): ${err.message}`);
     return null;
   }
   try {
@@ -2713,6 +2755,7 @@ module.exports.stripModelWrapper = stripModelWrapper;
 module.exports.normalizeUrl = normalizeUrl;
 module.exports.uploadImageToS3 = uploadImageToS3;
 module.exports.uploadVideoToS3 = uploadVideoToS3;
+module.exports.stripVideoMetadata = stripVideoMetadata;
 module.exports.postToGBP = postToGBP;
 module.exports.isGbpMediaError = isGbpMediaError;
 // Deterministic on-brand card (SVG -> JPEG -> CDN) — the only image source
