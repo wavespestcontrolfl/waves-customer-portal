@@ -752,13 +752,14 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     } finally { gate.evaluate.mockRestore(); }
   });
 
-  test('a LEGACY FLAT blog file at the canonical leaf passes the path binding (PR r1 P1)', async () => {
+  test('a LEGACY FLAT blog file at the canonical leaf passes the path binding when its slug routes to the canonical (PR r1 P1)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
     greenMergePath();
     // CANONICAL routes to /blog/test-post/ — the flat legacy file keeps the
-    // leaf at the blog root and routes by frontmatter slug.
+    // leaf at the blog root and routes by frontmatter slug, which must match.
     gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /blog/test-post/\n---\n\nPlain seasonal pest guidance for Southwest Florida homes.' });
     gh.mergePr.mockResolvedValue({ merged: true });
     indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
     publisher.planInternalLinksForTarget.mockResolvedValue(null);
@@ -767,6 +768,19 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
     expect(res.results[0]).toMatchObject({ merged: true, autoMerged: true });
+  });
+
+  test('a flat file whose FRONTMATTER slug routes elsewhere is withheld — filename alone never binds (PR r2 P1)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    greenMergePath();
+    gh.listPrFiles.mockResolvedValue([{ filename: 'src/content/blog/test-post.mdx', status: 'modified' }]);
+    gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /lawn-care/test-post/\n---\n\nUnrelated content routed to a different category.' });
+
+    const res = await poller.pollPending();
+
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'named_competitor_head_gate_failed' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
   test('a possibly-TRUNCATED PR file inventory (3,000 rows) withholds the merge (PR r1 P2)', async () => {

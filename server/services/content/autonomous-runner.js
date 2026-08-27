@@ -2927,9 +2927,17 @@ class AutonomousRunner {
       await db('autonomous_runs').where('id', run.id).update(runUpdate);
     } catch (err) {
       logger.error(`[autonomous-runner] named-competitor run persist failed (run ${run.id}); writing reconcilable fallback: ${err.message}`);
+      // The approval marker MUST survive the fallback: the PR poller's
+      // named-competitor merge gate reads trust_build_approved_at, and a
+      // fallback row without it would strand this human-approved PR at
+      // named_competitor_autopublish_revoked forever (PR #3508 r2 P2).
+      const approvalStamp = {
+        trust_build_approved_at: baseUpdate.trust_build_approved_at,
+        trust_build_approved_by: baseUpdate.trust_build_approved_by,
+      };
       const fallback = published
-        ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() }
-        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date() };
+        ? { outcome: 'completed_published', published_url: patch.published_url, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp }
+        : { outcome: 'completed_pending_review', skip_reason: patch.astro_pr_url ? 'astro_pr_pending_merge' : 'publisher_no_live_url', astro_pr_url: patch.astro_pr_url || null, draft_payload: stampedDraft, completed_at: new Date(), updated_at: new Date(), ...approvalStamp };
       await db('autonomous_runs').where('id', run.id).update(fallback)
         .catch((e2) => logger.error(`[autonomous-runner] named-competitor run fallback persist ALSO failed (run ${run.id}); manual reconcile needed: ${e2.message}`));
     }

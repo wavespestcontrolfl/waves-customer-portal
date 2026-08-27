@@ -888,6 +888,12 @@ async function maybeAutoMerge(run, pr) {
     // (src/content/blog{pathname}.mdx|.md) — otherwise an extra blog file
     // smuggled onto an eligible intercept PR would ride that brief's
     // competitor authorization. Unparseable payload/canonical fails closed.
+    // A flat-leaf binding routes by FRONTMATTER slug, not the filename, so
+    // the loop below must additionally verify the fetched file's slug routes
+    // to this expected path (PR r2 P1: a same-leaf flat file whose slug
+    // routes to a different category would otherwise merge unrelated content
+    // under the brief's authorization).
+    let flatBindingExpectedPath = null;
     if (run.action_type === 'new_supporting_blog') {
       let boundOk = false;
       try {
@@ -902,9 +908,11 @@ async function maybeAutoMerge(run, pr) {
           // The nested category path is canonical, but the publisher also
           // updates a LEGACY FLAT file in place (src/content/blog/{leaf}.mdx
           // routing by frontmatter slug) when the existing post lives there —
-          // accept that leaf too (PR review P1).
+          // accept that leaf too (PR review P1), subject to the slug check
+          // in the loop below.
           const leaf = expectedPath.replace(/\/$/, '').split('/').pop();
-          boundOk = `${rel}/` === expectedPath || (Boolean(leaf) && `${rel}/` === `/${leaf}/`);
+          if (`${rel}/` === expectedPath) boundOk = true;
+          else if (Boolean(leaf) && `${rel}/` === `/${leaf}/`) { boundOk = true; flatBindingExpectedPath = expectedPath; }
         }
       } catch (_) { boundOk = false; }
       if (!boundOk) {
@@ -936,6 +944,15 @@ async function maybeAutoMerge(run, pr) {
         // as an empty — clean — draft (hook r8 P1).
         if (!file || typeof file.content !== 'string' || !file.content.trim()) { comparisonBlocked = true; break; }
         const parsed = fmMod.parse(file.content);
+        // Flat-leaf binding: the file routes by its frontmatter slug — it
+        // must route to the run's expected path or the binding above was
+        // satisfied by filename alone (PR r2 P1). Missing/foreign slug
+        // fails closed.
+        if (flatBindingExpectedPath) {
+          const rawSlug = String((parsed && parsed.data && parsed.data.slug) || '');
+          const slugPath = `/${rawSlug.replace(/^\/+|\/+$/g, '')}/`;
+          if (!rawSlug.trim() || slugPath !== flatBindingExpectedPath) { comparisonBlocked = true; break; }
+        }
         const verdict = comparisonMod.evaluate(
           { body: String(parsed?.content || ''), frontmatter: (parsed && parsed.data) || {} },
           { namedCompetitorEnabled: namedEnabled, operatorBriefText: opText },
