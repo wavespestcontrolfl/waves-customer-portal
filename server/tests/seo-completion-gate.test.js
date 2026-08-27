@@ -482,6 +482,8 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(refOnly.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    // The `[cta]` label half of the full reference is not itself an anchor.
+    expect(refOnly.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
     const imageOnly = SeoCompletionGate.evaluate({
       draft: baseDraft({ body: 'Ants. ![Get My Free Pest Control Estimate](/contact/)' }),

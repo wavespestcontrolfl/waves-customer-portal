@@ -408,7 +408,9 @@ function extractLinks(body) {
     }
     // Shortcut references: a bare `[Label]` whose label has a definition and
     // that is not itself an inline/full reference or the definition line.
-    const shortcut = /(?<!!)\[([^\]]+)\](?![\[(:])/g;
+    // (?<![\]!]) — skip the label half of a full reference (`[text][label]`)
+    // and image syntax; (?![\[(:]) — skip inline/full references and definitions.
+    const shortcut = /(?<![\]!])\[([^\]]+)\](?![\[(:])/g;
     while ((m = shortcut.exec(s)) !== null) {
       const href = defs.get(label(m[1]));
       if (href) links.push({ anchor: m[1], href });
