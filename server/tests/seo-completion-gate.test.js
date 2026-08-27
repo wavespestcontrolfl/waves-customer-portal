@@ -267,6 +267,28 @@ describe('seo-completion-gate', () => {
     });
     expect(commercial.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(commercial.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // "-control" service ids land on their own specialty key.
+    const rodent = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Rats move in when nights cool. [Get a Rodent Quote](/pest-control-quote/) today.',
+      }),
+      brief: baseBrief({ service: 'rodent-control' }),
+      shadowMode: true,
+    });
+    expect(rodent.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(rodent.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+  });
+
+  test('an inspection-request anchor emits exactly one forbidden-wording finding', () => {
+    const result = SeoCompletionGate.evaluate({
+      draft: baseDraft({
+        body: 'Act now. [Request an Inspection](/contact/) today.',
+      }),
+      brief: baseBrief(),
+      shadowMode: true,
+    });
+    expect(result.findings.filter((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING').length).toBe(1);
   });
 
   test('a wrong-service CTA anchor is a violation even when a valid CTA also exists', () => {

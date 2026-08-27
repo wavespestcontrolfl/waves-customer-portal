@@ -132,8 +132,11 @@ function evaluate(input = {}) {
     if (badAnchor) {
       findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badAnchor}" uses inspection-request wording — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording, e.g. "Get My Free Termite Estimate".'));
     }
+    // Skip when it is the SAME anchor the inspection check already flagged —
+    // one anchor, one finding (a duplicate would double-count toward
+    // AUTONOMOUS_CONTENT_MAX_P1_FINDINGS).
     const badCta = badCtaAnchor(body, brief);
-    if (badCta) {
+    if (badCta && badCta !== badAnchor) {
       findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badCta}" violates the CTA-wording rule — owner rule 2026-08-27: every conversion CTA anchor uses estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording for this post\'s service, e.g. "Get My Free Termite Estimate" on a termite post.'));
     }
   }
@@ -325,10 +328,18 @@ const IMPERATIVE_CTA_ANCHOR_RE = /^(?:request|schedule|book|get|start|claim|call
 // parked by a partial local normalization.
 function ctaBriefService(rawService) {
   if (!rawService) return null;
-  const singular = String(rawService).toLowerCase().trim().replace(/\s+/g, '-').replace(/e?s$/, '');
-  if (CTA_ANCHOR_SERVICE_TERMS[singular]) return singular;
+  const base = String(rawService).toLowerCase().trim().replace(/\s+/g, '-');
+  // Try the id itself, its singular, and its "-control"/"-care"/"-treatment"
+  // stripped forms against the anchor vocabulary first, so every supported
+  // service id (rodent-control, bed-bug-control, bed-bugs, …) lands on its
+  // own key before any broad-service aliasing.
+  const stripped = base.replace(/-(?:control|care|treatment)s?$/, '');
+  const candidates = [base, base.replace(/e?s$/, ''), stripped, stripped.replace(/e?s$/, '')];
+  for (const c of candidates) {
+    if (CTA_ANCHOR_SERVICE_TERMS[c] || CTA_SERVICE_FAMILY[c]) return c;
+  }
   const { SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
-  const aliased = SERVICE_ID_ALIASES[singular] || SERVICE_ID_ALIASES[String(rawService).toLowerCase().trim()] || rawService;
+  const aliased = SERVICE_ID_ALIASES[base] || SERVICE_ID_ALIASES[stripped] || rawService;
   return normalizeService(aliased).replace(/\s+/g, '-').replace(/e?s$/, '');
 }
 
