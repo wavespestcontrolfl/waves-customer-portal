@@ -1615,7 +1615,12 @@ const AppointmentReminders = {
   // never owns the slot, never merges its label into a real owner, never
   // sends, and is never promoted. When a real window is later set, the
   // sync trigger's time_changed branch clears the markers and re-arms.
-  async insertPreClosedPlaceholderRowInTx(trx, { scheduledServiceId, customerId, apptTime, serviceLabel, source }) {
+  // `createdAt` (optional) preserves the VISIT's real booking time on the
+  // row (codex #3504 r14): when a real window is later set the sync
+  // trigger re-arms this row, and the 72h pass reads created_at as the
+  // booking time — a placeholder stamped with the heal/cron time would
+  // read as a late booking and falsely close the 72h reminder.
+  async insertPreClosedPlaceholderRowInTx(trx, { scheduledServiceId, customerId, apptTime, serviceLabel, source, createdAt }) {
     const windowsClosedAt = new Date();
     const [record] = await trx('appointment_reminders').insert({
       scheduled_service_id: scheduledServiceId,
@@ -1623,6 +1628,7 @@ const AppointmentReminders = {
       appointment_time: apptTime,
       service_type: serviceLabel,
       source,
+      ...(createdAt ? { created_at: createdAt } : {}),
       confirmation_sent: true,
       confirmation_sent_at: windowsClosedAt,
       reminder_72h_sent: true,
@@ -1851,6 +1857,7 @@ const AppointmentReminders = {
         if (closeReminderWindows) {
           const record = await this.insertPreClosedPlaceholderRowInTx(trx, {
             scheduledServiceId, customerId, apptTime, serviceLabel, source,
+            createdAt: options.createdAt || null,
           });
           return { record, serviceLabel, inserted: true };
         }
@@ -2102,6 +2109,8 @@ const AppointmentReminders = {
                 apptTime: placeholderTime,
                 serviceLabel,
                 source: 'cron_selfheal',
+                // Same booking-time preservation as the armed arm below.
+                createdAt: lockedVisit.created_at,
               });
               return { record };
             }

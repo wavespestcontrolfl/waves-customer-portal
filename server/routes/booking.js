@@ -2911,10 +2911,12 @@ async function createSelfBooking(payload = {}) {
     // learning the live quote needs conversion. SAVEPOINT-wrapped: the
     // strip is the money-safety action and must never be voided by a bell
     // failure — a savepoint failure logs loud and the strip stands.
-    const notifySeriesStripInTx = async (trx, parentId, reason) => {
+    // Deduped admin bell INSIDE the activation transaction, savepoint-
+    // wrapped so a bell failure never voids the decision it rides with.
+    // Shared by the pricing strips and the short-slot notice below.
+    const notifySeriesOfficeBellInTx = async (trx, { dedupeKey, title, body, metadata, failLabel }) => {
       try {
         await trx.transaction(async (sp) => {
-          const dedupeKey = `wizard-activation-stripped:${parentId}`;
           await sp.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin:${dedupeKey}`]);
           const existingBell = await sp('notifications')
             .where({ recipient_type: 'admin' })
@@ -2924,19 +2926,26 @@ async function createSelfBooking(payload = {}) {
           const created = await require('../services/notification-service').create({
             recipientType: 'admin',
             category: 'alert',
-            title: 'Self-booked plan did not activate',
-            body: `A self-booked recurring plan for customer ${custId} could not activate (${reason}). The booked first visit was kept but its per-application pricing was removed — convert the live quote to schedule and bill the plan.`,
+            title,
+            body,
             link: `/admin/customers/${custId}`,
             bell: true,
-            metadata: { dedupeKey, customer_id: custId, scheduled_service_id: parentId, reason },
+            metadata: { dedupeKey, customer_id: custId, ...metadata },
             connection: sp,
           });
-          if (!created) throw new Error('strip bell insert returned null');
+          if (!created) throw new Error(`${failLabel} bell insert returned null`);
         });
       } catch (bellErr) {
-        logger.warn(`[booking:confirm] strip bell failed for ${parentId} (strip stands): ${bellErr.message}`);
+        logger.warn(`[booking:confirm] ${failLabel} bell failed for ${metadata?.scheduled_service_id} (${failLabel} stands): ${bellErr.message}`);
       }
     };
+    const notifySeriesStripInTx = async (trx, parentId, reason) => notifySeriesOfficeBellInTx(trx, {
+      dedupeKey: `wizard-activation-stripped:${parentId}`,
+      title: 'Self-booked plan did not activate',
+      body: `A self-booked recurring plan for customer ${custId} could not activate (${reason}). The booked first visit was kept but its per-application pricing was removed — convert the live quote to schedule and bill the plan.`,
+      metadata: { scheduled_service_id: parentId, reason },
+      failLabel: 'strip',
+    });
 
     // Shared activation: series + conflict sweep + fee stamp + draft
     // retirement in ONE transaction, with the parent's billable pricing
@@ -3236,6 +3245,40 @@ async function createSelfBooking(payload = {}) {
               logger.warn(`[booking:confirm] cadence catalog row ${cadenceKey} missing — series ${seriesParentRow.id} stays name-resolved (fail-open)`);
             }
           }
+          // Activation-time ADDRESS EVIDENCE on the parent (codex #3504
+          // r14): the duplicate-series guard resolves an UNSTAMPED parent's
+          // property through its source estimate, and a wizard parent's
+          // source is the REUSABLE draft — the funnel revives and rewrites
+          // that same row for the customer's next quote (any address), so
+          // the older series would read as belonging to the newly quoted
+          // property and strip the legitimate second-property booking. The
+          // property linkage only stamps behind GATE_CUSTOMER_PROPERTIES
+          // (and deliberately leaves primary-address rows unstamped), so
+          // the parent carries the quoted address ITSELF, from the row-
+          // locked draft, before the children seed (copyIfPresent inherits
+          // it). Coordinates stay — the funnel geocoded this same address
+          // at booking. Unparseable ⇒ unstamped (the guard's live-draft
+          // refusal then falls to the primary-street heuristic: over-
+          // suppression, never a wrong match).
+          if (!String(seriesParentRow.service_address_line1 || '').trim()) {
+            const { parseEstimateAddress } = require('../services/estimate-property-linkage');
+            const quotedParts = parseEstimateAddress(lockedDraft.address);
+            if (quotedParts && String(quotedParts.address_line1 || '').trim()) {
+              const addressStamp = {
+                service_address_line1: quotedParts.address_line1,
+                service_address_line2: quotedParts.address_line2 || null,
+                service_address_city: quotedParts.city || null,
+                service_address_state: quotedParts.state || 'FL',
+                service_address_zip: quotedParts.zip || null,
+              };
+              await trx('scheduled_services')
+                .where({ id: seriesParentRow.id })
+                .update({ ...addressStamp, updated_at: trx.fn.now() });
+              Object.assign(seriesParentRow, addressStamp);
+            } else {
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id}: quoted address unparseable — parent stays unstamped (duplicate guard uses the primary-street heuristic)`);
+            }
+          }
           // The PARENT is reserved at the program duration too (codex
           // #3504 r13): the funnel booked/signed the first visit at its
           // coarse duration (mosquito 45) while the program's authority is
@@ -3277,7 +3320,21 @@ async function createSelfBooking(payload = {}) {
                   notes: trx.raw("COALESCE(notes, '') || ' — first visit reserved at the funnel duration; the program needs a longer slot but the following time is occupied; office to adjust'"),
                   updated_at: trx.fn.now(),
                 });
-              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted`);
+              // The note alone is passive (codex #3504 r14): ring the
+              // deduped office bell in the SAME transaction so the short
+              // slot is acted on before the visit day — the signed slot is
+              // the customer's confirmed time (kept, no persisted overlap);
+              // aborting the plan or demoting a confirmed visit for a
+              // 15-minute placement problem would trade a sale for a
+              // roster edit the office makes in seconds.
+              await notifySeriesOfficeBellInTx(trx, {
+                dedupeKey: `wizard-activation-short-slot:${seriesParentRow.id}`,
+                title: 'Self-booked plan: first visit reserved short',
+                body: `A self-booked recurring plan for customer ${custId} activated, but its first visit (${parentDateStr} ${slot_start}) is reserved at the funnel's ${parentDurationNow}-minute slot while the program needs ${seededChildDuration} minutes and the following time is already occupied. Move the neighbouring work or re-place this visit so the technician has the full slot.`,
+                metadata: { scheduled_service_id: seriesParentRow.id, reserved_minutes: parentDurationNow, needed_minutes: seededChildDuration },
+                failLabel: 'short-slot',
+              });
+              logger.warn(`[booking:confirm] wizard-series parent ${seriesParentRow.id} could not extend to ${seededChildDuration}min (adjacent work) — signed ${parentDurationNow}min slot kept, office noted + belled`);
             }
           }
           const seedResult = await RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {

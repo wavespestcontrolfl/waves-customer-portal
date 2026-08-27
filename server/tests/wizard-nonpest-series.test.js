@@ -387,7 +387,10 @@ describe('booking route wiring (source contracts)', () => {
     // r9: the duplicate-kept and moved-placement strips ring it too.
     expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the customer already has an active series for this service'\)/);
     expect(booking).toMatch(/notifySeriesStripInTx\(trx, seriesParentRow\.id, 'the first visit was moved before the plan activated'\)/);
-    expect(booking).toMatch(/strip bell failed for \$\{parentId\} \(strip stands\)/);
+    // r14: the strip bell rides the shared in-trx office-bell helper; the
+    // failure log names the decision that stands.
+    expect(booking).toMatch(/\$\{failLabel\} bell failed for \$\{metadata\?\.scheduled_service_id\} \(\$\{failLabel\} stands\)/);
+    expect(booking).toMatch(/failLabel: 'strip',/);
     // The drift/failure/moved strips carry the office note on the row.
     expect((booking.match(/self-booked plan did not activate \((quote changed|seeding failed|visit was moved before the plan started)\); office converts from the live quote/g) || []).length).toBe(3);
   });
@@ -665,11 +668,84 @@ describe('booking route wiring (source contracts)', () => {
     const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
     expect(recoverySrc).toMatch(/\.whereNotIn\('ss\.status', \['cancelled', 'canceled'\]\)/);
     expect(recoverySrc).not.toMatch(/whereIn\('ss\.status', \['pending', 'confirmed'\]\)/);
-    expect(recoverySrc).toMatch(/PROGRESSED_TERMINAL_STATES = new Set\(\['completed', 'skipped', 'no_show'\]\)/);
+    // r14: only a COMPLETED visit with a live invoice is "billed"; skipped
+    // / no_show never ran the completion-invoice path.
+    expect(recoverySrc).toMatch(/COMPLETED_STATES = new Set\(\['completed'\]\)/);
+    expect(recoverySrc).toMatch(/UNBILLED_TERMINAL_STATES = new Set\(\['skipped', 'no_show'\]\)/);
+    expect(recoverySrc).toMatch(/\.update\(byDisposition\.patch\)/);
     // Terminal-but-billed keeps estimated_price (history), clears the
     // pay-at-visit machinery, bells for the REMAINING program.
-    expect(recoverySrc).toMatch(/\.update\(terminalBilled\s*\n\s*\? \{\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
+    expect(recoverySrc).toMatch(/KEEP_PRICE_PATCH = \(trx, noteTail\) => \(\{\s*\n\s*payment_method_preference: null,\s*\n\s*create_invoice_on_complete: false,/);
     expect(recoverySrc).toMatch(/bill the REMAINING program/);
+  });
+
+  test('skipped / no-show stranded first visits are UNBILLED: strip + convert the FULL program (r14)', async () => {
+    // codex #3504 r14: those statuses skip the completion-invoice path (a
+    // no-show charges at most its flat fee), so "already billed at the
+    // quoted price" was false and the office would under-convert.
+    const { classifyStrandedDisposition } = require('../services/wizard-series-activation-recovery');
+    const trxWithInvoice = (rows) => {
+      const chain = {
+        where: jest.fn(() => chain),
+        whereNotIn: jest.fn(() => chain),
+        first: jest.fn(async () => rows[0] || null),
+      };
+      return Object.assign(jest.fn(() => chain), { chain });
+    };
+    expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'inv' }]), 'p1', 'skipped')).toBe('terminal_unbilled');
+    expect(await classifyStrandedDisposition(trxWithInvoice([{ id: 'inv' }]), 'p1', 'no_show')).toBe('terminal_unbilled');
+    expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'en_route')).toBe('in_flight');
+    expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'confirmed')).toBe('in_flight');
+    // completed is billed ONLY with a live invoice on the visit.
+    const billed = trxWithInvoice([{ id: 'inv' }]);
+    expect(await classifyStrandedDisposition(billed, 'p1', 'completed')).toBe('completed_billed');
+    expect(billed.chain.whereNotIn).toHaveBeenCalledWith('status', expect.arrayContaining(['void', 'refunded', 'cancelled']));
+    expect(await classifyStrandedDisposition(trxWithInvoice([]), 'p1', 'completed')).toBe('completed_unbilled');
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/terminal_unbilled: \{\s*\n\s*patch: STRIP_PATCH\(/);
+    expect(recoverySrc).toMatch(/bill the FULL plan/);
+    expect(recoverySrc).toMatch(/completed_unbilled: \{\s*\n\s*patch: KEEP_PRICE_PATCH\(/);
+  });
+
+  test('the follow-through healer walks the whole eligible set by keyset cursor, never one re-selected page (r14)', () => {
+    const recoverySrc = fs.readFileSync(path.join(__dirname, '..', 'services', 'wizard-series-activation-recovery.js'), 'utf8');
+    expect(recoverySrc).toMatch(/whereRaw\('\(ss\.created_at, ss\.id\) > \(\?, \?\)', \[cursor\.created_at, cursor\.id\]\)/);
+    expect(recoverySrc).toMatch(/\.orderBy\('ss\.created_at', 'asc'\)\s*\n\s*\.orderBy\('ss\.id', 'asc'\)/);
+    expect(recoverySrc).toMatch(/cursor = parents\[parents\.length - 1\]/);
+    expect(recoverySrc).toMatch(/if \(parents\.length < pageSize\) break;/);
+    expect(recoverySrc).not.toMatch(/limit = 200/);
+  });
+
+  test('a wizard parent carries the QUOTED address itself at activation; the guard never reads a live wizard draft back (r14)', async () => {
+    // codex #3504 r14: the wizard draft is REUSED for the customer's next
+    // quote (any address). An unstamped primary-address parent whose
+    // source is that draft would re-home to whatever was quoted last and
+    // strip the legitimate second-property booking.
+    expect(booking).toMatch(/parseEstimateAddress\(lockedDraft\.address\)/);
+    expect(booking).toMatch(/if \(!String\(seriesParentRow\.service_address_line1 \|\| ''\)\.trim\(\)\) \{/);
+    expect(booking).toMatch(/Object\.assign\(seriesParentRow, addressStamp\)/);
+    // Stamp precedes seeding so children inherit it (copyIfPresent).
+    expect(booking.indexOf('Object.assign(seriesParentRow, addressStamp)')).toBeLessThan(booking.indexOf('RecurringAppointmentSeeder.seedFollowUpsForParent(trx, seriesParentRow, {'));
+    const { sourceEstimateForScope } = require('../services/recurring-appointment-seeder');
+    const connFor = (row) => jest.fn(() => ({ where: () => ({ first: async () => row }) }));
+    const live = { property_id: 'pB', address: '200 Other St, Venice, FL 34285', source: 'quote_wizard', status: 'draft', archived_at: null };
+    expect(await sourceEstimateForScope(connFor(live), 'd1')).toBeNull();
+    const archived = { ...live, archived_at: new Date() };
+    expect(await sourceEstimateForScope(connFor(archived), 'd1')).toEqual(archived);
+    const accepted = { ...live, source: 'website', status: 'accepted' };
+    expect(await sourceEstimateForScope(connFor(accepted), 'd1')).toEqual(accepted);
+    expect(await sourceEstimateForScope(connFor(null), 'd1')).toBeNull();
+    const seeder = fs.readFileSync(path.join(__dirname, '..', 'services', 'recurring-appointment-seeder.js'), 'utf8');
+    // Both fallbacks (property id AND address) go through the refusal.
+    expect((seeder.match(/await sourceEstimateForScope\(conn, parent\.source_estimate_id\)/g) || []).length).toBe(2);
+    expect(seeder).not.toMatch(/where\(\{ id: parent\.source_estimate_id \}\)\.first\('address'\)/);
+  });
+
+  test('a parent that cannot extend to the program duration keeps its signed slot AND rings the office bell in-trx (r14)', () => {
+    expect(booking).toMatch(/dedupeKey: `wizard-activation-short-slot:\$\{seriesParentRow\.id\}`/);
+    expect(booking).toMatch(/notifySeriesOfficeBellInTx = async \(trx, \{ dedupeKey, title, body, metadata, failLabel \}\)/);
+    // The strip bell is the same shared helper.
+    expect(booking).toMatch(/notifySeriesStripInTx = async \(trx, parentId, reason\) => notifySeriesOfficeBellInTx\(trx, \{/);
   });
 
   test('a mixed quote (recurring + specialty/installation add-on) is not self-serve bookable', () => {
@@ -719,7 +795,7 @@ describe('booking route wiring (source contracts)', () => {
     // codex #3504 r10: the legacy path converted a null window to an
     // ARMED 08:00 registration — texting a time nobody chose.
     const reminders = fs.readFileSync(path.join(__dirname, '..', 'services', 'appointment-reminders.js'), 'utf8');
-    expect(reminders).toMatch(/async insertPreClosedPlaceholderRowInTx\(trx, \{ scheduledServiceId, customerId, apptTime, serviceLabel, source \}\)/);
+    expect(reminders).toMatch(/async insertPreClosedPlaceholderRowInTx\(trx, \{ scheduledServiceId, customerId, apptTime, serviceLabel, source, createdAt \}\)/);
     expect(reminders).toMatch(/if \(!lockedVisit\.window_start\) \{[\s\S]{0,900}insertPreClosedPlaceholderRowInTx\(trx, \{/);
     // registerAppointment's closeReminderWindows path shares the SAME
     // insert (single implementation): the definition + exactly two call

@@ -697,7 +697,7 @@ async function findActiveRecurringSeries(conn, {
       let parentPid = parent.property_id ? String(parent.property_id) : '';
       if (serviceAddressScope.estimatePropertyId && !parentPid && parent.source_estimate_id) {
         try {
-          const srcRow = await conn('estimates').where({ id: parent.source_estimate_id }).first('property_id');
+          const srcRow = await sourceEstimateForScope(conn, parent.source_estimate_id);
           if (srcRow?.property_id) parentPid = String(srcRow.property_id);
         } catch { /* fall through to the address branch / fail-closed default */ }
       }
@@ -736,7 +736,7 @@ async function findActiveRecurringSeries(conn, {
           // estimate's address committed in the SAME transaction as the parent,
           // so it is authoritative and race-free.
           try {
-            const src = await conn('estimates').where({ id: parent.source_estimate_id }).first('address');
+            const src = await sourceEstimateForScope(conn, parent.source_estimate_id);
             const recovered = parentKeyFromRaw(src?.address);
             if (recovered) {
               parentStreet = recovered;
@@ -853,6 +853,26 @@ async function findActiveRecurringSeries(conn, {
 // commit. Fail-open BY DESIGN (the guard is protective, not load-bearing):
 // errors are returned — never thrown — as { matches: [], guardError } so the
 // caller logs and proceeds with seeding.
+// The creating estimate's address/property stands in for an UNSTAMPED
+// parent's ONLY while that estimate row is immutable. A quote-wizard draft
+// is not: the funnel REVIVES and rewrites the same draft row for the
+// customer's next quote (any address) while a self-booked series keeps
+// pointing at it through source_estimate_id — reading a live draft back
+// would re-home an older series to whatever was quoted LAST, and the
+// duplicate guard would then strip the legitimate new-property booking
+// (codex #3504 r14). A live wizard draft therefore yields NOTHING and the
+// parent falls to the primary-street heuristic (over-suppression, never a
+// wrong match); archived/promoted wizard rows no longer revive and stay
+// usable, as do accept-path estimates.
+async function sourceEstimateForScope(conn, estimateId) {
+  const row = await conn('estimates')
+    .where({ id: estimateId })
+    .first('property_id', 'address', 'source', 'status', 'archived_at');
+  if (!row) return null;
+  if (row.source === 'quote_wizard' && row.status === 'draft' && !row.archived_at) return null;
+  return row;
+}
+
 async function checkActiveSeriesLocked(trx, opts = {}) {
   try {
     const matches = await trx.transaction(async (guardTrx) => {
@@ -1140,6 +1160,7 @@ module.exports = {
   acquireSeriesCreateLocks,
   buildRecurringFollowUpRows,
   checkActiveSeriesLocked,
+  sourceEstimateForScope,
   customerPrefersNoWeekends,
   findActiveRecurringSeries,
   seriesCreateLockKeys,

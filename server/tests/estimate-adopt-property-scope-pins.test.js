@@ -387,7 +387,7 @@ describe('unit-strict blind keys + no-ZIP shapes + pid recovery (codex #3431 r10
   test('converter and seeder recover a source estimate\'s property_id for unstamped rows', () => {
     expect(converterSrc).toContain(".first('address', 'property_id')");
     expect(converterSrc).toContain('if (src?.property_id) rowPid = String(src.property_id);');
-    expect(seederSrc).toContain("const srcRow = await conn('estimates').where({ id: parent.source_estimate_id }).first('property_id');");
+    expect(seederSrc).toContain("const srcRow = await sourceEstimateForScope(conn, parent.source_estimate_id);");
   });
 });
 

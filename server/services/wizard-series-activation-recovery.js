@@ -64,13 +64,47 @@ async function findStrandedParents(database, { olderThanMinutes, limit }) {
     .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.service_type', 'ss.scheduled_date', 'ss.status');
 }
 
-// Terminal-but-billed states: the visit happened (or was skipped/no-showed)
-// and its first-application invoice — if any — already minted from the
-// stamped price. Stripping estimated_price would only rewrite history;
-// the reconcile clears the pay-at-visit machinery so the row leaves the
-// predicate, keeps the price for the record, and bells the office to
-// convert the live draft for the REMAINING program.
-const PROGRESSED_TERMINAL_STATES = new Set(['completed', 'skipped', 'no_show']);
+// Terminal states, classified by what they mean for the MONEY (codex
+// #3504 r13 + r14):
+//  - completed + a live (non-void) invoice on the visit ⇒ BILLED at the
+//    quoted first-application price. Stripping estimated_price would only
+//    rewrite history; the reconcile clears the pay-at-visit machinery so
+//    the row leaves the predicate, keeps the price for the record, and
+//    bells the office to convert the live draft for the REMAINING program.
+//  - completed with NO live invoice ⇒ work done, UNBILLED: the price stays
+//    (the office bills the visit by hand) and the bell says so.
+//  - skipped / no_show ⇒ NOT billed (r14): neither runs the completion-
+//    invoice path — a no-show charges at most its flat fee off the card-
+//    hold rail, never the application — so the customer received no
+//    application and owes no application invoice. The row strips exactly
+//    like an in-flight one and the office converts the FULL program.
+const COMPLETED_STATES = new Set(['completed']);
+const UNBILLED_TERMINAL_STATES = new Set(['skipped', 'no_show']);
+const DEAD_INVOICE_STATUSES = ['void', 'voided', 'cancelled', 'canceled', 'refunded'];
+
+async function classifyStrandedDisposition(trx, parentId, status) {
+  if (UNBILLED_TERMINAL_STATES.has(status)) return 'terminal_unbilled';
+  if (!COMPLETED_STATES.has(status)) return 'in_flight';
+  const liveInvoice = await trx('invoices')
+    .where({ scheduled_service_id: parentId })
+    .whereNotIn('status', DEAD_INVOICE_STATUSES)
+    .first('id');
+  return liveInvoice ? 'completed_billed' : 'completed_unbilled';
+}
+
+const STRIP_PATCH = (trx, noteTail) => ({
+  estimated_price: null,
+  payment_method_preference: null,
+  create_invoice_on_complete: false,
+  notes: trx.raw("COALESCE(notes, '') || ?", [noteTail]),
+  updated_at: trx.fn.now(),
+});
+const KEEP_PRICE_PATCH = (trx, noteTail) => ({
+  payment_method_preference: null,
+  create_invoice_on_complete: false,
+  notes: trx.raw("COALESCE(notes, '') || ?", [noteTail]),
+  updated_at: trx.fn.now(),
+});
 
 async function sweepStrandedWizardActivations({ database = db, olderThanMinutes = DEFAULT_OLDER_THAN_MINUTES, limit = 10 } = {}) {
   const stranded = await findStrandedParents(database, { olderThanMinutes, limit });
@@ -105,7 +139,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           || fresh.payment_method_preference !== 'pay_at_visit'
           || ['cancelled', 'canceled'].includes(String(fresh.status || ''))
           || String(fresh.source_estimate_id || '') !== String(parent.source_estimate_id)) return false;
-        const terminalBilled = PROGRESSED_TERMINAL_STATES.has(String(fresh.status || ''));
+        const disposition = await classifyStrandedDisposition(trx, parent.id, String(fresh.status || ''));
         const freshChild = await trx('scheduled_services')
           .where({ recurring_parent_id: parent.id })
           .whereNot('status', 'cancelled')
@@ -116,22 +150,28 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
           .whereNull('archived_at')
           .first('id');
         if (!freshDraft) return false;
+        const who = `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)})`;
+        const byDisposition = {
+          completed_billed: {
+            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; office converts the live quote for the remaining program'),
+            bell: `${who} never activated (worker died mid-request) and that first visit has since been completed and invoiced at the quoted first-application price. The quote draft is still live — convert it to schedule and bill the REMAINING program.`,
+          },
+          completed_unbilled: {
+            patch: KEEP_PRICE_PATCH(trx, ' — series activation never completed (worker died mid-booking); this visit was completed but carries NO invoice — office bills it at the quoted first-application price and converts the live quote for the remaining program'),
+            bell: `${who} never activated (worker died mid-request). That first visit has since been completed but has NO invoice — bill it at the quoted first-application price (kept on the visit), then convert the still-live quote draft to schedule and bill the REMAINING program.`,
+          },
+          terminal_unbilled: {
+            patch: STRIP_PATCH(trx, ` — series activation never completed (worker died mid-booking); first visit ended ${fresh.status} with no application, pricing stripped; office converts the live quote for the FULL program`),
+            bell: `${who} never activated (worker died mid-request) and that first visit ended ${fresh.status} — no application was performed and none was invoiced. The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the FULL plan.`,
+          },
+          in_flight: {
+            patch: STRIP_PATCH(trx, ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'),
+            bell: `${who} committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
+          },
+        }[disposition];
         await trx('scheduled_services')
           .where({ id: parent.id })
-          .update(terminalBilled
-            ? {
-                payment_method_preference: null,
-                create_invoice_on_complete: false,
-                notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); this visit already billed at the quoted first-application price; office converts the live quote for the remaining program'"),
-                updated_at: trx.fn.now(),
-              }
-            : {
-                estimated_price: null,
-                payment_method_preference: null,
-                create_invoice_on_complete: false,
-                notes: trx.raw("COALESCE(notes, '') || ' — series activation never completed (worker died mid-booking); pricing stripped, office converts from the live quote'"),
-                updated_at: trx.fn.now(),
-              });
+          .update(byDisposition.patch);
         // Bell ATOMIC with the strip (codex #3504 r6 hook): the strip
         // removes the row from every future sweep, so a bell sent
         // best-effort afterwards could silently vanish and the office
@@ -151,9 +191,7 @@ async function sweepStrandedWizardActivations({ database = db, olderThanMinutes 
             recipientType: 'admin',
             category: 'alert',
             title: 'Self-booked plan never activated',
-            body: terminalBilled
-              ? `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) never activated (worker died mid-request) and that first visit has since been ${fresh.status}. It billed at the quoted first-application price; the quote draft is still live — convert it to schedule and bill the REMAINING program.`
-              : `A self-booked recurring plan for customer ${parent.customer_id} (${parent.service_type || 'service'}, first visit ${String(parent.scheduled_date).slice(0, 10)}) committed its first visit but the series never activated (worker died mid-request). The visit's per-application pricing was removed and the quote draft is still live — convert the quote to schedule and bill the plan.`,
+            body: byDisposition.bell,
             link: `/admin/customers/${parent.customer_id}`,
             bell: true,
             metadata: {
@@ -260,36 +298,52 @@ async function runActivationFollowThroughForParent(parent, { database = db } = {
 // follow-through re-run; re-running a healthy one is a no-op by design.
 // The 7-day window here is generous coverage for a seconds-wide crash
 // window (unlike the stranded strip above, nothing billable rides on it).
-// The 7-day window bounds the eligible set (a handful of self-booked
-// wizard activations), so every run processes ALL of it, oldest first —
-// a fixed newest-N slice with no completion marker would re-heal the
-// same rows forever and starve older ones past the window (codex #3504
-// r9 hook). The limit is a runaway safety cap only; hitting it logs
-// loud so it never silently truncates.
-async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, limit = 200 } = {}) {
-  const parents = await database('scheduled_services as ss')
-    .join('estimates as e', 'e.id', 'ss.source_estimate_id')
-    .whereNotNull('ss.self_booking_id')
-    .where('ss.is_recurring', true)
-    .whereNull('ss.recurring_parent_id')
-    .whereNotIn('ss.status', ['cancelled'])
-    .where('e.source', 'quote_wizard')
-    .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
-    .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
-    .orderBy('ss.created_at', 'asc')
-    .limit(limit)
-    .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id');
-  if (parents.length >= limit) {
-    logger.warn(`[wizard-series-recovery] follow-through heal hit its ${limit}-row safety cap — eligible set exceeds the cap, raise it or shrink the window`);
-  }
-  for (const parent of parents) {
-    try {
-      await runActivationFollowThroughForParent(parent, { database });
-    } catch (err) {
-      logger.warn(`[wizard-series-recovery] follow-through heal failed for parent=${parent.id} (retried next sweep): ${err.message}`);
+// Every run walks the WHOLE windowed set oldest-first — a fixed newest-N
+// slice with no completion marker would re-heal the same rows forever and
+// starve older ones past the window (codex #3504 r9 hook). There is no
+// completion marker by design (every step is idempotent), so the walk is
+// a KEYSET cursor over (created_at, id) in pages (codex #3504 r14): a
+// single capped page re-selected the same oldest rows every tick once
+// the eligible set outgrew it, and everything past the page aged out
+// unhealed. maxRows is a runaway safety cap only; hitting it logs loud so
+// it never silently truncates.
+async function healActivatedFollowThroughs({ database = db, olderThanMinutes = 10, youngerThanDays = 7, pageSize = 200, maxRows = 5000 } = {}) {
+  let healed = 0;
+  let cursor = null;
+  for (;;) {
+    const parents = await database('scheduled_services as ss')
+      .join('estimates as e', 'e.id', 'ss.source_estimate_id')
+      .whereNotNull('ss.self_booking_id')
+      .where('ss.is_recurring', true)
+      .whereNull('ss.recurring_parent_id')
+      .whereNotIn('ss.status', ['cancelled'])
+      .where('e.source', 'quote_wizard')
+      .whereRaw("ss.created_at < NOW() - (?::text || ' minutes')::interval", [String(olderThanMinutes)])
+      .whereRaw("ss.created_at > NOW() - (?::text || ' days')::interval", [String(youngerThanDays)])
+      .modify((qb) => {
+        if (cursor) qb.whereRaw('(ss.created_at, ss.id) > (?, ?)', [cursor.created_at, cursor.id]);
+      })
+      .orderBy('ss.created_at', 'asc')
+      .orderBy('ss.id', 'asc')
+      .limit(pageSize)
+      .select('ss.id', 'ss.customer_id', 'ss.source_estimate_id', 'ss.created_at');
+    if (!parents.length) break;
+    for (const parent of parents) {
+      try {
+        await runActivationFollowThroughForParent(parent, { database });
+      } catch (err) {
+        logger.warn(`[wizard-series-recovery] follow-through heal failed for parent=${parent.id} (retried next sweep): ${err.message}`);
+      }
+    }
+    healed += parents.length;
+    cursor = parents[parents.length - 1];
+    if (parents.length < pageSize) break;
+    if (healed >= maxRows) {
+      logger.warn(`[wizard-series-recovery] follow-through heal hit its ${maxRows}-row safety cap this tick — remaining rows resume next tick from the cursor's position (raise the cap or shrink the window if this repeats)`);
+      break;
     }
   }
-  return { healed: parents.length };
+  return { healed };
 }
 
 module.exports = {
@@ -297,4 +351,5 @@ module.exports = {
   findStrandedParents,
   runActivationFollowThroughForParent,
   healActivatedFollowThroughs,
+  classifyStrandedDisposition,
 };

@@ -95,12 +95,14 @@ describe('selfHealMissingReminderRows', () => {
     // codex #3504 r10: a windowless visit has no chosen time — the legacy
     // armed-08:00 registration texted 72/24h reminders for a time nobody
     // picked. The sync trigger re-arms the row when a real window is set.
+    const bookedAt2 = new Date('2026-07-20T12:00:00.000Z');
     const visit = {
       id: 'svc-2',
       customer_id: 'cust-2',
       scheduled_date: new Date('2026-08-02T00:00:00.000Z'),
       window_start: null,
       service_type: 'Every 6 Weeks Lawn Care Service',
+      created_at: bookedAt2,
     };
     db.mockImplementation(() => sweepChain([visit]));
     trxVisitRows = [visit];
@@ -116,6 +118,10 @@ describe('selfHealMissingReminderRows', () => {
       scheduledServiceId: 'svc-2',
       customerId: 'cust-2',
       source: 'cron_selfheal',
+      // codex #3504 r14: the placeholder keeps the visit's real booking
+      // time — once a window is set and the row re-arms, the 72h pass
+      // reads created_at as the booking time.
+      createdAt: bookedAt2,
     }));
   });
 
@@ -186,6 +192,33 @@ describe('selfHealMissingReminderRows', () => {
       confirmation_sent: true,
       created_at: bookedAt,
     }));
+  });
+
+  test('insertPreClosedPlaceholderRowInTx stamps the caller-provided booking time as created_at (r14)', async () => {
+    const bookedAt = new Date('2026-07-09T15:00:00.000Z');
+    const insertRow = {
+      insert: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockResolvedValue([{ id: 'rem-10' }]),
+    };
+    const trx = jest.fn(() => insertRow);
+    await AppointmentReminders.insertPreClosedPlaceholderRowInTx(trx, {
+      scheduledServiceId: 'svc-10',
+      customerId: 'cust-10',
+      apptTime: new Date('2026-08-01T12:00:00.000Z'),
+      serviceLabel: 'Lawn Care Service',
+      source: 'cron_selfheal',
+      createdAt: bookedAt,
+    });
+    expect(insertRow.insert).toHaveBeenCalledWith(expect.objectContaining({
+      windows_preclosed: true,
+      reminder_72h_sent: true,
+      created_at: bookedAt,
+    }));
+    // Without a booking time the column is left to its DB default.
+    await AppointmentReminders.insertPreClosedPlaceholderRowInTx(trx, {
+      scheduledServiceId: 'svc-11', customerId: 'cust-11', apptTime: new Date(), serviceLabel: 'x', source: 'booking',
+    });
+    expect(insertRow.insert.mock.calls[1][0]).not.toHaveProperty('created_at');
   });
 
   test('sweep query failure logs and returns 0 instead of throwing', async () => {
