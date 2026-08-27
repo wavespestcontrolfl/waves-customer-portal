@@ -216,7 +216,16 @@ class PaymentExpiry {
     let notified = 0;
 
     for (const rawCard of expiringCards) {
-      if (exemptIds.has(String(rawCard.customer_id))) { prepayExempt += 1; continue; }
+      if (exemptIds.has(String(rawCard.customer_id))) {
+        prepayExempt += 1;
+        // The skip only prevents FUTURE alerts — an alert created before
+        // the customer became exempt (e.g. pre-prepay) would otherwise sit
+        // in front of the operator forever: the active-alert reader
+        // (admin-compliance /alerts/active) returns every resolved=false
+        // row and nothing else resolves payment_expiry alerts.
+        await this.resolveAlertsForExemptCustomer(rawCard.customer_id);
+        continue;
+      }
       // Normalize legacy 2-digit years for EVERY downstream consumer — the
       // email path's expiry-stage math runs new Date(year, ...), where a raw
       // '26' reads as 1926 and the card emails as already expired.
@@ -306,6 +315,32 @@ class PaymentExpiry {
 
     logger.info(`Payment expiry: ${notified} customers notified, ${expiringCards.length} cards found, ${prepayExempt} prepay-covered exempt`);
     return { notified, totalExpiring: expiringCards.length };
+  }
+
+  /**
+   * Resolve any still-open payment_expiry alerts for a customer the prepay
+   * exemption now covers — a stale "card expiring" alert from before the
+   * coverage began is exactly the false signal this exemption suppresses.
+   * Best-effort: alert bookkeeping must never fail the scan. The insert
+   * above keys the customer via reference_id; the base migration only
+   * defines customer_id — match whichever columns this environment has.
+   */
+  async resolveAlertsForExemptCustomer(customerId) {
+    try {
+      const hasReferenceId = await db.schema.hasColumn('inventory_alerts', 'reference_id');
+      const resolvedCount = await db('inventory_alerts')
+        .where({ alert_type: 'payment_expiry', resolved: false })
+        .where(function byCustomer() {
+          this.where('customer_id', customerId);
+          if (hasReferenceId) this.orWhere('reference_id', String(customerId));
+        })
+        .update({ resolved: true, resolved_at: db.fn.now() });
+      if (resolvedCount) {
+        logger.info(`Payment expiry: resolved ${resolvedCount} stale expiry alert(s) for prepay-exempt customer ${customerId}`);
+      }
+    } catch (alertErr) {
+      logger.warn(`Payment expiry: stale-alert resolution failed for customer ${customerId}: ${alertErr.message}`);
+    }
   }
 }
 

@@ -3402,14 +3402,44 @@ async function getActivelyCoveredCustomerIds(asOf = etDateString(), conn = db) {
 // on_site, …) is still completable and therefore still chargeable.
 const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled'];
 
+// 'YYYY-MM-DD' + 1 day. Pure calendar math on validated date strings
+// (term_start/term_end are plain DATE columns — no timezone involved).
+function dayAfter(ymd) {
+  const parts = parseYmd(ymd);
+  if (!parts) return null;
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day + 1)).toISOString().slice(0, 10);
+}
+
+// True when the union of [start, end] date ranges covers EVERY day of
+// [windowStart, windowEnd]. Terms are inclusive on both ends, so a term
+// ending 09-30 followed by one starting 10-01 is continuous coverage
+// (renewals are written as adjacent rows, not extensions of the old row);
+// a missing day between them is a real gap — monthly billing charges the
+// card during it — and breaks the span.
+function mergedRangesSpan(ranges, windowStart, windowEnd) {
+  const sorted = [...ranges].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const merged = [];
+  for (const [start, end] of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && start <= dayAfter(last[1])) {
+      if (end > last[1]) last[1] = end;
+    } else {
+      merged.push([start, end]);
+    }
+  }
+  return merged.some(([start, end]) => start <= windowStart && end >= windowEnd);
+}
+
 /**
  * Customer IDs that every CARD-EXPIRY surface (dashboard cards_expiring_7d,
  * Monday sendCardExpiryWarnings, daily workflows/payment-expiry) must leave
- * alone: ONE paid prepay term spanning the WHOLE window (term_start <= today
- * and term_end >= horizon — a term starting inside the window does not
- * cover today, a term ending inside it does not cover the horizon, and two
- * terms with a gap between them are not continuous coverage) MINUS
- * customers who still have a card charge coming inside the window anyway.
+ * alone: paid prepay coverage spanning the WHOLE window — one term, or
+ * several ADJACENT paid terms merged (a renewal term starting the day after
+ * the prior term ends is continuous coverage; a term starting inside the
+ * window does not cover today, a term ending inside it does not cover the
+ * horizon, and two terms with a day's gap between them are not continuous)
+ * MINUS customers who still have a card charge coming inside the window
+ * anyway.
  * Both subtractions DELEGATE to the billing authorities rather than
  * re-deriving them:
  *
@@ -3421,7 +3451,10 @@ const CARD_EXPIRY_TERMINAL_VISIT_STATUSES = ['completed', 'cancelled', 'canceled
  *       nor "absorbed" (the obligation date itself is prepay-covered — the
  *       sweep self-supersedes it), and for any row not "parked" (no
  *       PaymentIntent id + metadata.ambiguous_outcome — the sweep supersedes
- *       it without charging). Other one-time retries are collectible.
+ *       it without charging) and not paused through the horizon
+ *       (autopay_paused_until >= horizon — the sweep's pause guard skips the
+ *       retry on every day of the window). Other one-time retries are
+ *       collectible.
  *   (b) a visit completion will bill: every still-completable visit in
  *       [today, horizon] run through predictCompletionBilling (billing-lane,
  *       the shared completion predicate) with the same inputs the schedule
@@ -3441,17 +3474,32 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
   const today = etDateString();
   let covered;
   try {
-    // ONE paid term must span the whole window [today, horizon]: the schema
-    // does not enforce contiguous terms, so "covered today" ∩ "covered at
-    // the horizon" could be two terms with a gap in between during which
-    // monthly billing charges the card. Same covered-term SQL as
-    // getActivelyCoveredCustomerIds (coveredTermsAsOf), bounded on both
-    // ends instead of at one date.
+    // Paid coverage must span the whole window [today, horizon], but it may
+    // be SPLIT across adjacent terms (createTermForAnnualPrepay writes a
+    // renewal as a NEW row starting the day after the old term ends). So:
+    // fetch every paid term overlapping the window — same covered-term SQL
+    // as getActivelyCoveredCustomerIds (coveredTermsAsOf) — and merge each
+    // customer's ranges; "covered today" ∩ "covered at the horizon" alone
+    // would miss a mid-window gap during which monthly billing charges the
+    // card, and a single-term span test would miss an adjacent renewal.
     const rows = await coveredTermsAsOf(conn, null)
-      .where('t.term_start', '<=', today)
-      .where('t.term_end', '>=', horizon)
-      .distinct('t.customer_id');
-    covered = new Set(rows.filter((row) => row.customer_id != null).map((row) => String(row.customer_id)));
+      .where('t.term_start', '<=', horizon)
+      .where('t.term_end', '>=', today)
+      .select('t.customer_id', 't.term_start', 't.term_end');
+    const rangesByCustomer = new Map();
+    for (const row of rows || []) {
+      if (row.customer_id == null) continue;
+      const start = dateOnly(row.term_start);
+      const end = dateOnly(row.term_end);
+      if (!parseYmd(start) || !parseYmd(end)) continue;
+      const key = String(row.customer_id);
+      if (!rangesByCustomer.has(key)) rangesByCustomer.set(key, []);
+      rangesByCustomer.get(key).push([start, end]);
+    }
+    covered = new Set();
+    for (const [customerId, ranges] of rangesByCustomer) {
+      if (mergedRangesSpan(ranges, today, horizon)) covered.add(customerId);
+    }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
     return new Set();
@@ -3466,10 +3514,29 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       .where('retry_count', '<', 3)
       .whereNotNull('next_retry_at')
       .select('id', 'customer_id', 'description', 'payment_date', 'metadata', 'stripe_payment_intent_id');
+    // The sweep's pause state guard (billing-cron retryFailedPayments /
+    // autopay-eligibility.isPaused): a paused customer's retries are skipped
+    // daily WITHOUT disarming, and the pause is date-INCLUSIVE (paused while
+    // paused_until >= today, resumes the day after).
+    let pausedUntilByCustomer = new Map();
+    if ((retrying || []).length) {
+      const pauseRows = await conn('customers')
+        .whereIn('id', [...new Set(retrying.map((row) => row.customer_id))])
+        .whereNotNull('autopay_paused_until')
+        .select('id', 'autopay_paused_until');
+      pausedUntilByCustomer = new Map((pauseRows || []).map((row) => [String(row.id), dateOnly(row.autopay_paused_until)]));
+    }
     const coveredOn = new Map();
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
       if (!covered.has(customerId)) continue;
+      // Paused through the horizon → the sweep skips this retry on every
+      // day of [today, horizon]; nothing charges the card inside the
+      // window, so the retry does not revoke the exemption. A pause
+      // lapsing INSIDE the window keeps the warning — the retry resumes
+      // and can charge before the horizon.
+      const pausedUntil = pausedUntilByCustomer.get(customerId);
+      if (pausedUntil && /^\d{4}-\d{2}-\d{2}$/.test(pausedUntil) && pausedUntil >= horizon) continue;
       let meta = {};
       try { meta = row.metadata ? (typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata) : {}; } catch (e) { meta = {}; }
       // Ambiguous Stripe outcome (no PaymentIntent id): the sweep PARKS the

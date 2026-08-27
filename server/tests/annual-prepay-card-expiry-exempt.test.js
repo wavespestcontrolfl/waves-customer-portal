@@ -36,21 +36,25 @@ const asked = (own, col) => (own.find((c) => c[0] === 'where' && c[1] === col) |
 // read (payer_id / po_number / self_pay_override come from the same row);
 // customers.first(...) is the resolver's customer-level fallback; invoices
 // is the completion-suppressor lookup.
-function route({ terms = [], payments = [], visits = [], invoices = [], throwOn = null }) {
-  const calls = { terms: [], payments: [], visits: [], invoices: [] };
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], throwOn = null }) {
+  const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
     if (String(table).startsWith('annual_prepay_terms')) return chain(terms, calls.terms);
     if (table === 'payments') return chain(payments, calls.payments);
     if (String(table).startsWith('scheduled_services')) return chain(visits, calls.visits);
-    if (table === 'customers') return chain([], []);
+    if (table === 'customers') return chain(customers, calls.customers);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     if (table === 'invoices') return chain(invoices, calls.invoices);
     throw new Error(`unexpected table ${table}`);
   });
   return calls;
 }
-const coveredAlways = (ids) => ids.map((customer_id) => ({ customer_id }));
+// term rows now carry their date range (the helper merges them); a wide
+// range spans any test window
+const coveredAlways = (ids) => ids.map((customer_id) => ({ customer_id, term_start: '2020-01-01', term_end: '2030-01-01' }));
+const dayAfterStr = (ymd) => { const [y, m, d] = ymd.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10); };
+const TOMORROW = dayAfterStr(TODAY);
 const baseVisit = (over) => ({
   id: 'v1', customer_id: 'c-prepaid', estimated_price: '120.00', is_callback: false, service_type: 'Quarterly Pest Control Service',
   payer_id: null, po_number: null, self_pay_override: false, customer_payer_id: null,
@@ -61,15 +65,15 @@ const baseVisit = (over) => ({
 beforeEach(() => jest.clearAllMocks());
 
 describe('getCardExpiryExemptCustomerIds — coverage window', () => {
-  test('ONE term spanning today..horizon → exempt (single bounded covered-term query, not two endpoint lookups)', async () => {
+  test('ONE term spanning today..horizon → exempt (terms fetched with their ranges over the whole window)', async () => {
     const calls = route({ terms: coveredAlways(['c-prepaid']) });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // overlap-bounded fetch WITH the range columns — the span judgment is
+    // the merge, not a single-row SQL predicate
     expect(calls.terms).toEqual(expect.arrayContaining([
-      ['where', 't.term_start', '<=', TODAY], ['where', 't.term_end', '>=', HORIZON],
+      ['where', 't.term_start', '<=', HORIZON], ['where', 't.term_end', '>=', TODAY],
+      ['select', 't.customer_id', 't.term_start', 't.term_end'],
     ]));
-    // a gap between two terms cannot slip through an endpoint intersection:
-    // there is no second, single-date coverage lookup for the window
-    expect(calls.terms.filter((c) => c[0] === 'where' && c[1] === 't.term_end').length).toBe(1);
     expect(calls.visits).toEqual(expect.arrayContaining([
       ['whereNotIn', 'ss.status', ['completed', 'cancelled', 'canceled', 'skipped', 'no_show', 'rescheduled']],
       ['where', 'ss.scheduled_date', '>=', TODAY], ['where', 'ss.scheduled_date', '<=', HORIZON],
@@ -77,10 +81,32 @@ describe('getCardExpiryExemptCustomerIds — coverage window', () => {
   });
 
   test('a term that does not span the window (starts after today, or ends before the horizon) is not exempt', async () => {
-    // the bounded query returns nothing for such a term
-    const calls = route({ terms: (own) => (asked(own, 't.term_start') === TODAY && asked(own, 't.term_end') === HORIZON ? [] : coveredAlways(['c-future'])) });
+    let calls = route({ terms: [{ customer_id: 'c-future', term_start: TOMORROW, term_end: '2030-01-01' }] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
     expect(calls.payments).toEqual([]);
+    calls = route({ terms: [{ customer_id: 'c-ending', term_start: '2020-01-01', term_end: TODAY }] });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    expect(calls.payments).toEqual([]);
+  });
+
+  test('adjacent paid terms (renewal starts the day after the prior term ends) are continuous coverage → exempt', async () => {
+    route({
+      terms: [
+        { customer_id: 'c-renewed', term_start: '2020-01-01', term_end: TODAY },
+        { customer_id: 'c-renewed', term_start: TOMORROW, term_end: '2030-01-01' },
+      ],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-renewed']);
+  });
+
+  test('two paid terms with a one-day gap inside the window are NOT continuous coverage → not exempt', async () => {
+    route({
+      terms: [
+        { customer_id: 'c-gap', term_start: '2020-01-01', term_end: TODAY },
+        { customer_id: 'c-gap', term_start: dayAfterStr(TOMORROW), term_end: '2030-01-01' },
+      ],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
   test('nobody covered → empty set without touching payments', async () => {
@@ -127,6 +153,27 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
+  test('a retry whose customer is autopay-paused through the horizon cannot fire inside the window → stays exempt', async () => {
+    const calls = route({
+      terms: coveredAlways(['c-prepaid']),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed({ description: 'Invoice WPC-1' })),
+      customers: [{ id: 'c-prepaid', autopay_paused_until: new Date(`${HORIZON}T05:00:00Z`) }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    expect(calls.customers).toEqual(expect.arrayContaining([
+      ['whereNotNull', 'autopay_paused_until'],
+    ]));
+    // a pause lapsing INSIDE the window resumes the retry before the
+    // horizon (isPaused is date-inclusive; retries resume the day after)
+    // → keeps the warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed({ description: 'Invoice WPC-1' })),
+      customers: [{ id: 'c-prepaid', autopay_paused_until: TODAY }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
   test('a WaveGuard Monthly retry already collected by a paid sibling for that month → stays exempt', async () => {
     const calls = route({
       terms: (own) => (asked(own, 't.term_end') === '2026-04-03' && asked(own, 't.term_start') === '2026-04-03' ? [] : coveredAlways(['c-prepaid'])),
@@ -166,7 +213,7 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
 
   test('a validly stamped covered visit (annual_prepay_invoice + amount + live term) leaves the customer exempt', async () => {
     route({
-      terms: [{ customer_id: 'c-prepaid', id: 'term-1', status: 'active' }],
+      terms: [{ customer_id: 'c-prepaid', id: 'term-1', status: 'active', term_start: '2020-01-01', term_end: '2030-01-01' }],
       visits: [baseVisit({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: '84.00', annual_prepay_term_id: 'term-1' })],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
