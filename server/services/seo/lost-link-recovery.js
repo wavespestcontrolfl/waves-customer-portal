@@ -16,9 +16,14 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 
-const NON_OUTREACH_TYPES = new Set(['directory', 'citation', 'social']);
-// The only link_types the outreach worker claims (link-prospect-worker OUTREACH_TYPES).
-const OUTREACH_TYPES = new Set(['editorial', 'resource', 'guest_post', 'haro']);
+const worker = require('./link-prospect-worker');
+
+// The worker's lane allowlists are canonical: signup-lane types are never
+// reopened into outreach, and a reopened row must carry a type the outreach
+// worker actually claims. Derived, never copied, so a reclassification there
+// flows through here.
+const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
+const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
 // Board states that mean "someone is already on this" — never reopened here.
 const IN_FLIGHT_STATUSES = new Set(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
 
