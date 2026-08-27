@@ -13627,7 +13627,13 @@ function oneTimeItemsForRender(estResult, estData) {
   if (raw.length > 0) return raw;
   let normalized = [];
   try { normalized = normalizeOneTimeBreakdown(estData).items || []; } catch { normalized = []; }
-  return normalized.map((row) => ({
+  // The normalizer also emits the pooled manual one-time discount as a
+  // negative `manual_discount` row. The SSR card subtracts
+  // manualDiscount.oneTimeAmount itself, so carrying that row through
+  // would net the discount TWICE ($500 − $100 stored as $400 rendering a
+  // $300 total while accept charges $400 — pre-push P0 on #3521). Drop
+  // discount-kind rows here; charge/included/quote rows carry through.
+  return normalized.filter((row) => row && row.kind !== 'discount').map((row) => ({
     service: row.service || null,
     name: row.label,
     label: row.label,

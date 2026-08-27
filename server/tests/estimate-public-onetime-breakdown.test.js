@@ -8112,3 +8112,29 @@ describe('engine-backed (engineResult-only) one-time estimates itemize on the SS
     expect(html).not.toContain('id="onetime-display"');
   });
 });
+
+describe('engine-backed SSR fallback nets a manual one-time discount ONCE (pre-push P0 on #3521)', () => {
+  test('a $720 line with a $108 discount stored as $612 renders a $612 total, not $504', () => {
+    const html = renderPage('engine-backed-discount-token', {
+      id: 'estimate-engine-discount',
+      status: 'sent',
+      customerName: 'Discount Customer',
+      address: '12 Engine Rd',
+      monthlyTotal: 0,
+      annualTotal: 0,
+      onetimeTotal: 612,
+      tier: 'One-Time',
+    }, {
+      engineResult: {
+        lineItems: [{ service: 'exclusion', label: 'Rodent Exclusion', priceAfterDiscount: 720 }],
+        summary: {
+          manualDiscount: { label: 'WaveGuard Member Discount', type: 'PERCENT', value: 15, amount: 108, recurringAmount: 0, oneTimeAmount: 108 },
+        },
+      },
+    });
+    expect(html).toContain('$612.00');
+    expect(html).not.toContain('$504.00');
+    // The synthesized discount row itself never prints as a service row.
+    expect(html).not.toMatch(/<tr><td>WaveGuard Member Discount<div class="sub">one-time<\/div><\/td><td[^>]*>−\$108\.00<\/td><\/tr>.*<tr><td>WaveGuard Member Discount/s);
+  });
+});
