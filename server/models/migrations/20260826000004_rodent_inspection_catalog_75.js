@@ -36,11 +36,17 @@ exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services'))) return;
   const row = await knex('services').where({ service_key: 'rodent_inspection' }).first();
   if (!row) return;
-  const state = { priceChanged: false, descriptionChanged: false };
+  const state = { priceChanged: false, descriptionChanged: false, priorPrice: null };
   const patch = {};
-  if (Number(row.base_price) === LEGACY_PRICE) {
+  // ANY divergent numeric catalog price moves to $75 — the estimator fee is
+  // unconditionally $75, and a staff-scheduled inspection copies this
+  // catalog value (uncapped audit P1 on #3521). NULL (variable pricing)
+  // is left alone; the prior value rides the state for rollback.
+  const currentPrice = Number(row.base_price);
+  if (row.base_price != null && Number.isFinite(currentPrice) && currentPrice !== NEW_PRICE) {
     patch.base_price = NEW_PRICE;
     state.priceChanged = true;
+    state.priorPrice = currentPrice;
   }
   if (String(row.description || '') === LEGACY_DESCRIPTION) {
     patch.description = NEW_DESCRIPTION;
@@ -60,7 +66,9 @@ exports.down = async function down(knex) {
   const row = await knex('services').where({ id: state.id, service_key: 'rodent_inspection' }).first();
   if (row) {
     const patch = {};
-    if (state.priceChanged && Number(row.base_price) === NEW_PRICE) patch.base_price = LEGACY_PRICE;
+    if (state.priceChanged && Number(row.base_price) === NEW_PRICE) {
+      patch.base_price = Number.isFinite(Number(state.priorPrice)) ? Number(state.priorPrice) : LEGACY_PRICE;
+    }
     if (state.descriptionChanged && String(row.description || '') === NEW_DESCRIPTION) patch.description = LEGACY_DESCRIPTION;
     if (Object.keys(patch).length) {
       await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });

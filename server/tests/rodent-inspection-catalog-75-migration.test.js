@@ -48,12 +48,20 @@ describe('20260826000004 rodent_inspection catalog $75', () => {
     expect(stateRow(db)).toBeUndefined();
   });
 
-  test('an admin-repriced row is left alone (no state recorded)', async () => {
+  test('an admin-repriced row is pinned to $75 too (custom copy kept); down() restores the edited price', async () => {
     const db = seedDb({ base_price: 99, description: 'Custom copy' });
     await migration.up(fakeKnex(db));
-    expect(insp(db).base_price).toBe(99);
+    expect(insp(db).base_price).toBe(NEW_PRICE);
     expect(insp(db).description).toBe('Custom copy');
-    expect(stateRow(db)).toBeUndefined();
+    expect(JSON.parse(stateRow(db).value)).toMatchObject({ priceChanged: true, priorPrice: 99, descriptionChanged: false });
+    await migration.down(fakeKnex(db));
+    expect(insp(db).base_price).toBe(99);
+  });
+
+  test('a NULL (variable-priced) row keeps NULL', async () => {
+    const db = seedDb({ base_price: null });
+    await migration.up(fakeKnex(db));
+    expect(insp(db).base_price).toBeNull();
   });
 
   test('down() ignores values that drifted after up()', async () => {

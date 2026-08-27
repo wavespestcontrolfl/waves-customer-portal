@@ -37,15 +37,23 @@ exports.up = async function up(knex) {
   if (!row) return;
   const patch = {};
   const changed = [];
+  const prior = {};
+  // Every numeric price field that diverges from the flat $350 is pinned —
+  // base_price, price_range_min AND price_range_max — whatever an admin
+  // set (uncapped audit P1 on #3521): the engine/client price is fixed, so
+  // scheduling must not expose or bill anything else. NULLs are left
+  // alone; prior values ride the state for rollback.
   for (const field of Object.keys(TARGET)) {
-    if (Number(row[field]) === LEGACY[field] && LEGACY[field] !== TARGET[field]) {
+    const current = Number(row[field]);
+    if (row[field] != null && Number.isFinite(current) && current !== TARGET[field]) {
       patch[field] = TARGET[field];
       changed.push(field);
+      prior[field] = current;
     }
   }
   if (!changed.length) return;
   await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });
-  await saveState(knex, { id: row.id, changed, tag: MIGRATION_TAG });
+  await saveState(knex, { id: row.id, changed, prior, tag: MIGRATION_TAG });
 };
 
 exports.down = async function down(knex) {
@@ -56,7 +64,10 @@ exports.down = async function down(knex) {
   if (row) {
     const patch = {};
     for (const field of (Array.isArray(state.changed) ? state.changed : [])) {
-      if (field in TARGET && Number(row[field]) === TARGET[field]) patch[field] = LEGACY[field];
+      if (field in TARGET && Number(row[field]) === TARGET[field]) {
+        const recorded = Number(state.prior?.[field]);
+        patch[field] = Number.isFinite(recorded) ? recorded : LEGACY[field];
+      }
     }
     if (Object.keys(patch).length) {
       await knex('services').where({ id: row.id }).update({ ...patch, updated_at: knex.fn.now() });

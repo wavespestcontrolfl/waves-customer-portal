@@ -44,10 +44,19 @@ describe('20260826000005 rodent_trapping catalog $350', () => {
     expect(stateRow(db)).toBeUndefined();
   });
 
-  test('an admin-edited range is left alone', async () => {
-    const db = seedDb({ price_range_max: 500 });
+  test('admin-edited price fields are all pinned to $350; down() restores each edited value', async () => {
+    const db = seedDb({ base_price: 375, price_range_min: 300, price_range_max: 500 });
     await migration.up(fakeKnex(db));
-    expect(trap(db).price_range_max).toBe(500);
+    expect(trap(db)).toMatchObject(TARGET);
+    expect(JSON.parse(stateRow(db).value)).toMatchObject({ prior: { base_price: 375, price_range_min: 300, price_range_max: 500 } });
+    await migration.down(fakeKnex(db));
+    expect(trap(db)).toMatchObject({ base_price: 375, price_range_min: 300, price_range_max: 500 });
+  });
+
+  test('NULL price fields are left alone', async () => {
+    const db = seedDb({ base_price: null, price_range_min: null, price_range_max: null });
+    await migration.up(fakeKnex(db));
+    expect(trap(db).base_price).toBeNull();
     expect(stateRow(db)).toBeUndefined();
   });
 
