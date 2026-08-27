@@ -596,13 +596,18 @@ export default function RainOutSheet({ service, onClose, onDone }) {
       // dispatcher it was texted buries the manual follow-up.
       const texted = (data.results || []).filter((r) => r.ok && r.smsSent).length;
       const notTexted = notify && texted < movedCount;
+      // Stops that moved onto an occupied slot: the move COMMITS (schedule
+      // overlaps are advisory on every staff surface) — say so and keep the
+      // sheet open so the dispatcher eyeballs the day's route.
+      const overlapCount = data.overlapCount
+        || (data.results || []).filter((r) => r.ok && Array.isArray(r.warnings) && r.warnings.length).length;
       const notifyClause = !notify ? ''
         : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
           : texted === 0 ? ', customer NOT texted'
             : `, ${texted}/${movedCount} texted`;
       const summary =
         `Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}`;
-      if (failedCount > 0 || notTexted) {
+      if (failedCount > 0 || notTexted || overlapCount > 0) {
         // Partial success (a stop raced to terminal or slot-conflicted) or a
         // silent non-send. The server still returns 200 when at least one
         // moved, so keep the sheet open with the warning instead of silently
@@ -613,10 +618,13 @@ export default function RainOutSheet({ service, onClose, onDone }) {
         const smsClause = notTexted
           ? ' Some customers were NOT texted (no phone or template disabled) — follow up manually.'
           : '';
-        setError(`${summary}.${failClause}${smsClause}`);
+        const overlapClause = overlapCount > 0
+          ? ` Heads up: ${overlapCount} ${overlapCount === 1 ? 'stop overlaps' : 'stops overlap'} another appointment on the schedule — both are kept on the calendar; check the day's route.`
+          : '';
+        setError(`${summary}.${failClause}${smsClause}${overlapClause}`);
         setBusy(false);
       }
-      onDone?.({ summary, movedCount, failedCount, notTexted });
+      onDone?.({ summary, movedCount, failedCount, notTexted, overlapCount });
     } catch (err) {
       setError(err.message || 'Quick Move failed');
       setBusy(false);

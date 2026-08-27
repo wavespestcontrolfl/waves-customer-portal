@@ -352,7 +352,7 @@ describe('rain-out service', () => {
         // excludeServiceIds = the row being moved ONLY, so the rebooker's
         // tech-blind occupancy check never clashes a move against the row's
         // own pre-move position — and sees every OTHER committed row.
-        { allowLive: true, excludeServiceIds: ['svc-1'] },
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] },
       );
 
       // ...but the CUSTOMER is quoted the usual 2-hour arrival window from the
@@ -512,10 +512,10 @@ describe('rain-out service', () => {
       // anchor's 13:00 target clears it, not an exclusion).
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
     });
 
     test('same-day BACKWARD pull (custom time earlier than anchor) moves head-first', async () => {
@@ -555,10 +555,10 @@ describe('rain-out service', () => {
       // target clear of it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-11', { start: '07:00', end: '08:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-11', { start: '09:30', end: '11:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
     });
 
     test('notifyCustomer=false moves without texting', async () => {
@@ -600,7 +600,7 @@ describe('rain-out service', () => {
       // The dispatch path must log moves as admin-initiated, not 'tech'.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'admin',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
     });
 
     test('an SMS exception after the move reports moved-but-not-notified, not failure', async () => {
@@ -807,6 +807,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          overlapAdvisory: true,
           expectAnchor: { scheduled_date: '2026-06-11', window_start: '09:00' },
         },
       );
@@ -847,10 +848,29 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          overlapAdvisory: true,
           excludeServiceIds: ['svc-1'],
           expect: { scheduled_date: '2026-06-11', window_start: '09:00' },
         },
       );
+    });
+
+    test('gate on: overlaps are ADVISORY on the staff surface — both rebooker calls pass overlapAdvisory and a warned move surfaces on the member result + overlapCount', async () => {
+      process.env.GATE_COLLECTIVE_SERIES_ANCHOR = 'true';
+      wireRecurring();
+      SmartRebooker.rescheduleSeries.mockResolvedValueOnce({
+        success: true,
+        rescheduledOccurrences: [],
+        warnings: ['Heads up: this booking overlaps another appointment on the schedule on 2026-06-12 — both are kept on the calendar.'],
+      });
+
+      const result = await RainOut.commit(DAY_MOVE_ARGS);
+
+      expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).toMatchObject({ overlapAdvisory: true });
+      const member = result.results.find((r) => r.id === 'svc-1');
+      expect(member.ok).toBe(true);
+      expect(member.warnings).toEqual([expect.stringContaining('2026-06-12')]);
+      expect(result.overlapCount).toBe(1);
     });
 
     test('gate on: an off-hour tech-supplied target is normalized on-the-hour before the series mints it (codex P1)', async () => {
@@ -912,6 +932,7 @@ describe('rain-out service', () => {
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'weather_rain', 'tech',
         {
           allowLive: true,
+          overlapAdvisory: true,
           excludeServiceIds: ['svc-1'],
           // Fallback keeps the anchor CAS the series call pinned.
           expect: { scheduled_date: '2026-06-11', window_start: '09:00' },
@@ -987,7 +1008,7 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'running_late', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] },
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] },
       );
       const vars = renderSmsTemplate.mock.calls[0][1];
       expect(vars.weather_lead).toBe("we're running behind schedule today");
@@ -1126,7 +1147,7 @@ describe('rain-out service', () => {
       // the 2-in-90-days missed-appointment outreach counter.
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-11', { start: '13:00', end: '14:00' }, 'customer_noshow', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] },
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] },
       );
       expect(renderSmsTemplate.mock.calls[0][1].weather_lead).toBe('we missed you today');
       expect(sendCustomerMessage.mock.calls[0][0].metadata).toMatchObject({ reason_code: 'customer_noshow' });
@@ -1248,14 +1269,14 @@ describe('rain-out service', () => {
       // visible. Exclusion never grows past the row being moved.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
       // Route siblings keep their own windows on the new date.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-3'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-3'] });
 
       // Anchor and sibling both get the self-serve link — no reply ask;
       // no-phone sibling skipped.
@@ -1339,7 +1360,7 @@ describe('rain-out service', () => {
       // reminder helper re-arms the sibling onto its real window, not 08:00.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
     });
 
     test('one stop racing to terminal does not strand the rest', async () => {
@@ -1389,17 +1410,17 @@ describe('rain-out service', () => {
       // accumulates, success or failure.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-1', '2026-06-12', { start: '09:00', end: '11:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-2', '2026-06-12', { start: '11:30', end: '13:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
       // svc-2 FAILED mid-batch — svc-3's probe keeps seeing the stranded
       // row (and can block on it) instead of silently double-booking on
       // top of it, exactly like it keeps seeing the successfully-moved
       // anchor's new position.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(3,
         'svc-3', '2026-06-12', { start: '14:00', end: '16:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-3'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-3'] });
     });
 
     test('a batch member RE-MOVED by another actor into a later target BLOCKS that later move (no moved-ids exclusion)', async () => {
@@ -1444,10 +1465,10 @@ describe('rain-out service', () => {
       // array is [its own id] — the already-moved svc-2 is NOT in it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
       // Loud partial result: the blocked anchor is reported failed; the
       // sibling's committed move stands.
       expect(result.ok).toBe(true);
@@ -1497,12 +1518,12 @@ describe('rain-out service', () => {
       // ONLY svc-2 — the unprocessed anchor stayed visible to it.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(1,
         'svc-2', '2026-06-11', { start: '15:30', end: '17:30' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-2'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-2'] });
       // The anchor's own move still ran, excluding only itself — the
       // exclusion is always exactly the row being moved.
       expect(SmartRebooker.reschedule).toHaveBeenNthCalledWith(2,
         'svc-1', '2026-06-11', { start: '13:00', end: '15:00' }, 'weather_rain', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] });
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] });
       // Loud partial result: the clashing member is reported failed, the
       // rest of the batch is not stranded.
       expect(result.ok).toBe(true);
@@ -2813,7 +2834,7 @@ describe('rain-out service', () => {
       expect(result.ok).toBe(true);
       expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
         'svc-1', '2026-06-12', { start: '13:00', end: '14:00' }, 'custom', 'tech',
-        { allowLive: true, excludeServiceIds: ['svc-1'] },
+        { allowLive: true, overlapAdvisory: true, excludeServiceIds: ['svc-1'] },
       );
       expect(renderSmsTemplate).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();

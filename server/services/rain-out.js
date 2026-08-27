@@ -1741,11 +1741,19 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     // TOP of commit() (before the custom move's SMS pre-render) — by here
     // target.window is already the window that books.
     let shiftedOccurrences = null;
+    // Staff surface (Quick Move / storm re-route): an occupancy clash COMMITS
+    // with a warning instead of 409ing (owner ruling 2026-08-27, extending
+    // the 2026-08-25 dispatch ruling — see rebooker.overlapAdvisory). The
+    // warnings ride the per-member result so both sheets can say "moved,
+    // overlaps another job". The expect/expectAnchor CAS still 409s on a
+    // stale row — that is a concurrency guard, not a schedule conflict.
+    const memberWarnings = [];
     try {
       if (wantsSeriesShift) {
         try {
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
+            overlapAdvisory: true,
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
@@ -1753,6 +1761,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           shiftedOccurrences = Array.isArray(seriesResult?.rescheduledOccurrences)
             ? seriesResult.rescheduledOccurrences
             : null;
+          if (Array.isArray(seriesResult?.warnings)) memberWarnings.push(...seriesResult.warnings);
         } catch (err) {
           logger.warn(`[rain-out] collective series shift failed for ${job.id} (${err.message}) — moving the visit alone and parking the series`);
         }
@@ -1771,13 +1780,15 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
         // would let this fallback overwrite the newer choice. The same
         // expected-state predicate makes the single path 409 instead —
         // caught below as a per-member failure the tech re-runs.
-        await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
+        const moveResult = await SmartRebooker.reschedule(job.id, target.date, newWindow, reasonCode, initiatedBy, {
           allowLive: true,
+          overlapAdvisory: true,
           excludeServiceIds: [job.id],
           ...(wantsSeriesShift
             ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
             : {}),
         });
+        if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.
@@ -1939,7 +1950,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       }
     }
 
-    results.push({ id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason });
+    results.push({
+      id: job.id, ok: true, newDate: target.date, newWindow, smsSent: sms.sent, smsReason: sms.sent ? null : sms.reason,
+      ...(memberWarnings.length ? { warnings: memberWarnings } : {}),
+    });
   }
 
   const moved = results.filter((r) => r.ok);
@@ -1948,6 +1962,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
     reason: moved.length === 0 ? (results[0]?.error || 'nothing_moved') : undefined,
     movedCount: moved.length,
     failedCount: results.length - moved.length,
+    // Stops that moved ONTO an occupied slot (advisory) — the sheets name
+    // the count so the dispatcher eyeballs the day's route.
+    overlapCount: moved.filter((r) => Array.isArray(r.warnings) && r.warnings.length > 0).length,
     results,
   };
 }

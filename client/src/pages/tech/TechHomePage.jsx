@@ -1357,6 +1357,11 @@ function RainOutSheet({ service, onClose, onDone }) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(EXTRA_REASON_ERROR_COPY[data.error] || data.error || `HTTP ${res.status}`);
       const failures = data.failedCount ? `, ${data.failedCount} failed — check dispatch` : '';
+      // Overlaps are advisory on staff surfaces: the stop moved, but onto an
+      // occupied slot — name it so the tech / office checks the route.
+      const overlapCount = data.overlapCount
+        || (data.results || []).filter((r) => r.ok && Array.isArray(r.warnings) && r.warnings.length).length;
+      const overlaps = overlapCount ? `, ${overlapCount} overlap${overlapCount === 1 ? 's' : ''} another job — check the route` : '';
       // Report what actually HAPPENED, not the request flag — a disabled
       // template or missing phone moves the visit without an SMS.
       const movedCount = data.movedCount || 0;
@@ -1364,7 +1369,7 @@ function RainOutSheet({ service, onClose, onDone }) {
       const notifyClause = !notify ? ''
         : texted === movedCount ? (movedCount === 1 ? ', customer texted' : ', customers texted')
           : `, ${texted}/${movedCount} texted — follow up on the rest`;
-      onDone(`Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}${failures}`);
+      onDone(`Moved ${movedCount} ${movedCount === 1 ? 'stop' : 'stops'} to ${selected.display}${notifyClause}${failures}${overlaps}`);
     } catch (err) {
       setError(err.message || 'Quick Move failed');
       setBusy(false);
