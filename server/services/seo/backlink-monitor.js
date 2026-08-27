@@ -221,13 +221,18 @@ class BacklinkMonitor {
         .whereNotIn('id', lostLinks.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000']))
         .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'severity', 'link_type', 'lost_reason');
       if (owed.length) logger.info(`Backlink scan: ${owed.length} earlier verified loss(es) still owed a recovery evaluation`);
-      lostDomains = await this.domainLevelLosses(lostLinks.concat(owed));
-      // Rows that cannot lead to a recovery (domain still linking, directory,
-      // low DR, owned…) are evaluated once and stamped; alertable ones are
-      // stamped after queueLostDomains reports a terminal outcome below.
+      const rollup = await this.domainLevelLosses(lostLinks.concat(owed));
+      lostDomains = rollup.filter(d => !d.stillLinking);
+      // Stamping (recovery_queued_at) is a DOMAIN-level terminal verdict:
+      //   - domain still has a live link → rows stay unstamped (deferred); the
+      //     owed sweep re-aggregates them when the last link goes
+      //   - domain at zero, not alertable (directory / low DR / owned / toxic /
+      //     unreachable) → stamped now
+      //   - domain at zero, alertable → stamped after queueLostDomains reports a
+      //     terminal outcome below
       evaluated = lostLinks.concat(owed);
-      const alertableDomains = new Set(lostDomains.filter(d => d.alertable).map(d => d.domain));
-      const settled = evaluated.filter(l => !alertableDomains.has(comparableDomain(l.source_domain))).map(l => l.id);
+      const verdict = new Map(rollup.map(d => [d.domain, d]));
+      const settled = evaluated.filter(l => { const v = verdict.get(comparableDomain(l.source_domain)); return v && !v.stillLinking && !v.alertable; }).map(l => l.id);
       if (settled.length) await db('seo_backlinks').whereIn('id', settled).update({ recovery_queued_at: now });
     } else {
       logger.info(`Backlink scan partial (${links.length}/${totalCount}) — loss detection skipped`);
@@ -357,7 +362,13 @@ class BacklinkMonitor {
         .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
         .whereRaw("regexp_replace(lower(source_domain), '^(www|mail)\\.', '') = ?", [domain])
         .first('id');
-      if (stillActive) continue;
+      if (stillActive) {
+        // Not a domain loss (yet). Reported so the caller DEFERS stamping these
+        // rows: when the domain's last link goes they must be aggregated with
+        // it, or a later non-editorial/unreachable sibling would mask them.
+        out.push({ domain, backlink_id: best.id, domain_rating: best.domain_rating || 0, stillLinking: true, alertable: false });
+        continue;
+      }
       const linkType = best.link_type || this.classifyLinkType(best);
       const owned = OWNED_DOMAINS.has(domain);
       const toxic = ['critical', 'warning'].includes(best.severity);
@@ -366,7 +377,7 @@ class BacklinkMonitor {
       out.push({
         domain, backlink_id: best.id, source_url: best.source_url, target_url: best.target_url,
         domain_rating: best.domain_rating || 0, anchor_text: best.anchor_text || null,
-        link_type: linkType, lost_reason: best.lost_reason, alertable,
+        link_type: linkType, lost_reason: best.lost_reason, stillLinking: false, alertable,
       });
     }
     return out;

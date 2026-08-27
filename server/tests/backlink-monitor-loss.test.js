@@ -169,6 +169,31 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(increments).toEqual([]);
   });
 
+  test('a loss on a domain that still links us is deferred (not stamped) and aggregated when the last link goes', async () => {
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const stamps = [];
+    const wrap = () => { const impl = db.getMockImplementation(); db.mockImplementation((table) => { const b = impl(table); const u = b.update; b.update = jest.fn((p) => { if (p.recovery_queued_at) stamps.push(b.whereIn.mock.calls.map(c => c[1]).flat()); return u(p); }); return b; }); };
+
+    // week 1: editorial A verified lost, sibling B still active → A deferred, no alert, no stamp
+    const A = activeRow({ id: 'A', source_url: 'https://dom.example/resources', source_domain: 'dom.example', miss_count: 1 });
+    scanWith({ items: [seen], active: [A], stillActiveDomain: true }); wrap();
+    const recovery = jest.fn(async () => ({ queued: 0, results: [] }));
+    const r1 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: async () => ({ found: false, status: 404 }), recoveryFn: recovery });
+    expect(r1).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 0, highValueLost: 0 }));
+    expect(recovery).not.toHaveBeenCalled();
+    expect(stamps).toEqual([]);
+
+    // week 3: B (a directory page, unreachable) goes too; A comes back via the owed sweep and represents the domain
+    const owedA = { id: 'A', source_url: 'https://dom.example/resources', target_url: A.target_url, source_domain: 'dom.example', domain_rating: 45, anchor_text: null, severity: 'clean', link_type: null, lost_reason: 'page_gone' };
+    const B = activeRow({ id: 'B', source_url: 'https://dom.example/directory/x', source_domain: 'dom.example', miss_count: 3 });
+    scanWith({ items: [seen], active: [B], owed: [owedA] }); wrap();
+    const recovery2 = jest.fn(async (losses) => ({ queued: 1, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
+    const r2 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: async () => ({ found: false, error: 'ETIMEDOUT' }), recoveryFn: recovery2 });
+    expect(r2).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, recoveryQueued: 1 }));
+    expect(recovery2).toHaveBeenCalledWith([expect.objectContaining({ domain: 'dom.example', backlink_id: 'A', lost_reason: 'page_gone', alertable: true })]);
+    expect(stamps.flat().sort()).toEqual(['A', 'B']); // both rows settled with the domain
+  });
+
   test('earlier verified losses still owed a recovery evaluation are swept into this scan', async () => {
     const recovery = jest.fn(async (losses) => ({ queued: losses.length, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
     const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
@@ -295,7 +320,7 @@ describe('BacklinkMonitor verified loss detection', () => {
     const still = await BacklinkMonitor.domainLevelLosses([
       { id: 'a', source_domain: 'good.example', source_url: 'https://good.example/p2', domain_rating: 40, severity: 'clean', lost_reason: 'page_gone' },
     ]);
-    expect(still).toEqual([]); // another page on the domain still links us → not a domain loss
+    expect(still).toEqual([expect.objectContaining({ domain: 'good.example', stillLinking: true, alertable: false })]); // another page still links → not a domain loss, row deferred
   });
 
   test('verifyLoss maps HTTP outcomes to reasons and gives unreachable hosts a longer window', async () => {
