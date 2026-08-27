@@ -73,6 +73,23 @@ describe('20260826000001 rodent trapping Standard-only', () => {
     expect(db.pricing_changelog).toHaveLength(0);
   });
 
+  test('admin pricing edits made AFTER up() survive rollback (value-guarded restores)', async () => {
+    const db = seedDb();
+    await migration.up(fakeKnex(db));
+    const edited = JSON.parse(trapCfg(db).data);
+    edited.standard_price = 399;          // admin moved the price after the migration
+    edited.included_followups = 3;        // and re-limited callbacks
+    edited.unlimited_price = 500;         // and re-added a retired key on purpose
+    trapCfg(db).data = edited;
+    await migration.down(fakeKnex(db));
+    const after = JSON.parse(trapCfg(db).data);
+    expect(after.standard_price).toBe(399);
+    expect(after.included_followups).toBe(3);
+    expect(after.unlimited_price).toBe(500);
+    // Untouched retired keys still come back from the audit row.
+    expect(after.upgrade_to_unlimited_price).toBe(125);
+  });
+
   test('down() leaves a catalog description an admin edited after up()', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));

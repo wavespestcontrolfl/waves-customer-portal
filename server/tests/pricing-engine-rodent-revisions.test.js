@@ -391,3 +391,22 @@ describe('included-section markers survive the legacy mapper (codex #3521 r15 P1
     expect(normalized.every((r) => r.kind === 'included')).toBe(true);
   });
 });
+
+describe('gross inspection fields reach the FINAL mapper projection (codex #3521 r16 P1)', () => {
+  const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+
+  test('a member inspection persists its face and perk rate on oneTime.specItems', () => {
+    const mapped = mapV1ToLegacyShape(generateEstimate(baseInput({
+      recurringCustomer: true,
+      services: { rodentInspection: {} },
+    })));
+    const row = [...(mapped.oneTime.items || []), ...(mapped.oneTime.specItems || [])]
+      .find((r) => r.service === 'rodent_inspection');
+    expect(row).toBeTruthy();
+    // $75 face, 15% member perk → $63.75 stored net; the face and the rate
+    // both ride the persisted row so closeout never needs reconstruction.
+    expect(row.price).toBe(63.75);
+    expect(row.priceBeforeDiscount).toBe(75);
+    expect(row.recurringCustomerDiscountRate).toBe(0.15);
+  });
+});

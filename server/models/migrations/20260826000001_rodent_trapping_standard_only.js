@@ -145,14 +145,17 @@ exports.down = async function (knex) {
   const loaded = await loadTrappingRow(knex);
   if (loaded) {
     const oldValue = typeof ownUp.old_value === 'string' ? JSON.parse(ownUp.old_value) : ownUp.old_value;
+    // Value-guarded like the companion migrations (uncapped audit P1 on
+    // #3521): each field goes back ONLY while it still holds what up()
+    // wrote — an admin edit made after up() survives the rollback.
     const restored = { ...loaded.data };
     for (const key of RETIRED_KEYS) {
-      if (oldValue && oldValue[key] != null) restored[key] = oldValue[key];
+      if (oldValue && oldValue[key] != null && restored[key] === undefined) restored[key] = oldValue[key];
     }
-    if (oldValue && oldValue.included_followups != null) {
+    if (oldValue && oldValue.included_followups != null && restored.included_followups === 'unlimited') {
       restored.included_followups = oldValue.included_followups;
     }
-    if (oldValue && oldValue.standard_price != null) {
+    if (oldValue && oldValue.standard_price != null && Number(restored.standard_price) === 350) {
       restored.standard_price = oldValue.standard_price;
     }
     // Restore the pricing-row name only if up() renamed it (the row still
@@ -169,15 +172,19 @@ exports.down = async function (knex) {
   }
   if (await knex.schema.hasTable('services')) {
     const oldValue = typeof ownUp.old_value === 'string' ? JSON.parse(ownUp.old_value) : ownUp.old_value;
+    // Restore the catalog copy ONLY if up() recorded changing it (a captured
+    // prior string) and the row still carries this migration's copy — an
+    // up() that found the copy already current never touches it, and
+    // neither does its rollback.
     const captured = oldValue && typeof oldValue.__service_description === 'string'
       ? oldValue.__service_description
       : null;
-    await knex('services')
-      .where('service_key', 'rodent_trapping')
-      // Value-guarded: only a row still carrying this migration's copy is
-      // restored, so a later admin edit survives the rollback.
-      .where('description', STANDARD_SERVICE_DESCRIPTION)
-      .update({ description: captured ?? LEGACY_SERVICE_DESCRIPTION, updated_at: knex.fn.now() });
+    if (captured !== null) {
+      await knex('services')
+        .where('service_key', 'rodent_trapping')
+        .where('description', STANDARD_SERVICE_DESCRIPTION)
+        .update({ description: captured, updated_at: knex.fn.now() });
+    }
   }
   if (await knex.schema.hasTable('pricing_changelog')) {
     await knex('pricing_changelog').where(CHANGELOG_IDENTITY).del();

@@ -414,6 +414,20 @@ function describeMosquitoAddOns(addOns = {}, multiplier = 1) {
   return parts.join(' + ');
 }
 
+// The recurring-customer one-time perk rate that netted an engine line:
+// the explicit field when the pricer set one, else the perk recorded in the
+// line's discount block (recurring_customer_one_time_perk). 0 when none.
+function perkRateOf(li = {}) {
+  const explicit = Number(li.recurringCustomerDiscountRate);
+  if (Number.isFinite(explicit) && explicit > 0 && explicit < 1) return explicit;
+  const applied = Array.isArray(li.discount?.appliedDiscounts) ? li.discount.appliedDiscounts : [];
+  if (applied.some((d) => d && d.type === 'recurring_customer_one_time_perk')) {
+    const rate = Number(li.discount?.effectiveDiscount);
+    if (Number.isFinite(rate) && rate > 0 && rate < 1) return rate;
+  }
+  return 0;
+}
+
 function mapV1ToLegacyShape(v1Result) {
   const R = {};
   const lineItems = v1Result.lineItems || [];
@@ -960,7 +974,7 @@ function mapV1ToLegacyShape(v1Result) {
       if (Number.isFinite(Number(li.priceBeforeDiscount))) item.priceBeforeDiscount = Number(li.priceBeforeDiscount);
       // The perk rate itself, so a stored row is self-describing even where a
       // reader only has the net price (codex #3521 r8 P0).
-      if (Number(li.recurringCustomerDiscountRate) > 0) item.recurringCustomerDiscountRate = Number(li.recurringCustomerDiscountRate);
+      if (perkRateOf(li) > 0) item.recurringCustomerDiscountRate = perkRateOf(li);
       v1OtItems.push(item);
       if (li.service === 'trenching' && !quoteRequired) R.trench = true;
     } else {
@@ -976,8 +990,8 @@ function mapV1ToLegacyShape(v1Result) {
         // SERVICES branch) — rodent_inspection lands here.
         ...(Number.isFinite(Number(li.priceBeforeDiscount))
           ? { priceBeforeDiscount: Number(li.priceBeforeDiscount) } : {}),
-        ...(Number(li.recurringCustomerDiscountRate) > 0
-          ? { recurringCustomerDiscountRate: Number(li.recurringCustomerDiscountRate) } : {}),
+        ...(perkRateOf(li) > 0
+          ? { recurringCustomerDiscountRate: perkRateOf(li) } : {}),
         // Included-row marker survives the specialty branch too: a V2
         // exclusion section a service credit zeroed must still reach the
         // customer page / PDF as "Included" instead of being filtered as an
@@ -1227,6 +1241,15 @@ function mapV1ToLegacyShape(v1Result) {
           addOns: s.addOns,
           serviceSpecificDiscountApplied: !!s.serviceSpecificDiscountApplied,
           serviceSpecificDiscounts: s.serviceSpecificDiscounts || [],
+          // Gross/perk fields survive the FINAL projection too (codex #3521
+          // r16 P1): a member inspection's persisted row must carry its
+          // face and rate so closeout never depends on audit reconstruction.
+          ...(Number.isFinite(Number(s.priceBeforeDiscount))
+            ? { priceBeforeDiscount: Number(s.priceBeforeDiscount) } : {}),
+          ...(Number(s.recurringCustomerDiscountRate) > 0
+            ? { recurringCustomerDiscountRate: Number(s.recurringCustomerDiscountRate) } : {}),
+          ...(s.priceAfterDiscount !== undefined && Number.isFinite(Number(s.priceAfterDiscount))
+            ? { priceAfterDiscount: Number(s.priceAfterDiscount) } : {}),
           warrantyExtendedSelected: s.warrantyExtendedSelected,
           warrantyExtendedPrice: s.warrantyExtendedPrice,
           ...measurementMetadataFields(s),

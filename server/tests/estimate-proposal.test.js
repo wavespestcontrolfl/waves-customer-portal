@@ -817,3 +817,23 @@ describe('fully credited one-time scope still prints on the proposal (uncapped a
     expect(p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time')).toHaveLength(0);
   });
 });
+
+describe('one-time itemization reads the frozen send-snapshot bundle first (codex #3521 r16 P2)', () => {
+  test('an engineInputs-only sent estimate itemizes from sendSnapshot.pricingBundle.oneTimeBreakdown', () => {
+    const p = normalizeProposal({
+      customer_name: 'S', address: '4 Attic Ln', monthly_total: 0, onetime_total: 650,
+      estimate_data: {
+        engineInputs: { services: { rodentTrapping: {}, exclusion: { pricingVersion: 'v2', standardWireMeshPoints: 4 } } },
+        sendSnapshot: { pricingBundle: { oneTimeBreakdown: { total: 650, items: [
+          { service: 'rodent_trapping', label: 'Rodent Trapping', amount: 350, kind: 'charge' },
+          { service: 'rodent_exclusion', label: 'Rodent Exclusion — Wire Mesh Points', amount: 300, kind: 'charge' },
+        ] } } },
+      },
+    });
+    const oneTime = p.buildings[0].lineItems.filter((l) => l.frequency === 'one_time');
+    expect(oneTime.map((l) => [l.description, l.amount])).toEqual([
+      ['Rodent Trapping', 350],
+      ['Rodent Exclusion — Wire Mesh Points', 300],
+    ]);
+  });
+});

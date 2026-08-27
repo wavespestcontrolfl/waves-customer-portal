@@ -567,13 +567,25 @@ function synthesizeFallbackProposal(estimate = {}, estimateData = {}, { recurrin
     // exactly the rows the estimate page prints. Lazy require: the route
     // module requires this service lazily too; loading it at module scope
     // would create a cycle.
+    // The frozen/live pricing bundle is the page's own itemization: a sent
+    // estimate that persists only engineInputs keeps its per-section rows
+    // under sendSnapshot.pricingBundle.oneTimeBreakdown (or the caller's
+    // livePricing bundle) while the raw data has no result at all (codex
+    // #3521 r16 P2). Read those first; re-normalize raw data only when no
+    // bundle rows exist.
     let normalizedRows = [];
-    try {
-      const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
-      if (typeof normalizeOneTimeBreakdown === 'function') {
-        normalizedRows = normalizeOneTimeBreakdown(estimateData).items || [];
-      }
-    } catch (_) { normalizedRows = []; }
+    const bundleRows = livePricing?.bundle?.oneTimeBreakdown?.items
+      ?? estimateData?.sendSnapshot?.pricingBundle?.oneTimeBreakdown?.items;
+    if (Array.isArray(bundleRows) && bundleRows.length > 0) {
+      normalizedRows = bundleRows;
+    } else {
+      try {
+        const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+        if (typeof normalizeOneTimeBreakdown === 'function') {
+          normalizedRows = normalizeOneTimeBreakdown(estimateData).items || [];
+        }
+      } catch (_) { normalizedRows = []; }
+    }
     // Charged rows must reconcile; rows a service credit zeroed print too,
     // as "(Included)" at $0 — they are approved scope the page shows and
     // the PDF must not drop (codex #3521 r4 P1).
