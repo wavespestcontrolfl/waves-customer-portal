@@ -47,7 +47,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [] };
   db.mockImplementation((table) => {
     if (throwOn && String(table).startsWith(throwOn)) throw new Error(`${table} down`);
@@ -58,6 +58,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'payment_methods') return chain(paymentMethods, []);
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
+    if (table === 'estimates') return chain([], []);
+    if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
     if (table === 'payers') return chain([{ id: 7, active: true, payment_terms: 'net_30' }], []); // payer ids are integers
     // plain 'invoices' = the visit's own invoice lookup; 'invoices as i' =
     // the sibling first-application lookup (it joins scheduled_services)
@@ -337,14 +339,43 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     // within the accepted amount → completion charges → warning
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: [{ id: 'inv-1', status: 'sent', subtotal: '120.00' }] });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
-    // within the accepted amount + its own setup-fee line (completion's
-    // bounded allowance) → still chargeable → warning
+  });
+
+  test('the setup-fee allowance follows completion AUTHORIZATION, never the line text alone', async () => {
+    const setupLine = JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]);
+    // per-application + accept-minted provenance → completion widens the
+    // cap and charges → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '219.00', line_items: setupLine, notes: 'Auto-generated from accepted estimate #123' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // per-application but NO provenance (stale/office-added line) →
+    // completion caps at the fee and routes to review → exempt
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '219.00', line_items: setupLine }],
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // an immutable setup_fee_claims record matching the line to the cent
+    // restores the allowance → warning
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '219.00', line_items: setupLine }],
+      setupFeeClaims: [{ amount: '99.00' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // NON-per-application lanes get no setup allowance at all → the same
+    // over-fee invoice routes to review → exempt
     route({
       terms: coveredAlways(['c-prepaid']),
       visits: [baseVisit({})],
-      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '219.00', line_items: JSON.stringify([{ description: 'WaveGuard Membership — one-time setup fee', amount: 99 }]) }],
+      invoices: [{ id: 'inv-1', status: 'sent', subtotal: '219.00', line_items: setupLine }],
     });
-    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 
   test('a sibling first-application invoice (same estimate/date) that suppresses or parks the completion charge → stays exempt', async () => {

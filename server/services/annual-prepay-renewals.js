@@ -3422,7 +3422,7 @@ function dayAfter(ymd) {
 // setup-fee line (the real allowance is min(line, fee) ≤ the line, and
 // the real anchor is one of these candidates). Anything not clearly over
 // that bound is treated as chargeable and keeps the warning.
-async function openInvoiceClearlyOverCompletionCap(inv, visit, conn) {
+async function openInvoiceClearlyOverCompletionCap(inv, visit, laneMode, conn) {
   const subtotal = inv.subtotal != null ? Number(inv.subtotal) : Number(inv.total || 0);
   const discount = Math.max(0, Number(inv.discount_amount) || 0);
   const netSubtotal = Math.round((subtotal - discount) * 100) / 100;
@@ -3435,7 +3435,7 @@ async function openInvoiceClearlyOverCompletionCap(inv, visit, conn) {
     .whereIn('scheduled_service_id', conn('scheduled_services').where(function series() {
       this.where({ id: seriesParentId }).orWhere({ recurring_parent_id: seriesParentId });
     }).select('id'))
-    .select('accepted_amount');
+    .select('accepted_amount', 'selected_plan');
   for (const row of apptRows || []) {
     const amt = Number(row.accepted_amount);
     if (Number.isFinite(amt) && amt > 0) anchors.push(amt);
@@ -3443,15 +3443,52 @@ async function openInvoiceClearlyOverCompletionCap(inv, visit, conn) {
   // No accepted amount under ANY lane → completion never auto-charges
   // uncapped: it routes to office review instead.
   if (!anchors.length) return true;
+  // The setup-fee ALLOWANCE mirrors completion's AUTHORIZATION, not just
+  // the line text: completion widens the cap only for PER-APPLICATION
+  // billing whose line has real provenance — an accept-minted invoice, a
+  // durable plan-choice selection on the series, a frozen wizard fee on
+  // the linked estimate, or an immutable setup_fee_claims record matching
+  // the line to the cent. A stale/office-added setup line earns NO
+  // allowance and the over-cap invoice routes to office review without
+  // charging — so it must not keep the warning either. The authorized
+  // bound uses the full line amount (the real allowance is min(line, fee)
+  // ≤ the line — anything inside the bound keeps the warning).
   let setupLineAllowance = 0;
+  let setupLineAmt = 0;
   try {
     const lines = typeof inv.line_items === 'string' ? JSON.parse(inv.line_items) : (inv.line_items || []);
     for (const li of Array.isArray(lines) ? lines : []) {
       if (!/one-time setup fee/i.test(String(li?.description || ''))) continue;
       const amt = Number(li?.amount ?? ((Number(li?.quantity) || 1) * (Number(li?.unit_price) || 0)));
-      if (Number.isFinite(amt) && amt > 0) setupLineAllowance = Math.max(setupLineAllowance, amt);
+      if (Number.isFinite(amt) && amt > 0) setupLineAmt = Math.max(setupLineAmt, amt);
     }
   } catch (e) { /* unparseable lines grant completion NO allowance — the bound stays valid */ }
+  // Provenance lookup errors PROPAGATE (→ the caller's fail-toward-warning
+  // catch): a transient read error must not shrink the bound and widen the
+  // exemption while completion could still grant the allowance and charge.
+  if (setupLineAmt > 0 && laneMode === 'per_application') {
+    let authorized = /Auto-generated from accepted estimate #/.test(String(inv.notes || ''));
+    if (!authorized) {
+      authorized = (apptRows || []).some((row) => row.selected_plan === 'per_application');
+    }
+    if (!authorized && visit.source_estimate_id) {
+      const srcEst = await conn('estimates').where({ id: visit.source_estimate_id }).first('estimate_data');
+      if (srcEst) {
+        let srcData = {};
+        try {
+          srcData = typeof srcEst.estimate_data === 'string' ? JSON.parse(srcEst.estimate_data) : (srcEst.estimate_data || {});
+        } catch (e) { srcData = {}; }
+        const frozen = Number(srcData?.acceptedSetupFeeAmount ?? srcData?.setupFeeQuote?.amount);
+        authorized = Number.isFinite(frozen) && frozen > 0;
+      }
+    }
+    if (!authorized) {
+      const claim = await conn('setup_fee_claims').where({ invoice_id: inv.id }).first('amount');
+      authorized = !!(claim && Math.round(Number(claim.amount) * 100) > 0
+        && Math.round(Number(claim.amount) * 100) === Math.round(setupLineAmt * 100));
+    }
+    if (authorized) setupLineAllowance = setupLineAmt;
+  }
   return netSubtotal > Math.max(...anchors) + setupLineAllowance + 0.005;
 }
 
@@ -3752,7 +3789,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       const visitInvoices = await conn('invoices')
         .where({ scheduled_service_id: v.id })
         .orderBy('created_at', 'desc')
-        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items');
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
       if ((visitInvoices || []).some((inv) => statusOf(inv) === 'refunded')) continue;
       const reused = (visitInvoices || []).find((inv) => !CANCELLED_SERVICE_RESOLVED_STATUSES.includes(statusOf(inv)));
@@ -3775,7 +3812,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
       if (reused) {
         // An OPEN reused invoice charges only within completion's cap —
         // over the accepted amount it routes to office review instead.
-        if (await openInvoiceClearlyOverCompletionCap(reused, v, conn)) continue;
+        if (await openInvoiceClearlyOverCompletionCap(reused, v, lane.mode, conn)) continue;
         if (await dunningStopped(reused)) continue;
       } else {
         // No direct invoice on the visit → completion consults the SIBLING
@@ -3793,7 +3830,7 @@ async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = d
         if (siblingStatus === 'refunded') continue;
         if (['paid', 'prepaid', 'processing'].includes(siblingStatus)) continue;
         if (!sibling.invoice && sibling.canceledSetupFee) continue;
-        if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, conn)) continue;
+        if (sibling.invoice && await openInvoiceClearlyOverCompletionCap(sibling.invoice, v, lane.mode, conn)) continue;
         if (sibling.invoice && await dunningStopped(sibling.invoice)) continue;
       }
       // Only an auto_charge touches the saved card at completion ('invoice'
