@@ -991,7 +991,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
           would vanish from every live view (server 409s stale pages).
           Also hidden on a pipeline-posted reply: it must stay reachable for
           the edited-after-post bell and Retract (server 409s too). */}
-      {onDismiss && !review.missingSince && !(review.autoReply?.status === "posted" && !["human", "agent_ops"].includes(review.autoReply?.version)) && (
+      {onDismiss && !review.missingSince && !(review.autoReply?.status === "posted" && !["human", "agent_ops"].includes(review.autoReply?.version)) && !(review.autoReply?.status === "parked" && review.autoReply?.reason === "review_edited_after_post") && (
         <div style={{ textAlign: "right", marginTop: 8 }}>
           {" "}
           <button

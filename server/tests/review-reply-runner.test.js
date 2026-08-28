@@ -427,7 +427,8 @@ describe('processDueAutoReplies — state machine', () => {
   test('whereNotAutoPosted keeps pipeline-posted replies out of Dismiss; human / IB posts stay dismissible (codex r75)', () => {
     const qb = { whereRaw: jest.fn() };
     Runner.whereNotAutoPosted(qb);
-    expect(qb.whereRaw).toHaveBeenCalledWith("NOT (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE)");
+    // codex r77: a reply parked by the reviewer's edit is still live on Google — not dismissible either.
+    expect(qb.whereRaw).toHaveBeenCalledWith("NOT ((COALESCE(auto_reply_status, '') = 'parked' AND COALESCE(auto_reply_reason, '') = 'review_edited_after_post') OR (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE))");
   });
 
   test('queued rows older than maxQueueAgeHours leave the lane before a claim instead of auto-posting after a pause (codex r74)', async () => {
@@ -1175,6 +1176,15 @@ describe('processDueAutoReplies — state machine', () => {
     const parkedAfterPost = { ...posted, star_rating: 1, review_text: 'Actually terrible', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' };
     expect(Runner.reviewEditFields(parkedAfterPost, { star_rating: 2, review_text: 'Slightly less terrible', reviewer_name: 'Dana W.' })).toEqual({});
     expect(Runner.reviewEditFields(row({ auto_reply_status: 'skipped' }), { star_rating: 1, review_text: 'x', reviewer_name: 'Dana W.' })).toEqual({});
+    // codex r77: a Skip-auto row still carrying the pipeline draft loses that
+    // stale wording (stays skipped, nothing requeues); a skipped row with a
+    // REAL reply (manual_reply / already_replied) is untouched.
+    const skippedDraft = row({ auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip', auto_reply_draft: 'Hi Dana, old praise.', review_reply: '[DRAFT] Hi Dana, old praise.', auto_reply_drafted_at: '2026-08-27T14:00:00Z', auto_reply_grounding: { fingerprint: 'x' } });
+    expect(Runner.reviewEditFields(skippedDraft, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' }))
+      .toEqual({ auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_grounding: null, auto_reply_error: null, review_reply: null, reply_updated_at: null });
+    expect(Runner.reviewEditFields({ ...skippedDraft, review_reply: null }, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' }))
+      .toEqual({ auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_grounding: null, auto_reply_error: null });
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_draft: 'Hi Dana, old praise.', review_reply: 'A real posted reply' }), { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({});
   });
   test('reviewEditFields: a reviewer edit clears a pipeline-owned draft and requeues; human drafts and reconciliation parks are left alone', () => {
     const edit = { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' };

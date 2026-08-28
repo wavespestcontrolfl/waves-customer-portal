@@ -1067,6 +1067,21 @@ function reviewEditFields(existing, normalized) {
   if (humanDraftOn(existing)) {
     return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null };
   }
+  // Skip auto kept the pipeline draft on the row for Use Draft (codex r51);
+  // written for the OLD review it is now stale wording that would read as an
+  // ordinary saved draft (codex r77). Clear it — the row stays skipped (Skip
+  // auto is authoritative; nothing requeues). A real posted reply on a
+  // skipped row (manual_reply / already_replied) is never touched.
+  if (existing.auto_reply_status === STATUS.SKIPPED) {
+    if (!existing.auto_reply_draft || hasRealReply(existing.review_reply)) return {};
+    return {
+      auto_reply_draft: null,
+      auto_reply_drafted_at: null,
+      auto_reply_grounding: null,
+      auto_reply_error: null,
+      ...(isDraftReply(existing.review_reply) ? { review_reply: null, reply_updated_at: null } : {}),
+    };
+  }
   if (!REDRAFT_ON_EDIT_STATUSES.has(existing.auto_reply_status)) return {};
   if (!existing.auto_reply_draft) return {};
   return {
@@ -1278,8 +1293,11 @@ function whereNoReconcilePark(qb) {
 // reviewer later rewrites the review, the sync parks it as
 // review_edited_after_post with an action bell whose deep link cannot show a
 // dismissed row — the public reply would be neither inspectable nor
-// retractable. Human / IB-posted replies may still be dismissed.
-const AUTO_POSTED_SQL = "(COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE)";
+// retractable. Human / IB-posted replies may still be dismissed — except
+// once the reviewer's edit has parked them as review_edited_after_post (codex
+// r77): that park exists precisely so a person inspects / retracts the
+// still-live reply, whoever wrote it.
+const AUTO_POSTED_SQL = "((COALESCE(auto_reply_status, '') = 'parked' AND COALESCE(auto_reply_reason, '') = 'review_edited_after_post') OR (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE))";
 function whereNotAutoPosted(qb) {
   qb.whereRaw(`NOT ${AUTO_POSTED_SQL}`);
 }
