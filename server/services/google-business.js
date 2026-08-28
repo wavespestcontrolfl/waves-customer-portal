@@ -1147,21 +1147,26 @@ class GoogleBusinessService {
           // Same live re-read under the lock as the authoritative upsert.
           const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
           await trx('google_reviews').where({ id: existing.id }).update(upd);
-          return this._reconcileReviewEdit(live, placesEdit, { conn: trx, bell: false });
+          const reconciled = await this._reconcileReviewEdit(live, placesEdit, { conn: trx, bell: false });
+          // A Places owner reply that differs from the local one goes through
+          // the canonical sync path: it fills an empty slot, replaces a
+          // "[DRAFT]", and — when the owner edited our POSTED reply directly
+          // on Google during a GBP outage — replaces the stale text and
+          // closes the automatic state (edited_on_google). Judged against the
+          // row AS IT IS after the reconciliation above (hook P1: a cleared
+          // draft must not make this CAS miss), inside the same transaction.
+          // An ABSENT Places reply is still never a downgrade (the sample is
+          // not authoritative for deletions).
+          if (ownerReply) {
+            const after = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || live;
+            if (ownerReply.trim() !== String(after.review_reply || '').trim()) {
+              const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
+              await applySyncReplyFields(existing.id, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx, expectedReply: after.review_reply ?? null });
+            }
+          }
+          return reconciled;
         });
         if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
-        // A Places owner reply that differs from the local one goes through
-        // the canonical sync path: it fills an empty slot, replaces a
-        // "[DRAFT]", and — when the owner edited our POSTED reply directly
-        // on Google during a GBP outage — replaces the stale text and closes
-        // the automatic state (edited_on_google), so an admin editing from
-        // this page no longer works from a reply Google no longer shows. An
-        // ABSENT Places reply is still never a downgrade (the sample is not
-        // authoritative for deletions).
-        if (ownerReply && ownerReply.trim() !== String(existing.review_reply || '').trim()) {
-          const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
-          await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { expectedReply: existing.review_reply ?? null });
-        }
         // Reinstatement clear, mirroring _upsertGbpReview: the main update
         // never touches missing_since; the clear is a separate conditional
         // UPDATE against the CURRENT column value with the ordering token,

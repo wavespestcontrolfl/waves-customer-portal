@@ -486,7 +486,13 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       current = await db('google_reviews').where({ id: reviewId }).first();
       if (current && !current.missing_since && reviewFingerprint(current) !== prePutFingerprint) {
         editedDuringPut = true;
-        updated = await base().update({ ...clean, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null });
+        // Only a PIPELINE-owned reply (automation, or Post now stamping
+        // 'posted') takes the automatic park — a human's reply keeps the
+        // caller's own close fields so the UI never offers auto-reply
+        // Retract for it (hook P1). The bell rings for both.
+        const pipelineOwned = isAuto || autoFields?.auto_reply_status === 'posted';
+        const stamp = pipelineOwned ? { auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null } : {};
+        updated = await base().update({ ...clean, ...stamp });
       }
     }
     if (updatedCount(updated) === 0) {

@@ -308,6 +308,17 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_published_at: '2026-08-27T15:00:00Z' });
     expect(mockNotify).toHaveBeenCalledTimes(1);
     expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', needsAction: true });
+    // A HUMAN reply edited-during-PUT keeps the caller's own close fields
+    // (never the automatic park — no auto-reply Retract for a person's text)
+    // but the bell still rings (hook P1).
+    mockNotify.mockClear();
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: null, auto_reply_reason: null, review_text: 'Great', star_rating: 5 };
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows[0].review_text = 'Rewritten again'; return {}; });
+    const rh = await publishReviewReply({ reviewId: 'rev-1', text: 'A person wrote this.', actor: { type: 'admin' }, allowOverwrite: true, autoFields: { auto_reply_status: null, auto_reply_reason: null } });
+    expect(rh.editedDuringPut).toBe(true);
+    expect(state.rows[0]).toMatchObject({ review_reply: 'A person wrote this.', auto_reply_status: null });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
     // No edit → clean posted, no bell.
     mockNotify.mockClear();
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null, review_text: 'Great', star_rating: 5 };
