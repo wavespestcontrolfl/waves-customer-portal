@@ -41,11 +41,14 @@ async function fullSync(state) {
       : null;
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
-    // fullSync serves two cases: first connect (empty table → mailbox
-    // HISTORY, never notify) and expired-history-cursor recovery (table
-    // populated → genuinely new arrivals are among these, so the 24h age
-    // guard decides, exactly as for an incremental sync) — hook P1.
-    const initialConnect = !(await db('emails').first('id'));
+    // fullSync serves two cases: first connect (mailbox HISTORY, never
+    // notify) and expired-history-cursor recovery (genuinely new arrivals
+    // are among these, so the 24h age guard decides, as for an incremental
+    // sync). Decided from the sync-state row read BEFORE the remote scan —
+    // durable across pods: a pod that has never completed a sync has
+    // emails_synced = 0, so two concurrent first syncs both see "initial"
+    // (both stay silent); recovery has a prior count (hook P1).
+    const initialConnect = !state?.last_history_id && !(Number(state?.emails_synced) > 0);
 
     let failedMessages = 0;
     for (const msg of messages) {
@@ -457,7 +460,13 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified }) 
         customerId,
       });
     } finally {
-      if (!stats || stats.error) {
+      // Keep the claim only for a real outcome: a bell written, a push sent,
+      // or a deliberate suppression (prefs/policy). Any other no-delivery
+      // (prefs lookup failed, empty recipients, insert/push failure) releases
+      // it so a later replay can recover the alert (hook P1).
+      const delivered = Boolean(stats && !stats.error
+        && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
+      if (!delivered) {
         await db('emails').where({ id: email.id }).update({ customer_bell_claimed_at: null }).catch(() => {});
       }
     }

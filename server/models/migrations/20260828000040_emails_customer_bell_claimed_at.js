@@ -9,6 +9,9 @@ exports.up = async function up(knex) {
   await knex.schema.alterTable('emails', (table) => {
     table.timestamp('customer_bell_claimed_at', { useTz: true }).nullable();
   });
+  // Everything already in the table predates the feature: mark it handled so
+  // a label/history replay or resync can never ring for pre-rollout mail.
+  await knex('emails').whereNull('customer_bell_claimed_at').update({ customer_bell_claimed_at: knex.fn.now() });
 };
 
 exports.down = async function down(knex) {
