@@ -36,19 +36,20 @@
  * it. Moves made from the Edit appointment modal before this lane wrote no
  * reschedule_log row — for those, a second pass walks every live series and
  * marks any occurrence whose date deviates from the series' CADENCE, with
- * the cadence date as its position. A row's series POSITION is its rank by
- * creation among the series' cadence rows (the seeder and the extension
- * writers insert occurrences in cadence order — a moved row keeps its
- * rank even when its date now sits past two siblings), never its current
- * date order. The cadence is not assumed to run through any particular
- * row: every row is tried as the origin at its rank, the origin explaining
- * the MAJORITY of the series wins (same projector rescheduleSeries uses,
- * weekend shift honored, stepping backward for earlier ranks), and a
- * series no origin can explain for more than half its rows is left alone
- * as ambiguous. Completed rows take part in the fit (they anchor the
- * cadence) but only live upcoming rows are stamped. A false positive costs
- * nothing (the row shifts by the delta instead of being re-projected); a
- * miss would erase a customer's exception.
+ * the cadence date as its position. The schema holds no durable occurrence
+ * sequence (created_at is transaction-stable for a seeded batch, UUIDs
+ * order randomly), so positions are the rows' DATE order and the cadence
+ * is not assumed to run through any particular row: every row is tried as
+ * the origin at its rank, the origin explaining the MAJORITY of the series
+ * wins (same projector rescheduleSeries uses, weekend shift honored,
+ * stepping backward for earlier ranks). Completed rows take part in the
+ * fit; only live upcoming rows are stamped. A series no origin can explain
+ * (an exception moved past its siblings reorders the ranks) is PRESERVED
+ * WHOLESALE instead of guessed at: every live row is stamped an exception
+ * at its own date, so a later collective move shifts the customer's
+ * existing dates by the delta and never regenerates any of them. A false
+ * positive costs nothing (delta shift instead of re-projection); a miss
+ * would erase a customer's exception.
  */
 const { nextRecurringDate, recurrenceOrdinalOptions, isMonthBasedRecurrence } = require('../../services/rebooker');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
@@ -56,9 +57,10 @@ const { parseETDateTime, etParts, etDateString, addETDays } = require('../../uti
 const dateOnly = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
 
 // Pure: which occurrences of one series sit off the series' cadence.
-// `rows` = ALL the series' cadence rows (parent first) in CREATION order —
-// index = series position. Returns { planned: [{ id, expected }],
-// ambiguous }; the caller stamps only live upcoming rows. Exported for tests.
+// `rows` = the series' cadence rows (any status but cancelled) in DATE
+// order — index = series position. Returns { planned: [{ id, expected }],
+// ambiguous }; when ambiguous the caller preserves every live row at its
+// own date. Exported for tests.
 function planCadenceExceptions(parent, rows) {
   if (!parent?.recurring_pattern || rows.length < 2) return { planned: [], ambiguous: false };
   // Month-based patterns take their ordinal (nth weekday) from the origin
@@ -117,18 +119,31 @@ async function backfillCadenceDeviations(knex) {
   let stamped = 0;
   let ambiguous = 0;
   for (const parent of parents) {
-    // Every cadence row of the series in creation order (cancelled rows
-    // hold no cadence slot; completed ones do) — index = series position.
+    // Every cadence row of the series in position order (cancelled rows
+    // hold no cadence slot; completed ones do).
     const rows = await knex('scheduled_services')
       .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parent.id, parent.id])
       .whereNot('status', 'cancelled')
-      .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
       .select('id', 'scheduled_date', 'status', 'date_exception', 'date_exception_cadence_date');
     const plan = planCadenceExceptions(parent, rows);
     if (plan.ambiguous) {
+      // No origin explains the series (a reordering move): preserve it
+      // wholesale — every live row is an exception at its own date.
       ambiguous += 1;
-       
-      console.log(`[20260828000030] series ${parent.id}: no cadence origin explains a majority of its ${rows.length} live rows — left unmarked (ambiguous)`);
+      const preserved = await knex('scheduled_services')
+        .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parent.id, parent.id])
+        .where({ date_exception: false })
+        .whereNotIn('status', ['completed', 'cancelled'])
+        .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+        .update({
+          date_exception: true,
+          date_exception_source: 'backfill_preserved',
+          date_exception_at: knex.fn.now(),
+          date_exception_cadence_date: knex.raw('scheduled_date'),
+        });
+      stamped += preserved;
+      console.log(`[20260828000030] series ${parent.id}: no cadence origin explains a majority of its ${rows.length} rows — ${preserved} live row(s) preserved at their own dates`);
       continue;
     }
     for (const entry of plan.planned) {
@@ -146,8 +161,8 @@ async function backfillCadenceDeviations(knex) {
     }
   }
   if (ambiguous) {
-     
-    console.log(`[20260828000030] ${ambiguous} ambiguous series left unmarked`);
+
+    console.log(`[20260828000030] ${ambiguous} ambiguous series preserved wholesale`);
   }
   return stamped;
 }
@@ -156,6 +171,9 @@ exports.up = async function up(knex) {
     await knex.schema.createTable('series_moves', (t) => {
       t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
       t.string('operation_key', 120);
+      // The request's own identity (anchor:date:start:end[:clear]) — a
+      // client-minted operation_key replays only the identical request.
+      t.string('request_key', 160);
       t.uuid('anchor_service_id').notNullable().references('id').inTable('scheduled_services');
       t.uuid('parent_service_id').references('id').inTable('scheduled_services');
       t.uuid('customer_id').references('id').inTable('customers');
@@ -258,10 +276,10 @@ exports.up = async function up(knex) {
          AND s.scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date
          AND s.date_exception = false
     `);
-     
+
     console.log(`[20260828000030] backfilled ${backfilled.rowCount ?? '?'} pre-existing manual date exception(s) from reschedule_log`);
     const deviations = await backfillCadenceDeviations(knex);
-     
+
     console.log(`[20260828000030] backfilled ${deviations} cadence deviation(s) (modal-moved and other unlogged exceptions)`);
   }
 };

@@ -450,6 +450,15 @@ describe('rescheduleSeries — one recorded operation', () => {
       .rejects.toMatchObject({ message: expect.stringContaining(`The future visit on ${SIB1} keeps a time this move can't carry forward`) });
   });
 
+  test('a client operation_key reused for the same date but a DIFFERENT window is rejected (request_key bound), never replayed', async () => {
+    wireSeriesMocks([sib('svc-1', BASE)], {
+      priorMove: { id: 'sm-prior', new_date: TARGET, request_key: `svc-1:${TARGET}:09:00:11:00`, result: { success: true, newDate: TARGET } },
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'OPERATION_KEY_REUSED' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
   test('an operation_key reused for a DIFFERENT target of the same appointment is rejected, never replayed', async () => {
     wireSeriesMocks([sib('svc-1', BASE)], {
       priorMove: { id: 'sm-prior', new_date: SIB1, result: { success: true, newDate: SIB1 } },
@@ -462,7 +471,7 @@ describe('rescheduleSeries — one recorded operation', () => {
   test('callers that mint no key get the request identity anchor:target:start; an older committed row with that key is superseded first', async () => {
     const { seriesMovesInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
-    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${TARGET}:09:00:11:00` });
+    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${TARGET}:09:00:11:00`, request_key: `svc-1:${TARGET}:09:00:11:00` });
     expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:09:00:11:00`, status: 'committed' });
     expect(seriesMovesInsert.update).toHaveBeenCalledWith({ status: 'superseded' });
   });
@@ -494,18 +503,20 @@ describe('rescheduleSeries — one recorded operation', () => {
   });
 
   test('a repeated operation_key replays the committed result without re-running the sweep', async () => {
-    const { priorLookup } = wireSeriesMocks([sib('svc-1', BASE)], {
-      priorMove: { id: 'sm-prior', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2 } },
+    const { priorLookup } = wireSeriesMocks([sib('svc-1', TARGET)], {
+      anchor: anchorRow({ scheduled_date: TARGET }),
+      priorMove: { id: 'sm-prior', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] } },
     });
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
-    expect(result).toEqual({ success: true, newDate: TARGET, occurrencesRescheduled: 2, seriesMoveId: 'sm-prior', replayed: true });
+    expect(result).toMatchObject({ success: true, newDate: TARGET, occurrencesRescheduled: 2, seriesMoveId: 'sm-prior', replayed: true });
     expect(db.transaction).not.toHaveBeenCalled();
     // The replay lookup is scoped to THIS appointment's key.
     expect(priorLookup.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: 'op-123', status: 'committed' });
   });
 
   test('a replay whose stored result is missing rebuilds the occurrence list from the row snapshots', async () => {
-    wireSeriesMocks([sib('svc-1', BASE)], {
+    wireSeriesMocks([sib('svc-1', TARGET)], {
+      anchor: anchorRow({ scheduled_date: TARGET }),
       priorMove: {
         id: 'sm-prior', result: null, original_date: BASE, new_date: TARGET, delta_days: 2, skipped_count: 1, exception_count: 0,
         rows: [
@@ -540,9 +551,10 @@ describe('rescheduleSeries — one recorded operation', () => {
     wireSeriesMocks([sib('svc-1', BASE)], {
       priorMove: {
         id: 'sm-prior', new_date: TARGET, customer_id: 'cust-1',
-        result: { success: true, newDate: TARGET, occurrencesRescheduled: 1, rescheduledOccurrences: [] },
+        result: { success: true, newDate: TARGET, occurrencesRescheduled: 1, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
         rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: {} }],
       },
+      anchor: anchorRow({ scheduled_date: TARGET }),
     });
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
     expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-9', current_job_id: 'svc-1', status: 'idle' });
@@ -639,16 +651,17 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'a', expected: BASE }], ambiguous: false });
   });
 
-  test('position = creation rank, so an exception moved PAST its siblings is still recovered (rows arrive in creation order, not date order)', () => {
-    // Weekly D, D+7, D+14, D+21; the first occurrence was moved to D+19 —
-    // by date it now sorts between the 3rd and 4th, by creation it is rank 0.
+  test('an exception moved PAST its siblings reorders the date ranks — no origin explains the series, so it is reported ambiguous (the caller preserves it wholesale)', () => {
+    // Weekly D, D+7, D+14, D+21; the first occurrence was moved to D+19 and
+    // now sorts between the 3rd and 4th. Nothing in the schema proves its
+    // original slot, so the migration must not guess.
     const rows = [
-      { id: 'a', scheduled_date: dayOffset(29) },
       { id: 'b', scheduled_date: SIB1 },
       { id: 'c', scheduled_date: SIB2 },
+      { id: 'a', scheduled_date: dayOffset(29) },
       { id: 'd', scheduled_date: SIB3 },
     ];
-    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'a', expected: BASE }], ambiguous: false });
+    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [], ambiguous: true });
   });
 
   test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {

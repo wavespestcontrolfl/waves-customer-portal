@@ -216,24 +216,22 @@ function snapshotRow(row) {
 // superseded before the new row claims the unique index.
 const SERIES_RETRY_HORIZON_MS = 10 * 60 * 1000;
 function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
-  if (typeof options.operationKey === 'string' && options.operationKey) {
-    return { key: options.operationKey, derived: false };
-  }
   const win = parseWindow(newWindow);
   const hm = (t) => (t ? String(t).slice(0, 5) : '-');
   // Every request dimension the move writes — date, start AND end (an
   // end-only correction to a just-moved slot is a different request), plus
-  // an explicit anchor clear — so only a true repeat matches.
-  return {
-    key: `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}`,
-    derived: true,
-  };
+  // an explicit anchor clear — so only a true repeat matches. Stored on the
+  // row as request_key; a client-minted operation_key replays only the
+  // identical request.
+  const requestKey = `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}`;
+  if (typeof options.operationKey === 'string' && options.operationKey) {
+    return { key: options.operationKey, derived: false, requestKey };
+  }
+  return { key: requestKey, derived: true, requestKey };
 }
-// A DERIVED-key replay additionally requires the anchor to still sit exactly
-// where the committed move left it (date + window from its recorded
-// occurrence); a client-minted key is the caller's own assertion of identity.
-function priorStillCurrent(prior, service, derived) {
-  if (!derived) return true;
+// A replay additionally requires the anchor to still sit exactly where the
+// committed move left it (date + window from its recorded occurrence).
+function priorStillCurrent(prior, service) {
   const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
     || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
   const after = occ ? { date: occ.date ?? occ.after?.scheduled_date, start: occ.windowStart ?? occ.after?.window_start, end: occ.windowEnd ?? occ.after?.window_end } : null;
@@ -245,12 +243,24 @@ function priorStillCurrent(prior, service, derived) {
 }
 // A derived-key match whose anchor has since changed is a STALE retry: it
 // must never fall through and apply its old window as a single edit.
-async function findPriorSeriesMove(conn, serviceId, { key, derived }, service = null) {
+async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
   if (!prior) return null;
-  if (service && !priorStillCurrent(prior, service, derived)) {
+  // A client key bound to a DIFFERENT request (other target date, other
+  // window, a clear) is a caller bug, never a silent replay of the earlier
+  // move — checked before the still-current fence so the caller learns the
+  // real reason.
+  if ((newDate && prior.new_date && dateOnly(prior.new_date) !== dateOnly(newDate))
+    || (requestKey && prior.request_key && prior.request_key !== requestKey)) {
+    throw Object.assign(new Error('This operation key was already used for a different move of this appointment'), {
+      statusCode: 409,
+      isOperational: true,
+      code: 'OPERATION_KEY_REUSED',
+    });
+  }
+  if (service && !priorStillCurrent(prior, service)) {
     throw Object.assign(new Error('This move was already applied and the visit has changed since — reload and check the schedule before moving it again'), {
       statusCode: 409,
       isOperational: true,
@@ -799,7 +809,7 @@ class SmartRebooker {
       // retry replays it (and its caller can finish the effects) instead of
       // falling into a same-date single edit.
       const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveResult(prior, newDate);
@@ -1296,7 +1306,7 @@ class SmartRebooker {
     const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
     const operationKey = opKey.key;
     {
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveResult(prior, newDate);
@@ -1330,6 +1340,7 @@ class SmartRebooker {
     const moveRows = [];
     const failedMoveFields = {
       operation_key: operationKey,
+      request_key: opKey.requestKey,
       anchor_service_id: serviceId,
       parent_service_id: parentId,
       customer_id: service.customer_id,
