@@ -1174,9 +1174,12 @@ unset its gate; budget kill = the issuer program's limit.
   `outcome='slot_reserved'` for the ET day, written under the claim's advisory lock and
   counted with completed submissions — so several leased providers cannot all observe room
   before any attempt is recorded; re-checked immediately before every submit. **Submission
-  is idempotency-guarded like a purchase:** immediately before the irreversible call the
-  provider flips the attempt `slot_reserved → submitting` (durable, conditional on the
-  lease); a `submitting` attempt is never released by the sweep — if the worker dies before
+  is idempotency-guarded like a purchase:** the slot row carries its ET date
+  (`slot_day = etDateString(now)`); immediately before the irreversible call, under the same
+  advisory lock, the provider compares `slot_day` with the current ET day — if the day rolled
+  over the old slot is released and a new one atomically reserved against the NEW day's cap
+  (no room ⇒ the attempt is `skipped`, never submitted) — and only then flips the attempt
+  `slot_reserved → submitting` (durable, conditional on the lease); a `submitting` attempt is never released by the sweep — if the worker dies before
   reporting, the sweep parks it as `submit_ambiguous`, the placement is excluded from
   re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
   the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released. The runner's
