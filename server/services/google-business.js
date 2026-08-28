@@ -767,7 +767,10 @@ class GoogleBusinessService {
       .where('reviewer_name', '!=', '_stats')
       .whereNull('missing_since')
       .select('id', 'reviewer_name', 'review_created_at');
-    return candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at)) || null;
+    const hit = candidates.find(row => sameReviewerAndTime(row, normalized.reviewer_name, normalized.review_created_at));
+    // Callers read the FULL row (reply, draft/auto-reply state, publish
+    // claim) off `existing` — the fuzzy candidate projection above is not it.
+    return hit ? (await db('google_reviews').where({ id: hit.id }).first()) || null : null;
   }
 
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
