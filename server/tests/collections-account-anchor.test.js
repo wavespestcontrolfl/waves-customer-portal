@@ -2,7 +2,7 @@
  * account-anchor — ONE dunning clock per customer, anchored to the
  * OLDEST-due open invoice (owner ruling 2026-08-28).
  */
-const { anchorInvoiceOf, accountDaysOverdue, daysOverdueOn, dunningTierForOverdue, registerForTier, dueValueOf } = require('../services/collections/account-anchor');
+const { anchorInvoiceOf, orderByDue, accountDaysOverdue, daysOverdueOn, dunningTierForOverdue, registerForTier, dueValueOf } = require('../services/collections/account-anchor');
 
 const NOW = new Date('2026-08-28T15:00:00Z'); // 11:00 ET Fri Aug 28
 
@@ -24,6 +24,11 @@ test('equal due dates tie-break on created_at as INSTANTS (Postgres returns Date
   expect(anchorInvoiceOf([first, later]).id).toBe('first');
   const missing = { id: 'missing', due_date: '2026-07-29', created_at: null };
   expect(anchorInvoiceOf([missing, later]).id).toBe('later'); // unparseable sorts last
+  // orderByDue is the same comparator end-to-end and never mutates its input.
+  const noDue = { id: 'nodue', due_date: null, created_at: null };
+  const input = [noDue, later, missing, first];
+  expect(orderByDue(input).map((i) => i.id)).toEqual(['first', 'later', 'missing', 'nodue']);
+  expect(input.map((i) => i.id)).toEqual(['nodue', 'later', 'missing', 'first']);
 });
 
 test('account age = the anchor\'s age; a 4-day invoice does not soften a 30-day one', () => {

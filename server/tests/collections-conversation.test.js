@@ -37,10 +37,9 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn(() => ({
 
 // Disclosure reads the SAME eligible-invoice authority the policy used at
 // dial time (prb-r1) — mocked as one $258 eligible invoice.
-jest.mock('../config/feature-gates', () => {
-  const actual = jest.requireActual('../config/feature-gates');
-  return { ...actual, isEnabled: jest.fn(() => false) };
-});
+// pay-combined's sibling selection = what /pay/:token would actually collect
+// beyond the anchor invoice; null = single-invoice flow.
+jest.mock('../services/pay-combined', () => ({ combinedEligibleSiblings: jest.fn(async () => null) }));
 jest.mock('../services/collections/contact-policy', () => ({
   loadEligibleInvoices: jest.fn(async () => ([
     { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
@@ -1238,36 +1237,53 @@ describe('account-level disclosure + registers', () => {
     expect(out).toMatch(/^Total account balance: \$149\.85 across 2 open invoices/);
     expect(out.indexOf('Lawn Care on 2026-07-12')).toBeLessThan(out.indexOf('Pest Control on 2026-08-24'));
     expect(out).toMatch(/Lawn Care on 2026-07-12: \$44\.55 \(\d+ days past due\)/);
-    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link for the OLDEST invoice only/); // gate off ⇒ one-invoice link, said plainly
+    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link for the OLDEST invoice only/); // no combined siblings ⇒ one-invoice link, said plainly
     expect(out).not.toMatch(/consequence/i); // friendly register never carries one
+    expect(convo._ctx.invoiceId).toBe('inv-old'); // the link carries the OLDEST-DUE invoice, not the loader's first row
+    expect(convo._ctx.payLinkInvoiceIds).toEqual(['inv-old']);
   });
 
-  test('the pay-link offer covers the account only when /pay collects the combined balance (GATE_PAY_INCLUDE_BALANCE)', async () => {
-    const FeatureGates = require('../config/feature-gates');
-    const two = [
-      { id: 'inv-new', title: 'Pest Control', due_date: '2026-08-24', total: '105.30', credit_applied: 0 },
-      { id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-29', total: '44.55', credit_applied: 0 },
+  test('the pay-link offer covers the account only when pay-combined would actually bundle EVERY open invoice behind the anchor', async () => {
+    const PayCombined = require('../services/pay-combined');
+    const three = [
+      { id: 'inv-new', title: 'Pest Control', due_date: '2026-08-24', total: '105.30', credit_applied: 0, stripe_payment_intent_id: null },
+      { id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-29', total: '44.55', credit_applied: 0, stripe_payment_intent_id: 'pi_old' },
+      { id: 'inv-mid', title: 'Mosquito', due_date: '2026-08-10', total: '20.00', credit_applied: 0, stripe_payment_intent_id: null },
     ];
-    FeatureGates.isEnabled.mockImplementation((g) => g === 'payIncludeBalance');
-    try {
-      loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+    const disclose = async (set) => {
+      loadEligibleInvoices.mockResolvedValueOnce(set).mockResolvedValueOnce(set);
+      setDb();
       const { convo } = makeConvo();
       await convo._contextReady;
       convo.verified = true;
-      const out = await convo._toolGetBalance();
-      expect(out).toMatch(/offer to text the secure payment link — it opens the full account balance for one payment/);
-      expect(convo._ctx.payLinkCoversAccount).toBe(true);
-    } finally {
-      FeatureGates.isEnabled.mockImplementation(() => false);
-    }
-    // A single open invoice needs no combined page.
-    const one = [two[1]];
-    loadEligibleInvoices.mockResolvedValueOnce(one).mockResolvedValueOnce(one);
-    setDb(); // a fresh call row — the first session spent the queue
-    const { convo } = makeConvo();
-    await convo._contextReady;
-    convo.verified = true;
-    expect(await convo._toolGetBalance()).toMatch(/it opens the full account balance/);
+      return { convo, out: await convo._toolGetBalance() };
+    };
+    // Full bundle ⇒ full-account promise; the selector is asked with the ANCHOR (oldest-due) row.
+    PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-mid' }, { id: 'inv-new' }]);
+    let r = await disclose(three);
+    expect(r.out).toMatch(/offer to text the secure payment link — it opens the full account balance for one payment/);
+    expect(r.convo._ctx.payLinkCoversAccount).toBe(true);
+    expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old', 'inv-mid', 'inv-new']);
+    const [anchorArg, opts] = PayCombined.combinedEligibleSiblings.mock.calls.at(-1);
+    expect(anchorArg).toMatchObject({ id: 'inv-old', customer_id: 'cust-1' });
+    expect(opts).toEqual({ reusePaymentIntentId: 'pi_old' });
+    // Partial bundle (a sibling holds a live PI, over-cap, …) ⇒ never promise the whole balance.
+    PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-mid' }]);
+    r = await disclose(three);
+    expect(r.out).toMatch(/for the OLDEST invoice only/);
+    expect(r.convo._ctx.payLinkCoversAccount).toBe(false);
+    expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old', 'inv-mid']);
+    // Selector failure degrades to the anchor alone.
+    PayCombined.combinedEligibleSiblings.mockRejectedValue(new Error('boom'));
+    r = await disclose(three);
+    expect(r.out).toMatch(/for the OLDEST invoice only/);
+    expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old']);
+    PayCombined.combinedEligibleSiblings.mockResolvedValue(null);
+    // A single open invoice needs no bundle — and the selector is not consulted.
+    PayCombined.combinedEligibleSiblings.mockClear();
+    r = await disclose([three[1]]);
+    expect(r.out).toMatch(/it opens the full account balance/);
+    expect(PayCombined.combinedEligibleSiblings).not.toHaveBeenCalled();
   });
 
   test('the register follows the FRESH set at disclosure and the system prompt is rebuilt to match', async () => {

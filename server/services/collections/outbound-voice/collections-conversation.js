@@ -52,7 +52,7 @@ const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 const { invoiceAmountDue } = require('../../invoice-helpers');
-const { anchorInvoiceOf, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
+const { anchorInvoiceOf, orderByDue, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
@@ -390,11 +390,11 @@ class CollectionsConversation {
         // SMS consent happened on this number — a send must never follow a
         // mid-call phone edit to a number that did neither.
         dialedPhone: row.to_phone || null,
-        // The pay-link target is the LIVE eligible set's oldest invoice (gh
-        // prb-r5): the balance disclosed in-call is computed from it, and a
-        // link to a snapshot invoice paid since dialing would contradict the
-        // spoken figure. Snapshot ids remain on the case row for audit.
-        invoiceId: eligibleInvoices[0]?.id || null,
+        // The pay-link target is the LIVE eligible set's OLDEST-DUE invoice
+        // (gh prb-r5 + hook r2): the balance disclosed in-call is computed
+        // from it, and a link to a snapshot invoice paid since dialing would
+        // contradict the spoken figure. Snapshot ids stay on the case row.
+        invoiceId: anchorInvoiceOf(eligibleInvoices)?.id || null,
       };
       return true;
     } catch (err) {
@@ -727,14 +727,31 @@ class CollectionsConversation {
       logger.warn(`[collections-voice] service-hold read failed callSid=${this.callSid}: ${err.message} — no consequence`);
     }
     const consequenceDueAt = await readConsequenceDueAt(customerId);
-    // The pay link is /pay/:token of the oldest open invoice; under
-    // GATE_PAY_INCLUDE_BALANCE that page itemizes every open self-pay
-    // invoice and charges the COMBINED total in one payment (pay-combined.js,
-    // owner ruling 2026-08-16). Gate off + several invoices ⇒ the link is
-    // for ONE invoice and she must say so (hook P1).
-    const { isEnabled } = require('../../../config/feature-gates');
-    const payLinkCoversAccount = invoices.length <= 1 || isEnabled('payIncludeBalance');
-    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt, payLinkCoversAccount };
+    // The pay link is /pay/:token of the OLDEST-DUE open invoice. Under
+    // GATE_PAY_INCLUDE_BALANCE that page bundles the customer's other open
+    // self-pay invoices into ONE combined charge (pay-combined.js, owner
+    // ruling 2026-08-16) — but its selection can degrade (gate off, payer
+    // anchor, incomplete sibling read, live PI on a sibling, over-cap,
+    // dunning-stopped rows). Ask the SAME selector /pay uses (hook r2 P1):
+    // what she promises and what the ledger records is what the link would
+    // actually collect. Any failure degrades to the anchor alone.
+    const anchor = anchorInvoiceOf(invoices);
+    let payLinkInvoiceIds = anchor ? [String(anchor.id)] : [];
+    if (anchor && invoices.length > 1) {
+      try {
+        const PayCombined = require('../../pay-combined');
+        const siblings = await PayCombined.combinedEligibleSiblings(
+          { ...anchor, customer_id: customerId }, // open-balance rows carry no customer_id
+          { reusePaymentIntentId: anchor.stripe_payment_intent_id || null },
+        );
+        if (Array.isArray(siblings) && siblings.length) payLinkInvoiceIds.push(...siblings.map((inv) => String(inv.id)));
+      } catch (err) {
+        logger.warn(`[collections-voice] combined pay-link scope probe failed callSid=${this.callSid}: ${err.message} — anchor invoice only`);
+      }
+    }
+    const covered = new Set(payLinkInvoiceIds);
+    const payLinkCoversAccount = invoices.length > 0 && invoices.every((inv) => covered.has(String(inv.id)));
+    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt, payLinkInvoiceIds, payLinkCoversAccount };
   }
 
   _ensureSystemBlocks() {
@@ -1066,7 +1083,7 @@ class CollectionsConversation {
         count: fresh.length,
         invoices: fresh,
       };
-      this._ctx.invoiceId = fresh[0]?.id || null;
+      this._ctx.invoiceId = anchorInvoiceOf(fresh)?.id || null;
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
       Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
@@ -1110,7 +1127,7 @@ class CollectionsConversation {
     // date — oldest first, the overdue ones marked, then ONE total. She asks
     // for the whole balance.
     const now = this._now();
-    const ordered = [...(b.invoices || [])].sort((x, y) => String(dueValueOf(x) || '').localeCompare(String(dueValueOf(y) || '')));
+    const ordered = orderByDue(b.invoices || []);
     const lines = ordered.map((inv) => {
       const label = inv.title || inv.service_type || 'service';
       const when = inv.service_date || inv.due_date;
@@ -1456,11 +1473,9 @@ class CollectionsConversation {
         customerId: this._ctx.customer.id,
         channel: 'sms',
         purpose: 'late_payment',
-        // Every invoice the link collects (the /pay page's combined charge
-        // under GATE_PAY_INCLUDE_BALANCE), else the one it carries.
-        invoiceIds: this._ctx.payLinkCoversAccount
-          ? (this._ctx.balance?.invoices || []).map((inv) => inv.id).filter(Boolean)
-          : [invoiceId],
+        // Every invoice the link would actually collect (pay-combined's own
+        // selection at disclosure time), never more.
+        invoiceIds: (this._ctx.payLinkInvoiceIds && this._ctx.payLinkInvoiceIds.length) ? this._ctx.payLinkInvoiceIds : [invoiceId],
         source: 'collections_voice_paylink',
         metadata: {
           callLogId: this._ctx.callLogId,

@@ -30,19 +30,29 @@ function epochOf(value) {
   return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
 }
 
-/** The oldest-due invoice of a set (ties: earliest created_at). null on empty. */
+/** ET due day of an invoice ('YYYY-MM-DD'); missing sorts last. */
+function dueDayOf(invoice) {
+  const v = dueValueOf(invoice);
+  return v ? String(etCalendarDayOf(v)) : '9999-99-99';
+}
+
+/**
+ * Sorted COPY, oldest-due first (ties: earliest created_at — compared as
+ * instants: Postgres returns Date objects and String(Date) is not
+ * chronological). The ONE ordering the policy, sweep and disclosure share.
+ */
+function orderByDue(invoices = []) {
+  return invoices.filter(Boolean).slice().sort((x, y) => {
+    const a = dueDayOf(x);
+    const b = dueDayOf(y);
+    if (a !== b) return a < b ? -1 : 1;
+    return epochOf(x.created_at) - epochOf(y.created_at);
+  });
+}
+
+/** The oldest-due invoice of a set. null on empty. */
 function anchorInvoiceOf(invoices = []) {
-  let anchor = null;
-  for (const inv of invoices) {
-    if (!inv) continue;
-    if (!anchor) { anchor = inv; continue; }
-    const a = String(etCalendarDayOf(dueValueOf(anchor)));
-    const b = String(etCalendarDayOf(dueValueOf(inv)));
-    // created_at comes back from Postgres as a Date — compare instants,
-    // never String(Date) (not chronological).
-    if (b < a || (b === a && epochOf(inv.created_at) < epochOf(anchor.created_at))) anchor = inv;
-  }
-  return anchor;
+  return orderByDue(invoices)[0] || null;
 }
 
 /** Days overdue of the ACCOUNT = of its anchor invoice. */
@@ -69,4 +79,4 @@ function registerForTier(tier) {
   return 'friendly';
 }
 
-module.exports = { dueValueOf, daysOverdueOn, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };
+module.exports = { dueValueOf, daysOverdueOn, orderByDue, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };
