@@ -795,9 +795,11 @@ describe('processDueAutoReplies — state machine', () => {
     const { buildReplyGrounding } = require('../services/review-reply/grounding');
     buildReplyGrounding.mockImplementationOnce(async (r) => ({ version: 'grounding-v1', reviewId: r.id, reviewerName: r.reviewer_name, customerId: r.customer_id, review: { rating: r.star_rating, text: r.review_text || '' }, account: await mockAccountFacts(r.customer_id), provenance: {} }));
     const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
-    expect(r.outcome).toBe('posted');
+    // codex r36: the approved draft was discarded → the replacement is SURFACED, not published unseen.
+    expect(r).toMatchObject({ outcome: 'parked', reason: 'draft_replaced', drafted: true });
     expect(mockDraft).toHaveBeenCalledTimes(1);
-    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'draft_replaced', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text });
   });
 
   test('an exhausted runner error after an admin cancelled the claim sends no bell', async () => {
@@ -913,6 +915,9 @@ describe('processDueAutoReplies — state machine', () => {
     const posted = row({ auto_reply_status: 'posted' });
     expect(Runner.reviewEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
     expect(Runner.reviewEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    // codex r36: a re-attribution (customer_id change) is a review change too.
+    expect(Runner.reviewEditFields(posted, { star_rating: posted.star_rating, review_text: posted.review_text, reviewer_name: posted.reviewer_name, customer_id: 'someone-else' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    expect(Runner.reviewEditFields(posted, { star_rating: posted.star_rating, review_text: posted.review_text, reviewer_name: posted.reviewer_name, customer_id: posted.customer_id })).toEqual({});
     // codex r35: a HUMAN draft written for the old review is kept but marked stale.
     const humanDrafted = { ...posted, auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Owner wrote this for the 5-star version', auto_reply_draft: null };
     expect(Runner.reviewEditFields(humanDrafted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null });
@@ -1124,8 +1129,15 @@ describe('admin actions', () => {
     mockVerify.mockReturnValueOnce('repeated_opening');
     state.rows = [mk()];
     r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
-    expect(r.outcome).toBe('posted');
+    // codex r36: a failing re-verification surfaces the fresh draft instead of publishing it unseen.
+    expect(r).toMatchObject({ outcome: 'parked', reason: 'draft_replaced', drafted: true });
     expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'draft_replaced', auto_reply_draft: GOOD_DRAFT.text });
+    // The surfaced draft posts on the next Post now.
+    state.rows[0].auto_reply_grounding = JSON.parse(state.rows[0].auto_reply_grounding);
+    r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' }, { expectedDraft: GOOD_DRAFT.text });
+    expect(r.outcome).toBe('posted');
     expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });

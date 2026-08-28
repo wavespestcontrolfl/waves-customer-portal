@@ -430,7 +430,10 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
       // Success-shaped (200) so the page reloads the card and RENDERS the
       // draft before another Post now is possible (codex r28).
       if (result.drafted) {
-        return res.json({ success: false, drafted: true, outcome: result.outcome, reason: result.reason || null, message: 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.' });
+        const message = result.reason === 'draft_replaced'
+          ? 'The draft you approved was no longer valid (the review or customer facts changed, or it no longer passes the checks). A fresh draft is on the review — read it, then Post now again.'
+          : 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.';
+        return res.json({ success: false, drafted: true, outcome: result.outcome, reason: result.reason || null, message });
       }
       return res.status(409).json({ error: `Could not post: ${result.reason || result.outcome}`, outcome: result.outcome, reason: result.reason || null });
     }

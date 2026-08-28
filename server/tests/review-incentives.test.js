@@ -1,4 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
+const mockNotify = jest.fn(async () => ({}));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -212,6 +214,41 @@ describe('review incentives', () => {
 
     expect(result).toMatchObject({ created: false, skipped: true, reason: 'not_eligible' });
     expect(conn.__state.rows.review_incentive_payouts).toHaveLength(0);
+  });
+
+  test('re-attributing a review with a POSTED automatic reply parks it review_edited_after_post inside the relink and rings the bell after commit (codex r36)', async () => {
+    mockNotify.mockClear();
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true },
+        { id: 'customer-2', first_name: 'Customer', last_name: 'Two', active: true },
+      ],
+      technicians: [{ id: 'tech-1', name: 'Tech One', active: true }],
+      service_records: [],
+      google_reviews: [{
+        id: 'google-posted',
+        customer_id: 'customer-1',
+        link_source: 'click_auto',
+        auto_linked_at: '2026-05-29T16:05:00.000Z',
+        reviewer_name: 'Dana W.',
+        star_rating: 5,
+        review_text: 'Great',
+        review_reply: 'Hi Dana, glad to keep looking after your Venice home.',
+        auto_reply_status: 'posted',
+        auto_reply_reason: null,
+        publish_claimed_until: null,
+        review_created_at: '2026-05-29T16:00:00.000Z',
+        location_id: 'sarasota',
+        google_review_id: 'accounts/1/locations/2/reviews/posted',
+      }],
+    });
+    await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-posted', customerId: 'customer-2', technicianId: null, serviceRecordId: null, noVisit: true, adminId: 'admin-1',
+    }, { conn });
+    const row = conn.__state.rows.google_reviews[0];
+    expect(row).toMatchObject({ customer_id: 'customer-2', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', review_reply: 'Hi Dana, glad to keep looking after your Venice home.' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', cause: 'attribution', needsAction: true });
   });
 
   test('an explicit no-visit confirm never auto-resolves a technician or mints a payout', async () => {

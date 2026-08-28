@@ -209,6 +209,16 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   // edit while the PUT is in flight — applyReviewEditFields defers under a
   // live claim, so this write is the only place that can notice).
   let prePutFingerprint = null;
+  let prePutContent = null;
+  // Predicate: the row's review CONTENT still equals the pre-check snapshot
+  // (rating / text / reviewer / attribution). Used to make the persist a
+  // compare-and-set on the review the reply was written for.
+  const whereSameContent = (qb, snap) => {
+    if (snap.star_rating == null) qb.whereNull('star_rating'); else qb.where('star_rating', snap.star_rating);
+    if (snap.review_text == null) qb.whereNull('review_text'); else qb.where('review_text', snap.review_text);
+    if (snap.reviewer_name == null) qb.whereNull('reviewer_name'); else qb.where('reviewer_name', snap.reviewer_name);
+    if (snap.customer_id == null) qb.whereNull('customer_id'); else qb.where('customer_id', snap.customer_id);
+  };
   // Row-state checks shared by the Google path (run INSIDE the publish
   // claim on a fresh read) and the dev/preview local-only path below: the
   // browser-observed reply / draft / review tokens, overwrite rules, the
@@ -216,6 +226,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   const inClaimChecks = async (fresh) => {
     if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
     prePutFingerprint = reviewFingerprint(fresh);
+    prePutContent = { star_rating: fresh.star_rating, review_text: fresh.review_text, reviewer_name: fresh.reviewer_name, customer_id: fresh.customer_id };
     // The review CONTENT the browser displayed (codex r33): manually
     // written text carries no draft token, so the editor sends the review
     // token from the list API; a reviewer rewrite the sync recorded since
@@ -272,6 +283,8 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       .where({ id: reviewId })
       .whereNull('missing_since')
       .modify((qb) => { if (fresh.review_reply == null) qb.whereNull('review_reply'); else qb.where('review_reply', fresh.review_reply); })
+      // …and on the review content the checks ran against (codex r36).
+      .modify((qb) => whereSameContent(qb, prePutContent))
       // Pipeline state closes here too (a shadow draft posted from the editor
       // in a dev/preview env must not stay 'drafted' beside a real reply).
       .update({ review_reply: replyText, reply_updated_at: new Date(), ...(autoFields || {}) });
@@ -441,14 +454,15 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   let abandoned = false;
   let editedDuringPut = false;
   try {
-    // A reviewer edit the sync recorded while the PUT was in flight: the
-    // reply is live against a review it was not written for. Record it, but
-    // as parked/review_edited_after_post (never a clean 'posted'), and ring
+    // The persist is a compare-and-set on the review CONTENT the reply was
+    // written for (codex r36): the clean 'posted' write applies only while
+    // rating / text / reviewer / attribution still equal the pre-PUT
+    // snapshot. Zero rows with the row still live means a sync recorded a
+    // reviewer edit while the PUT was in flight (its own reconciliation
+    // defers under our claim): record the reply as parked/
+    // review_edited_after_post instead (never a clean 'posted') and ring
     // the same action bell the sync would have.
-    const current = await db('google_reviews').where({ id: reviewId }).first();
-    editedDuringPut = !!current && !current.missing_since && reviewFingerprint(current) !== prePutFingerprint;
-    const editedFields = editedDuringPut ? { auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null } : {};
-    const updated = await db('google_reviews')
+    const base = () => db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
       // Non-overwriting callers: the reply slot must still be empty or the
@@ -462,13 +476,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
           this.orWhere('review_reply', asDraft(replyText));
         });
-      })
-      .update({
-        review_reply: replyText,
-        reply_updated_at: db.fn.now(),
-        ...(autoFields || {}),
-        ...editedFields,
       });
+    const clean = { review_reply: replyText, reply_updated_at: db.fn.now(), ...(autoFields || {}) };
+    let current = null;
+    let updated = await base().modify((qb) => whereSameContent(qb, prePutContent)).update(clean);
+    if (updatedCount(updated) === 0) {
+      current = await db('google_reviews').where({ id: reviewId }).first();
+      if (current && !current.missing_since && reviewFingerprint(current) !== prePutFingerprint) {
+        editedDuringPut = true;
+        updated = await base().update({ ...clean, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null });
+      }
+    }
     if (updatedCount(updated) === 0) {
       // Defensive only — unreachable while the claim defers stamping.
       throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });

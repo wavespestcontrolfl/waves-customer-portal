@@ -421,7 +421,7 @@ function groundingSnapshot(grounding) {
  * Process ONE claimed row. `intent` = 'cron' (honor the gate mode) or
  * 'post_now' (an admin asked for it: always publish, ignoring shadow).
  */
-async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = config(), techFirstNames = null } = {}) {
+async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = config(), techFirstNames = null, surfaceOnly = false } = {}) {
   const fresh = await db('google_reviews').where({ id: row.id }).first();
   if (!fresh || fresh.missing_since) {
     await releaseClaim(row, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'missing' });
@@ -532,6 +532,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     if (!(await storeDraft(merged, draft, STATUS.DRAFTED, 'shadow', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Shadow reply drafted', body: `${summarize(merged)} — auto-reply is in shadow mode; the draft is on the review, nothing was posted.`, reason: 'shadow', action: false, extra: { mode: draft.mode } });
     return { outcome: 'drafted', reason: 'shadow', mode: draft.mode };
+  }
+
+  // Post now whose DISPLAYED draft was discarded (stale account facts, or it
+  // no longer verifies): the admin approved text A — Google must not receive
+  // an unseen text B. Surface the replacement as a park; their next Post now
+  // publishes what they have now read (codex r36).
+  if (intent === 'post_now' && surfaceOnly) {
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, 'draft_replaced', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+    return { outcome: 'parked', reason: 'draft_replaced', mode: draft.mode, drafted: true };
   }
 
   // Google write access is required only HERE: shadow drafts and the 1-3★
@@ -736,6 +745,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // fresh (never a 409 the admin cannot get past).
   const accountFpNow = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)).catch(() => null));
   const humanDraft = humanDraftOn(row);
+  const hadStoredDraft = !!row.auto_reply_draft && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status);
   if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
@@ -821,7 +831,9 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
     }
   }
   try {
-    return await processClaimedRow(row, { intent: 'post_now', actor: actor || { type: 'admin' } });
+    // A displayed pipeline draft that was discarded above must be replaced
+    // by a SURFACED draft, never published unseen.
+    return await processClaimedRow(row, { intent: 'post_now', actor: actor || { type: 'admin' }, surfaceOnly: hadStoredDraft && !humanDraft && !existing });
   } catch (err) {
     // Errors before processClaimedRow's own publish try/catch (grounding
     // read, GBP config check…) must not strand the claim for its TTL.
@@ -878,7 +890,7 @@ const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 function reviewEditFields(existing, normalized) {
   if (!existing) return {};
   const before = reviewFingerprint(existing);
-  const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name });
+  const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name, customer_id: normalized.customer_id !== undefined ? normalized.customer_id : existing.customer_id });
   if (before === after) return {};
   if (existing.auto_reply_status === STATUS.POSTED) {
     return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
@@ -1135,6 +1147,24 @@ function humanDraftSavedFields(conn = db) {
   };
 }
 
+/**
+ * Action bell for a POSTED automatic reply whose review changed underneath
+ * it (reviewer edit via sync, or a manual re-attribution): the row is parked
+ * review_edited_after_post; a person checks whether the reply still fits.
+ */
+async function notifyReviewEditedAfterPost(existing, { location_id, star_rating, cause = 'edit' } = {}) {
+  const locName = locationName(location_id);
+  const what = cause === 'attribution'
+    ? `${star_rating}★ review on ${locName} was re-attributed to a different customer after our automatic reply posted — the reply used the previous customer's facts; check whether it still fits (edit or retract).`
+    : `${star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`;
+  await NotificationService.notifyAdmin('review', cause === 'attribution' ? 'Review re-attributed after auto-reply' : 'Review edited after auto-reply', what, {
+    link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
+    bell: true,
+    dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
+    metadata: { reason: 'review_edited_after_post', cause, reviewId: existing.id, locationId: location_id, needsAction: true },
+  }).catch((e) => logger.warn(`[review-auto-reply] edited-after-post bell failed for ${existing.id}: ${e.message}`));
+}
+
 /** Token for an editor AI draft: the review + account fingerprints it saw. */
 function groundingToken(review, grounding) {
   return `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
@@ -1212,6 +1242,7 @@ module.exports = {
   groundingToken,
   humanDraftSavedFields,
   HUMAN_DRAFT_STALE,
+  notifyReviewEditedAfterPost,
   classifyReplyMode,
   isDraftReply,
 };

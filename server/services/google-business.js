@@ -795,13 +795,10 @@ class GoogleBusinessService {
   }
 
   async _bellEditedAfterPost(existing, normalized) {
-    const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
-    await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
-      link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
-      bell: true,
-      dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
-      metadata: { reason: 'review_edited_after_post', reviewId: existing.id, locationId: normalized.location_id, needsAction: true },
-    }).catch((e) => logger.warn(`[gbp] edited-after-post bell failed: ${e.message}`));
+    // One bell for every "review changed under a posted reply" path
+    // (sync edit here, manual re-attribution in review-incentives).
+    const { notifyReviewEditedAfterPost } = require('./review-reply/runner');
+    await notifyReviewEditedAfterPost(existing, { location_id: normalized.location_id, star_rating: normalized.star_rating, cause: 'edit' });
     return true;
   }
 

@@ -972,6 +972,12 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   // another linked review still proves they reviewed. Only the audit-log
   // insert stays best-effort, outside the transaction.
   let reversedCustomerId = null;
+  // Auto-reply reconciliation (codex r36): a POSTED automatic reply may
+  // carry the PREVIOUS customer's public-safe facts (city, tenure,
+  // categories); a pending pipeline draft was grounded on them. Inside the
+  // same transaction the row is parked / requeued exactly like a reviewer
+  // edit; the action bell rings after commit.
+  let autoReplyParkedPosted = false;
   const linkedCount = await conn.transaction(async (trx) => {
     // Paid-payout serialization INSIDE the relink transaction (pre-push
     // P0 ×2): lock the payout row FOR UPDATE regardless of status so a
@@ -991,6 +997,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     // must roll BOTH back: committing a re-attributed payout beside an
     // un-relinked review leaves an inconsistency payroll could pay (GH
     // codex #3483 r6 P1) — so a zero-row relink throws INSIDE the trx.
+    // Snapshot BEFORE the relink write: the auto-reply reconciliation below
+    // compares the row as it was (some drivers/mocks hand back live row
+    // references that the update mutates in place).
+    const beforeRelink = { ...review, customer_id: prior?.customer_id ?? review.customer_id };
     const count = await trx('google_reviews')
       .where({ id: review.id })
       .whereNull('missing_since')
@@ -1009,6 +1019,13 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     const linked = (Array.isArray(count) ? count.length : count) > 0;
     if (!linked) {
       throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
+    }
+    if (String(beforeRelink.customer_id ?? '') !== String(customerId ?? '')) {
+      const { applyReviewEditFields } = require('./review-reply/runner');
+      const n = await applyReviewEditFields(beforeRelink.id, beforeRelink, {
+        star_rating: beforeRelink.star_rating, review_text: beforeRelink.review_text, reviewer_name: beforeRelink.reviewer_name, customer_id: customerId,
+      }, { conn: trx });
+      if (n > 0 && beforeRelink.auto_reply_status === 'posted') autoReplyParkedPosted = true;
     }
     if (existingPayout) {
       const payoutPatch = {
@@ -1087,6 +1104,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     }
     return count;
   });
+  if (autoReplyParkedPosted) {
+    const { notifyReviewEditedAfterPost } = require('./review-reply/runner');
+    await notifyReviewEditedAfterPost(review, { location_id: review.location_id, star_rating: review.star_rating, cause: 'attribution' });
+  }
   if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
   }
