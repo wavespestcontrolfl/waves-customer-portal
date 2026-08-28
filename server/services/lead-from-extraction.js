@@ -405,6 +405,28 @@ async function resolveLeadSourceId(toPhone) {
 }
 
 /**
+ * The ONE writer of customers.preferred_language (codex #3561 P1): empty-only
+ * so a prior preference is never clobbered, non-blocking on error. Used by the
+ * lead capture above and by the inbound relay's Spanish-session stamp
+ * (voice-agent/relay-conversation) — never re-implemented.
+ * @returns {Promise<boolean>} true when THIS call filled the column.
+ */
+async function stampCustomerPreferredLanguage(customerId, language) {
+  const lang = language ? String(language).toLowerCase().slice(0, 8) : null;
+  if (!lang || !customerId) return false;
+  try {
+    const updated = await db('customers')
+      .where({ id: customerId })
+      .whereRaw("COALESCE(preferred_language, '') = ''")
+      .update({ preferred_language: lang });
+    return Number(updated) > 0;
+  } catch (e) {
+    logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`);
+    return false;
+  }
+}
+
+/**
  * @param {object} extracted  agent-captured fields:
  *   { first_name, last_name, email, address_line1, city, zip,
  *     requested_service|matched_service, preferred_date_time, pain_points,
@@ -493,13 +515,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
   // is never clobbered. (Routing never reads this column.)
-  if (language && customerId) {
-    await db('customers')
-      .where({ id: customerId })
-      .whereRaw("COALESCE(preferred_language, '') = ''")
-      .update({ preferred_language: language })
-      .catch((e) => logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`));
-  }
+  if (language && customerId) await stampCustomerPreferredLanguage(customerId, language);
 
   // Guard FIRST (mirror the voicemail processor): a matched lifecycle customer
   // that isn't in a lead stage gets NO lead work — even if a historical/
@@ -855,5 +871,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
-  sweepUnsurfacedContactInstructions,
+  sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage,
 };

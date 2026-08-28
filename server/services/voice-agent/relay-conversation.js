@@ -75,6 +75,10 @@ const WRITE_TOOL_IN_FLIGHT_TEXT =
 const WRITE_DRAIN_TIMEOUT_MS = 10000;
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
+// Bound on the detached preferred_language stamp (read + write) — never on
+// the caller's path, so a stall only costs the stamp.
+const LANGUAGE_STAMP_TIMEOUT_MS = 3000;
+
 function withTimeout(promise, ms, fallback = undefined) {
   let timer;
   const timeout = new Promise((resolve) => {
@@ -510,16 +514,22 @@ class RelayConversation {
             // stability) — the KNOWN CALLER block then rides the next user
             // turn instead, like the recent-texts data turn.
             if (this._systemBlocks) this._lateContextBlockPending = true;
+            // A late confident match still earns the language stamp (codex
+            // #3561 P2) — same guarded, bounded, detached write as below.
+            void this._persistLanguagePreference();
           }
         },
       })
         .then((ctx) => { this._callerContext = this._callerContext || ctx; })
-        // Spanish session + CONFIDENT resolution (ANI matched the account's
-        // own number ⇒ tier 'full') ⇒ remember the preference on the customer.
-        // Never from ANI + press-2 alone: a redacted/contact-slot match is a
-        // shared number and does not speak for the account holder.
-        .then(() => this._persistLanguagePreference())
         .catch(() => {});
+      // Spanish session + CONFIDENT resolution ⇒ remember the preference on
+      // the customer. DETACHED from _contextReady (codex #3561 P1): the first
+      // model turn awaits that promise, and a locked customers row must never
+      // cost the caller silence — this write is non-blocking metadata with
+      // its own bound. Never from ANI + press-2 alone: a redacted /
+      // contact-slot match is a shared number and does not speak for the
+      // account holder.
+      this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()
         .then((hours) => { this._officeHours = hours; })
@@ -553,13 +563,46 @@ class RelayConversation {
   }
 
   /** Speak a line to the caller (no-op on empty). Everything spoken is recorded. */
+  /**
+   * preferred_language='es' on the resolved customer — every leg fails closed:
+   *   1. the session language is Spanish (setup-frame hint),
+   *   2. the caller resolved CONFIDENTLY — ANI matched the account's own
+   *      number (tier 'full') and the verification callback fired,
+   *   3. the selection is RE-PROVEN from the authenticated call_log row's
+   *      metadata.caller_language, which only the signed /voice press-2
+   *      handler writes (codex #3561 P1): the setup frame's `lang` is
+   *      unverified input and never mutates an account on its own,
+   *   4. one attempt per session; the whole thing is time-bounded and
+   *      detached from the first-turn wait.
+   * Writes through lead-from-extraction's ONE customer-language writer.
+   */
   async _persistLanguagePreference() {
-    const { isSpanish, stampPreferredLanguage } = require('./relay-language');
+    if (this._languageStampStarted) return false;
+    const { isSpanish } = require('./relay-language');
     if (!isSpanish(this.language)) return false;
     const ctx = this._callerContext;
     const customerId = ctx && ctx.tier === 'full' && ctx.customer && ctx.customer.id;
-    if (!customerId || this._callerVerified !== true) return false;
-    return stampPreferredLanguage(customerId, this.language);
+    if (!customerId || this._callerVerified !== true || !this.callSid) return false;
+    this._languageStampStarted = true;
+    try {
+      const proof = await withTimeout(
+        db('call_log').where({ twilio_call_sid: this.callSid }).first('metadata'),
+        LANGUAGE_STAMP_TIMEOUT_MS,
+        null,
+      );
+      let meta = proof && proof.metadata;
+      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+      if (!meta || !isSpanish(meta.caller_language)) {
+        logger.warn(`[voice-relay] Spanish session without a signed press-2 stamp on call_log — preference NOT persisted callSid=${this.callSid}`);
+        return false;
+      }
+      const { stampCustomerPreferredLanguage } = require('../lead-from-extraction');
+      const wrote = await withTimeout(stampCustomerPreferredLanguage(customerId, 'es'), LANGUAGE_STAMP_TIMEOUT_MS, false);
+      return wrote === true;
+    } catch (err) {
+      logger.warn(`[voice-relay] language preference stamp skipped (non-blocking): ${err.message}`);
+      return false;
+    }
   }
 
   say(text) {

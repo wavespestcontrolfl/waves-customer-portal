@@ -9,14 +9,12 @@
  *   - the deterministic spoken closes (an LLM instruction does NOT translate a
  *     hard-coded English string handed straight to TTS — each close has a
  *     Spanish twin selected by session language),
- *   - the customer-level preference stamp, written only once the relay has
- *     CONFIDENTLY resolved the caller (ANI match at the `full` tier) — never
- *     from ANI + press-2 alone (shared numbers, spouses).
+ * The customer-level preference stamp lives in relay-conversation
+ * (`_persistLanguagePreference`) and writes through lead-from-extraction's
+ * ONE `stampCustomerPreferredLanguage` — never a sibling writer here.
  * English copy is byte-identical to before: `copy(key)` with no/English
  * language returns the exact prior string.
  */
-
-const logger = require('../logger');
 
 function isSpanish(language) {
   return /^es(?:[-_]|$)/i.test(String(language || ''));
@@ -63,24 +61,4 @@ function copy(key, language) {
   return isSpanish(language) ? entry.es : entry.en;
 }
 
-/**
- * Persist the caller's language on the resolved customer — empty-only, same
- * idiom as lead-from-extraction (a prior preference is never clobbered).
- * Caller guarantees confident resolution; this only writes.
- */
-async function stampPreferredLanguage(customerId, language, { database } = {}) {
-  if (!customerId || !isSpanish(language)) return false;
-  const db = database || require('../../models/db');
-  try {
-    const updated = await db('customers')
-      .where({ id: customerId })
-      .whereRaw("COALESCE(preferred_language, '') = ''")
-      .update({ preferred_language: 'es' });
-    return Number(updated) > 0;
-  } catch (err) {
-    logger.warn(`[voice-relay-language] preferred_language stamp failed (non-blocking): ${err.message}`);
-    return false;
-  }
-}
-
-module.exports = { isSpanish, LANGUAGE_ADDENDUM_ES, COPY, copy, stampPreferredLanguage };
+module.exports = { isSpanish, LANGUAGE_ADDENDUM_ES, COPY, copy };

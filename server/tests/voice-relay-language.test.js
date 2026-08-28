@@ -7,8 +7,7 @@
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 
-const db = require('../models/db');
-const { isSpanish, copy, COPY, LANGUAGE_ADDENDUM_ES, stampPreferredLanguage } = require('../services/voice-agent/relay-language');
+const { isSpanish, copy, COPY, LANGUAGE_ADDENDUM_ES } = require('../services/voice-agent/relay-language');
 const { buildBasePrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
 const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, DISCLOSURE_SUFFIX_ES, defaultWelcomeGreeting, DEFAULT_WELCOME_GREETING } = require('../services/voice-agent/relay-protocol');
 
@@ -76,33 +75,5 @@ describe('Spanish greeting validation arms', () => {
     expect(defaultWelcomeGreeting()).toContain('may be recorded');
     delete process.env.VOICE_RELAY_GREETING;
     expect(defaultWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING);
-  });
-});
-
-describe('stampPreferredLanguage', () => {
-  function chain(updateResult = 1) {
-    const q = {};
-    ['where', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
-    q.update = jest.fn(async () => updateResult);
-    return q;
-  }
-  test('writes es empty-only on the given customer', async () => {
-    const q = chain(1);
-    expect(await stampPreferredLanguage('cust-1', 'es-US', { database: jest.fn(() => q) })).toBe(true);
-    expect(q.where).toHaveBeenCalledWith({ id: 'cust-1' });
-    expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(preferred_language, '') = ''");
-    expect(q.update).toHaveBeenCalledWith({ preferred_language: 'es' });
-  });
-  test('no customer / not Spanish ⇒ no write', async () => {
-    const database = jest.fn(() => chain(1));
-    expect(await stampPreferredLanguage(null, 'es', { database })).toBe(false);
-    expect(await stampPreferredLanguage('cust-1', 'en-US', { database })).toBe(false);
-    expect(database).not.toHaveBeenCalled();
-  });
-  test('a prior preference is never clobbered (0 rows) and a DB error is non-blocking', async () => {
-    expect(await stampPreferredLanguage('cust-1', 'es', { database: jest.fn(() => chain(0)) })).toBe(false);
-    const q = chain(); q.update = jest.fn(async () => { throw new Error('boom'); });
-    expect(await stampPreferredLanguage('cust-1', 'es', { database: jest.fn(() => q) })).toBe(false);
-    expect(db).not.toHaveBeenCalled();
   });
 });
