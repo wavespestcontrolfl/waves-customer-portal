@@ -126,7 +126,7 @@ t.boolean('account_required').notNullable(); t.boolean('email_verification').not
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
 t.boolean('baseline').notNullable().defaultTo(false); // existing-backlink import placeholder (§4): descriptive only, never executable
-t.string('provider_override');                    // per-path learned/owner override of policy.preferred_provider (CHECK against the provider enum); written by the benchmark/learning job with reason in `investigation.provider_override_reason`; claim uses COALESCE(path.provider_override, policy.preferred_provider); payment steps ignore it (deterministic_runner only)
+t.string('provider_override');                    // per-path OWNER override of policy.preferred_provider (CHECK against the provider enum); written ONLY by an audited owner edit — the benchmark/learning job writes its recommendation to `investigation.provider_recommendation` (advisory) and never switches providers itself; claim uses COALESCE(path.provider_override, policy.preferred_provider); payment steps ignore it (deterministic_runner only)
 // All authority-relevant flags are NOT NULL: the investigator must answer each explicitly (its JSON schema requires them);
 // §6.3's validity step also asserts they are literal booleans and consistent with the type (paid_listing/membership/
 // association/sponsorship ⇒ payment_required; self_service_free ⇒ NOT payment_required; not_reproducible/unknown ⇒ INVALID).
@@ -199,9 +199,14 @@ it), **execution** for every other type (self-service, account, business-claim, 
 vendor registration, human steps), and **payment** in addition whenever `payment_required`.
 An outreach placement therefore never carries an execution row, so the 56 drafts and their
 follow-ups need exactly the communication authority (plus payment only if paid). The locked claim and every
-irreversible step (submit, send, mint) load ALL rows for the placement and require, for each:
-level is `AUTO_*` (with its gate on and the re-run decision agreeing) or `OWNER_*` with a
-valid, unconsumed, dimension-matching approval; any row at `DENY`/`INVALID`, or a required
+irreversible step (submit, send, mint) load ALL rows for the placement. The dimension
+**owning the current action** (payment for mint, communication for send/follow-up, execution
+for submit/create-account) must be `AUTO_*` (gate on, re-run decision agreeing) or `OWNER_*`
+with a valid, **unconsumed, action-matching** approval — consumed by this step's terminal
+outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
+`AUTO_*` or `OWNER_*` with an approval that is valid and not invalidated (consumed is fine —
+the communication approval consumed by the send still satisfies the later mint of the same
+paid outreach placement, and vice versa). Any row at `DENY`/`INVALID`, or a required
 dimension with no row, blocks. A paid guest post thus cannot execute on a payment approval
 alone, nor send on an outreach approval alone.
 
@@ -1012,8 +1017,10 @@ Score:
 verified dofollow + indexed + live at D30 (40, cohort phase), no human step (20), correct
 fields (10, replay phase), time (10), cost (10), recovery from UI change (5), evidence quality
 (5). Results are rows in `seo_link_attempts` (replay rows flagged `sandbox=true` and excluded
-from D30/learning); the Agent tab shows the table. No provider is chosen by preference —
-`preferred_provider` follows the numbers.
+from D30/learning); the Agent tab shows the table with a recommended provider. The
+benchmark is **advisory**: it never changes `preferred_provider` or any `provider_override`
+— the owner selects the provider through the audited Policy panel edit, so account
+sessions and credentials never move to a different provider without that action.
 
 ---
 
