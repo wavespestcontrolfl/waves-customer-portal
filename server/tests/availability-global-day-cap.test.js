@@ -46,7 +46,7 @@ const CANDIDATE_DATES = [1, 2].map((i) => etDateString(addETDays(new Date(), i))
 let selfBookedRows;
 
 // Minimal filtering builder for self_booked_appointments: supports the
-// GLOBAL count chain (.where('date').whereNot('status').modify().count().first())
+// GLOBAL count chain (.whereRaw(effective date).whereNot('status').count().first())
 // AND the zone-scoped occupancy list (awaited directly after wheres).
 function selfBookedBuilder() {
   const preds = [];
@@ -62,9 +62,17 @@ function selfBookedBuilder() {
       return b;
     },
     modify(fn) { fn(b); return b; },
-    // Superseded-copy filter passthrough — these fixtures have no linked
-    // scheduled_services rows, so every copy stands.
-    whereNotExists() { return b; },
+    // Effective-date predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL = ?::date):
+    // these fixtures have no linked scheduled_services rows, so the CASE
+    // falls through to the copy's own date — filter on it. The day being
+    // counted is the LAST binding (the first three are inactive statuses).
+    whereRaw(sql, bindings) {
+      if (/self_booked_appointments\.date END\) = \?::date/.test(sql)) {
+        const day = bindings[bindings.length - 1];
+        preds.push((r) => String(r.date) === String(day));
+      }
+      return b;
+    },
     count() { counting = true; return b; },
     first() {
       return Promise.resolve(counting ? { count: rows().length } : rows()[0]);

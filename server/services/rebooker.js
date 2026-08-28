@@ -66,9 +66,11 @@ const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefers
 // report: every offered slot 409'd because a projection collided with a
 // seeded placeholder 6 months out). The ANCHOR row — the visit the customer
 // actually picked — is always hard-checked regardless of this horizon, as
-// are siblings landing inside it. A beyond-horizon overlap commits at its
-// cadence date and is flagged (`conflicted`) so route callers can park an
-// admin review notification.
+// are siblings landing inside it, and so is ANY sibling whose occupant is
+// not positively a seeded placeholder (isSeededPlaceholderRow). A
+// beyond-horizon placeholder overlap commits at its cadence date WITHOUT a
+// window (no occupancy — never two occupying rows) and is flagged
+// (`conflicted`) so route callers can park an admin retiming notification.
 const SERIES_SIBLING_CLASH_HORIZON_DAYS = Math.max(
   1,
   Number(process.env.REBOOKER_SIBLING_CLASH_HORIZON_DAYS) || 60
@@ -1414,8 +1416,20 @@ class SmartRebooker {
                 subcode: 'SERIES_PROJECTION',
               });
             } else {
+              // Beyond the horizon and every occupant is a seeded
+              // placeholder: commit the occurrence at its cadence date
+              // WINDOWLESS. A windowless row carries no occupancy (the
+              // probe's window predicate never matches it), so no two
+              // occupying rows ever share the window — the invariant holds
+              // — and the NULL window is the durable signal: dispatch
+              // routes windowless rows freely and the operator retimes it
+              // as the date approaches, exactly like a windowless prepay
+              // seed. Flagged (`conflicted`) so callers park the review
+              // notification as well.
               sibClashBeyondHorizon = true;
-              logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} lands on an occupied window ${String(date).split('T')[0]} ${updateData.window_start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committing at cadence, flagged for review`);
+              updateData.window_start = null;
+              updateData.window_end = null;
+              logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} projected onto a seeded-placeholder window ${String(date).split('T')[0]} ${occurrenceWindow.start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committed at cadence WITHOUT a window, flagged for retiming`);
             }
           }
         }
@@ -1481,14 +1495,15 @@ class SmartRebooker {
         touched.push({
           id: sib.id,
           date,
-          windowStart: win.start || sib.window_start,
-          windowEnd: win.end || sib.window_end,
-          // True only for a BEYOND-horizon occurrence committed onto an
-          // occupied (placeholder-land) window — near-term clashes abort the
-          // whole trx above and never reach here. Callers (admin-dispatch,
-          // reschedule-public) park flagged occurrences as a
-          // schedule_conflict admin notification; the tech is KEPT (an
-          // unassigned row would still occupy its window).
+          windowStart: sibClashBeyondHorizon ? null : (win.start || sib.window_start),
+          windowEnd: sibClashBeyondHorizon ? null : (win.end || sib.window_end),
+          // True only for a BEYOND-horizon occurrence whose projected window
+          // held a seeded placeholder — committed at its cadence date
+          // WINDOWLESS (see above); near-term clashes and real-booking
+          // clashes abort the whole trx and never reach here. Callers
+          // (admin-dispatch, reschedule-public) park flagged occurrences as a
+          // schedule_conflict admin notification for retiming; the tech is
+          // KEPT.
           conflicted: sibClashBeyondHorizon,
         });
       }

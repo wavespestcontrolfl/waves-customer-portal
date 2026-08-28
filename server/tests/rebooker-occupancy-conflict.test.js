@@ -520,7 +520,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).toHaveBeenCalled();
   });
 
-  test('sibling clash BEYOND the horizon commits at cadence — flagged, tech kept, no abort', async () => {
+  test('sibling clash BEYOND the horizon with a seeded placeholder commits at cadence WINDOWLESS — flagged, tech kept, no abort', async () => {
     // 90-day custom cadence: the first shifted occurrence lands ~90 days
     // out, past SERIES_SIBLING_CLASH_HORIZON_DAYS (60). An occupancy hit
     // there is placeholder-land (the seeder itself commits overlapping
@@ -582,11 +582,16 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update).toHaveBeenCalled();
     // …kept its tech (unassignment is not a resolution)…
     expect(sibUpdate.update.mock.calls[0][0]).not.toHaveProperty('technician_id');
+    // …and WITHOUT a window: a windowless row carries no occupancy, so the
+    // placeholder and this occurrence never both occupy the window.
+    expect(sibUpdate.update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
     // …and is flagged so route callers park the admin-review notification.
     const occurrences = result.rescheduledOccurrences;
     expect(occurrences).toHaveLength(2);
     expect(occurrences[0].conflicted).toBe(false); // anchor
     expect(occurrences[1].conflicted).toBe(true);  // far sibling
+    expect(occurrences[1].windowStart).toBeNull();
+    expect(occurrences[1].windowEnd).toBeNull();
   });
 
   test('sibling clash BEYOND the horizon with a REAL booking (not a seeded placeholder) still aborts', async () => {

@@ -39,9 +39,10 @@
  * job_update broadcast per moved row; the office gets the same internal
  * alert text a self-booked appointment fires. A shifted sibling landing on
  * an occupied window ABORTS the commit when it's near-term (rebooker clash
- * horizon); a beyond-horizon overlap with placeholder-land commits with its
- * tech kept, comes back flagged (occ.conflicted), and is parked as a
- * schedule_conflict admin notification here.
+ * horizon) or when the occupant is a real booking; a beyond-horizon overlap
+ * with a seeded placeholder commits WINDOWLESS at its cadence date (tech
+ * kept), comes back flagged (occ.conflicted), and is parked as a
+ * schedule_conflict admin notification here for retiming.
  */
 
 const express = require('express');
@@ -946,23 +947,24 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     }
 
     // Series-shift conflicts: the rebooker hard-aborts any NEAR-TERM
-    // occurrence that would land on an occupied window (nothing
-    // double-booked commits inside the clash horizon). A BEYOND-horizon
-    // occurrence that overlaps placeholder-land commits at its cadence date
-    // with its tech KEPT and comes back flagged (occ.conflicted). Owner
-    // model is hands-off + exception-based: park the flagged ones as an
-    // admin notification for review from dispatch.
+    // occurrence that would land on an occupied window, and any occurrence
+    // whose occupant is a real booking (nothing double-booked ever
+    // commits). A BEYOND-horizon occurrence whose projected window held
+    // only a seeded placeholder commits at its cadence date WINDOWLESS with
+    // its tech KEPT and comes back flagged (occ.conflicted). Owner model is
+    // hands-off + exception-based: park the flagged ones as an admin
+    // notification for retiming from dispatch.
     const siblingConflicts = (shiftedOccurrences || [])
       .filter((occ) => occ.conflicted)
       .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
     if (siblingConflicts.length) {
-      logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) onto occupied placeholder windows: ${JSON.stringify(siblingConflicts)}`);
+      logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) windowless (projected window held a seeded placeholder): ${JSON.stringify(siblingConflicts)}`);
       try {
         const NotificationService = require('../services/notification-service');
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           'Series re-anchor needs a look',
-          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) landed on windows that already hold another visit (${siblingConflicts.map((c) => c.date).join(', ')}). Both kept their times — review from dispatch as those dates approach.`,
+          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) projected onto a window already holding another plan's placeholder (${siblingConflicts.map((c) => c.date).join(', ')}). They kept their dates but have NO time window — set a time from dispatch as those dates approach.`,
           { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
         );
         if (!notif) {
@@ -982,7 +984,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           weekday: 'long', month: 'long', day: 'numeric', timeZone: 'America/New_York',
         });
         const seriesNote = shiftedOccurrences
-          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} left UNASSIGNED (see bell)` : ''}`
+          ? `\nSERIES RE-ANCHORED — ${shiftedOccurrences.length} visit(s) shifted${siblingConflicts.length ? ` — ⚠️ ${siblingConflicts.length} left WITHOUT a time window (see bell)` : ''}`
           : '';
         await TwilioService.sendSMS(
           process.env.ADAM_PHONE,

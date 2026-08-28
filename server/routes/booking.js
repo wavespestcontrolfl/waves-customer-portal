@@ -927,18 +927,22 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     maxPerDay, slotGridMinutes, dayStartMin, dayEndMin,
     lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
   } = bookingSlotWindow(config);
-  // excludeSupersededSelfBookings: same filter the commit-time counter
-  // applies — a booking whose live visit was moved off its original day (or
-  // cancelled) must release that day's cap here too, or the offer keeps a
-  // phantom slot the commit would grant.
-  const { excludeSupersededSelfBookings } = require('../services/availability');
+  // Count each booking on its EFFECTIVE date (the linked live visit's date;
+  // the copy's own date only when unlinked) — the same expression the
+  // commit-time gate keys on. A booking whose live visit was moved off its
+  // original day must release that day's cap here AND consume the new
+  // day's, or the offer keeps a phantom slot the commit would refuse (or
+  // offers one the commit would grant).
+  const {
+    SELF_BOOKING_EFFECTIVE_DATE_SQL: effectiveDateSql,
+    SELF_BOOKING_INACTIVE_STATUSES: inactiveStatuses,
+  } = require('../services/availability');
   const bookingCounts = await db('self_booked_appointments')
     .whereNot('status', 'cancelled')
-    .whereBetween('date', [rangeFrom, rangeTo])
-    .modify(excludeSupersededSelfBookings)
-    .select('date')
+    .whereRaw(`${effectiveDateSql} BETWEEN ?::date AND ?::date`, [...inactiveStatuses, rangeFrom, rangeTo])
+    .select(db.raw(`${effectiveDateSql} AS date`, inactiveStatuses))
     .count('* as count')
-    .groupBy('date');
+    .groupByRaw(effectiveDateSql, inactiveStatuses);
   // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
   // only `scheduled_services` (the office-review pending lifecycle), and
   // countActiveSelfBookingsForDay — the commit-time gate — now includes them.
