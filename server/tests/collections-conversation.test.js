@@ -99,7 +99,9 @@ const CALL_ROW = {
   twilio_call_sid: 'CA1',
   customer_id: 'cust-1',
   to_phone: '+19415551234',
-  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }),
+  // Origination stamps supervision on every row it writes (codex #3560);
+  // legacy stamp-less rows are pinned explicitly below.
+  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false }),
 };
 const CASE_ROW = {
   id: 'case-1',
@@ -318,6 +320,25 @@ test('human escape passes the call row supervision stamp to the staffed-hours pr
   await turn(convo, 'human please');
   expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(AFTER_HOURS_NOW, { supervised: true });
   expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
+});
+
+test('a legacy stamp-less call row derives supervision from the case once and backfills it', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  const backfill = chain();
+  setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }) } });
+  const orig = db.getMockImplementation();
+  const cases = [chain({ first: { approved_by: 'admin:adam@wavespestcontrol.com' } }), chain({ first: CASE_ROW })];
+  const callLogs = [chain({ first: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }) } }), backfill, chain(), chain(), chain()];
+  db.mockImplementation((table) => {
+    if (table === 'collection_cases') return cases.shift() || chain({ first: CASE_ROW });
+    if (table === 'call_log') return callLogs.shift() || chain();
+    return orig(table);
+  });
+  const { convo } = makeConvo({ now: AFTER_HOURS_NOW });
+  await turn(convo, 'human please');
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(AFTER_HOURS_NOW, { supervised: true });
+  expect(backfill.whereRaw).toHaveBeenCalledWith(expect.stringContaining('collectionsSupervised'));
+  expect(backfill.update).toHaveBeenCalled();
 });
 
 test('human escape after hours ⇒ callback card + fixed promise', async () => {

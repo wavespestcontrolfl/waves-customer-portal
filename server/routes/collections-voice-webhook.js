@@ -31,6 +31,7 @@ const logger = require('../services/logger');
 const script = require('../services/collections/outbound-voice/script');
 const { isVoiceLatePaymentEnabled } = require('../services/collections/outbound-voice/gates');
 const { isStaffedHours } = require('../services/collections/outbound-voice/staffed-hours');
+const { resolveCallSupervision } = require('../services/collections/outbound-voice/supervision');
 const {
   voicemailPermitted, stampVoicemailLeft, isMachineEnd,
 } = require('../services/collections/outbound-voice/voicemail');
@@ -106,11 +107,11 @@ async function loadCollectionsCall(req) {
   if (!linkedCase || String(linkedCase.customer_id) !== String(row.customer_id)) return null;
   // Supervised (admin-approved) calls may ride the owner call-window
   // override at answer/press-1 revalidation and for staffed-hours;
-  // autodial calls never do (codex P1 on #3555). Read from the IMMUTABLE
-  // call_log stamp origination wrote — never from the case, whose
-  // approved_by is cleared once an outcome persists (codex #3560 P2:
-  // a Twilio retry must classify the call exactly as the first attempt).
-  const supervised = meta.collectionsSupervised === true;
+  // autodial calls never do (codex P1 on #3555). Resolved from the
+  // IMMUTABLE call_log stamp (legacy rows derive once + backfill) — never
+  // live from the case, whose approved_by is cleared once an outcome
+  // persists (codex #3560 P2/P0).
+  const supervised = await resolveCallSupervision({ row, meta });
   const customer = await db('customers')
     .where({ id: row.customer_id })
     .first('id', 'first_name');

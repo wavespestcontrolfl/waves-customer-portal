@@ -78,8 +78,11 @@ const CALL_ROW = {
   source: 'collections_voice',
   twilio_call_sid: 'CA1',
   customer_id: 'cust-1',
-  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }),
+  // Origination stamps supervision on every row it writes (codex #3560);
+  // legacy stamp-less rows are pinned explicitly below.
+  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false }),
 };
+const LEGACY_META = JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' });
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat' };
 
 function chain({ first } = {}) {
@@ -277,7 +280,29 @@ test('supervision for staffed-hours + revalidation comes from call_log metadata,
   expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
 });
 
-test('a call row without the supervision stamp is unsupervised (fail closed)', async () => {
+test('a legacy call row without the stamp derives supervision from the case ONCE and backfills it', async () => {
+  // Pre-deploy in-flight row (codex #3560 P0): the linked case still carries
+  // its admin approver ⇒ supervised, and the stamp is written onto the row.
+  const backfill = chain();
+  setDb({ extraCallRows: [] });
+  const dbm = require('../models/db');
+  const orig = dbm.getMockImplementation();
+  const cases = [chain({ first: LINKED_CASE }), chain({ first: { ...LINKED_CASE, approved_by: 'admin:adam@wavespestcontrol.com' } })];
+  const callLogs = [chain({ first: { ...CALL_ROW, metadata: LEGACY_META } }), backfill, chain(), chain()];
+  dbm.mockImplementation((table) => {
+    if (table === 'collection_cases') return cases.shift() || chain({ first: LINKED_CASE });
+    if (table === 'call_log') return callLogs.shift() || chain();
+    return orig(table);
+  });
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
+  expect(backfill.whereRaw).toHaveBeenCalledWith(expect.stringContaining("collectionsSupervised"));
+  expect(backfill.update).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.anything() }));
+});
+
+test('a legacy row whose case has no admin approver is unsupervised (fail closed)', async () => {
+  setDb({ callRow: { ...CALL_ROW, metadata: LEGACY_META } });
   const res = mockRes();
   await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
   expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: false });
@@ -643,7 +668,7 @@ test('a replayed machine callback with the cap already stamped writes the fallba
 test('a replayed transfer-complete files NO duplicate card but keeps the promise', async () => {
   const replayRow = {
     ...CALL_ROW,
-    metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', transfer_miss_card_at: '2026-08-15T18:00:00Z' }),
+    metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false, transfer_miss_card_at: '2026-08-15T18:00:00Z' }),
   };
   const claimChain = chain();
   claimChain.update = jest.fn(async () => 0); // claim already taken

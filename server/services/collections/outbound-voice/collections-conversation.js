@@ -48,6 +48,7 @@ const logger = require('../../logger');
 const script = require('./script');
 const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('./gates');
 const { isStaffedHours } = require('./staffed-hours');
+const { resolveCallSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 
@@ -288,9 +289,10 @@ class CollectionsConversation {
     if (!meta.collectionCaseId) return this._refuse('no_case_linkage');
     // Admin-approved calls may ride the owner call-window override for the
     // staffed-hours (transfer vs callback) branch; autodial calls never do.
-    // Immutable call_log stamp from origination (codex #3560 P2) — the
-    // case's approved_by is mutable and cleared at outcome time.
-    this._supervised = meta.collectionsSupervised === true;
+    // Immutable call_log stamp from origination (codex #3560 P2; legacy
+    // rows derive once + backfill, P0) — the case's approved_by is mutable
+    // and cleared at outcome time.
+    this._supervised = await resolveCallSupervision({ row, meta });
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
