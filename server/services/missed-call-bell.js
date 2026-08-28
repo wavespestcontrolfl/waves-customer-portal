@@ -59,6 +59,12 @@ async function ringMissedCallIfUnanswered(callSid) {
     if (!claimed) return false;
     const customer = await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone');
     const { triggerNotification } = require('./notification-triggers');
+    // Is this call still the missed-call lane's? False once a recording
+    // persisted or the voicemail lane claimed it.
+    const stillMissed = async () => {
+      const cur = await db('call_log').where({ id: row.id }).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at');
+      return Boolean(cur) && !cur.recording_sid && !cur.recording_url && !cur.voicemail_callback_alerted_at;
+    };
     let stats = null;
     try {
       stats = await triggerNotification('customer_missed_call', {
@@ -67,6 +73,11 @@ async function ringMissedCallIfUnanswered(callSid) {
         phone: row.from_phone,
         callLogId: row.id,
         at: row.created_at,
+      }, {
+        // Re-read right before the push (same supersession pattern as the
+        // SMS bell): a recording that landed while the badge was computing
+        // must not produce a contradictory missed-call push (hook P1).
+        beforePush: stillMissed,
       });
     } finally {
       const delivered = Boolean(stats && !stats.error
@@ -80,8 +91,7 @@ async function ringMissedCallIfUnanswered(callSid) {
     // and here makes this call the voicemail lane's — retire the bell just
     // written. The voicemail path runs the same supersede when IT claims, so
     // both orderings converge on one alert per call.
-    const after = await db('call_log').where({ id: row.id }).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at').catch(() => null);
-    if (after && (after.recording_sid || after.recording_url || after.voicemail_callback_alerted_at)) {
+    if (!(await stillMissed().catch(() => true))) {
       const NotificationService = require('./notification-service');
       await NotificationService.supersedeMissedCallAdmin({ callLogId: row.id }).catch(() => {});
     }

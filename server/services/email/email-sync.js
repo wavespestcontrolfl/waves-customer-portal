@@ -432,14 +432,13 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       // (a process exit there would otherwise lose it). Everything else
       // keeps the bounded background path — a full mailbox sync must not
       // serialize an LLM call per message (hook P1 ×2).
-      let classified = false;
-      try {
-        await classifyEmail(email);
-        classified = true;
-      } catch (err) {
-        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+      // The per-email claim is taken BEFORE classification so a recovery
+      // sweep on another pod can't classify (and auto-act on) the same row
+      // concurrently — whoever owns the claim classifies + rings (hook P1).
+      if (await claimCustomerEmailBell(email.id)) {
+        const classified = await classifyOwned(email);
+        await ringCustomerEmailBell(email, { customerId, parsed, classified, owned: true });
       }
-      await ringCustomerEmailBell(email, { customerId, parsed, classified });
     } else {
       setImmediate(() => {
         classifyEmail(email).catch((err) => {
@@ -486,6 +485,7 @@ async function sweepUnclaimedCustomerEmailBells() {
     const parsed = { from_name: row.from_name, from_address: row.from_address, subject: row.subject, label_ids: row.label_ids || [] };
     const outcome = await recoverLostCustomerEmailBell(row, { customerId: row.customer_id, parsed, backfill: false }).catch(() => null);
     if (outcome === 'ineligible' || outcome === 'control') {
+      // ('claimed' = another pod owns it; nothing to do here.)
       // Terminally ineligible (unauthenticated sender, not in INBOX, control
       // message): mark handled so it stops occupying the oldest-50 page and
       // can't starve newer eligible rows (hook P1). Only the sweep stamps —
@@ -541,23 +541,37 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
   })) return 'ineligible';
   if (existing.is_archived) return 'ineligible';
   if (await isControlMessage(existing)) return 'control';
+  // Own the row BEFORE any classifier auto-action can run (hook P1): the
+  // claim is the cross-pod lock — a concurrent sweep or the insert path on
+  // another pod loses it and does nothing.
+  if (!(await claimCustomerEmailBell(existing.id))) return 'claimed';
   // A row the crash left UNCLASSIFIED (insert landed, classifier never
   // wrote) gets the same awaited classification the insert path gives a
   // bell candidate — otherwise spam without a List-Unsubscribe header could
   // ring through the recovery lane (codex r4). Classifier failure keeps the
   // insert path's fallback: ring (classified:false).
-  let classified = Boolean(existing.classification);
-  if (!classified) {
-    const { classifyEmail } = require('./email-classifier');
-    try {
-      await classifyEmail(existing);
-      classified = true;
-    } catch (err) {
-      logger.error(`[email-sync] Recovery classification failed for ${existing.id}: ${err?.message || err}`);
-    }
-  }
-  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified });
+  const classified = existing.classification ? true : await classifyOwned(existing);
+  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified, owned: true });
   return 'offered';
+}
+
+/** Atomic per-email ownership (emails.customer_bell_claimed_at). */
+async function claimCustomerEmailBell(emailId) {
+  const claimed = await db('emails').where({ id: emailId }).whereNull('customer_bell_claimed_at')
+    .update({ customer_bell_claimed_at: new Date() });
+  return Boolean(claimed);
+}
+
+/** Classify a row this process owns. Returns whether classification wrote. */
+async function classifyOwned(email) {
+  const { classifyEmail } = require('./email-classifier');
+  try {
+    await classifyEmail(email);
+    return true;
+  } catch (err) {
+    logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+    return false;
+  }
 }
 
 /**
@@ -568,18 +582,19 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
  * than a rare unwanted bell. An archived row (auto-trashed / bulk) never
  * rings. Fail-soft: the bell can never fail the sync.
  */
-async function ringCustomerEmailBell(email, { customerId, parsed, classified }) {
+async function ringCustomerEmailBell(email, { customerId, parsed, classified, owned = false }) {
   try {
     const row = await db('emails').where('id', email.id).first('classification', 'is_archived');
+    // Archived / bulk after classification: terminal — an owned claim stays
+    // (nothing to deliver, nothing to retry).
     if (!row || row.is_archived) return;
     if (classified && row.classification && NEVER_RING_CLASSES.has(row.classification)) return;
     // Atomic per-email claim (emails.customer_bell_claimed_at): at most one
     // delivery across insert path, crash recovery, label/history replays and
     // concurrent pods — and independent of a bell row (push-only admins get
-    // none). A failed trigger releases the claim so a retry can ring.
-    const claimed = await db('emails').where({ id: email.id }).whereNull('customer_bell_claimed_at')
-      .update({ customer_bell_claimed_at: new Date() });
-    if (!claimed) return;
+    // none). Callers that classified under their own claim pass owned:true.
+    // A failed trigger releases the claim so a retry can ring.
+    if (!owned && !(await claimCustomerEmailBell(email.id))) return;
     const { triggerNotification } = require('../notification-triggers');
     let stats = null;
     try {

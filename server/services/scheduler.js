@@ -3943,18 +3943,25 @@ function initScheduledJobs() {
     try {
       const { syncEmails } = require('./email/email-sync');
       const result = await syncEmails();
-      // Durable retry for the missed-call bell (owner ruling 2026-08-28):
-      // the post-call timer is in-memory; this re-offers what it missed.
-      try {
-        await require('./missed-call-bell').sweepMissedCalls();
-      } catch (sweepErr) {
-        logger.warn(`[scheduler] missed-call sweep failed: ${sweepErr.message}`);
-      }
       if (result.newEmails > 0) {
         logger.info(`[email-sync] Synced ${result.newEmails} new emails`);
       }
     } catch (err) {
       logger.error(`[email-sync] Cron failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
+  // post-call timer is in-memory and the sweep window is 24h, so a Gmail
+  // hang must never be able to starve it (hook P1).
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./missed-call-bell').sweepMissedCalls();
+    } catch (err) {
+      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -722,6 +722,22 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
     const stampedIds = emails.where.mock.calls.filter(([arg]) => arg && typeof arg === 'object' && arg.id).map(([arg]) => arg.id);
     expect(stampedIds).toEqual(expect.arrayContaining(['e-spoof', 'e-proof']));
   });
+  test('an eligible unclassified row is CLAIMED before the classifier runs (cross-pod lock precedes auto-actions)', async () => {
+    const row = { id: 'e-live', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'Question about my service', label_ids: ['INBOX'], received_at: fresh, authentication_results: aligned, classification: null, is_archived: false };
+    const emails = chainMock([row]);
+    // The claim UPDATE must report 1 row; awaiting the chain resolves the
+    // row list for the sweep SELECT and `1` for the claim/other updates.
+    let calls = 0;
+    emails.then = (resolve, reject) => Promise.resolve(calls++ === 0 ? [row] : 1).then(resolve, reject);
+    emails.first = jest.fn(() => Promise.resolve({ classification: null, is_archived: false }));
+    db.schema = { hasColumn: jest.fn(() => Promise.resolve(true)) };
+    mockTables({ emails, notification_preferences: chainMock([]), technicians: chainMock([]), notifications: chainMock([{ id: 'n1' }]) });
+    await sweepUnclaimedCustomerEmailBells();
+    expect(classifyEmail).toHaveBeenCalledWith(expect.objectContaining({ id: 'e-live' }));
+    const claimCall = emails.update.mock.calls.findIndex(([arg]) => arg && arg.customer_bell_claimed_at instanceof Date);
+    expect(claimCall).toBeGreaterThanOrEqual(0);
+    expect(emails.update.mock.invocationCallOrder[claimCall]).toBeLessThan(classifyEmail.mock.invocationCallOrder[0]);
+  });
 });
 
 describe('voicemail supersedes a missed-call bell for the same call (hook P1)', () => {
