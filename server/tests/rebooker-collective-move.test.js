@@ -524,6 +524,31 @@ describe('rescheduleSeries — one recorded operation', () => {
     });
   });
 
+  test('the call-booked follow-up shift runs INSIDE the move transaction (non-idempotent — never on a replay)', async () => {
+    const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(shiftCallFollowUpsForParentMove).toHaveBeenCalledTimes(1);
+    const call = shiftCallFollowUpsForParentMove.mock.calls[0][0];
+    expect(call).toMatchObject({ parentServiceId: 'svc-1', fromDate: BASE, toDate: TARGET });
+    expect(call.conn).not.toBe(db);
+  });
+
+  test('a replay of a committed move re-runs the idempotent live-anchor cleanup (tech pointer release) but not the follow-up shift', async () => {
+    const { clearTechCurrentJob } = require('../services/tech-status');
+    const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    wireSeriesMocks([sib('svc-1', BASE)], {
+      priorMove: {
+        id: 'sm-prior', new_date: TARGET, customer_id: 'cust-1',
+        result: { success: true, newDate: TARGET, occurrencesRescheduled: 1, rescheduledOccurrences: [] },
+        rows: [{ id: 'svc-1', anchor: true, before: { status: 'on_site', technician_id: 'tech-9' }, after: {} }],
+      },
+    });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
+    expect(clearTechCurrentJob).toHaveBeenCalledWith({ tech_id: 'tech-9', current_job_id: 'svc-1', status: 'idle' });
+    expect(shiftCallFollowUpsForParentMove).not.toHaveBeenCalled();
+  });
+
   test('the LOSER of two concurrent identical operations (CAS 409 before the unique insert) replays the winner instead of failing', async () => {
     const winner = { id: 'sm-winner', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [] } };
     // Prior lookup: nothing BEFORE the trx, the winner's row AFTER the CAS miss.
@@ -614,6 +639,18 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'a', expected: BASE }], ambiguous: false });
   });
 
+  test('position = creation rank, so an exception moved PAST its siblings is still recovered (rows arrive in creation order, not date order)', () => {
+    // Weekly D, D+7, D+14, D+21; the first occurrence was moved to D+19 —
+    // by date it now sorts between the 3rd and 4th, by creation it is rank 0.
+    const rows = [
+      { id: 'a', scheduled_date: dayOffset(29) },
+      { id: 'b', scheduled_date: SIB1 },
+      { id: 'c', scheduled_date: SIB2 },
+      { id: 'd', scheduled_date: SIB3 },
+    ];
+    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'a', expected: BASE }], ambiguous: false });
+  });
+
   test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {
     expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: dayOffset(19) }])).toEqual({ planned: [], ambiguous: true });
     expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: SIB1 }])).toEqual({ planned: [], ambiguous: false });
@@ -624,8 +661,7 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
 describe('caller wiring (source)', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
 
-  test('Quick Move normalizes an off-hour target under EITHER gate; SMS-reply effects run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
-    expect(read('../services/rain-out.js')).toContain("(process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' || process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true')");
+  test('SMS-reply effects run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
     expect(read('../services/reschedule-sms.js')).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
     expect(read('../index.js')).toContain("runExclusive('series-move-effects-reconcile'");
   });
@@ -649,9 +685,9 @@ describe('caller wiring (source)', () => {
   });
 
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {
-    // Quick Move's single call opts out ONLY after an explicit series attempt
-    // (wantsSeriesShift) — with the older series gate off, the choke point decides.
-    expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,900}\.\.\.\(wantsSeriesShift\s*\?\s*\{ seriesPolicy: 'single'/);
+    // Quick Move's series behavior is owned by its own gate + effects path:
+    // its single call always opts out of the collective choke point.
+    expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,900}seriesPolicy: 'single',/);
     expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single' }");
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");

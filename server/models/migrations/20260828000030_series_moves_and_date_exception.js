@@ -36,24 +36,29 @@
  * it. Moves made from the Edit appointment modal before this lane wrote no
  * reschedule_log row — for those, a second pass walks every live series and
  * marks any occurrence whose date deviates from the series' CADENCE, with
- * the cadence date as its position. The cadence is not assumed to run
- * through any particular row (the first live row may itself be the moved
- * one): every row is tried as the origin, the origin that explains the
- * MAJORITY of the series wins (same projector rescheduleSeries uses,
- * weekend shift honored, stepping backward for earlier rows), and a series
- * no origin can explain for more than half its rows is left alone as
- * ambiguous. A false positive costs nothing (the row shifts by the delta
- * instead of being re-projected); a miss would erase a customer's exception.
+ * the cadence date as its position. A row's series POSITION is its rank by
+ * creation among the series' cadence rows (the seeder and the extension
+ * writers insert occurrences in cadence order — a moved row keeps its
+ * rank even when its date now sits past two siblings), never its current
+ * date order. The cadence is not assumed to run through any particular
+ * row: every row is tried as the origin at its rank, the origin explaining
+ * the MAJORITY of the series wins (same projector rescheduleSeries uses,
+ * weekend shift honored, stepping backward for earlier ranks), and a
+ * series no origin can explain for more than half its rows is left alone
+ * as ambiguous. Completed rows take part in the fit (they anchor the
+ * cadence) but only live upcoming rows are stamped. A false positive costs
+ * nothing (the row shifts by the delta instead of being re-projected); a
+ * miss would erase a customer's exception.
  */
 const { nextRecurringDate, recurrenceOrdinalOptions, isMonthBasedRecurrence } = require('../../services/rebooker');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 const dateOnly = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
 
-// Pure: which live occurrences of one series sit off the series' cadence.
-// `rows` = the series' live occurrences (parent included when live) ordered
-// by series position (cadence date, else date). Returns { planned:
-// [{ id, expected }], ambiguous }. Exported for tests.
+// Pure: which occurrences of one series sit off the series' cadence.
+// `rows` = ALL the series' cadence rows (parent first) in CREATION order —
+// index = series position. Returns { planned: [{ id, expected }],
+// ambiguous }; the caller stamps only live upcoming rows. Exported for tests.
 function planCadenceExceptions(parent, rows) {
   if (!parent?.recurring_pattern || rows.length < 2) return { planned: [], ambiguous: false };
   // Month-based patterns take their ordinal (nth weekday) from the origin
@@ -112,12 +117,13 @@ async function backfillCadenceDeviations(knex) {
   let stamped = 0;
   let ambiguous = 0;
   for (const parent of parents) {
+    // Every cadence row of the series in creation order (cancelled rows
+    // hold no cadence slot; completed ones do) — index = series position.
     const rows = await knex('scheduled_services')
       .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parent.id, parent.id])
-      .whereNotIn('status', ['completed', 'cancelled'])
-      .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
-      .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date');
+      .whereNot('status', 'cancelled')
+      .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+      .select('id', 'scheduled_date', 'status', 'date_exception', 'date_exception_cadence_date');
     const plan = planCadenceExceptions(parent, rows);
     if (plan.ambiguous) {
       ambiguous += 1;
@@ -126,8 +132,11 @@ async function backfillCadenceDeviations(knex) {
       continue;
     }
     for (const entry of plan.planned) {
+      // Only live upcoming rows are stamped (the WHERE repeats the guard).
       stamped += await knex('scheduled_services')
         .where({ id: entry.id, date_exception: false })
+        .whereNotIn('status', ['completed', 'cancelled'])
+        .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
         .update({
           date_exception: true,
           date_exception_source: 'backfill_cadence',

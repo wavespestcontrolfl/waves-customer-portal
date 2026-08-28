@@ -13563,7 +13563,17 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // leaves the 24h reminder pending so the cron still reminds the customer.
       { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
-    return synced !== null;
+    if (synced !== null) return true;
+    // handleReschedule resolves null both for a failure and for a visit that
+    // simply has no appointment_reminders row (legacy visits predate the
+    // table). A confirmed missing row is a completed no-op — nothing to
+    // sync — not a reason to keep the operation retryable forever.
+    const reminderRow = await db('appointment_reminders').where({ scheduled_service_id: serviceId }).first('id');
+    if (!reminderRow) {
+      logger.info(`[dispatch] no appointment_reminders row for ${serviceId} — reminder sync is a no-op`);
+      return true;
+    }
+    return false;
   } catch (err) {
     logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
     return false;

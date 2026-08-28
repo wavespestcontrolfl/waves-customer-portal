@@ -260,6 +260,25 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived }, service = 
   return prior;
 }
 
+// Idempotent post-commit cleanup a replay of a committed move must still
+// perform (the original pass may have died right after its commit): a live
+// anchor's tech_status pointer release (conditional on the pointer still
+// targeting this job) and the customer tracker refresh. The non-idempotent
+// follow-up shift is inside the move trx, so a replay never repeats it.
+async function replaySeriesMoveCleanup(prior) {
+  const anchor = Array.isArray(prior.rows) ? prior.rows.find((r) => r.anchor) : null;
+  if (!anchor || !LIVE_OVERRIDE_STATUSES.has(String(anchor.before?.status))) return;
+  const techId = anchor.before?.technician_id || null;
+  if (techId) {
+    try {
+      await clearTechCurrentJob({ tech_id: techId, current_job_id: anchor.id, status: 'idle' });
+    } catch (err) {
+      logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
+    }
+  }
+  emitCustomerJobRefresh({ id: anchor.id, customer_id: prior.customer_id }, 'confirmed');
+}
+
 // What an operation_key replay hands back for a committed move: the result
 // stored WITH the row in the move transaction, or — for a row whose result
 // column is somehow empty — the same occurrence list rebuilt from the
@@ -781,7 +800,10 @@ class SmartRebooker {
       // falling into a same-date single edit.
       const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
-      if (prior) return replaySeriesMoveResult(prior, newDate);
+      if (prior) {
+        await replaySeriesMoveCleanup(prior);
+        return replaySeriesMoveResult(prior, newDate);
+      }
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
         // The caller's full scheduling pin rides along: a start-only or
@@ -1275,7 +1297,10 @@ class SmartRebooker {
     const operationKey = opKey.key;
     {
       const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
-      if (prior) return replaySeriesMoveResult(prior, newDate);
+      if (prior) {
+        await replaySeriesMoveCleanup(prior);
+        return replaySeriesMoveResult(prior, newDate);
+      }
     }
     const {
       isMonthBasedPattern, opts, deltaDays, pureCadenceDate, projectOccurrenceDate,
@@ -1892,6 +1917,22 @@ class SmartRebooker {
         });
       }
 
+      // A call-booked package's follow-up (visit 2, linked by
+      // parent_service_id — not a cadence sibling) stays spaced from its
+      // primary. INSIDE this trx: the shift applies a delta and is not
+      // idempotent, so it must land exactly once with the move (a replay of
+      // a committed move must never re-run it). Tech-day locks it takes are
+      // rung-3, after this trx's rung-1 date locks — the ordering contract.
+      const followUpsShifted = await shiftCallFollowUpsForParentMove({
+        conn: trx,
+        parentServiceId: serviceId,
+        fromDate: dateOnly(service.scheduled_date),
+        toDate: seriesDateStr,
+      });
+      if (followUpsShifted > 0) {
+        logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
+      }
+
       // One operation row per shift — the audit boundary, the idempotency
       // key for every side effect, and the Undo source of truth. Inside the
       // trx: a shift with no record is as bad as a record with no shift.
@@ -1967,6 +2008,7 @@ class SmartRebooker {
       throw err;
     });
     if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
+      await replaySeriesMoveCleanup(occurrencesRescheduled.replayedFrom);
       return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom, newDate);
     }
 
@@ -2007,23 +2049,6 @@ class SmartRebooker {
       } catch (err) {
         logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
       }
-    }
-
-    // A call-booked package's follow-up (visit 2, linked by parent_service_id
-    // — not a cadence sibling) stays spaced from its primary, same as the
-    // single path; best-effort outside the trx.
-    try {
-      const shifted = await shiftCallFollowUpsForParentMove({
-        conn: db,
-        parentServiceId: serviceId,
-        fromDate: dateOnly(service.scheduled_date),
-        toDate: seriesDateStr,
-      });
-      if (shifted > 0) {
-        logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
-      }
-    } catch (err) {
-      logger.error(`[rebooker] call follow-up shift after series move failed for ${serviceId}: ${err.message}`);
     }
 
     // Same escalation check the single-visit path runs — a series re-anchor

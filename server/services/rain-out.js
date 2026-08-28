@@ -1523,10 +1523,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // r2 P1). Scoped to the rain-out's own anchor: route SIBLINGS keep
   // their existing windows on a day move, and rounding a legacy
   // half-hour window would silently shift that customer's time.
-  // Either gate can route this move into rescheduleSeries (the older one
-  // here, the collective one through the rebooker's choke point), so the
-  // on-the-hour normalization applies under both.
-  if ((process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' || process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true')
+  if (process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
     && !!service.is_recurring
     && String(target.date) !== anchorDateStr
     && (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0) {
@@ -1815,21 +1812,18 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           allowLive: true,
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
-          // After an explicit series attempt the fallback is the visit
-          // moving ALONE by design (the collective choke point must not
-          // re-enter the series). Without one — the older series gate off —
-          // the rebooker's choke point decides, so Quick Move honors
-          // GATE_ADMIN_COLLECTIVE_MOVE like every other staff surface.
+          // Quick Move's series behavior is owned by GATE_COLLECTIVE_SERIES_
+          // ANCHOR and the explicit series branch above (its own sheet
+          // disclosure, its own effects + parking path). This single call is
+          // never widened by the rebooker's collective choke point: either
+          // it is the fallback after a series attempt (the visit moves ALONE
+          // by design) or the sheet asked for a single move.
+          seriesPolicy: 'single',
           ...(wantsSeriesShift
-            ? { seriesPolicy: 'single', expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
-        if (moveResult?.seriesMoveId && Array.isArray(moveResult.rescheduledOccurrences)) {
-          // The choke point turned this into a series move — the shifted
-          // siblings get the same silent re-arm + conflict parking below.
-          shiftedOccurrences = moveResult.rescheduledOccurrences;
-        }
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.
