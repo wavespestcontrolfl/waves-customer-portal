@@ -146,14 +146,16 @@ t.jsonb('investigation');                         // evidence: pages fetched, fo
 t.timestamp('last_investigated_at');
 t.timestamps(true, true);
 t.text('path_key').notNullable();                 // `${acquisition_type}:${normalized submission_url || '-'}` — non-null, so re-investigation upserts instead of duplicating (Postgres UNIQUE treats NULLs as distinct)
-t.uuid('superseded_by');                          // → the path row that replaced this one (identity change); a superseded path is never claimable
+t.uuid('superseded_by');                          // → the path row that replaced this one (explicit predecessor match only — §3.2 identity rule); a superseded path is never claimable; credentials/sessions keyed to the old path are rebound to the new one in the same transaction (same account) or left for a fresh account when the investigator says the login changed
 t.timestamp('superseded_at');
 // uniqueness applies to ACTIVE paths only: partial unique index ON (domain_id, path_key) WHERE superseded_by IS NULL —
 // a superseded row keeps its key for history, and a path seen again later (A → B → A) is a NEW active row
 // (fresh id, revision 1, no approvals carried; the superseded A's approvals stay invalidated)
-// IDENTITY vs REVISION: acquisition_type and submission_url ARE the identity (path_key). A re-investigation that
-// finds a different type/URL does not edit the row in place — it inserts the new path and, in the SAME transaction,
-// marks the old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
+// IDENTITY vs REVISION: acquisition_type and submission_url ARE the identity (path_key). Several ACTIVE paths per
+// domain are normal (a directory listing AND a sponsorship); a newly observed type/URL is simply ADDED alongside them.
+// Supersession happens ONLY when the investigator explicitly matches a predecessor (`replaces_path_id`: it observed the
+// old submission_url gone/redirected/renamed to the new one, or the same form under a new URL). In that case it inserts
+// the new path and, in the SAME transaction, marks the matched old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
 // repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
 // purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`):
 // that placement stays PINNED to the old path: the old path is marked `superseded_by` = new path immediately (so no
@@ -194,8 +196,9 @@ t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','paym
 t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
 t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence; the referenced approval's `dimension` must equal this row's dimension (enforced in the approval transaction)
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
-t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when the dimension's action completed (e.g. communication after `sent`) — a satisfied dimension is never re-decided
-t.unique(['prospect_id', 'dimension']);
+t.string('instance_key').notNullable().defaultTo('-'); // the ACTION INSTANCE this row governs: '-' = initial acquisition/send; a renewal's renewal_period_key; 'followup' for the follow-up send — each new instance (every renewal, the follow-up) is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances
+t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
+t.unique(['prospect_id', 'dimension', 'instance_key']);
 ```
 The bridge job writes one row per dimension the path touches — the dimensions are
 mutually exclusive by path type except for payment: **communication** for outreach/content
@@ -215,8 +218,13 @@ paid outreach placement, and vice versa). **Invalidation is scoped per dimension
 revision (`revision_payment` / `revision_communication` / `revision_execution`, §3.2) and its
 own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
 (price, renewal, payment/legal flags → payment; recipient/draft → communication; type/URL →
-supersession, all dimensions). A dimension with `satisfied_at` set is validated by nothing
-further — it is done. A completed communication attempt (`sent`) is a satisfied prerequisite for
+supersession, all dimensions). A dimension INSTANCE with `satisfied_at` set is validated by nothing further — it is done;
+but satisfaction is per action instance: a renewal (`instance_key` = period) and the
+follow-up (`instance_key='followup'`) are new rows that require their own decision and, when
+`OWNER_*`, their own fresh, action-matching approval — a consumed approval never satisfies a
+later instance, and an unsatisfied later instance never blocks the durable prerequisite that
+an earlier one already satisfied (e.g. the initial send stays satisfied while the renewal's
+payment instance is pending). A completed communication attempt (`sent`) is a satisfied prerequisite for
 the rest of that placement's life — a later price change never demands re-approving, let
 alone re-sending, a message that already went out. Any row at `DENY`/`INVALID`, or a required
 dimension with no row, blocks. A paid guest post thus cannot execute on a payment approval
@@ -305,7 +313,7 @@ t.string('decision').notNullable();           // CHECK (decision IN ('approved',
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT money_action OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT money_action OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
-t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
+t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[], and for payment approvals the merchant_binding (checkout_origin + allowed_processor_hosts) the owner approved — copied, never referenced
 t.string('dimension').notNullable();          // CHECK (dimension IN ('execution','payment','communication')) — the authority dimension this approval satisfies
 t.string('action').notNullable();             // CHECK (action IN ('acquire','purchase','renewal','outreach_send','outreach_followup')) AND CHECK ((dimension='execution' AND action='acquire') OR (dimension='payment' AND action IN ('purchase','renewal')) OR (dimension='communication' AND action IN ('outreach_send','outreach_followup'))) — an approval authorizes exactly one action in exactly one dimension; a paid membership has an execution/acquire approval AND a separate payment/purchase approval
 t.text('action_hash');                        // outreach_send/followup: sha256 of (recipient email, subject, body) of the draft the owner saw; renewal: the renewal_period_key — the send claim recomputes it and refuses on mismatch (an edited/replaced draft is a new approval)
@@ -632,6 +640,7 @@ t.uuid('approval_id');                              // → seo_link_approvals (d
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
+t.jsonb('merchant_binding').notNullable();          // IMMUTABLE at reservation: { checkout_origin (scheme+host of the investigated submission_url), allowed_processor_hosts[] (explicit, from the investigator's observed checkout chain, e.g. stripe.com/paypal.com), issuer_merchant_descriptor (when the issuer exposes it) } — validated immediately before mint AND before submit against the LIVE checkout page origin/redirect chain; any mismatch ⇒ voided (pre-exposure) or refused; where the issuer supports merchant/MCC restrictions the single-use card is minted locked to that merchant
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.uuid('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease: every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
@@ -676,6 +685,14 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   reservation ⇒ the row is `voided` (no card was ever minted) and re-parked. A gate flipped
   off, or a domain whose score/spam/confidence moved, between reservation and submission can
   never reach the merchant.
+- **Payment is bound to the approved merchant.** The purchase's immutable `merchant_binding`
+  (checkout origin + explicitly allowed processor hosts, captured by the investigator and
+  snapshotted into the payment approval) is checked immediately before mint and again before
+  submit against the live page: the checkout page's origin and every redirect hop must be
+  the bound origin or an allowed processor host; anything else — a redirect elsewhere, a
+  changed domain, an injected form — refuses (`voided` if pre-exposure, else `ambiguous`
+  with the card closed). Where the issuer supports it the single-use card is minted with a
+  merchant/MCC lock to that binding, so even a leaked number cannot fund another merchant.
 - **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
   final total is `0` (waived/discounted fee), the row is `voided` with
   `outcome='no_payment_required'` BEFORE any mint (no card exists), the placement proceeds
@@ -1094,8 +1111,11 @@ Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
 New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
 `GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`, AND every automated claim
 and every irreversible step re-checks it; **off ⇒ the claim route grants no automated lease
-at all and in-flight `AUTO_*` work stops before its next irreversible action** — every row, pre-existing ones included, is
-`awaiting_owner` and only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
+at all and in-flight `AUTO_*` work stops before its next irreversible action** — every
+PENDING placement that would otherwise receive an automated lease (`prospect` with an
+`AUTO_*` stamp, pre-existing ones included) parks as `awaiting_owner`; verified and terminal
+statuses (`placed`/`live`/`indexed`/`lost`/`rejected`) are Judge-owned history and are never
+rewritten by a gate; only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
 (separately arms `AUTO_PAID_WITHIN_POLICY` — never required for owner-approved payments),
 `GATE_LINK_PAYMENTS` (the payment-lane kill switch: off ⇒ no purchase of any authority is
 minted or submitted; owner-approved rows wait), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
