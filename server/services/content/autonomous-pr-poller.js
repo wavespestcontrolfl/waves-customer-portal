@@ -281,31 +281,36 @@ const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
 // opportunity_queue row's skip_reason so the review queue shows why. The PR
 // stays open — the operator edits/replaces the draft or dismisses; a
 // requeue re-drives the lane.
-async function parkTopicBlockedRun(run, pr, reason) {
+// Atomic: both writes run on `trx` (the topic-merge lock's transaction) and
+// each must affect exactly one row — a lost CAS (operator requeue/dismiss
+// landed meanwhile) throws TOPIC_PARK_LOST, which rolls the transaction
+// back; the caller reports `parked` only after the commit.
+async function parkTopicBlockedRun(run, pr, reason, trx) {
+  const q = trx || db;
   const pendingReason = pendingSkipReasonForRun(run);
   const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR left open; edit/replace the draft or dismiss.`;
-  try {
-    const fresh = await db('autonomous_runs').where('id', run.id).first('reviewer_notes');
-    await db('autonomous_runs')
-      .where('id', run.id)
-      .where('outcome', PENDING_OUTCOME)
+  const lost = (what) => { const e = new Error(`topic-block park lost its ${what} CAS (operator action landed) — nothing changed`); e.code = 'TOPIC_PARK_LOST'; return e; };
+  const fresh = await q('autonomous_runs').where('id', run.id).first('reviewer_notes');
+  const runRows = await q('autonomous_runs')
+    .where('id', run.id)
+    .where('outcome', PENDING_OUTCOME)
+    .where('skip_reason', pendingReason)
+    .update({
+      skip_reason: TOPIC_BLOCKED_SKIP_REASON,
+      reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+      poll_pending_reason: null,
+      updated_at: new Date(),
+    });
+  if (Number(runRows) !== 1) throw lost('run');
+  if (run.opportunity_id) {
+    const queueRows = await q('opportunity_queue')
+      .where('id', run.opportunity_id)
+      .where('status', 'pending_review')
       .where('skip_reason', pendingReason)
-      .update({
-        skip_reason: TOPIC_BLOCKED_SKIP_REASON,
-        reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
-        poll_pending_reason: null,
-        updated_at: new Date(),
-      });
-    if (run.opportunity_id) {
-      await db('opportunity_queue')
-        .where('id', run.opportunity_id)
-        .where('status', 'pending_review')
-        .where('skip_reason', pendingReason)
-        .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
-    }
-  } catch (err) {
-    logger.warn(`[autonomous-pr-poller] topic-block park failed for run ${run.id}: ${err.message} (retried next tick)`);
+      .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
+    if (Number(queueRows) !== 1) throw lost('queue');
   }
+  return true;
 }
 
 /**
@@ -1063,11 +1068,12 @@ async function maybeAutoMerge(run, pr) {
       // result is returned through the lock via `withheld`.
       let withheld = null;
       const { withTopicMergeLock } = require('./topic-targeting-gate');
-      mergeRes = await withTopicMergeLock(db, async () => {
+      mergeRes = await withTopicMergeLock(db, async (trx) => {
         const topic = await recheckTopicTargeting(run, pr, gh);
         if (!topic.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
-          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason);
+          // Deterministic → park on this transaction (commits with the lock).
+          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx);
           withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
           return null;
         }
@@ -1089,6 +1095,10 @@ async function maybeAutoMerge(run, pr) {
     if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
       logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
       return { pending: true, reason: 'topic_merge_lock_busy' };
+    }
+    if (err?.code === 'TOPIC_PARK_LOST') {
+      logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: ${err.message}`);
+      return { pending: true, reason: 'queue_row_moved_during_gating' };
     }
     if (err?.status === 409) {
       logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: PR #${pr.number} head moved after gating (409)`);

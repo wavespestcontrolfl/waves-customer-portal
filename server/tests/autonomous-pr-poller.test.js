@@ -66,6 +66,13 @@ const indexNow = require('../services/seo/indexnow-submit');
 const social = require('../services/social-media');
 const topicGate = require('../services/content/topic-targeting-gate');
 const poller = require('../services/content/autonomous-pr-poller');
+// The topic-merge lock's transaction: queries delegate to the db mock (so
+// setupDb records the park writes), raw() answers the advisory-lock probe.
+function fakeTrx(locked) {
+  const trx = (...args) => db(...args);
+  trx.raw = jest.fn().mockResolvedValue({ rows: [{ locked }] });
+  return trx;
+}
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
 
@@ -219,7 +226,7 @@ function runUpdates(updates) {
 beforeEach(() => {
   // Topic-gated merges run recheck → merge inside db.transaction under an
   // advisory lock; the bare jest.fn() db grants it by default.
-  db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked: true }] }) }));
+  db.transaction = jest.fn(async (fn) => fn(fakeTrx(true)));
   // Default: the PR head's blog file is readable and the topic recheck is
   // clean (the recheck fails closed on an unreadable file).
   gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
@@ -716,6 +723,24 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runPark.updates.poll_pending_reason).toBeNull();
     const queuePark = updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'topic_targeting_blocked');
     expect(queuePark).toBeDefined();
+    expect(db.transaction).toHaveBeenCalledTimes(1); // both park writes ran inside the lock transaction
+  });
+
+  test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()], updateResult: 0 });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'owned' }] }));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'queue_row_moved_during_gating' });
+    expect(res.results[0].parked).toBeUndefined();
   });
 
   test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
@@ -726,7 +751,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
     pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
     publisher.assertCodexReviewClear.mockResolvedValue(true);
-    db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked: false }] }) }));
+    db.transaction = jest.fn(async (fn) => fn(fakeTrx(false)));
 
     const res = await poller.pollPending();
 
