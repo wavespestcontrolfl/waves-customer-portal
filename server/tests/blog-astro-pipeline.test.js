@@ -3575,6 +3575,19 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
   });
 
+  test('distinct sources count, not references; new body-N names skip ones the draft already references (hook r3)', async () => {
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/blog/pest-control/drywood-frass-venice/body-2.webp' ? { content: 'x', sha: 'b2' } : null));
+    mockHeroGeneration();
+    heroImageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm', alt: 'Gen alt' });
+    // Two references to ONE committed file → one image → one more needed, and it must not be body-2.
+    const body = `${article}\n\n![same](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n![same again](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`;
+    await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(1);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+  });
+
   test('fail-closed: a draft image ref that is NOT committed (invented path / remote URL) parks instead of shipping a broken image (hook r2)', async () => {
     gh.getFile.mockResolvedValue(null);
     mockHeroGeneration();

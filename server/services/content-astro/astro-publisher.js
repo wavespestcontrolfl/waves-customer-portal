@@ -1820,7 +1820,9 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   if (!bodyImagesEnabled()) return none;
   const draftRefs = bodyImageRefs(body);
   await assertDraftBodyImagesCommitted(draftRefs, slug);
-  const have = draftRefs.length;
+  // Distinct pictures, not references — two links to one file is one image.
+  const draftSrcs = new Set(draftRefs.map((r) => r.src));
+  const have = draftSrcs.size;
   const need = BODY_IMAGE_MIN - have;
   if (need <= 0) return none;
 
@@ -1836,10 +1838,16 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const newAlts = [];
   const placements = [];
   const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
+  // body-N names are allocated past anything the draft already references
+  // (a draft carrying body-2.webp must not have it overwritten by a new
+  // generation that would then be linked twice).
+  let n = 0;
+  const nextSrc = () => {
+    do { n += 1; } while (draftSrcs.has(`${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`));
+    return { src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`, repoPath: `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp` };
+  };
   for (let k = 0; k < slots.length; k++) {
-    const n = have + k + 1;
-    const src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`;
-    const repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
+    const { src, repoPath } = nextSrc();
     const slot = slots[k];
 
     // Reuse a file already committed on main when the live body still
