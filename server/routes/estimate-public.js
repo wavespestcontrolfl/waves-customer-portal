@@ -104,6 +104,8 @@ const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
 const featureGates = require('../config/feature-gates');
+const acceptanceTerms = require('../services/acceptance-terms-text');
+const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const {
   parcelOverlayEnabled,
@@ -252,6 +254,79 @@ async function registerAcceptedEstimateAppointmentReminder({
 // First-view side-effects (status flip + admin in-app notification) use the
 // same gate; a filtered preview must not make the estimate look customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
+
+/**
+ * Acceptance terms apply to cancel-anytime lanes only (GH Codex P1 ×2).
+ * - Termite / WDO work is governed by its own signed agreement (contracts
+ *   lane): an estimate carrying any termite/WDO row anywhere it can live —
+ *   mapped recurring/one-time rows, engine `lineItems` (result or raw
+ *   engineResult), or a commercial proposal's buildings/programs — gets NO
+ *   acceptance line and NO record.
+ * - An authored commercial proposal with contractual `commercialTerms`
+ *   (initial term, cancellation notice) is governed by those terms.
+ * FAIL CLOSED: malformed or empty estimate data ⇒ no terms (showing
+ * "cancel anytime / no contract" to an estimate we cannot classify is the
+ * failure to avoid; the accept still works, just unrecorded).
+ */
+function acceptanceTermsApplyTo(estimate) {
+  let d = estimate?.estimate_data;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch { return false; }
+  }
+  if (!d || typeof d !== 'object') return false;
+  // Terms-neutral lanes get nothing (GH/pre-push Codex P1): commercial
+  // estimates (authored proposals and auto-priced alike — their terms live
+  // in the proposal or the account manager's paperwork) and invoice-mode
+  // billing (the invoice states its own payment terms).
+  // Effective invoice mode (the column OR a derived guarantee-only renewal —
+  // the helper's own public-surface contract), never the raw column.
+  if (resolveEstimateInvoiceMode(estimate, d)) return false;
+  if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL') return false;
+  if (isCommercialAutoAcceptEstimate(estimate)) return false;
+  const result = d.result && typeof d.result === 'object' ? d.result : d;
+  const proposal = d.proposal && typeof d.proposal === 'object' ? d.proposal : null;
+  if (proposal?.enabled === true) return false;
+  const list = (v) => (Array.isArray(v) ? v : []);
+  // The converter's extractors own the supported containers (result /
+  // nested results / root one_time / oneTimeItems / specItems …) — reuse
+  // them rather than re-listing shapes here (pre-push Codex P1).
+  const Converter = require('../services/estimate-converter');
+  const engineShaped = d.engineResult && typeof d.engineResult === 'object' ? { result: d.engineResult } : null;
+  let rows;
+  try {
+    rows = [
+      ...list(Converter.recurringServicesFromEstimateData(d)),
+      ...list(Converter.estimateOneTimeItemsFromData(d)),
+      ...(engineShaped ? list(Converter.recurringServicesFromEstimateData(engineShaped)) : []),
+      ...(engineShaped ? list(Converter.estimateOneTimeItemsFromData(engineShaped)) : []),
+      ...list(result?.lineItems),
+      ...list(d.engineResult?.lineItems),
+      ...list(proposal?.buildings).flatMap((b) => list(b?.lineItems)),
+      ...list(proposal?.programs),
+    ];
+  } catch {
+    return false;
+  }
+  if (!rows.length) return false;
+  return !rows.some((r) => {
+    if (!r || typeof r !== 'object') return true;
+    // Canonical keys are underscored (`wdo_inspection`, `pre_slab_termidor`)
+    // — `_` is a regex word character, so normalize separators to spaces
+    // before the word-boundary match (GH Codex r8 P1).
+    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''} ${r.description || ''}`
+      .toLowerCase().replace(/[_-]+/g, ' ');
+    // Pre-slab termiticide/Termidor (FDACS paper lane) carries no literal
+    // "termite" in its canonical key or mapped name (GH Codex r4 P1).
+    return /termite|\bwdo\b|wood destroying|pre ?slab|termiticide|termidor/.test(names)
+      || isPreSlabOneTimeItem(r)
+      || String(recurringServiceKey(r) || '').includes('termite')
+      || isTermiteBondRow(r)
+      || isTermiteInstallItem(r)
+      || isTermiteBaitOneTimeItem(r)
+      || isTermiteFoamOneTimeItem(r)
+      || isTermiteTrenchingOneTimeItem(r);
+  });
+}
 
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
@@ -8298,11 +8373,26 @@ async function handleEstimateView(req, res, next) {
     // their side effects) and never enter the experiment below.
     const estimatePdfRenderPass = req.query.mode === 'pdf'
       && featureGates.isEnabled('estimateDocPdf');
+    // Acceptance terms live ONLY in the React view (server-served line +
+    // drawer + the render-bound version attestation). The legacy server-HTML
+    // page neither renders them nor attests, so under the gate its accept
+    // would 409 TERMS_VERSION_STALE with no way forward (pre-push Codex P0).
+    // Same deal as the card-hold / recurring-card forces above. Only estimates
+    // that can still accept: expired / terminal / archived rows have no
+    // accept to protect and keep their SSR pages (the expired carve-out
+    // below). Gate-tied so the kill switch fully restores today's routing.
+    // Scoped to estimates that actually RECEIVE terms (acceptanceTermsApplyTo):
+    // termite/WDO, commercial and invoice-mode lanes show nothing new, so
+    // they keep their renderer and their GrowthBook holdback eligibility.
+    const acceptanceTermsForcesReactView = featureGates.isEnabled('estimateAcceptanceTerms')
+      && isEstimateAcceptActive(estimate)
+      && acceptanceTermsApplyTo(estimate);
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
-      || estimatePdfRenderPass;
+      || estimatePdfRenderPass
+      || acceptanceTermsForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -8325,6 +8415,7 @@ async function handleEstimateView(req, res, next) {
       && !cardHoldForcesReactView
       && !recurringCardForcesReactView
       && !estimatePdfRenderPass
+      && !acceptanceTermsForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -8346,6 +8437,16 @@ async function handleEstimateView(req, res, next) {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );
+    }
+    // The /api/estimates/:token mount renders legacy HTML regardless of the
+    // React decision; under the acceptance-terms gate that page cannot
+    // accept (see acceptanceTermsForcesReactView), so send the visitor to
+    // the React URL for the same estimate instead of a dead-end 409. After
+    // the expired carve-out: an expired estimate cannot accept, so it keeps
+    // its personalized SSR expired page.
+    if (acceptanceTermsForcesReactView) {
+      const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+      return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
 
     // Track every real view (count + last_viewed_at). Bot UAs and admin
@@ -8704,6 +8805,54 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // NO slot — the prepay path already skips scheduling and waives the (absent)
     // setup fee.
     const isCommercialAccept = isCommercialAutoAcceptEstimate(estimate);
+
+    // Acceptance-terms attestation (GATE_ESTIMATE_ACCEPTANCE_TERMS). The
+    // client sends the version it RENDERED above the Accept button (same
+    // render-bound pattern as cardHoldDisclosureVersion). With the gate on,
+    // the attestation is REQUIRED: a missing or non-current version (a tab
+    // that loaded older copy, an older bundle mid-deploy, a hand-rolled
+    // client) is refused before any mutation with a reload prompt, so an
+    // estimate can never be accepted under the gate without its record
+    // (pre-push Codex P1). Gate off ⇒ the field is ignored and nothing is
+    // recorded: nothing was shown, so nothing is claimed.
+    const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
+      ? req.body.termsVersion.trim().slice(0, 40)
+      : '';
+    // Annual prepay is paid up front, so the "due when each service is
+    // completed" line does not describe that transaction: the page hides the
+    // line and sends no attestation for a prepay accept, and the route
+    // records nothing for it (terms-neutral lane).
+    const acceptanceTermsApplicable = acceptanceTermsApplyTo(estimate)
+      && req.body?.paymentMethodPreference !== 'prepay_annual';
+    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms') && acceptanceTermsApplicable;
+    // The kill switch is absolute: gate OFF ⇒ nothing is recorded, even
+    // from a tab that loaded while the gate was on and attests the current
+    // version (the operator pulled the feature; that accept lands exactly
+    // as a pre-gate accept did). Reviewed both ways (GH r5 P1 vs pre-push
+    // P1) — the kill-switch contract in feature-gates.js wins.
+    const recordAcceptanceTerms = acceptanceTermsActive
+      && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
+    // A STALE attestation is always refused: the tab rendered an older copy
+    // than this server records, so it must reload and read the current line.
+    // An ABSENT attestation is a tab loaded before the gate flipped (legacy
+    // SSR page, the previous React bundle) that never rendered any terms and
+    // cannot be recorded as accepting them. Under `true` it accepts
+    // unrecorded so no live tokenized flow is stranded (GH Codex r1+r2 P0);
+    // under `required` (flipped once open tabs have had time to reload) it
+    // gets the same reloadable 409, so every acceptance has its record
+    // (pre-push Codex P1). Nothing is ever recorded without an attestation.
+    const acceptanceTermsRequired = acceptanceTermsActive
+      && featureGates.isEnabled('estimateAcceptanceTermsRequired');
+    // The record written in the accept transaction — the post-commit copy
+    // email keys on it (one copy per acceptance event).
+    let acceptanceRecordId = null;
+    if (acceptanceTermsActive && !recordAcceptanceTerms
+      && (acceptedTermsVersion || acceptanceTermsRequired)) {
+      return res.status(409).json({
+        error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
+        code: 'TERMS_VERSION_STALE',
+      });
+    }
 
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
@@ -10180,6 +10329,40 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
       }
 
+      // Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): the verbatim
+      // terms the customer saw above Accept, the authorization instant, and
+      // the device — written in the SAME transaction as the accepted state
+      // so an estimate can never be accepted without its record (or vice
+      // versa). Retries of an already-accepted estimate never reach here
+      // (the guarded UPDATE above 409s first).
+      if (recordAcceptanceTerms) {
+        const [acceptanceRow] = await trx('estimate_acceptances').insert({
+          estimate_id: estimate.id,
+          customer_id: customerId || null,
+          method: 'public_estimate',
+          terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
+          terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+          accepted_at: acceptAuthorizedAt,
+          // Proxy-validated client (trust proxy = 1 hop in index.js), never
+          // the raw X-Forwarded-For head a requester can supply (GH Codex P1).
+          ip: String(req.ip || '').slice(0, 64) || null,
+          user_agent: (req.get('user-agent') || '').slice(0, 1000) || null,
+        }).returning('id');
+        acceptanceRecordId = acceptanceRow?.id || acceptanceRow || null;
+        await trx('estimates').where({ id: estimate.id })
+          .update({ terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
+        if (customerId) {
+          // "Latest version accepted on any estimate": never downgrade — an
+          // older app revision handling an accept during an overlapping
+          // deploy must not overwrite a newer version (GH Codex r4 P2).
+          // Versions are 'vYYYY-MM' — string order is chronological.
+          await trx('customers').where({ id: customerId })
+            .where((q) => q.whereNull('accepted_terms_version')
+              .orWhere('accepted_terms_version', '<', acceptanceTerms.ACCEPTANCE_TERMS_VERSION))
+            .update({ accepted_terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
+        }
+      }
+
       // Copy the estimate's service-preference selections onto the customer
       // row so tech routes + the customer portal see the same source of truth.
       // Defensive: skip if the column hasn't been migrated yet (older envs).
@@ -11653,7 +11836,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // idempotent per estimate so an accept retry can't double-send. The
     // earliest visit the accept flow scheduled (if any) supplies the
     // appointment line; the template degrades cleanly when none exists.
-    if (customerId) {
+    // A phoneless one-time accept commits with NO customer row; under the
+    // acceptance-terms gate that customer was still promised an emailed
+    // copy, so the sender falls back to the estimate's own contact
+    // (pre-push Codex P1). Gate off ⇒ customer-less accepts email nothing,
+    // exactly as before.
+    if (customerId || recordAcceptanceTerms) {
       const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
       // DB-refreshed rows carry scheduled_date as a Date (pg materializes
       // date columns at local midnight); freshly-built rows carry the
@@ -11676,6 +11864,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void sendEstimateAcceptedOnboarding({
         customerId,
         estimateId: estimate.id,
+        acceptanceId: acceptanceRecordId,
         serviceLabel: firstAcceptedAppointment?.service_type
           || invoiceServiceLabel
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
@@ -22495,7 +22684,12 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
     const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
-    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
+    generateEstimateProposalPDF(estimate, res, {
+      ...(await resolveProposalBillingContext(estimate)),
+      // The recorded acceptance rides the fallback too (pre-push Codex P1):
+      // a downloaded accepted document must never omit its record.
+      acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
+    });
   } catch (err) { next(err); }
 });
 
@@ -23414,6 +23608,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
+    // Acceptance record for the document: an accepted estimate whose
+    // terms_version proves a record was committed. Deliberately NOT gated —
+    // the gate controls what is shown and written from now on; evidence
+    // already recorded stays on the accepted estimate even after the kill
+    // switch (pre-push Codex P1). The customer-facing shape masks the IP to
+    // its first two octets and reduces the user-agent to a family label —
+    // enough to say "this device, this moment" without printing raw
+    // telemetry on a PDF.
+    const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
+      && acceptanceTermsApplyTo(estimate);
+    // Strict on the headless document pass: the rendered PDF must carry the
+    // record or fail the render (which then fails the pdfkit fallback too).
+    const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
       // Authored commercial proposal, rendered on-page under the commercial
@@ -23448,6 +23656,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS): the line + drawer
+      // the page renders above Accept, served by the SERVER so the copy the
+      // customer sees is the copy the accept route records. Absent when the
+      // gate is off ⇒ response byte-identical to today.
+      ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload() } : {}),
+      ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical
@@ -23891,3 +24105,6 @@ module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-
 // lawn PriceCard renders beside its per-application price.
 module.exports.measuredBasisForSection = measuredBasisForSection;
 module.exports.attachMeasuredBasis = attachMeasuredBasis;
+// Test hook (acceptance-terms lane 2026-08-28): which estimates get the
+// cancel-anytime acceptance line at all.
+module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;

@@ -2600,7 +2600,13 @@ router.get('/:id/proposal.pdf', async (req, res, next) => {
     // Same live billing lane the customer-facing download resolves, so the
     // operator's copy and the customer's copy stay byte-identical.
     const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
-    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
+    const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
+    generateEstimateProposalPDF(estimate, res, {
+      ...(await resolveProposalBillingContext(estimate)),
+      // Same recorded acceptance the customer's download carries (strict: an
+      // accepted document is never produced without its record).
+      acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
+    });
   } catch (err) { next(err); }
 });
 

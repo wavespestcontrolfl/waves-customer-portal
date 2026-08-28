@@ -197,3 +197,68 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).not.toContain('CUSTOMER RESPONSIBILITIES');
   });
 });
+
+describe('pdfkit fallback — recorded acceptance block', () => {
+  const ACCEPTANCE = {
+    recordId: 'ACC-ABCD1234',
+    termsVersion: 'v2026-09',
+    termsText: 'Accepting authorizes these services at the price shown.\nServices — until you cancel. No contract.\nAccepting — counts as your signature.',
+    acceptedAt: '2026-08-28T10:35:00Z',
+    ipMasked: '203.0.x.x',
+    device: 'iPhone · Safari',
+  };
+
+  test('prints the verbatim recorded text + stamp when a record is supplied', async () => {
+    const buffer = await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, { acceptance: ACCEPTANCE });
+    const text = extractPdfText(buffer);
+    expect(text).toContain('SERVICE & PAYMENT AUTHORIZATION');
+    expect(text).toContain('Accepting authorizes these services at the price shown.');
+    expect(text).toContain('Accepting');
+    expect(text).toContain('Terms v2026-09');
+    expect(text).toContain('Record ACC-ABCD1234');
+    expect(text).toContain('IP 203.0.x.x');
+  });
+
+  // Per-page text: pdfkit writes one content stream per page, so the
+  // heading and the stamp must land in the SAME stream for any page fill.
+  function extractPdfPages(buffer) {
+    const raw = buffer.toString('latin1');
+    const pages = [];
+    const re = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+    let match;
+    while ((match = re.exec(raw)) !== null) {
+      let inflated;
+      try { inflated = zlib.inflateSync(Buffer.from(match[1], 'latin1')).toString('latin1'); } catch { continue; }
+      const parts = [];
+      for (const tj of inflated.matchAll(/\[((?:<[0-9a-fA-F]+>|-?\d+(?:\.\d+)?|\s)+)\]\s*TJ/g)) {
+        parts.push([...tj[1].matchAll(/<([0-9a-fA-F]+)>/g)].map((seg) => Buffer.from(seg[1], 'hex').toString('latin1')).join(''));
+      }
+      if (parts.length) pages.push(parts.join('\n'));
+    }
+    return pages;
+  }
+
+  test('the block is never split across a page boundary, whatever precedes it', async () => {
+    for (const pad of [0, 300, 600, 900, 1200, 1500, 1800]) {
+      const estimate = {
+        ...STRUCTURED_ESTIMATE,
+        estimate_data: {
+          ...STRUCTURED_ESTIMATE.estimate_data,
+          proposal: { ...STRUCTURED_ESTIMATE.estimate_data.proposal, terms: `${STRUCTURED_ESTIMATE.estimate_data.proposal.terms} ${'Operator term text. '.repeat(pad / 20)}`.trim() },
+        },
+      };
+      const pages = extractPdfPages(await buildEstimateProposalPDFBuffer(estimate, { acceptance: ACCEPTANCE }));
+      const withHeading = pages.filter((t) => t.includes('SERVICE & PAYMENT AUTHORIZATION'));
+      expect(withHeading).toHaveLength(1);
+      expect(withHeading[0]).toContain('Record ACC-ABCD1234');
+      expect(withHeading[0]).toContain('Accepting authorizes these services at the price shown.');
+    }
+  });
+
+  test('renders exactly as before when no record is supplied', async () => {
+    const buffer = await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, {});
+    const text = extractPdfText(buffer);
+    expect(text).not.toContain('SERVICE & PAYMENT AUTHORIZATION');
+    expect(text).not.toContain('Accepted electronically');
+  });
+});

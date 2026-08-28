@@ -347,9 +347,244 @@ async function runBondRenewalSweep() {
   return { sent };
 }
 
-async function runDailySweeps() {
-  const bond = await runBondRenewalSweep();
-  return { bondRenewalsSent: bond.sent };
+// Acceptance copy catch-up (GATE_ESTIMATE_ACCEPTANCE_TERMS; pre-push Codex
+// P1): the accept route's post-commit onboarding email — which carries the
+// promised copy of the accepted terms — is fire-and-forget, so a crash or a
+// provider failure between commit and send would leave a recorded
+// acceptance with no emailed copy. Fulfilment is tracked ON THE RECORD
+// (estimate_acceptances.copy_emailed_at, stamped by the sender): every
+// unfulfilled acceptance is re-attempted daily with no time limit — the
+// stable key first (a sent-but-unstamped race dedupes harmlessly and gets
+// stamped), then a day-scoped retry key when the stable key is wedged on a
+// failed/blocked row (the bond-renewal pattern above). An acceptance with
+// no usable email at all cannot be fulfilled by mail: after
+// ACCEPTANCE_COPY_ESCALATE_DAYS the office is notified ONCE
+// (copy_escalated_at) so a person can hand over the copy — the accepted
+// page and PDF carry the same record — instead of the promise silently
+// lapsing (rule 14: exceptions park and surface).
+const ACCEPTANCE_COPY_SETTLE_MINUTES = 30; // give the post-commit send time to land
+const ACCEPTANCE_COPY_ESCALATE_DAYS = 7;
+const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
+
+// Does the ACTIVE estimate.accepted_onboarding version reference the
+// acceptance_note variable (block or text body)?
+async function activeOnboardingTemplateCarriesNote() {
+  try {
+    const { loadTemplateByKey } = require('./email-template-library');
+    const loaded = await loadTemplateByKey('estimate.accepted_onboarding');
+    const v = loaded?.activeVersion;
+    if (!v) return false;
+    const blocks = typeof v.blocks === 'string' ? v.blocks : JSON.stringify(v.blocks || []);
+    return blocks.includes('acceptance_note') || String(v.text_body || '').includes('acceptance_note');
+  } catch (err) {
+    logger.warn(`[lifecycle-sweeps] could not inspect the active onboarding template: ${err.message}`);
+    return false;
+  }
 }
 
-module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };
+async function runAcceptanceCopySweep() {
+  if (!(await db.schema.hasTable('estimate_acceptances'))) return { sent: 0, checked: 0, escalated: 0 };
+  const now = Date.now();
+  const rows = await db('estimate_acceptances')
+    .whereNull('copy_emailed_at')
+    .where('accepted_at', '<=', new Date(now - ACCEPTANCE_COPY_SETTLE_MINUTES * 60000))
+    .orderBy('accepted_at', 'asc')
+    .select('id', 'estimate_id', 'customer_id', 'accepted_at', 'copy_escalated_at');
+  const seen = new Set();
+  let sent = 0;
+  let checked = 0;
+  let escalated = 0;
+  let templateCarriesNote = null; // resolved once per run, lazily
+  for (const row of rows) {
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
+    checked += 1;
+    const { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, ACCEPTANCE_COPY_MARKER } = require('./estimate-accepted-email');
+    // Keyed per acceptance EVENT: a re-accept after a revision is its own
+    // row with its own copy, never deduped against the earlier one.
+    const baseKey = acceptedOnboardingKey(row.estimate_id, row.id);
+    // Surface an exception ONCE (copy_escalated_at), and only when the admin
+    // notification row actually persisted (bell policy can silence the
+    // category; then the next sweep retries).
+    const escalate = async (estimate, body) => {
+      const NotificationService = require('./notification-service');
+      // dedupeKey: once per acceptance — a crash between this insert and
+      // the copy_escalated_at stamp must not re-ring tomorrow (GH Codex r9 P2).
+      const notification = await NotificationService.notifyAdmin('estimate', `Acceptance copy not delivered: ${estimate?.customer_name || 'customer'}`, body, { dedupeKey: `acceptance_copy_escalation:${row.id}` });
+      if (notification?.id) {
+        await db('estimate_acceptances').where({ id: row.id }).update({ copy_escalated_at: new Date() });
+        escalated += 1;
+      } else {
+        logger.warn(`[lifecycle-sweeps] acceptance copy escalation for estimate ${row.estimate_id} not persisted (${notification?.reason || 'suppressed'}); will retry next sweep`);
+      }
+    };
+    try {
+      // EVERY sent-ish attempt under this key (initial + corrective): any one
+      // carrying the copy fulfils the promise (GH Codex r9 P2).
+      const deliveredRows = await db('email_messages')
+        .where('idempotency_key', 'like', `${baseKey}%`)
+        .whereIn('status', SENT_ISH)
+        .select('id', 'text_snapshot', 'html_snapshot');
+      const delivered = deliveredRows[0] || null;
+      if (delivered) {
+        const carriesCopy = deliveredRows.some((m) => [m.text_snapshot, m.html_snapshot]
+          .some((b) => typeof b === 'string' && b.includes(ACCEPTANCE_COPY_MARKER)));
+        if (carriesCopy) {
+          // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
+          await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')
+            .update({ copy_emailed_at: new Date() });
+          continue;
+        }
+        // Sent WITHOUT the copy: the active template version lacked the
+        // {{acceptance_note}} block. Surface once (operator fix); and once
+        // the active version carries the block again, re-send under a
+        // distinct key so the corrective copy actually goes out (pre-push
+        // Codex P1) — never a daily duplicate while it is still missing.
+        if (!row.copy_escalated_at) {
+          const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_name', 'address');
+          await escalate(estimate, `${estimate?.address || 'no address'} — the onboarding email went out without the accepted-terms copy: the active estimate.accepted_onboarding template version has no {{acceptance_note}} block. Restore the block (Email Templates) and the copy will be re-sent; meanwhile the accepted estimate page / PDF carries the same record.`);
+        }
+        if (templateCarriesNote === null) templateCarriesNote = await activeOnboardingTemplateCarriesNote();
+        if (!templateCarriesNote) continue;
+        // fall through: corrective resend under the day-scoped copy key
+      }
+      const wedged = delivered ? { id: delivered.id } : await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data', 'updated_at');
+      if (!estimate) continue;
+      // Already escalated (no address / suppressed): the office owns it. Retry
+      // only when contact data changed since — a customer or estimate row
+      // updated after the escalation — so a permanently suppressed recipient
+      // does not mint a blocked email_messages row every day forever
+      // (pre-push Codex P1). A corrected email resumes fulfilment by itself.
+      if (row.copy_escalated_at && !delivered) {
+        const since = new Date(row.copy_escalated_at).getTime();
+        const customerId = row.customer_id || estimate.customer_id || null;
+        const customer = customerId ? await db('customers').where({ id: customerId }).first('updated_at') : null;
+        const touched = [estimate.updated_at, customer?.updated_at]
+          .some((t) => t && new Date(t).getTime() > since);
+        if (!touched) continue;
+      }
+      const EstimateConverter = require('./estimate-converter');
+      let estData = estimate.estimate_data;
+      if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
+      const firstService = (EstimateConverter.recurringServicesFromEstimateData(estData || {})[0]
+        || EstimateConverter.estimateOneTimeItemsFromData(estData || {})[0]) || null;
+      const result = await sendEstimateAcceptedOnboarding({
+        customerId: row.customer_id || estimate.customer_id || null,
+        estimateId: estimate.id,
+        serviceLabel: firstService?.name || firstService?.label || 'service',
+        appointment: null,
+        acceptanceId: row.id,
+        idempotencyKey: delivered ? `${baseKey}:copy:${etDateString()}` : (wedged ? `${baseKey}:${etDateString()}` : baseKey),
+      });
+      if (result?.sent && !result?.copyMissing) { sent += 1; continue; }
+      if (result?.copyMissing) {
+        // Sent WITHOUT the copy (template version lacks the block) — surface now.
+        if (!row.copy_escalated_at) {
+          await escalate(estimate, `${estimate.address || 'no address'} — the onboarding email went out without the accepted-terms copy: the active estimate.accepted_onboarding template version has no {{acceptance_note}} block. Restore the block (Email Templates) and the copy will be re-sent; meanwhile the accepted estimate page / PDF carries the same record.`);
+        }
+        continue;
+      }
+      // Outcomes (GH Codex r3 P1): no usable address anywhere, or a
+      // suppression block (bounced/unsubscribed — the provider will not
+      // deliver) are NOT mail problems a retry can fix → surface once so a
+      // person delivers the copy. A transient failure ({outcome:'failed'})
+      // is left for tomorrow's retry and never escalated as "no email".
+      const undeliverable = result?.outcome === 'no_address' || result?.blocked === true;
+      const ageDays = (now - new Date(row.accepted_at).getTime()) / 86400000;
+      if (undeliverable && !row.copy_escalated_at && ageDays >= ACCEPTANCE_COPY_ESCALATE_DAYS) {
+        await escalate(estimate, `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)}; ${result?.blocked ? 'their email is suppressed (bounced/unsubscribed)' : 'no usable email on the customer or the estimate'}. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`);
+      }
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] acceptance copy resend failed for estimate ${row.estimate_id}: ${err.message}`);
+    }
+  }
+  if (sent || escalated) logger.info(`[lifecycle-sweeps] acceptance copies: ${sent} re-sent, ${escalated} escalated (${checked} checked)`);
+  return { sent, checked, escalated };
+}
+
+// Acceptance ownership reconciliation (pre-push Codex P1): the /book fan-out
+// for a customer-less accepted estimate is best-effort inside the booking
+// request, so a transient failure there must not leave the record unowned
+// forever. Every acceptance row still without a customer is re-examined
+// daily: if its estimate has since gained a customer, the row and the
+// customer stamp follow; if a booking that proved ownership stamped
+// scheduled_services.source_estimate_id, the shared claim runs again.
+async function runAcceptanceOwnershipSweep() {
+  if (!(await db.schema.hasTable('estimate_acceptances'))) return { attached: 0, checked: 0 };
+  const { attachAcceptanceOwnership } = require('./estimate-acceptance-record');
+  const rows = await db('estimate_acceptances').whereNull('customer_id').select('id', 'estimate_id', 'terms_version');
+  let attached = 0;
+  let checked = 0;
+  const seen = new Set();
+  for (const row of rows) {
+    if (seen.has(row.estimate_id)) continue;
+    seen.add(row.estimate_id);
+    checked += 1;
+    try {
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'status', 'terms_version');
+      if (!estimate) continue;
+      let customerId = estimate.customer_id || null;
+      if (!customerId) {
+        // Candidates = every customer whose committed booking links this
+        // estimate. More than one is a race the request path already lost
+        // on both sides — refuse rather than pick one (pre-push Codex P1).
+        const booked = await db('scheduled_services').where({ source_estimate_id: row.estimate_id }).whereNotNull('customer_id').select('customer_id');
+        const candidates = [...new Set(booked.map((b) => String(b.customer_id)))];
+        if (candidates.length > 1) {
+          logger.warn(`[lifecycle-sweeps] acceptance ownership for estimate ${row.estimate_id} is ambiguous (${candidates.length} booking customers) — left for the office`);
+          continue;
+        }
+        customerId = candidates[0] || null;
+      }
+      if (!customerId) continue;
+      // Whoever owns (or now claims) the estimate: no other customer's visit
+      // may keep correlating to it.
+      const clearOtherLinks = async (ownerId) => db('scheduled_services')
+        .where({ source_estimate_id: row.estimate_id })
+        .whereNot({ customer_id: ownerId })
+        .update({ source_estimate_id: null });
+      if (!estimate.customer_id) {
+        const claim = await attachAcceptanceOwnership(db, { estimateId: row.estimate_id, customerId });
+        if (claim.attached) { attached += 1; await clearOtherLinks(customerId); }
+        continue;
+      }
+      await clearOtherLinks(customerId);
+      // Estimate already owned (accept-time customer or a later admin link):
+      // bring the acceptance rows and the customer stamp along.
+      await db.transaction(async (trx) => {
+        await trx('estimate_acceptances').where({ estimate_id: row.estimate_id }).whereNull('customer_id').update({ customer_id: customerId });
+        if (estimate.terms_version) {
+          await trx('customers').where({ id: customerId })
+            .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', estimate.terms_version))
+            .update({ accepted_terms_version: estimate.terms_version });
+        }
+      });
+      attached += 1;
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] acceptance ownership reconcile failed for estimate ${row.estimate_id}: ${err.message}`);
+    }
+  }
+  if (attached) logger.info(`[lifecycle-sweeps] attached ${attached} acceptance record(s) to their customer (${checked} checked)`);
+  return { attached, checked };
+}
+
+// Each sweep is attempted every day regardless of the others (pre-push Codex
+// P1): a persistent bond-sync failure must not silently stall the acceptance
+// copy promise, and vice versa.
+async function runDailySweeps() {
+  const attempt = async (name, fn, empty) => {
+    try {
+      return await fn();
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] ${name} failed: ${err.message}`);
+      return empty;
+    }
+  };
+  const bond = await attempt('bond renewal', runBondRenewalSweep, { sent: 0 });
+  const ownership = await attempt('acceptance ownership', runAcceptanceOwnershipSweep, { attached: 0, checked: 0 });
+  const acceptanceCopies = await attempt('acceptance copies', runAcceptanceCopySweep, { sent: 0, checked: 0, escalated: 0 });
+  return { bondRenewalsSent: bond.sent, acceptanceOwnershipAttached: ownership.attached, acceptanceCopiesSent: acceptanceCopies.sent };
+}
+
+module.exports = { runDailySweeps, runBondRenewalSweep, runAcceptanceCopySweep, runAcceptanceOwnershipSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };

@@ -1349,6 +1349,24 @@ const gates = {
   // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
   estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
 
+  // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
+  // renders a one-line authorization + inline "View terms" drawer directly
+  // above Accept (same steps, no extra page) and the accept route records
+  // the verbatim text/version, time, IP and device on `estimate_acceptances`
+  // + stamps estimates.terms_version / customers.accepted_terms_version.
+  // Off ⇒ /data payload and the accept flow are byte-identical to today and
+  // nothing is recorded (nothing was shown). Counsel reviews the copy once
+  // before this flips. Kill switch: unset GATE_ESTIMATE_ACCEPTANCE_TERMS.
+  //
+  // Rollout is two-step on the same variable: `true` shows + records, and
+  // an accept that carries NO attestation (a tab loaded before the flip —
+  // legacy SSR page or the previous bundle) still accepts unrecorded, so no
+  // live tokenized flow is stranded; `required` (flip once every open tab
+  // has had time to reload) refuses an unattested accept with the
+  // reloadable 409 too, so every acceptance under the gate has its record.
+  estimateAcceptanceTerms: ['true', 'required'].includes(process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS),
+  estimateAcceptanceTermsRequired: process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS === 'required',
+
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to
   // 100% of customers. Glass is now the unconditional theme on every customer
