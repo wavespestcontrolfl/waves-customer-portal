@@ -249,6 +249,8 @@ t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
                                       //   'payment_ambiguous','mint_not_started','sandbox_replay' )) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
+t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
+t.uuid('lease_token');                // the claim lease that holds this slot; the sweep releases only slot_reserved rows whose lease expired
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
@@ -316,7 +318,7 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.integer('path_revision').notNullable();     // the path's revision_<dimension of this approval's action> at approval time (§3.2) — never the global counter
-t.text('decision_inputs_hash').notNullable(); // hash of the §6.3 inputs at approval (spam_score, score, confidence, estimated/renewal cents, flags); a mismatch at claim time invalidates the approval
+t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding}; communication = {link_type, expected_rel, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence}. A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
 t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
