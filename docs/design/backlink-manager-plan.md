@@ -141,7 +141,7 @@ t.uuid('path_id').references('seo_link_acquisition_paths.id');
 t.string('authority');            // authority level under which this placement was/will be acted on
 t.text('source_detail');
 t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
-t.timestamp('renews_at');         // = paid_through; written ONLY when a purchase reaches `charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
+t.timestamp('renews_at');         // = paid_through; written atomically when a purchase reaches `charged` OR `reconciled_charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
@@ -432,7 +432,12 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
   under the same lock/budget/idempotency rules — or lets the listing lapse
-  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal never charges
+  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal reservation is
+  claimable: the claim predicate's "no open purchase" rule excludes `submitting` and
+  `ambiguous` purchases and any `reserved` purchase held by another lease, but the
+  `deterministic_runner` may claim the placement whose matching `renewal` reservation is
+  unleased (the lease then binds that purchase row); the paid term written on
+  `charged`/`reconciled_charged` advances `renews_at`. A renewal never charges
   without its own reservation and, where the merchant does not support one-off renewal, its
   own owner approval.
 - **A reservation is charged against the month it is submitted in.** The
@@ -447,8 +452,12 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
   exposes the card to the provider. Where the merchant supports it the
   `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
-  transitions are `charged` (success reported with `merchant_ref`), `voided` (provider
-  proves the merchant rejected before capture), or `ambiguous`.
+  transitions are `charged` (success reported with `merchant_ref`) or `ambiguous` — **every
+  unsuccessful or unclear post-exposure result is `ambiguous`**, including a merchant
+  "declined"/"error" page (a merchant can authorize and fail at the application layer, then
+  capture later). `voided` exists only for failures **before** the card was exposed
+  (`reserved` state). Nothing that saw the card can release budget or start a new generation
+  except through `reconciled_not_charged` (card closed + issuer-confirmed no capture/pending).
 - **Crash = ambiguous, never re-submit; a crash before the card was exposed = voided.** A
   worker that dies after `submitting` leaves the row in `submitting`; the hourly lease-expiry
   sweep moves any `submitting` row older than the lease TTL to `ambiguous` (closing the card
@@ -513,8 +522,9 @@ together:
   `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row; the path's lane
   gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
-  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no open purchase
-  (`reserved`/`submitting`/`ambiguous`) exists for the placement; and the provider requesting
+  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no `submitting`/`ambiguous`
+  purchase exists for the placement and no `reserved` purchase is bound to another lease
+  (an unleased `renewal` reservation is claimable by the runner, §6.3); and the provider requesting
   the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
   the policy has not authorized cannot be leased by any caller.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
