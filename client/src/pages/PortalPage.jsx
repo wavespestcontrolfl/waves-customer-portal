@@ -5305,7 +5305,10 @@ function BillingTab({ customer, refreshCustomer }) {
     setAutoApplyCredit(next);
     try {
       await api.updateAccountCreditPreference(next);
-      if (typeof refreshCustomer === 'function') refreshCustomer();
+      // Awaited so a second flip cannot start before the authoritative
+      // /auth/me reload lands (out-of-order reloads would show the
+      // opposite of the persisted preference).
+      if (typeof refreshCustomer === 'function') await refreshCustomer();
     } catch (err) {
       setAutoApplyCredit(!next);
       console.error('account-credit preference update failed', err);
@@ -6507,7 +6510,7 @@ function BillingTab({ customer, refreshCustomer }) {
         </div>
       )}
 
-      {(totalCredits > 0 || credits.length > 0) && (
+      {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Adjustments</div>
