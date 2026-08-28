@@ -135,3 +135,20 @@ describe('markLive on an un-pitched prospect (lost-link recovery row under daily
     expect(updates[0].patch).not.toHaveProperty('outreach_status');
   });
 });
+
+describe('verifier reconcile evidence is scan-tracked only', () => {
+  test('reconcileFromProfile and reconcileByDomain both exclude GSC-export rows (historical, cannot prove liveness) via the shared scanTrackedOnly predicate', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'seo', 'link-prospect-verifier.js'), 'utf8');
+    expect(src).toMatch(/const scanTrackedOnly = \(qb\) => qb\.whereNull\('discovery_source'\)\.orWhere\('discovery_source', 'dataforseo'\);/);
+    const fromProfile = src.slice(src.indexOf('async function reconcileFromProfile'), src.indexOf('async function reconcileByDomain'));
+    const byDomain = src.slice(src.indexOf('async function reconcileByDomain'), src.indexOf('const OMEGA_MAX_ATTEMPTS'));
+    for (const block of [fromProfile, byDomain]) {
+      const iStatus = block.indexOf(".where({ status: 'active' })");
+      const iTracked = block.indexOf('.where(scanTrackedOnly)');
+      expect(iStatus).toBeGreaterThan(-1);
+      expect(iTracked).toBeGreaterThan(iStatus);
+    }
+  });
+});

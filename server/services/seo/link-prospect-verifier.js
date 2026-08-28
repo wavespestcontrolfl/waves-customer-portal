@@ -160,10 +160,17 @@ function firstSeenOnOrAfter(row, floorDate) {
 // live_url. Active-only: a 'disavowed' or 'lost' row must not promote a prospect to
 // live (loss is then detected by the crawl/wasLive fallback in verifyOne, which is
 // more authoritative than a possibly-stale scan row).
+// Only SCAN-TRACKED rows are evidence a link is live today: a GSC-export row
+// is historical (it stays active forever and is excluded from loss detection
+// for the same reason), so it must never promote a prospect — least of all a
+// lost_recovery row whose loss was just crawl-verified.
+const scanTrackedOnly = (qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo');
+
 async function reconcileFromProfile(prospect) {
   const liveStripped = normalizeComparableUrl(prospect.live_url);
   const rows = await db('seo_backlinks')
     .where({ status: 'active' })
+    .where(scanTrackedOnly)
     .whereRaw(`${SOURCE_URL_COMPARABLE_SQL} = ?`, [liveStripped.toLowerCase()])
     .orderBy('last_checked', 'desc')
     .limit(10);
@@ -202,6 +209,7 @@ async function reconcileByDomain(prospect) {
   const rows = await db('seo_backlinks')
     // Active only — never promote/index from a 'disavowed' (or 'lost') link.
     .where({ status: 'active' })
+    .where(scanTrackedOnly)
     .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [dom])
     .orderBy('last_checked', 'desc')
     .limit(25);
