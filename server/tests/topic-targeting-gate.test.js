@@ -239,10 +239,12 @@ describe('entity rarity is judged within the candidate category', () => {
     expect(r.findings[0].owners).toEqual(['/termite/advion-termite-bait/']);
   });
 
-  test('unknown candidate category falls back to corpus-wide rarity (conservative pool, global frequency)', () => {
+  test('unknown candidate category is judged against EVERY category and the owners are unioned (hook, PR codex r5 push)', () => {
+    // A global frequency (advion in 4 posts > RARE_ENTITY_DF_MAX) used to hide every owner here.
     const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'advion station cost' }, { corpus });
-    expect(r.ok).toBe(true);
-    expect(r.entity_owners).toEqual([]);
+    expect(r.ok).toBe(false);
+    expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
+    expect(r.findings[0].owners).toEqual(expect.arrayContaining(['/termite/advion-termite-bait/']));
   });
 
   test('index caches one frequency table per category', () => {
@@ -561,7 +563,10 @@ describe('hook (PR codex r5 push): state names / leading abbreviations before a 
     const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'advion termite bait review', title: 'Is Advion Termite Bait Worth It?', slug: '/advion-termite-bait-review/' }, { corpus });
     expect(r.category).toBeNull();
     expect(r.ok).toBe(false);
-    expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['advion'], owners: ['/termite/advion-termite-bait/'] });
+    expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['advion'] });
+    // The termite owner (hidden by a global pass) is found; the pest posts,
+    // each built around Advion in their own category, are owners too.
+    expect(r.findings[0].owners).toEqual(expect.arrayContaining(['/termite/advion-termite-bait/']));
   });
 });
 
