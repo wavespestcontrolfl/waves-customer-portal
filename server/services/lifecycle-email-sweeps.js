@@ -448,10 +448,72 @@ async function runAcceptanceCopySweep() {
   return { sent, checked, escalated };
 }
 
-async function runDailySweeps() {
-  const bond = await runBondRenewalSweep();
-  const acceptanceCopies = await runAcceptanceCopySweep();
-  return { bondRenewalsSent: bond.sent, acceptanceCopiesSent: acceptanceCopies.sent };
+// Acceptance ownership reconciliation (pre-push Codex P1): the /book fan-out
+// for a customer-less accepted estimate is best-effort inside the booking
+// request, so a transient failure there must not leave the record unowned
+// forever. Every acceptance row still without a customer is re-examined
+// daily: if its estimate has since gained a customer, the row and the
+// customer stamp follow; if a booking that proved ownership stamped
+// scheduled_services.source_estimate_id, the shared claim runs again.
+async function runAcceptanceOwnershipSweep() {
+  if (!(await db.schema.hasTable('estimate_acceptances'))) return { attached: 0, checked: 0 };
+  const { attachAcceptanceOwnership } = require('./estimate-acceptance-record');
+  const rows = await db('estimate_acceptances').whereNull('customer_id').select('id', 'estimate_id', 'terms_version');
+  let attached = 0;
+  let checked = 0;
+  const seen = new Set();
+  for (const row of rows) {
+    if (seen.has(row.estimate_id)) continue;
+    seen.add(row.estimate_id);
+    checked += 1;
+    try {
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'status', 'terms_version');
+      if (!estimate) continue;
+      let customerId = estimate.customer_id || null;
+      if (!customerId) {
+        const booked = await db('scheduled_services').where({ source_estimate_id: row.estimate_id }).whereNotNull('customer_id').first('customer_id');
+        customerId = booked?.customer_id || null;
+      }
+      if (!customerId) continue;
+      if (!estimate.customer_id) {
+        if ((await attachAcceptanceOwnership(db, { estimateId: row.estimate_id, customerId })).attached) attached += 1;
+        continue;
+      }
+      // Estimate already owned (accept-time customer or a later admin link):
+      // bring the acceptance rows and the customer stamp along.
+      await db.transaction(async (trx) => {
+        await trx('estimate_acceptances').where({ estimate_id: row.estimate_id }).whereNull('customer_id').update({ customer_id: customerId });
+        if (estimate.terms_version) {
+          await trx('customers').where({ id: customerId })
+            .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', estimate.terms_version))
+            .update({ accepted_terms_version: estimate.terms_version });
+        }
+      });
+      attached += 1;
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] acceptance ownership reconcile failed for estimate ${row.estimate_id}: ${err.message}`);
+    }
+  }
+  if (attached) logger.info(`[lifecycle-sweeps] attached ${attached} acceptance record(s) to their customer (${checked} checked)`);
+  return { attached, checked };
 }
 
-module.exports = { runDailySweeps, runBondRenewalSweep, runAcceptanceCopySweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };
+// Each sweep is attempted every day regardless of the others (pre-push Codex
+// P1): a persistent bond-sync failure must not silently stall the acceptance
+// copy promise, and vice versa.
+async function runDailySweeps() {
+  const attempt = async (name, fn, empty) => {
+    try {
+      return await fn();
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] ${name} failed: ${err.message}`);
+      return empty;
+    }
+  };
+  const bond = await attempt('bond renewal', runBondRenewalSweep, { sent: 0 });
+  const ownership = await attempt('acceptance ownership', runAcceptanceOwnershipSweep, { attached: 0, checked: 0 });
+  const acceptanceCopies = await attempt('acceptance copies', runAcceptanceCopySweep, { sent: 0, checked: 0, escalated: 0 });
+  return { bondRenewalsSent: bond.sent, acceptanceOwnershipAttached: ownership.attached, acceptanceCopiesSent: acceptanceCopies.sent };
+}
+
+module.exports = { runDailySweeps, runBondRenewalSweep, runAcceptanceCopySweep, runAcceptanceOwnershipSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };

@@ -132,7 +132,8 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       // errors out of the logs and log a redacted reason below.
       suppressProviderErrorLog: true,
     });
-    logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
+    if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
+    else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);
     // The copy went out (a deduped sent-ish row counts): stamp fulfilment so
     // the catch-up sweep stops retrying this acceptance.
     if (acceptanceNote && result?.sent) {

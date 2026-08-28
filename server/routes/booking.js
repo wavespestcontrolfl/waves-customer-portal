@@ -2054,7 +2054,18 @@ async function createSelfBooking(payload = {}) {
         // acceptance record + terms stamp. Only that case touches the DB.
         if (!sourceEstimateRow.customer_id && sourceEstimateRow.status === 'accepted' && sourceEstimateRow.terms_version) {
           const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
-          await attachAcceptanceOwnership(db, { estimateId: srcEstIdStr, customerId: custId });
+          const claim = await attachAcceptanceOwnership(db, { estimateId: srcEstIdStr, customerId: custId });
+          if (!claim.attached && claim.outcome === 'not_claimable') {
+            // A concurrent booking won the claim (or the estimate is no
+            // longer unowned) — this booking must not carry the link (GH
+            // Codex r5 P2): proceed unlinked, same as a failed ownership match.
+            sourceEstimateId = null;
+            logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} was claimed by another customer — booking proceeds unlinked`);
+          } else if (!claim.attached) {
+            // Transient failure: keep the link — the daily acceptance-
+            // ownership sweep reconciles from scheduled_services.source_estimate_id.
+            logger.error(`[booking:confirm] acceptance ownership fan-out failed for estimate ${srcEstIdStr} → customer ${custId}; the daily sweep will reconcile`);
+          }
         }
       } else {
         logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} does not belong to booking customer ${custId} — booking proceeds unlinked`);

@@ -271,7 +271,7 @@ describe('attachAcceptanceOwnership (customer-less accept, later /book owner)', 
     jest.doMock('../models/db', () => jest.fn());
     const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
     const { dbh, updates, tx } = fakeDb([{ id: 'e1', terms_version: 'v2026-09' }]);
-    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(true);
+    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toEqual({ attached: true });
     expect(tx()).toBe(1);
     expect(updates.map((u) => u.table)).toEqual(['estimates', 'estimate_acceptances', 'customers']);
     expect(updates[0].patch).toEqual({ customer_id: 'c1' });
@@ -283,7 +283,11 @@ describe('attachAcceptanceOwnership (customer-less accept, later /book owner)', 
     jest.doMock('../models/db', () => jest.fn());
     const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
     const { dbh, updates } = fakeDb([]);
-    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(false);
+    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toEqual({ attached: false, outcome: 'not_claimable' });
     expect(updates.map((u) => u.table)).toEqual(['estimates']);
+    // A thrown query is an 'error' outcome (the daily sweep reconciles), never a lost claim.
+    const boom = () => { throw new Error('db down'); };
+    boom.transaction = async () => { throw new Error('db down'); };
+    expect(await attachAcceptanceOwnership(boom, { estimateId: 'e1', customerId: 'c1' })).toEqual({ attached: false, outcome: 'error' });
   });
 });

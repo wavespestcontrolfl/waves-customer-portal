@@ -3,6 +3,7 @@ import { WAVES_ACCOUNT_MANAGER_FIRST_NAME, WAVES_FL_LICENSE_LINE, WAVES_SUPPORT_
 import { fmtMoney } from '../lib/money';
 import { glassCtaMicroForKeys, glassRowInclusions, glassServiceSlug } from '../lib/estimate-glass-copy';
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
+import { formatETDateTime } from '../lib/timezone';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -32,13 +33,10 @@ const LINE = '#C9CED4';
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
 
+// Shared ET formatter (lib/timezone) — no parallel date utility here.
 function formatAcceptedAt(value) {
-  if (!value) return '';
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleString('en-US', {
-    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short',
-  });
+  if (!value || Number.isNaN(new Date(value).getTime())) return '';
+  return formatETDateTime(value, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' });
 }
 
 // Same precedence as ServiceReportDocument.portalBase: the headless renderer

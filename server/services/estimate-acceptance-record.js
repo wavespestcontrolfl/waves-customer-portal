@@ -54,8 +54,13 @@ async function acceptanceRecordForEstimate(estimate, { strict = false } = {}) {
  * no-op unless the estimate is accepted with a record and still unowned
  * (GH Codex #3574 r4 P2). Never throws — the booking must not fail on it.
  */
+// Returns { attached: true } when this request won the claim,
+// { attached: false, outcome: 'not_claimable' } when the estimate is not an
+// unowned accepted+recorded estimate (someone else owns it, or nothing to
+// attach), and { attached: false, outcome: 'error' } on a failure the daily
+// ownership sweep reconciles later.
 async function attachAcceptanceOwnership(dbh, { estimateId, customerId }) {
-  if (!estimateId || !customerId) return false;
+  if (!estimateId || !customerId) return { attached: false, outcome: 'not_claimable' };
   try {
     // ONE transaction, and the claim is the guarded UPDATE itself
     // (customer_id IS NULL … RETURNING): two concurrent bookings can both
@@ -70,7 +75,7 @@ async function attachAcceptanceOwnership(dbh, { estimateId, customerId }) {
         .update({ customer_id: customerId })
         .returning(['id', 'terms_version']);
       const won = Array.isArray(claimed) ? claimed[0] : null;
-      if (!won) return false;
+      if (!won) return { attached: false, outcome: 'not_claimable' };
       const termsVersion = won.terms_version;
       await trx('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
       if (termsVersion) {
@@ -78,12 +83,12 @@ async function attachAcceptanceOwnership(dbh, { estimateId, customerId }) {
           .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', termsVersion))
           .update({ accepted_terms_version: termsVersion });
       }
-      return true;
+      return { attached: true };
     };
     return typeof dbh.transaction === 'function' ? await dbh.transaction(run) : await run(dbh);
   } catch (e) {
     logger.warn(`[estimate-acceptance] ownership attach failed for estimate ${estimateId} → customer ${customerId}: ${e.message}`);
-    return false;
+    return { attached: false, outcome: 'error' };
   }
 }
 

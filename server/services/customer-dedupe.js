@@ -3429,33 +3429,15 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // vacating to null here. Pre-upgrade journals lack the key and keep the
     // old behavior (clear-to-null / stay-cleared).
     const priorValues = recorded.winner_prior_values || {};
-    // accepted_terms_version (GH Codex #3574 r4 P2): the merge may have
-    // folded the loser's version onto the winner (backfill + journaled
-    // prior). An acceptance the WINNER made since the merge is not in the
-    // journal and stays on the winner, so the generic clear/restore would
-    // erase it; treat it as a changed value and restore the newest of the
-    // pre-merge prior and any post-merge acceptance.
-    if (Object.prototype.hasOwnProperty.call(backfills, 'accepted_terms_version')
-      || Object.prototype.hasOwnProperty.call(priorValues, 'accepted_terms_version')) {
-      let postMergeLatest = null;
-      try {
-        const rows = await trx('estimate_acceptances')
-          .where({ customer_id: winnerId })
-          .where('accepted_at', '>', journal.created_at)
-          .select('terms_version');
-        postMergeLatest = rows.map((r) => String(r.terms_version || '')).filter(Boolean).sort().pop() || null;
-      } catch (e) {
-        // Fail CLOSED (pre-push Codex P1): continuing into the generic
-        // clear/restore could erase a newer post-merge acceptance.
-        refuse(`Could not verify the kept customer's acceptance history (${e.message}) — undo refused.`);
-      }
-      if (postMergeLatest) {
-        const prior = priorValues.accepted_terms_version ? String(priorValues.accepted_terms_version) : '';
-        winnerPatch.accepted_terms_version = postMergeLatest > prior ? postMergeLatest : prior;
-        delete backfills.accepted_terms_version;
-        delete priorValues.accepted_terms_version;
-      }
-    }
+    // accepted_terms_version (GH Codex #3574 r4/r5, pre-push P1): the merge
+    // may have folded the loser's version onto the winner (backfill +
+    // journaled prior). The generic clear/restore below runs as usual; the
+    // FINAL word is derived at the end of this transaction from the
+    // acceptance rows that remain winner-owned once the journaled rows are
+    // back on the loser — commit-safe (no timestamps), so an acceptance the
+    // winner made since the merge is never erased.
+    const acceptanceStampTouched = Object.prototype.hasOwnProperty.call(backfills, 'accepted_terms_version')
+      || Object.prototype.hasOwnProperty.call(priorValues, 'accepted_terms_version');
     // The ADDRESS is an atomic tuple (r27): the forward merge backfills it
     // whole, and clearing its unchanged members while preserving one an
     // operator edited (a corrected ZIP) would strand a partial mixed
@@ -3960,6 +3942,25 @@ async function revertMerge({ journalId, performedBy, performedById }) {
             .merge({ monthly_rate: row.monthly_rate, updated_at: new Date() });
         }
       });
+    }
+
+    if (acceptanceStampTouched) {
+      let remainingLatest = null;
+      try {
+        const rows = await trx('estimate_acceptances').where({ customer_id: winnerId }).select('terms_version');
+        remainingLatest = rows.map((r) => String(r.terms_version || '')).filter(Boolean).sort().pop() || null;
+      } catch (e) {
+        // Fail CLOSED: an undo that cannot verify the kept customer's
+        // acceptance history could leave a stale stamp behind.
+        refuse(`Could not verify the kept customer's acceptance history (${e.message}) — undo refused.`);
+      }
+      if (remainingLatest) {
+        const current = await trx('customers').where({ id: winnerId }).first('accepted_terms_version');
+        const cur = current?.accepted_terms_version ? String(current.accepted_terms_version) : '';
+        if (remainingLatest > cur) {
+          await trx('customers').where({ id: winnerId }).update({ accepted_terms_version: remainingLatest, updated_at: trx.fn.now() });
+        }
+      }
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({
