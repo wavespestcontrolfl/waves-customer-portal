@@ -691,7 +691,7 @@ t.uuid('approval_id');                              // → seo_link_approvals (d
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
-t.jsonb('merchant_binding').notNullable();          // IMMUTABLE at reservation: { checkout_origin, processor: { host, merchant_account_id } — the processor-level RECIPIENT identity observed at investigation (Stripe account/`acct_…` or checkout session's account, PayPal merchant id, etc.), issuer_merchant_descriptor } — a processor HOST alone never binds anything (any merchant can sit on stripe.com); validated immediately before mint AND before submit against the LIVE checkout (origin + the processor merchant/account id read from the live checkout session/form); mismatch or unreadable id ⇒ voided (pre-exposure) or refused
+t.jsonb('merchant_binding');                        // IMMUTABLE at reservation, copied from the path: { checkout_origin, processor: { host, merchant_account_id? }, issuer_merchant_descriptor? }. NULLABLE only for `manual_charged` rows (the owner paid outside the system; the receipt is the record). For AUTOMATED purchases it is REQUIRED and must satisfy ONE of two enforcement modes, fail-closed: (a) `processor.merchant_account_id` present — validated immediately before mint AND before submit against the LIVE checkout (origin + the merchant/account id read from the live session/form); or (b) `issuer_merchant_descriptor` present AND the issuer actually minted the single-use card locked to that descriptor (`issuer_lock_applied=true` recorded at mint) — then the live check validates origin only. A processor HOST alone never binds anything; neither mode satisfiable ⇒ `instrument_unavailable` (pre-exposure void) and the path routes to OWNER_MANUAL_PAYMENT
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
@@ -747,8 +747,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   changed domain, an injected form — refuses (`voided` if pre-exposure, else `ambiguous`
   with the card closed). The recipient is bound at the **processor merchant/account level**
   (the merchant's Stripe/PayPal/etc. account identifier captured at investigation and
-  re-read from the live checkout), never merely at the processor host — a redirect to a
-  different merchant on the same processor fails the binding. Enforcement is
+  re-read from the live checkout, OR the issuer's descriptor lock actually applied at mint),
+  never merely at the processor host — a redirect to a different merchant on the same
+  processor fails the binding. Enforcement is
   **fail-closed on two requirements, at least one of which must hold or no automated
   purchase is made**: (1) the issuer mints the single-use card with a merchant lock to that
   identity, or (2) the broker can read and verify the processor merchant/account id from
