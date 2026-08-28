@@ -645,6 +645,13 @@ router.post('/sms', async (req, res) => {
           media: inboundMedia,
         }),
       }).catch(() => {});
+      if (!quietReaction) {
+        // Same SELECT→INSERT window as the general path: if the thread was
+        // read while this legacy row was being written, mirror it now.
+        const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+          .then((r) => r?.is_read === true).catch(() => false);
+        if (readNow) await db('sms_log').where({ twilio_sid: MessageSid, direction: 'inbound' }).update({ is_read: true }).catch(() => {});
+      }
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
       if (!quietReaction && customer && !isAiNumber && (numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking')) {
