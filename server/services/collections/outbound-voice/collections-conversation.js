@@ -1137,6 +1137,26 @@ class CollectionsConversation {
     return 'That did not match. Ask them to try the other detail (street number or billing ZIP). Do not hint at any value.';
   }
 
+  // "Settled" is a stronger claim than "not collectible right now": the
+  // eligible set DROPS rows on resolve failures and dunning-stopped
+  // invoices. Only a raw zero-open-rows read proves it. Returns 'settled'
+  // | 'open' (a surviving raw row) | 'unknown' (probe failed).
+  async _settledProof() {
+    try {
+      const rawOpen = await db('invoices')
+        .where({ customer_id: this._ctx.customer.id })
+        .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
+        .whereNull('payer_id')
+        .whereNull('payer_statement_id')
+        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+        .first('id');
+      return rawOpen ? 'open' : 'settled';
+    } catch (err) {
+      logger.error(`[collections-voice] settled-claim probe failed callSid=${this.callSid}: ${err.message}`);
+      return 'unknown';
+    }
+  }
+
   async _toolGetBalance() {
     if (!this.verified) return 'Refused: the customer is not verified.';
     // Re-read at DISCLOSURE time (gh prb-r7): the init-time snapshot ages
@@ -1173,20 +1193,11 @@ class CollectionsConversation {
       // zero-open-rows read earns the settled copy; a surviving raw row
       // (resolution failure, dunning-stopped) is indeterminate and
       // discloses nothing.
-      try {
-        const rawOpen = await db('invoices')
-          .where({ customer_id: this._ctx.customer.id })
-          .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
-          .whereNull('payer_id')
-          .whereNull('payer_statement_id')
-          .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
-          .first('id');
-        if (rawOpen) {
-          return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
-        }
-      } catch (err) {
-        logger.error(`[collections-voice] settled-claim probe failed callSid=${this.callSid}: ${err.message}`);
-        return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
+      const proof = await this._settledProof();
+      if (proof !== 'settled') {
+        return proof === 'open'
+          ? 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.'
+          : 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
       }
       // The balance genuinely cleared between dial and now — say so and wrap up.
       this.state = 'RESOLUTION';
@@ -1630,7 +1641,12 @@ class CollectionsConversation {
         }
         const remaining = refreshed.fresh;
         if (!remaining.length) {
-          return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
+          // An EMPTY eligible set is not proof of settlement (hook r13 —
+          // same bar as disclosure): only zero raw open rows earns it.
+          if ((await this._settledProof()) === 'settled') {
+            return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
+          }
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be verified. Say the office will follow up — do NOT state a figure and do NOT say the account is settled.';
         }
         if (!refreshed.callable) {
           return `No text was needed: account credit covered that invoice in full. ${this._notCallableCopy(refreshed.notCallable)}`;

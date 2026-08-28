@@ -42,7 +42,8 @@ function normalizedCents(value) {
 }
 
 // Denials that are unknowns or computed FROM the eligible balance — the only
-// ones an incomplete read can excuse.
+// ones an INCOMPLETE read can excuse (standalone, a pilot_* / no-balance
+// denial is definitive: paid, reassigned, or aged out — the case lapses).
 function isTransientOrBalanceDerived(reason) {
   const r = String(reason).split(':')[0];
   return r === 'policy_evaluation_error' || r === 'balance_read_incomplete' || r === 'no_eligible_balance' || r.startsWith('pilot_');
@@ -172,9 +173,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // is itself derived from that unreliable balance (hook r12): a hard
         // flag or suppression in the same verdict (payment plan, do-not-
         // call, commercial, consent…) is definitive and lapses the case.
-        if (verdict.denialReasons.every(isTransientOrBalanceDerived)) {
-          stillEligible.add(customerId);
-        }
+        const reasons = verdict.denialReasons.map((r) => String(r).split(':')[0]);
+        const preserve = reasons.includes('policy_evaluation_error')
+          || (reasons.includes('balance_read_incomplete') && reasons.every(isTransientOrBalanceDerived));
+        if (preserve) stillEligible.add(customerId);
         continue;
       }
       stillEligible.add(customerId);

@@ -1560,11 +1560,21 @@ describe('prb-r18', () => {
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
     loadEligibleInvoices.mockResolvedValueOnce(rest).mockResolvedValueOnce([]);
     const again = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
-    expect(again).toMatch(/account is settled/);
+    expect(again).toMatch(/account is settled/); // zero raw open rows (the default chain) proves it
     expect(convo.payLinkSent).toBe(true);
-    // Neither attempt texted anything — both reservations are released so the
+    // An empty ELIGIBLE set with a surviving raw open row (dunning-stopped, resolve failure) is NOT settled.
+    convo.payLinkSent = false;
+    const prevDb = db.getMockImplementation();
+    db.mockImplementation((t) => (t === 'invoices' ? chain({ first: { id: 'inv-stopped' } }) : prevDb(t)));
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockResolvedValueOnce([]);
+    const unproven = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(unproven).toMatch(/could not be verified/);
+    expect(unproven).toMatch(/do NOT say the account is settled/);
+    db.mockImplementation(prevDb);
+    // None of the attempts texted anything — every reservation is released so the
     // retry (and other outreach) is not fenced by a phantom contact.
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2);
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(3);
     expect(ContactLedger.markSendFailed).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'ledger-sms-1' }), expect.objectContaining({ code: 'covered_by_credit', never_contacted: true }));
     // The release stamp is checked with one retry; if it cannot be made durable the latch stays CLOSED.
     convo.payLinkSent = false;
