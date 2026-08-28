@@ -942,29 +942,11 @@ router.post('/messages/read', async (req, res, next) => {
       return res.status(400).json({ error: 'readBefore required when marking a conversation read' });
     }
 
-    const now = new Date();
-    let q = db('messages')
-      .where({ channel: 'sms', direction: 'inbound' })
-      .andWhere(function unreadOnly() {
-        this.where({ is_read: false }).orWhereNull('is_read');
-      });
-    q = q.andWhere(function byMessageOrConversation() {
-      if (ids.length) this.whereIn('id', ids);
-      if (conversationIds.length) {
-        this.orWhere(function visibleConversationRows() {
-          this.whereIn('conversation_id', conversationIds)
-            .where('created_at', '<=', readBefore);
-        });
-      }
+    const { markInboundSmsRead } = require('../services/inbound-sms-read');
+    const { updated, notificationsCleared } = await markInboundSmsRead({
+      messageIds: ids, conversationIds, readBefore, adminUserId: req.technicianId || null, role: req.techRole,
     });
-    const updated = await q.update({
-      is_read: true,
-      read_at: now,
-      read_by_admin_user_id: req.technicianId || null,
-      updated_at: now,
-    });
-
-    res.json({ success: true, updated });
+    res.json({ success: true, updated, notificationsCleared });
   } catch (err) { next(err); }
 });
 

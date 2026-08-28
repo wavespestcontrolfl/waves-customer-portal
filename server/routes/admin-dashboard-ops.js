@@ -53,12 +53,9 @@ router.get('/inbox', async (req, res, next) => {
 /* ── 2. POST /inbox/:id/read — mark message as read ── */
 router.post('/inbox/:id/read', async (req, res, next) => {
   try {
-    await db('messages').where({ id: req.params.id }).update({
-      is_read: true,
-      read_at: new Date(),
-      read_by_admin_user_id: req.technicianId || null,
-      updated_at: new Date(),
-    });
+    // Shared read writer: mirrors sms_log, strips reset markers, clears the
+    // thread bell — same as opening the thread in Communications.
+    await require('../services/inbound-sms-read').markInboundSmsRead({ messageIds: [req.params.id], adminUserId: req.technicianId || null, role: req.techRole });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -106,12 +103,7 @@ router.post('/inbox/:id/reply', async (req, res, next) => {
       return res.status(422).json({ error: result.reason || result.code || 'SMS send blocked/failed' });
     }
 
-    await db('messages').where({ id: req.params.id }).update({
-      is_read: true,
-      read_at: new Date(),
-      read_by_admin_user_id: req.technicianId || null,
-      updated_at: new Date(),
-    });
+    await require('../services/inbound-sms-read').markInboundSmsRead({ messageIds: [req.params.id], adminUserId: req.technicianId || null, role: req.techRole });
 
     res.json({ success: true, sid: result?.providerMessageId });
   } catch (err) { next(err); }
