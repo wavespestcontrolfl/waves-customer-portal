@@ -163,8 +163,10 @@ t.timestamp('superseded_at');
 // NEW work can start on it), and the placement records `pending_path_id` = new path (durable FK on seo_link_prospects,
 // nullable) instead of being repointed; purchases/reconciliation are explicitly permitted to complete against a
 // superseded path (state-locked transitions check the purchase's own path_id, not "non-superseded"). When the
-// purchase settles, the settlement transaction writes the paid term from the purchase's snapshot, repoints
-// `path_id := pending_path_id`, clears it, and lets the bridge re-decide. After a restart the sweep finds every
+// purchase settles, the settlement transaction repoints `path_id := pending_path_id`, clears it, and lets the bridge
+// re-decide; it writes the paid term from the purchase's snapshot ONLY when the settlement is a charge
+// (`charged` / `reconciled_charged` / `manual_charged`) — `reconciled_not_charged` completes the repoint and frees a
+// new generation but never grants a term. After a restart the sweep finds every
 // placement with a non-null pending_path_id and no open purchase and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
 // different path. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
 // Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
@@ -254,7 +256,7 @@ t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'payment_ambiguous','mint_not_started','sandbox_replay' )) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
-t.uuid('lease_token');                // the claim lease that holds this slot; the sweep releases only slot_reserved rows whose lease expired
+t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
@@ -692,7 +694,7 @@ t.text('merchant_ref');                             // merchant order/receipt id
 t.jsonb('merchant_binding').notNullable();          // IMMUTABLE at reservation: { checkout_origin, processor: { host, merchant_account_id } — the processor-level RECIPIENT identity observed at investigation (Stripe account/`acct_…` or checkout session's account, PayPal merchant id, etc.), issuer_merchant_descriptor } — a processor HOST alone never binds anything (any merchant can sit on stripe.com); validated immediately before mint AND before submit against the LIVE checkout (origin + the processor merchant/account id read from the live checkout session/form); mismatch or unreadable id ⇒ voided (pre-exposure) or refused
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
-t.uuid('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease: every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
+t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
 
