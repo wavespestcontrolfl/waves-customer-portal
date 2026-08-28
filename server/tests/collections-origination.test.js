@@ -72,6 +72,7 @@ const ALLOWED_VERDICT = {
   denialReasons: [],
   eligibleInvoiceIds: ['inv-1'],
   eligibleBalanceCents: 25800,
+  eligibleInvoiceCents: { 'inv-1': 25800 },
 };
 
 const calls = [];
@@ -185,7 +186,7 @@ test('policy denial at dial time ⇒ case CANCELLED, never dialed', async () => 
 // a covered invoice leaving the set (paid/credited/reassigned) still cancels.
 test('a new invoice joining the account re-snapshots the case pre-dial and the call proceeds', async () => {
   ContactPolicy.isWithinCallWindow.mockReturnValue(false); // stop at the claim recheck after the re-snapshot
-  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455 });
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455, eligibleInvoiceCents: { 'inv-1': 25800, 'inv-2': 4455 } });
   const resnap = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), resnap],
@@ -199,8 +200,24 @@ test('a new invoice joining the account re-snapshots the case pre-dial and the c
   expect(resnap._updated.current_state).toBeUndefined(); // not cancelled
 });
 
+// Hook P1: net GROWTH must not hide a payment on an approved invoice — the
+// approved invoices' own remainder has to equal the snapshot exactly.
+test('an approved invoice paid down while a new one joined ⇒ cancelled (predial_balance_changed), never dialed', async () => {
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 12900 + 20000, eligibleInvoiceCents: { 'inv-1': 12900, 'inv-2': 20000 } });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.reason).toBe('snapshot_changed');
+  expect(stateChain._updated.current_state).toBe('cancelled');
+  expect(stateChain._updated.hold_reason).toBe('predial_balance_changed');
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
 test('a covered invoice leaving the set ⇒ cancelled (predial_invoice_set_changed)', async () => {
-  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-9'], eligibleBalanceCents: 30000 });
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-9'], eligibleBalanceCents: 30000, eligibleInvoiceCents: { 'inv-9': 30000 } });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
@@ -213,7 +230,7 @@ test('a covered invoice leaving the set ⇒ cancelled (predial_invoice_set_chang
 });
 
 test('balance drift vs approved snapshot ⇒ cancelled, never dialed', async () => {
-  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 19900 });
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 19900, eligibleInvoiceCents: { 'inv-1': 19900 } });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],

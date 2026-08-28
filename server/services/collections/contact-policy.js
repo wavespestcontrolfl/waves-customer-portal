@@ -227,6 +227,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     denialReasons: [],
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
+    eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
     nextEligibleAt: null,
     consentEvidence: null,
     activeHolds: [],
@@ -284,10 +285,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // prb-r1.) Historical rationale for the arms lives on the loader.
     // Legacy 'unpaid' status (codex r-gh2)
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
-    result.eligibleBalanceCents = eligible.reduce(
-      (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
-      0,
+    result.eligibleInvoiceCents = Object.fromEntries(
+      eligible.map((inv) => [String(inv.id), Math.round(invoiceAmountDue(inv) * 100)]),
     );
+    result.eligibleBalanceCents = Object.values(result.eligibleInvoiceCents).reduce((sum, c) => sum + c, 0);
     // Dues-only carve-out (codex 2026-08-14 P1): the previsit rail
     // legitimately reminds about late MONTHLY-MEMBERSHIP DUES with zero
     // open invoices — dues aren't invoiced until collected. The caller

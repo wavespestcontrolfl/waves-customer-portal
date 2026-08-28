@@ -37,6 +37,10 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn(() => ({
 
 // Disclosure reads the SAME eligible-invoice authority the policy used at
 // dial time (prb-r1) — mocked as one $258 eligible invoice.
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: jest.fn(() => false) };
+});
 jest.mock('../services/collections/contact-policy', () => ({
   loadEligibleInvoices: jest.fn(async () => ([
     { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
@@ -122,7 +126,7 @@ function chain({ first } = {}) {
   return q;
 }
 
-function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER } = {}) {
+function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER, dunning = undefined } = {}) {
   const queues = {
     call_log: [chain({ first: callRow }), chain(), chain(), chain()],
     collection_cases: [chain({ first: caseRow })],
@@ -131,6 +135,8 @@ function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER } =
     // customers is read at init AND at the pay-link phone re-check (prb-r16)
     // — always serve the same row rather than a finite queue.
     if (table === 'customers') return chain({ first: customer });
+    // A2's account dunning row (consequence_due_at) — absent by default.
+    if (table === 'customer_dunning_sequences') return chain({ first: dunning });
     const queue = queues[table];
     if (!queue || !queue.length) return chain();
     return queue.shift();
@@ -1232,29 +1238,80 @@ describe('account-level disclosure + registers', () => {
     expect(out).toMatch(/^Total account balance: \$149\.85 across 2 open invoices/);
     expect(out.indexOf('Lawn Care on 2026-07-12')).toBeLessThan(out.indexOf('Pest Control on 2026-08-24'));
     expect(out).toMatch(/Lawn Care on 2026-07-12: \$44\.55 \(\d+ days past due\)/);
-    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link for the full amount/);
+    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link for the OLDEST invoice only/); // gate off ⇒ one-invoice link, said plainly
     expect(out).not.toMatch(/consequence/i); // friendly register never carries one
   });
 
-  test('firm/final registers speak a consequence ONLY when the state is true', async () => {
+  test('the pay-link offer covers the account only when /pay collects the combined balance (GATE_PAY_INCLUDE_BALANCE)', async () => {
+    const FeatureGates = require('../config/feature-gates');
     const two = [
-      { id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-01', total: '44.55', credit_applied: 0 },
+      { id: 'inv-new', title: 'Pest Control', due_date: '2026-08-24', total: '105.30', credit_applied: 0 },
+      { id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-29', total: '44.55', credit_applied: 0 },
     ];
-    loadEligibleInvoices.mockResolvedValueOnce(two);
+    FeatureGates.isEnabled.mockImplementation((g) => g === 'payIncludeBalance');
+    try {
+      loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+      const { convo } = makeConvo();
+      await convo._contextReady;
+      convo.verified = true;
+      const out = await convo._toolGetBalance();
+      expect(out).toMatch(/offer to text the secure payment link — it opens the full account balance for one payment/);
+      expect(convo._ctx.payLinkCoversAccount).toBe(true);
+    } finally {
+      FeatureGates.isEnabled.mockImplementation(() => false);
+    }
+    // A single open invoice needs no combined page.
+    const one = [two[1]];
+    loadEligibleInvoices.mockResolvedValueOnce(one).mockResolvedValueOnce(one);
+    setDb(); // a fresh call row — the first session spent the queue
     const { convo } = makeConvo();
     await convo._contextReady;
     convo.verified = true;
-    convo._ctx.register = 'firm'; convo._ctx.holdActive = false;
-    expect(await convo._toolGetBalance()).toMatch(/No consequence is authorized on this call/);
-    loadEligibleInvoices.mockResolvedValueOnce(two);
-    convo._ctx.register = 'firm'; convo._ctx.holdActive = true;
-    expect(await convo._toolGetBalance()).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
-    loadEligibleInvoices.mockResolvedValueOnce(two);
-    convo._ctx.register = 'final'; convo._ctx.consequenceDueAt = null;
-    expect(await convo._toolGetBalance()).toMatch(/No consequence is authorized/);
-    loadEligibleInvoices.mockResolvedValueOnce(two);
-    convo._ctx.register = 'final'; convo._ctx.consequenceDueAt = '2026-09-15';
-    expect(await convo._toolGetBalance()).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
+    expect(await convo._toolGetBalance()).toMatch(/it opens the full account balance/);
+  });
+
+  test('the register follows the FRESH set at disclosure and the system prompt is rebuilt to match', async () => {
+    const young = [{ id: 'a', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }]; // 18d on Aug 12 → friendly
+    const old = [{ id: 'b', title: 'Lawn Care', due_date: '2026-07-01', total: '10.00', credit_applied: 0 }]; // 42d → firm
+    loadEligibleInvoices.mockResolvedValueOnce(young).mockResolvedValueOnce(old);
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    expect(convo._ctx.register).toBe('friendly');
+    convo._ensureSystemBlocks();
+    expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FRIENDLY REMINDER/);
+    convo.verified = true;
+    await convo._toolGetBalance();
+    expect(convo._ctx.register).toBe('firm');
+    expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FIRM/);
+    expect(convo._systemBlocks[0].text).not.toMatch(/REGISTER: FRIENDLY/);
+  });
+
+  test('firm/final registers speak a consequence ONLY when the state is true — read from the DB at disclosure', async () => {
+    const firmSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }]; // 42d on Aug 12 → firm
+    const finalSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-01', total: '44.55', credit_applied: 0 }]; // 72d → final
+    const disclose = async (set, { customer = CUSTOMER, dunning } = {}) => {
+      loadEligibleInvoices.mockResolvedValueOnce(set).mockResolvedValueOnce(set);
+      setDb({ customer, dunning });
+      const { convo } = makeConvo();
+      await convo._contextReady;
+      convo.verified = true;
+      return { convo, out: await convo._toolGetBalance() };
+    };
+    let r = await disclose(firmSet);
+    expect(r.convo._ctx.register).toBe('firm');
+    expect(r.out).toMatch(/No consequence is authorized on this call/);
+    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold' } });
+    expect(r.convo._ctx.holdActive).toBe(true);
+    expect(r.out).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
+    r = await disclose(finalSet);
+    expect(r.convo._ctx.register).toBe('final');
+    expect(r.out).toMatch(/No consequence is authorized/);
+    r = await disclose(finalSet, { dunning: { consequence_due_at: '2026-09-15' } });
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
+    // A hold on a FRIENDLY account is never spoken (the register gates it too).
+    r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold' } });
+    expect(r.convo._ctx.register).toBe('friendly');
+    expect(r.out).not.toMatch(/consequence/i);
   });
 
   test('the prompt carries exactly one register, the full-balance ask, the pay-link default, and the fee prohibition', () => {
@@ -1262,7 +1319,7 @@ describe('account-level disclosure + registers', () => {
     expect(friendly).toMatch(/REGISTER: FRIENDLY REMINDER/);
     expect(friendly).not.toMatch(/REGISTER: FIRM|REGISTER: FINAL/);
     expect(friendly).toMatch(/state the TOTAL account balance, then name each open invoice/);
-    expect(friendly).toMatch(/ALWAYS offer to text a secure payment link for the full balance/);
+    expect(friendly).toMatch(/ALWAYS offer to text the secure payment link \(send_pay_link\) — the balance tool result says what it covers/);
     expect(friendly).toMatch(/Never mention late fees, interest, or collection costs/);
     expect(buildSystemPrompt({ firstName: 'Pat', register: 'firm' })).toMatch(/REGISTER: FIRM/);
     expect(buildSystemPrompt({ firstName: 'Pat', register: 'final' })).toMatch(/REGISTER: FINAL NOTICE/);

@@ -24,6 +24,12 @@ function daysOverdueOn(now, dueValue) {
   return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
 }
 
+/** Epoch ms of a timestamp column (string or Date); unparseable sorts LAST. */
+function epochOf(value) {
+  const t = value ? new Date(value).getTime() : NaN;
+  return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
+}
+
 /** The oldest-due invoice of a set (ties: earliest created_at). null on empty. */
 function anchorInvoiceOf(invoices = []) {
   let anchor = null;
@@ -32,7 +38,9 @@ function anchorInvoiceOf(invoices = []) {
     if (!anchor) { anchor = inv; continue; }
     const a = String(etCalendarDayOf(dueValueOf(anchor)));
     const b = String(etCalendarDayOf(dueValueOf(inv)));
-    if (b < a || (b === a && String(inv.created_at || '') < String(anchor.created_at || ''))) anchor = inv;
+    // created_at comes back from Postgres as a Date — compare instants,
+    // never String(Date) (not chronological).
+    if (b < a || (b === a && epochOf(inv.created_at) < epochOf(anchor.created_at))) anchor = inv;
   }
   return anchor;
 }

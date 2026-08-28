@@ -16,6 +16,16 @@ test('anchor = oldest due_date (ties broken by created_at); created_at is the fa
   expect(dueValueOf(c)).toBe('2026-07-20T00:00:00Z');
 });
 
+test('equal due dates tie-break on created_at as INSTANTS (Postgres returns Date objects)', () => {
+  // String(Date) is not chronological ("Wed Jul 01" > "Fri Jul 10"); compare epochs.
+  const first = { id: 'first', due_date: '2026-07-29', created_at: new Date('2026-07-01T12:00:00Z') };
+  const later = { id: 'later', due_date: '2026-07-29', created_at: new Date('2026-07-10T12:00:00Z') };
+  expect(anchorInvoiceOf([later, first]).id).toBe('first');
+  expect(anchorInvoiceOf([first, later]).id).toBe('first');
+  const missing = { id: 'missing', due_date: '2026-07-29', created_at: null };
+  expect(anchorInvoiceOf([missing, later]).id).toBe('later'); // unparseable sorts last
+});
+
 test('account age = the anchor\'s age; a 4-day invoice does not soften a 30-day one', () => {
   const old = { id: 'o', due_date: '2026-07-29' };
   const young = { id: 'y', due_date: '2026-08-24' };

@@ -139,10 +139,16 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   const liveIds = sortedIds(verdict.eligibleInvoiceIds);
   const approvedIds = sortedIds(caseRow.eligible_invoice_ids);
   const liveSet = new Set(liveIds);
+  const liveCents = verdict.eligibleInvoiceCents || {};
   const approvedStillOpen = approvedIds.every((id) => liveSet.has(id));
-  const balanceShrank = verdict.eligibleBalanceCents < Number(caseRow.eligible_balance_snapshot);
+  // The APPROVED invoices' own remainder must still equal the snapshot
+  // (hook P1): a covered invoice paid down while a new one joined would
+  // otherwise read as net growth and dial on an approval for a different
+  // balance. Growth is only ever NEW invoices joining.
+  const approvedRemainderCents = approvedIds.reduce((sum, id) => sum + Number(liveCents[id] || 0), 0);
+  const approvedChanged = approvedRemainderCents !== Number(caseRow.eligible_balance_snapshot);
   const setChanged = JSON.stringify(liveIds) !== JSON.stringify(approvedIds);
-  if (!approvedStillOpen || balanceShrank) {
+  if (!approvedStillOpen || approvedChanged) {
     // A covered invoice was paid/credited/reassigned since approval — the
     // approval was for a DIFFERENT balance; never dial on it. Cancel and
     // let the sweep regenerate a fresh proposal card.
@@ -152,7 +158,7 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
     });
     return { dialed: false, reason: 'snapshot_changed' };
   }
-  if (setChanged || verdict.eligibleBalanceCents !== Number(caseRow.eligible_balance_snapshot)) {
+  if (setChanged) {
     // The balance only GREW — a new invoice joined the account (owner ruling
     // 2026-08-28: new invoices join the existing balance silently). Re-snapshot
     // the case so the disclosed figure and the pay link cover the whole

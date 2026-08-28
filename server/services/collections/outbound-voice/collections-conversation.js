@@ -262,7 +262,7 @@ function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
     '- Never mention late fees, interest, or collection costs — Waves charges none on this account.',
     ...(REGISTER_RULES[register] || REGISTER_RULES.friendly),
     '- Say "open balance" or "billing follow-up". NEVER say "collections", "debt", or "delinquent". Never threaten, pressure, negotiate, settle, or discount. You have no authority over amounts.',
-    '- NEVER take a payment or any card, bank, or account numbers on this call. ALWAYS offer to text a secure payment link for the full balance (send_pay_link) — send it as soon as they agree to receive the text.',
+    '- NEVER take a payment or any card, bank, or account numbers on this call. ALWAYS offer to text the secure payment link (send_pay_link) — the balance tool result says what it covers; send it as soon as they agree to receive the text.',
     '- If they give a date they intend to pay, record it with record_payment_intent and thank them. Do not press for a date if they do not offer one; asking once is fine.',
     '- If they dispute the bill, use record_dispute and assure them the office will review it before any further notices.',
     '- If they ask you to stop calling, use record_do_not_call immediately and confirm it is done.',
@@ -328,7 +328,7 @@ class CollectionsConversation {
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
-        .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip', 'service_pause_reason')
+        .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip')
       : null;
     if (!caseRow || !customer) return this._refuse('case_or_customer_missing');
     // The case must belong to the authenticated call row's customer (gh
@@ -377,25 +377,15 @@ class CollectionsConversation {
         invoices: eligibleInvoices,
       };
 
-      // ONE clock per customer: the register (friendly / firm / final) comes
-      // from the OLDEST-due open invoice, and the consequence lines are
-      // gated on TRUE state read here — never asserted (owner ruling +
-      // FCCPA: no consequence the system does not carry out).
-      const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), eligibleInvoices));
-      const register = registerForTier(tier);
-      const holdActive = String(customer.service_pause_reason || '') === 'nonpayment_hold';
-      const consequenceDueAt = await readConsequenceDueAt(customer.id);
-
       this._ctx = {
         callLogId: row.id,
         caseId: caseRow.id,
         caseVersion: caseRow.case_version,
         customer,
         balance,
-        tier,
-        register,
-        holdActive,
-        consequenceDueAt,
+        // register / holdActive / consequenceDueAt / payLinkCoversAccount —
+        // refreshed again at disclosure time (see _accountState).
+        ...(await this._accountState(customer.id, eligibleInvoices)),
         // The number this call was DIALED to (gh prb-r16): verification and
         // SMS consent happened on this number — a send must never follow a
         // mid-call phone edit to a number that did neither.
@@ -720,25 +710,56 @@ class CollectionsConversation {
     return TOOLS.filter((t) => names.has(t.name));
   }
 
-  async _modelTurn() {
-    if (!this._systemBlocks) {
-      // ET calendar day + weekday via datetime-et / an explicit timeZone —
-      // never raw new Date() ET math (the timestamptz trap).
-      let today = null;
-      try {
-        const { etCalendarDayOf } = require('../../../utils/datetime-et');
-        const now = this._now();
-        const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
-        today = `${weekday}, ${etCalendarDayOf(now)}`;
-      } catch (err) {
-        logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
-      }
-      this._systemBlocks = [{
-        type: 'text',
-        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
-        cache_control: { type: 'ephemeral' },
-      }];
+  // ONE clock per customer: the register (friendly / firm / final) comes
+  // from the OLDEST-due open invoice, and the consequence lines are gated on
+  // TRUE state — never asserted (owner ruling + FCCPA: no consequence the
+  // system does not carry out). Read at init AND again at disclosure (hook
+  // P1): a payment, a cleared hold, or a withdrawn deadline during
+  // verification must not leave a stale authorization. Fail closed: an
+  // unreadable hold / deadline is NO consequence.
+  async _accountState(customerId, invoices) {
+    const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), invoices));
+    let holdActive = false;
+    try {
+      const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('service_pause_reason');
+      holdActive = String(row?.service_pause_reason || '') === 'nonpayment_hold';
+    } catch (err) {
+      logger.warn(`[collections-voice] service-hold read failed callSid=${this.callSid}: ${err.message} — no consequence`);
     }
+    const consequenceDueAt = await readConsequenceDueAt(customerId);
+    // The pay link is /pay/:token of the oldest open invoice; under
+    // GATE_PAY_INCLUDE_BALANCE that page itemizes every open self-pay
+    // invoice and charges the COMBINED total in one payment (pay-combined.js,
+    // owner ruling 2026-08-16). Gate off + several invoices ⇒ the link is
+    // for ONE invoice and she must say so (hook P1).
+    const { isEnabled } = require('../../../config/feature-gates');
+    const payLinkCoversAccount = invoices.length <= 1 || isEnabled('payIncludeBalance');
+    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt, payLinkCoversAccount };
+  }
+
+  _ensureSystemBlocks() {
+    if (this._systemBlocks && this._promptRegister === this._ctx.register) return;
+    // ET calendar day + weekday via datetime-et / an explicit timeZone —
+    // never raw new Date() ET math (the timestamptz trap).
+    let today = null;
+    try {
+      const { etCalendarDayOf } = require('../../../utils/datetime-et');
+      const now = this._now();
+      const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
+      today = `${weekday}, ${etCalendarDayOf(now)}`;
+    } catch (err) {
+      logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
+    }
+    this._promptRegister = this._ctx.register;
+    this._systemBlocks = [{
+      type: 'text',
+      text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
+      cache_control: { type: 'ephemeral' },
+    }];
+  }
+
+  async _modelTurn() {
+    this._ensureSystemBlocks();
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
       let msg;
@@ -1046,6 +1067,10 @@ class CollectionsConversation {
         invoices: fresh,
       };
       this._ctx.invoiceId = fresh[0]?.id || null;
+      // Register / hold / deadline from the FRESH set (hook P1) — and the
+      // prompt follows the register if it moved during verification.
+      Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
+      this._ensureSystemBlocks();
     } catch (err) {
       logger.error(`[collections-voice] disclosure-time balance read failed callSid=${this.callSid}: ${err.message}`);
       return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
@@ -1105,7 +1130,10 @@ class CollectionsConversation {
     } else if (ctx.register === 'firm' || ctx.register === 'final') {
       consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
     }
-    return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; offer to text the secure payment link for the full amount.${consequence}`;
+    const linkScope = ctx.payLinkCoversAccount
+      ? 'offer to text the secure payment link — it opens the full account balance for one payment.'
+      : 'offer to text the secure payment link for the OLDEST invoice only; say the office will send the rest separately — never promise one link for the full balance.';
+    return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; ${linkScope}${consequence}`;
   }
 
   async _toolRecordPaymentIntent(input) {
@@ -1428,7 +1456,11 @@ class CollectionsConversation {
         customerId: this._ctx.customer.id,
         channel: 'sms',
         purpose: 'late_payment',
-        invoiceIds: [invoiceId],
+        // Every invoice the link collects (the /pay page's combined charge
+        // under GATE_PAY_INCLUDE_BALANCE), else the one it carries.
+        invoiceIds: this._ctx.payLinkCoversAccount
+          ? (this._ctx.balance?.invoices || []).map((inv) => inv.id).filter(Boolean)
+          : [invoiceId],
         source: 'collections_voice_paylink',
         metadata: {
           callLogId: this._ctx.callLogId,
@@ -1460,7 +1492,9 @@ class CollectionsConversation {
       }
       if (result && (result.sent || result.ok)) {
         this._captures.payLinkSent = true;
-        return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page.';
+        return this._ctx.payLinkCoversAccount
+          ? 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page with the full account balance.'
+          : 'The payment link for the oldest invoice was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page; the office will send the rest.';
       }
       this.payLinkSent = false; // provider REPORTED non-delivery — retry is safe
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });

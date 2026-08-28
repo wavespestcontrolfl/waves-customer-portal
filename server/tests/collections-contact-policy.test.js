@@ -454,6 +454,7 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect(result.denialReasons).not.toContain('pilot_not_overdue_long_enough');
     expect(result.eligibleInvoiceIds.sort()).toEqual(['inv-1', 'inv-new']);
     expect(result.eligibleBalanceCents).toBe(12800 + 4455);
+    expect(result.eligibleInvoiceCents).toEqual({ 'inv-1': 12800, 'inv-new': 4455 }); // per-invoice remainder for the pre-dial drift check
   });
 
   test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {
