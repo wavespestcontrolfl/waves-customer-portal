@@ -493,9 +493,15 @@ bridge → authority before any send).
   Sunday scan.
 - **Existing profile** — every active, scan-tracked `seo_backlinks` row → a registry domain
   (`source='existing_backlink'`, `agent_state='acquired'`) **plus** a placement and a path,
-  so the baselines are real rows, not a flag: the placement is `seo_link_prospects`
-  (`source='existing_backlink'`, `status='live'`, `live_url=source_url`,
-  `backlink_id`, `first_live_at = seo_backlinks.first_seen`, `target_page` =
+  so the baselines are real rows, not a flag: ONE representative placement per
+  `(target_domain, target_page, location_key)` — placements stay unique on that key — chosen
+  deterministically (the dofollow link with the earliest `first_seen`, ties by lowest id),
+  while EVERY inbound `seo_backlinks` row from that host to that page is kept in a new
+  one-to-many `seo_link_placement_backlinks (prospect_id, backlink_id UNIQUE)` mapping so no
+  link identity is dropped or overwritten; the placement is `seo_link_prospects`
+  (`source='existing_backlink'`, `status='live'`, `live_url` = the representative's
+  `source_url`, `backlink_id` = the representative's id, `first_live_at = seo_backlinks.first_seen`
+  of the representative, `target_page` =
   `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
   it like any placement — but **D30/D90 are never inferred from age**: for an imported link
   they are set only by the §8 sampled rule (a recorded observation inside the D30/D90
@@ -516,7 +522,7 @@ the CHECK), `confidence=0.1`, `last_investigated_at=null`
   and `baseline=true` (new boolean; a baseline path is non-executable by definition — the
   §6.3 validity step already returns `INVALID` on a null `last_investigated_at`, and the
   investigator replaces it with a real path on the first pass). Idempotent via
-  `findPlacementRow`/`path_key`; excluded from acquisition (nothing to acquire) and from the
+  `findPlacementRow`/`path_key` for the placement and the UNIQUE `backlink_id` for the mapping (a re-run adds newly seen links to the mapping and never re-picks the representative while it is live; per-link verification and loss events read the mapping, and §8 D30 sampling is per placement following the representative); excluded from acquisition (nothing to acquire) and from the
   Source×funnel *acquired* counts (reported separately as "existing").
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
   registry row (`source='lost_recovery'`).
@@ -1440,13 +1446,19 @@ unset its gate; budget kill = the issuer program's limit.
   navigation and subrequest (deterministic runner, credential/payment brokers and every
   model-observed provider alike) runs under **browser-level request interception with per-hop
   validation**: each request — top-level navigations, every redirect hop, subresources,
-  fetch/XHR, websockets — is resolved before it is allowed and refused unless the scheme is
-  http(s), the resolved IP (all A/AAAA answers, re-resolved per hop so DNS rebinding cannot
-  swap it) is public unicast (no loopback, RFC1918, link-local, CGNAT, multicast, metadata
-  169.254.169.254, sandbox-internal ranges) and the host is not on the deny list; a blocked
+  fetch/XHR, websockets — is refused unless the scheme is http(s) and the host is not on the
+  deny list; and, because interception alone is NOT an SSRF boundary (a pre-check resolution
+  does not bind Chromium's own later lookup — a rebinding host can answer public to the guard
+  and internal to the browser), the sandbox has **no direct egress**: every browser socket
+  goes through a network-enforced egress proxy (`--proxy-server`, with the sandbox subnet
+  firewalled so the proxy is the only route out and loopback/RFC1918/link-local/CGNAT/
+  multicast/metadata 169.254.169.254/sandbox-internal ranges are unroutable) that resolves the
+  destination itself and connects ONLY to the address it validated as public unicast — the
+  actual socket destination is what is checked, per hop, redirects included. A blocked
   request fails the step (`outcome='blocked'`, evidence recorded) rather than being silently
   dropped. The same interception layer carries the §12 mutating-request policy; a provider
-  that cannot run under it (no CDP/route hook) is not eligible for live steps at all.
+  that cannot run under it (no CDP/route hook) or outside the proxied sandbox is not eligible
+  for live steps at all.
 - **Comms** — outreach targets are businesses. Today `link-prospect-outreach` only validates
   recipient *syntax*; step 4 adds a **fail-closed customer-recipient exclusion** before any
   auto-send: the recipient email (and its domain, when the domain is a customer's own) is
