@@ -3766,6 +3766,25 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(ok.ok).toBe(true);
   });
 
+  test('bodyImageRefs: image syntax nested in a LINK destination is not an image; an image in a link LABEL renders and is (GH r6)', () => {
+    const body = '[contact](/go/![hidden](/images/blog/x/body-1.webp)) and [![linked](/images/blog/x/body-2.webp)](/contact/)';
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-2.webp']);
+  });
+
+  test('bodyImageSlots: headings and prose inside blockquotes or list items are not top-level — never sections or slots (GH r6)', () => {
+    const body = [
+      '## Real section', '', 'Real prose.', '',
+      '> ## Quoted heading', '>', '> Quoted testimonial prose.', '',
+      '- item', '  ## Nested heading', '', '  Nested prose under the item.', '',
+      '## Second real', '', 'Second prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Real section', 'Second real']);
+    const slots = bodyImageSlots(body, 2, { title: 'T' });
+    const lines = body.split('\n');
+    expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['Real prose.', 'Second prose.']);
+  });
+
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);

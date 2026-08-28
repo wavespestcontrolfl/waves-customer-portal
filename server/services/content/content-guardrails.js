@@ -267,7 +267,11 @@ function blankLinkDefinitionsAndTitles(str) {
     .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
 }
 
-function blankMarkdownLinkDestinations(str) {
+// `keepImages`: leave image syntax in place (the body-image scanner needs
+// the images themselves) while still blanking every LINK destination — an
+// image nested inside a link destination renders nothing and is blanked
+// with it; an image inside a link LABEL renders and stays.
+function blankMarkdownLinkDestinations(str, { keepImages = false } = {}) {
   const text = blankLinkDefinitionsAndTitles(str);
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
@@ -304,7 +308,7 @@ function blankMarkdownLinkDestinations(str) {
       continue;
     }
     if (isImage) {
-      blank(labelStart - 1, k); // an image renders no text at all
+      if (!keepImages) blank(labelStart - 1, k); // an image renders no text at all
     } else {
       blank(labelStart, labelStart);       // "["
       blank(labelEnd, k);                  // "](destination)"
@@ -4641,6 +4645,7 @@ module.exports = {
   eachTag,
   blankExpressions,
   blankLinkDefinitionsAndTitles,
+  blankMarkdownLinkDestinations,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,
   unsupportedBodySyntaxAdded,

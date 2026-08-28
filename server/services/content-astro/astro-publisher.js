@@ -1760,12 +1760,20 @@ function blankJsxAndExpressions(text) {
   return contentGuardrails.blankExpressions(out.join(''));
 }
 
-function renderedBodyLines(body) {
-  // Shared stripper (code, spans, comments, <pre>) → reference definitions /
-  // "[ref]" tails / link titles (never rendered) → tags + MDX expressions.
-  return blankJsxAndExpressions(
-    contentGuardrails.blankLinkDefinitionsAndTitles(contentGuardrails.blankNonRenderedMarkdown(String(body || ''))),
+// Rendered view of the body plus each line's blockquote depth: shared
+// stripper (code, spans, comments, <pre>; quote markers and list indent
+// removed) → link destinations / reference definitions / titles blanked with
+// images kept (a `![..]` nested in a link destination goes with it; one in a
+// link label renders and stays) → tags + MDX expressions.
+function renderedBodyView(body) {
+  const { text, depths } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const lines = blankJsxAndExpressions(
+    contentGuardrails.blankMarkdownLinkDestinations(text, { keepImages: true }),
   ).split('\n');
+  return { lines, depths };
+}
+function renderedBodyLines(body) {
+  return renderedBodyView(body).lines;
 }
 
 function bodyImageRefs(body) {
@@ -1811,15 +1819,20 @@ function scanBodySections(body, { title = '' } = {}) {
   // ALL structure (headings, blank lines, paragraph openers, images) is read
   // off the rendered view — fenced/indented code, code spans, comments and
   // <pre> are blank there, so a "## heading" inside a comment or a fence is
-  // never a section and a code sample is never prose. Raw lines only feed
-  // the lead text.
-  const rendered = renderedBodyLines(body);
+  // never a section and a code sample is never prose. Only TOP-LEVEL blocks
+  // are placement candidates: the rendered view strips quote markers and
+  // list indent, so a heading or paragraph counts only at quote depth 0 with
+  // its raw line at column 0 (an H2 inside a blockquote or a list item is
+  // neither a section nor a slot — an image inserted there would land
+  // outside the quote or break the list). Raw lines feed the lead text.
+  const { lines: rendered, depths } = renderedBodyView(body);
+  const topLevel = (i) => (depths[i] || 0) === 0 && !/^\s/.test(lines[i] || '');
   const sections = [];
   let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
   let paraStart = -1;
   const closePara = (end) => {
     if (paraStart < 0) return;
-    if (!NON_PROSE_LINE_RE.test(rendered[paraStart])) {
+    if (topLevel(paraStart) && !NON_PROSE_LINE_RE.test(rendered[paraStart])) {
       cur.lastProse = end; // insert BEFORE this index
       if (!cur.lead) cur.lead = proseLead(lines.slice(paraStart, end).join(' '));
     }
@@ -1827,7 +1840,7 @@ function scanBodySections(body, { title = '' } = {}) {
   };
   for (let i = 0; i < rendered.length; i++) {
     const line = rendered[i];
-    const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    const heading = topLevel(i) ? line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/) : null;
     if (heading) {
       closePara(i);
       // Only an H2 opens a new section: H3+ sub-headings stay INSIDE the
@@ -3743,6 +3756,7 @@ module.exports = {
     bodyImageRefs,
     validateBodyImageRefs,
     scanBodySections,
+    renderedBodyView,
     imageDHash,
     hammingDistance,
     committedImageBuffer,
