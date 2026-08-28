@@ -96,9 +96,9 @@ describe('buildReplyGrounding', () => {
   test('linked review: derived account facts + provenance + allowlists', async () => {
     mockState.customers = [{ id: 'cust-1', city: 'Venice', member_since: '2025-01-15', created_at: '2025-01-15' }];
     mockState.scheduled_services = [
-      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control' },
-      { customer_id: 'cust-1', status: 'completed', service_type: 'lawn_care' },
-      { customer_id: 'cust-1', status: 'cancelled', service_type: 'mosquito' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-05-01' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'lawn_care', scheduled_date: '2026-07-01' },
+      { customer_id: 'cust-1', status: 'cancelled', service_type: 'mosquito', scheduled_date: '2026-08-01' },
     ];
     const g = await G.buildReplyGrounding(review);
     expect(g.review.firstName).toBe('Dana');
@@ -116,6 +116,19 @@ describe('buildReplyGrounding', () => {
     for (const k of ['transcript', 'sms', 'call_summary', 'feedback', 'notes', 'phone', 'address', 'invoice']) {
       expect(json.toLowerCase()).not.toContain(k);
     }
+  });
+
+  test('recurrence counts distinct visit dates, not completed rows', async () => {
+    mockState.customers = [{ id: 'cust-1', city: 'Sarasota', member_since: '2026-08-01', created_at: '2026-08-01' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-10' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'mosquito', scheduled_date: '2026-08-10' },
+    ];
+    let g = await G.buildReplyGrounding(review);
+    expect(g.account.relationship).toBe('first_visit');
+    mockState.scheduled_services.push({ customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-24' });
+    g = await G.buildReplyGrounding(review);
+    expect(g.account.relationship).toBe('recurring');
   });
 
   test('unlinked review: review-only pack, account null', async () => {

@@ -341,9 +341,12 @@ describe('publishReviewReply', () => {
 
   test('no GBP at all (dev): humans get the historical local-only save, automation is refused', async () => {
     mockGbp.configured = false;
-    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' } });
+    state.rows[0].auto_reply_status = 'drafted';
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply' } });
     expect(r).toMatchObject({ googlePosted: false, localOnly: true });
     expect(state.rows[0].review_reply).toBe('Thanks Dana.');
+    // Pipeline fields apply on the local-only path too.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply' });
     state.rows[0].review_reply = null;
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.NOT_CONFIGURED });

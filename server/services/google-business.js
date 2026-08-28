@@ -775,6 +775,26 @@ class GoogleBusinessService {
     return hit ? (await db('google_reviews').where({ id: hit.id }).first()) || null : null;
   }
 
+  // A reviewer edit on a review that carries a POSTED automatic reply: the
+  // reply may no longer fit (5★ praise → 1★ complaint) — park it for a
+  // person, conditional on the row still being 'posted'. Shared by the GBP
+  // upsert and the Places fallback.
+  async _reconcilePostedEdit(existing, normalized) {
+    const { postedEditFields } = require('./review-reply/runner');
+    const edited = postedEditFields(existing, normalized);
+    if (!Object.keys(edited).length) return false;
+    const n = await db('google_reviews').where({ id: existing.id, auto_reply_status: 'posted' }).update(edited);
+    if ((Array.isArray(n) ? n.length : n) === 0) return false;
+    const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
+    await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
+      link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
+      bell: true,
+      dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
+      metadata: { reason: 'review_edited_after_post', reviewId: existing.id, locationId: normalized.location_id, needsAction: true },
+    }).catch((e) => logger.warn(`[gbp] edited-after-post bell failed: ${e.message}`));
+    return true;
+  }
+
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
@@ -829,7 +849,7 @@ class GoogleBusinessService {
     if (existing) {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
-      const { applyRequeueOnIdentity, postedEditFields } = require('./review-reply/runner');
+      const { applyRequeueOnIdentity } = require('./review-reply/runner');
       await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
       // Conditional on the row STILL being parked for that reason (an admin
       // Skip in the meantime wins).
@@ -838,19 +858,7 @@ class GoogleBusinessService {
       // A reviewer edit on a review that carries a POSTED automatic reply:
       // the reply may no longer fit (5★ praise → 1★ complaint) — park it for
       // a person, conditional on the row still being 'posted'.
-      const edited = postedEditFields(existing, normalized);
-      if (Object.keys(edited).length) {
-        const n = await db('google_reviews').where({ id: existing.id, auto_reply_status: 'posted' }).update(edited);
-        if ((Array.isArray(n) ? n.length : n) > 0) {
-          const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
-          await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
-            link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
-            bell: true,
-            dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
-            metadata: { reason: 'review_edited_after_post', reviewId: existing.id, locationId: normalized.location_id, needsAction: true },
-          }).catch((e) => logger.warn(`[gbp] edited-after-post bell failed: ${e.message}`));
-        }
-      }
+      await this._reconcilePostedEdit(existing, normalized);
       result = { id: existing.id, inserted: false };
     } else {
       try {
@@ -1090,6 +1098,7 @@ class GoogleBusinessService {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
+        await this._reconcilePostedEdit(existing, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
           await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { expectedReply: existing.review_reply ?? null });

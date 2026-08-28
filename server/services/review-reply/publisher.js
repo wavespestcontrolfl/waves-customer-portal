@@ -170,7 +170,9 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const updated = await db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
-      .update({ review_reply: replyText, reply_updated_at: new Date() });
+      // Pipeline state closes here too (a shadow draft posted from the editor
+      // in a dev/preview env must not stay 'drafted' beside a real reply).
+      .update({ review_reply: replyText, reply_updated_at: new Date(), ...(autoFields || {}) });
     if (updatedCount(updated) === 0) throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });
     await audit({ googlePosted: false, localOnly: true });
     return { googlePosted: false, localOnly: true, reviewId };

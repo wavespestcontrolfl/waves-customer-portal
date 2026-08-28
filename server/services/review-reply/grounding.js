@@ -160,8 +160,10 @@ async function loadAccountFacts(customerId, conn = db) {
   if (!customer) return null;
   const visits = await conn('scheduled_services')
     .where({ customer_id: customerId, status: 'completed' })
-    .select('service_type');
-  const completed = visits.length;
+    .select('service_type', 'scheduled_date');
+  // Distinct VISIT DATES, not rows: a multi-service first appointment is
+  // several completed rows but one visit ("recurring" would be a lie).
+  const completed = new Set(visits.map((v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10)).filter(Boolean)).size || (visits.length ? 1 : 0);
   const relationship = completed === 0 ? null : completed === 1 ? 'first_visit' : 'recurring';
   return {
     relationship,

@@ -91,7 +91,7 @@ const BANNED_RE = new RegExp([
   // Rating solicitation / review editing.
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
-  '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharmless\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
+  '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharm\\w*\\b', '\\brisk[- ]?free\\b', '\\bno[- ]risk\\b', "\\b(?:won't|will\\s+not|doesn't|does\\s+not|never|no)\\s+(?:harm|hurt|affect|bother|endanger)\\w*\\b", '\\b(?:okay|ok|fine|gentle)\\s+(?:around|for|with)\\s+(?:your\\s+)?(?:pets?|dogs?|cats?|kids?|children|family|babies|plants)\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
   '\\bguarantee\\w*\\b', '\\bwarrant\\w*\\b',
   // Drying / curing / wait-before language of any form (fixed intervals are
   // banned on every customer surface; a reply has no legitimate use for it).

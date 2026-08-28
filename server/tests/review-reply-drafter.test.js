@@ -105,6 +105,8 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Enjoy a free visit on us.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Please give us five stars.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus used a safe product and the ants are gone.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't harm your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and our warranties cover this.'))).toBe('banned_phrase');
