@@ -181,8 +181,13 @@ t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNull
 t.timestamp('decided_at').notNullable();
 t.unique(['prospect_id', 'dimension']);
 ```
-The bridge job writes one row per dimension the path touches (execution always; payment when
-`payment_required`; communication for outreach/content types). The locked claim and every
+The bridge job writes one row per dimension the path touches — the dimensions are
+mutually exclusive by path type except for payment: **communication** for outreach/content
+types (their only non-payment dimension: the send click's `outreach_send` approval satisfies
+it), **execution** for every other type (self-service, account, business-claim, membership,
+vendor registration, human steps), and **payment** in addition whenever `payment_required`.
+An outreach placement therefore never carries an execution row, so the 56 drafts and their
+follow-ups need exactly the communication authority (plus payment only if paid). The locked claim and every
 irreversible step (submit, send, mint) load ALL rows for the placement and require, for each:
 level is `AUTO_*` (with its gate on and the re-run decision agreeing) or `OWNER_*` with a
 valid, unconsumed, dimension-matching approval; any row at `DENY`/`INVALID`, or a required
@@ -348,7 +353,7 @@ bridge → authority before any send).
   `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
   it like any placement — but **D30/D90 are never inferred from age**: for an imported link
   they are set only by the §8 sampled rule (a recorded observation inside the D30/D90
-  window with no loss event before it); an import whose cutoffs predate scan coverage stays
+  window with no loss event before it, following `merged → detail.into` to the survivor); an import whose cutoffs predate scan coverage stays
   `null` (= unknown, excluded from learning) — a link that vanished and returned, or
   predates scan coverage, must not teach the scorer that its path "survives"; the path is
   `seo_link_acquisition_paths` with `acquisition_type` mapped from the link's classified
@@ -451,7 +456,8 @@ max_spam_score               = 10
 **Payment and communication are independent authorities.** The decision returns a SET of
 required authorities, one per dimension the path touches: `payment` (when
 `payment_required`), `communication` (when the path is an outreach/content type), and
-`execution` (everything else: free/account/human-step). A paid guest post therefore needs
+`execution` (every non-outreach type: free/account/claim/membership/human-step — never
+both communication and execution on one placement). A paid guest post therefore needs
 BOTH an `AUTO_PAID_WITHIN_POLICY`/`OWNER_PAYMENT` decision AND an
 `AUTO_OUTREACH`/`OWNER_OUTREACH` decision with its exact-draft approval; the claim,
 reservation and send/submit steps require every dimension's gate/approval to be satisfied
@@ -887,9 +893,11 @@ learned from attempt outcomes). Outreach: `OutreachProvider` = drafter + `link-p
 - **D30 survival** = a **sampled observation at the cutoff**, not an inference from
   neighbours: the daily verifier records an explicit `d30_sample` (and `d90_sample`) check
   for each placement within a bounded window `[cutoff, cutoff + 3 days]`; `d30_live=true`
-  only if that sampled crawl/reconcile found the link active AND no `lost`/`merged` event
-  exists between `first_live_at` and the sample; `false` if the sample found it gone (or a
-  loss event precedes the sample); `null` (unknown, excluded from learning) if no sample was
+  only if that sampled crawl/reconcile found the link active AND no `lost` event exists
+  between `first_live_at` and the sample on the row's lineage — a `merged` event is NOT a
+  loss: it retires a duplicate spelling into a survivor, so the sample and the loss check
+  follow `detail.into` to the surviving canonical row; `false` if the sample found it gone
+  (or a loss event precedes the sample); `null` (unknown, excluded from learning) if no sample was
   taken inside the window — bracketing observations days apart never stand in for the
   sample, because a link can vanish and return between scans without a two-miss loss
   event. The same rule replaces the imported-baseline test in §4 (imports predating scan
