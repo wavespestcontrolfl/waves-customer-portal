@@ -944,6 +944,9 @@ together:
   placement property, so a second location's placement is leasable after the first was
   acquired; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row — except
+  `OWNER_MANUAL_PAYMENT`, which is never leasable for any payment claim (no reservation, no
+  mint: the owner pays outside the system and records a `human` attempt whose settlement
+  writes the paid term; the placement's non-payment dimensions proceed normally), and
   `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
   `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
@@ -1218,9 +1221,13 @@ unset its gate; budget kill = the issuer program's limit.
   checked inside the send claim against every real contact source — `customers.email` plus
   **every** slot in `SERVICE_CONTACT_SLOTS` from `services/customer-contact.js` (today
   `service_contact_email`, `service_contact2_email`, `service_contact3_email`; the lookup is
-  BUILT from that export so a new slot is covered automatically), and `leads.email` — a
-  match or a lookup error routes the draft to the approval queue, and the check is unit-tested
-  per slot (slot 3 included) rather than against a hand-written column list.
+  BUILT from that export so a new slot is covered automatically), and `leads.email` — the check runs
+  inside EVERY send claim — auto-send, owner-approved send, follow-up — not only before an
+  auto-send: an identified customer recipient is a **hard block** (`skipped`,
+  `reason='customer_recipient'`, row parked with the reason; no approval can send it), while a
+  lookup error/timeout or an ambiguous match (name-only, shared business domain) routes the
+  draft to the approval queue with the match shown. Unit-tested per slot (slot 3 included)
+  rather than against a hand-written column list.
   The June drafts are released only through this path.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
