@@ -125,8 +125,8 @@ t.string('expected_indexability');                // indexable | noindex | unkno
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
 t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
 t.numeric('confidence', 3, 2);                    // 0–1
-t.integer('revision').notNullable().defaultTo(1);  // +1 on every write; approvals bind to it (§3.6b)
-t.string('authority');                            // decided authority level (§6), stamped by policy
+t.integer('revision').notNullable().defaultTo(1);  // +1 ONLY when an approval-bound term changes (acquisition_type, submission_url, *_cost_cents, renewal_period, payment/legal flags, expected_rel); derived fields (confidence, investigation, last_investigated_at) do not bump it. Approvals bind to it (§3.6b)
+t.string('authority_last_decided');               // informational copy of the latest §6 decision; NOT versioned, NOT approval-bound — the binding stamp lives on the placement
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
 t.timestamps(true, true);
@@ -142,7 +142,7 @@ t.uuid('path_id').references('seo_link_acquisition_paths.id');
 t.string('authority');            // authority level under which this placement was/will be acted on
 t.text('source_detail');
 t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
-t.timestamp('renews_at');         // = paid_through; written atomically when a purchase reaches `charged` OR `reconciled_charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
+t.timestamp('renews_at');         // = paid_through; written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
@@ -209,8 +209,8 @@ t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').n
 t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (revision bumps on every investigator/edit write)
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
-t.integer('approved_amount_cents');           // for payment/membership: the ceiling the owner approved
-t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
+t.integer('approved_amount_cents');           // the ceiling the owner approved; CHECK: (path requires payment) ⇒ approved_amount_cents IS NOT NULL AND > 0 (safe integer) — a paid approval without a ceiling cannot exist
+t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
 t.timestamp('consumed_at');                   // set when the leased execution reports a terminal outcome
@@ -218,7 +218,9 @@ t.timestamp('consumed_at');                   // set when the leased execution r
 `seo_link_acquisition_paths` gains `revision` (integer, +1 on every write). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
 invalidated, not consumed, and whose `path_revision` equals the path's current revision;
-the final-total guard compares `final_cents` to `approved_amount_cents` (+ tolerance). Any
+the final-total guard compares `final_cents` to `approved_amount_cents` (+ tolerance) and
+refuses when the approval lacks one (it cannot, by CHECK, for a paid path — the guard is
+still written null-safe: null ⇒ refuse). Any
 path write re-validates open approvals and invalidates the ones whose snapshot no longer
 matches — the row returns to `awaiting_owner` with a fresh card.
 
@@ -396,8 +398,9 @@ inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses t
 money page for the placement (scorer topic mapping → `targetPageOf`; homepage for
 listing-style paths), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
 `source` = the domain's first-touch source, `link_type` = the path's lane) if none exists
-for that (domain, page), runs the §6.3 decision, stamps `authority` on the placement and
-the path, and advances the registry: `AUTO_*` → `agent_state='ready_to_acquire'` (the row is
+for that (domain, page), runs the §6.3 decision, stamps `authority` on the **placement**
+(the path only receives the informational `authority_last_decided`, which does not bump its
+revision — so approval never invalidates itself), and advances the registry: `AUTO_*` → `agent_state='ready_to_acquire'` (the row is
 now leasable); `OWNER_*` → `awaiting_owner` (registry stays `qualified` until approval, which
 runs the same stamping and advances it); `DENY` → `agent_state='rejected'` with reasons
 shown (owner override re-enters here); `INVALID` → back to `investigating`. The job is
@@ -423,8 +426,8 @@ t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
-t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','charged','ambiguous','reconciled_charged','reconciled_not_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist
-                                                    // reserved → voided (pre-exposure only) | reserved → submitting → charged | ambiguous → reconciled_charged | reconciled_not_charged
+t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist
+                                                    // reserved → voided (pre-exposure only) | reserved → submitting → close_pending → charged | submitting → ambiguous → reconciled_charged | reconciled_not_charged
 t.uuid('approval_id');                              // → seo_link_approvals when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
@@ -436,10 +439,10 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
-  → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
+  → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, close_pending, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
   → **open/settled-purchase check — all-time, not per month**: if ANY row for
   `(prospect_id, path_id, purchase_kind, renewal_period_key)` is in `reserved`, `submitting`,
-  `ambiguous`, `charged` or `reconciled_charged` → no new reservation (409). A placement that
+  `close_pending`, `ambiguous`, `charged` or `reconciled_charged` → no new reservation (409). A placement that
   was paid for in March can never be paid for again as `initial` in April; only an explicit
   `renewal` for a *new* period can be reserved, and `claim()` never leases a placement with an
   open (`reserved`/`submitting`/`ambiguous`) purchase of any kind. Otherwise `generation` =
@@ -513,7 +516,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
   exposes the card to the provider. Where the merchant supports it the
   `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
-  transitions are `charged` (success reported with `merchant_ref`) or `ambiguous` — **every
+  transitions are `close_pending` (success reported with `merchant_ref`; the card is not yet
+  confirmed closed) or `ambiguous` — **every
   unsuccessful or unclear post-exposure result is `ambiguous`**, including a merchant
   "declined"/"error" page (a merchant can authorize and fail at the application layer, then
   capture later). `voided` exists only for failures **before** the card was exposed
@@ -543,7 +547,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
 - **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
-  prior state (`reserved→voided`, `reserved→submitting`, `submitting→charged|ambiguous`,
+  prior state (`reserved→voided`, `reserved→submitting`, `submitting→close_pending|ambiguous`,
+  `close_pending→charged` only with `card_closed_at`, `close_pending→ambiguous`,
   `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
   stale lease or a wrong prior state affects 0 rows and returns 409.
 - **Instrument.** A dedicated **issuer account/program** (with its own hard monthly program
@@ -581,14 +586,15 @@ under `claimProspectDomain`).
 rejected). **The board does not care which provider did the work.** Two contract changes
 land with the authority step (§14 step 4), in one PR, with the route/worker tests updated
 together:
-- **Claim predicate is authority-aware and atomic.** Today `claim()` filters only on
-  prospect status/type. Under `GATE_LINK_AUTHORITY` it joins the registry and leases a row
-  only when ALL hold inside the same locked select: placement `status='prospect'`; registry
+- **Claim predicate is authority-aware, atomic and UNCONDITIONAL.** Today `claim()` filters
+  only on prospect status/type. From step 4 it always joins the registry — no gate turns the
+  old predicate back on; `GATE_LINK_AUTHORITY` only controls whether the policy may *grant*
+  an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement `status='prospect'`; registry
   `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row; the path's lane
   gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
-  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no `submitting`/`ambiguous`
-  purchase exists for the placement and no `reserved` purchase is bound to another lease
+  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no `submitting`/`close_pending`/
+  `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
   (an unleased `renewal` reservation is claimable by the runner, §6.3); and the provider requesting
   the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
   the policy has not authorized cannot be leased by any caller.
@@ -620,7 +626,14 @@ provider whose reasoning observes page state (DOM, screenshots, accessibility tr
 traces — i.e. every cloud CUA implementation) is restricted to non-payment steps; for a
 paid path it may prepare the checkout up to the payment form, then hands off to the broker
 (`outcome='ready_for_payment'`) and is never resumed on that page until the broker has
-submitted and the card is closed. The broker performs the payment in a **separate,
+submitted and the card is closed. **`charged` is committed only after the issuer confirms
+the card closed:** a successful submission lands in `close_pending`, the broker closes the
+card, and `close_pending → charged` requires `card_closed_at` (issuer-confirmed). If the
+close call fails or the worker dies in between, the row stays `close_pending` — a
+non-terminal state that consumes budget, blocks the placement and is retried by the hourly
+sweep (close, then confirm) until it becomes `charged`, or `ambiguous` if the issuer reports
+a second authorization in the meantime. The merchant token can therefore never outlive the
+ledger's view of the purchase. The broker performs the payment in a **separate,
 observation-free browser context**: tracing, video, screenshots, DOM snapshots, HAR/network
 recording, accessibility dumps, console capture and every provider hook are **disabled on
 that context before the card is fetched**, and nothing in that context is ever attached to
