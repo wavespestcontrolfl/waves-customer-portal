@@ -1231,7 +1231,7 @@ async function maybeDraftEstimateForCall({
   // original call context (enriched extraction + transcript — the quote
   // evidence lives there, not in the SMS thread) with the customer's
   // answer applied; the stale draft is retired atomically on insert.
-  supersedeEstimateId = null, supersedeReason = null, bedroomCountOverride = null,
+  supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
 }) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
@@ -1250,6 +1250,7 @@ async function maybeDraftEstimateForCall({
     if (context && !context.error && supersedeEstimateId) {
       context.supersedeEstimateId = String(supersedeEstimateId);
       context.supersedeReason = supersedeReason || null;
+      context.supersedeAttempt = supersedeAttempt || null;
     }
     if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.

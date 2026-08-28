@@ -215,7 +215,7 @@ async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
  * customer owns it). Marker + estimator_engine stamp mirror the
  * linkage-invalidation precedent (estimator-engine/index.js).
  */
-async function lockSupersededDraftInTx(trx, { estimateId }) {
+async function lockSupersededDraftInTx(trx, { estimateId, attempt = null }) {
   if (!trx || !estimateId) return null;
   // 'scheduled' = an unsent draft with a due time; superseding it must
   // also cancel that schedule (archive below returns it to an inert draft).
@@ -227,6 +227,10 @@ async function lockSupersededDraftInTx(trx, { estimateId }) {
     .whereIn('status', ['draft', 'scheduled', 'send_failed'])
     .whereNull('sent_at')
     .whereNull('archived_at')
+    // The re-price attempt that stamped this row must still own it: an
+    // operator revision deletes the token, invalidating any in-flight
+    // re-draft so it can never archive a corrected draft.
+    .modify((q) => { if (attempt) q.whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(attempt)]); })
     .forUpdate()
     .first();
   return stale || null;

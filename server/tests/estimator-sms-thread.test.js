@@ -155,11 +155,12 @@ describe('startSmsThreadDraft', () => {
   test('a clarify-reply re-draft carries the draft it supersedes into the pipeline context (retired atomically on insert)', async () => {
     const result = await startSmsThreadDraft({
       phone: PHONE, triggerBody: "It's a 2 bedroom", skipIntentGate: true, skipCooldown: true,
-      supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 2,
+      supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', supersedeAttempt: 'att-1', bedroomCountOverride: 2,
     });
     await result.draftPromise;
     const args = mockRunDraftPipeline.mock.calls[0][0];
     expect(args.context.supersedeEstimateId).toBe('est-1');
+    expect(args.context.supersedeAttempt).toBe('att-1');
     expect(args.context.supersedeReason).toBe('clarify_bedroom_reply');
     expect(args.context.bedroomCountOverride).toBe(2);
     // An ordinary thread draft names nothing to supersede (fresh context

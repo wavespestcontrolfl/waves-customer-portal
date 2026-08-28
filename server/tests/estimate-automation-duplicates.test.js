@@ -240,6 +240,8 @@ describe('supersede support (clarify-reply re-draft): lock, then archive AFTER t
       where(...a) { wheres.push(a); return q; },
       whereIn(...a) { wheres.push(['whereIn', ...a]); return q; },
       whereNull(...a) { wheres.push(['whereNull', ...a]); return q; },
+      whereRaw(...a) { wheres.push(['whereRaw', ...a]); return q; },
+      modify(fn) { fn(q); return q; },
       forUpdate() { return q; },
       first: async () => row,
       update: async (payload) => { updates.push(payload); return updateResult; },
@@ -254,6 +256,10 @@ describe('supersede support (clarify-reply re-draft): lock, then archive AFTER t
     expect(trx.wheres.some((w) => w[0] === 'whereIn' && w[1] === 'status' && w[2].includes('scheduled'))).toBe(true);
     expect(trx.wheres.some((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toBe(true);
     await expect(lockSupersededDraftInTx(fakeTrx(null), { estimateId: 'est-1' })).resolves.toBeNull();
+    // With an attempt token the lock is scoped to the row THIS attempt stamped.
+    const scoped = fakeTrx({ id: 'est-1', estimate_data: '{}' });
+    await lockSupersededDraftInTx(scoped, { estimateId: 'est-1', attempt: 'att-1' });
+    expect(scoped.wheres.some((w) => w[0] === 'whereRaw' && /reprice_attempt/.test(w[1]) && w[2][0] === 'att-1')).toBe(true);
     await expect(lockSupersededDraftInTx(trx, { estimateId: null })).resolves.toBeNull();
   });
 

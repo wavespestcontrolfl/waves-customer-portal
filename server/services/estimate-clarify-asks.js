@@ -337,7 +337,7 @@ async function clearEstimateRepricePending(estimateId, database = db) {
     .where({ id: estimateId })
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') <> ''")
     .update({
-      estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at')"),
+      estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')"),
       updated_at: new Date(),
     });
   return Number(changed) > 0;
@@ -347,11 +347,14 @@ async function clearEstimateRepricePending(estimateId, database = db) {
 // let the scheduler claim the due row and send the stale fallback price
 // — so the schedule is cancelled (inert draft, no due time) and the bell
 // hands it to the operator.
-async function unscheduleForOperatorReprice(trx, estimateId) {
+async function unscheduleForOperatorReprice(trx, estimateId, attempt) {
   const changed = await trx('estimates')
     .where({ id: estimateId, status: 'scheduled' })
     .whereNull('sent_at')
     .whereNull('archived_at')
+    // Only while THIS attempt still owns the row — an operator's revision
+    // (which may have re-scheduled a corrected price) deletes the token.
+    .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(attempt || '')])
     .update({ status: 'draft', scheduled_at: null, updated_at: new Date() });
   return Number(changed) > 0;
 }
@@ -362,7 +365,7 @@ async function unscheduleForOperatorReprice(trx, estimateId) {
 // reconciliation's markers (linkage_invalidated_at / invalidation_pending_at)
 // can never be overwritten by a stale blob, and the predicate refuses an
 // archived or invalidated row outright (codex pre-push P0).
-async function setEstimateRepricePending(trx, estimateId, at) {
+async function setEstimateRepricePending(trx, estimateId, at, attempt = null) {
   // 'scheduled' rows are unsent drafts with a due time — the cron would
   // otherwise deliver the stale fallback price; the supersede path returns
   // them to an inert draft when the replacement lands. A row already in
@@ -377,13 +380,17 @@ async function setEstimateRepricePending(trx, estimateId, at) {
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
     .update({
+      // The attempt token ties THIS answer's detached re-draft to the row:
+      // supersede/archive and unschedule require it, and the operator's
+      // revision deletes it, so a stale attempt can never touch a draft
+      // that was corrected while composition ran.
       estimate_data: at
         ? trx.raw(
-          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('reprice_pending_at', ?::text))",
-          [at],
+          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('reprice_pending_at', ?::text, 'reprice_attempt', ?::text))",
+          [at, attempt || ''],
         )
         : trx.raw(
-          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at')",
+          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')",
         ),
       updated_at: new Date(),
     });
@@ -686,8 +693,11 @@ async function handleClarifyReply({ phone, body }) {
       // until the replacement lands (repricePendingActive — time-boxed so
       // a process restart can never strand a draft).
       let repriceGuarded = false;
-      if (recorded.includes('bedroom_count') && lockedEstimateId) {
-        repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString());
+      const repriceAttempt = recorded.includes('bedroom_count') && lockedEstimateId
+        ? require('crypto').randomUUID()
+        : null;
+      if (repriceAttempt) {
+        repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);
       }
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
@@ -726,7 +736,7 @@ async function handleClarifyReply({ phone, body }) {
       // The LOCKED row's linkage is authoritative — a concurrent
       // mergePendingClarify may have re-pointed estimate_id since the
       // unlocked read above.
-      return { recorded, estimateId: lockedEstimateId, repriceGuarded };
+      return { recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt };
     });
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
@@ -779,6 +789,7 @@ async function handleClarifyReply({ phone, body }) {
               quotePromised: true,
               supersedeEstimateId,
               supersedeReason: 'clarify_bedroom_reply',
+              supersedeAttempt: locked.repriceAttempt,
               bedroomCountOverride: bedroomCount,
             });
           } else {
@@ -791,7 +802,7 @@ async function handleClarifyReply({ phone, body }) {
             skipIntentGate: true,
             skipCooldown: true,
             ...(supersedeEstimateId
-              ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: bedroomCount }
+              ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', supersedeAttempt: locked.repriceAttempt, bedroomCountOverride: bedroomCount }
               : {}),
           });
           // The thread draft is itself detached — wait for its outcome only
@@ -817,7 +828,7 @@ async function handleClarifyReply({ phone, body }) {
         // No replacement: the draft's dollars are KNOWN stale, so the send
         // guard STAYS (only the operator's explicit re-price clears it);
         // a scheduled row is pulled off the cron so it cannot auto-send.
-        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, repriceTarget))
+        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, repriceTarget, locked.repriceAttempt))
           .catch((err) => logger.warn(`[estimate-clarify] unschedule for operator re-price failed: ${err.message}`));
         // Exception-based (CLAUDE.md rule 14): the pending stamp stays on
         // the ask row and the operator gets the one bell that names the

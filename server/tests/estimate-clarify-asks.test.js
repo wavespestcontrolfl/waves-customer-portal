@@ -21,7 +21,7 @@ jest.mock('../models/db', () => {
       orWhere() { return builder; },
       orderBy() { return builder; },
       orderByRaw() { return builder; },
-      whereRaw() { return builder; },
+      whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
@@ -842,6 +842,12 @@ describe('_private.composeClarifyBody', () => {
 });
 
 // ── bedroom_count (GATE_UNIT_BAND_PRICING lane) ─────────────────
+// The attempt token the guard stamp wrote (second jsonb_build_object param).
+function guardStampAttempt(state) {
+  const stamp = state.updates.find((u) => u.table === 'estimates' && /reprice_attempt/.test(String(u.payload.estimate_data?.__raw || '')));
+  return stamp ? stamp.payload.estimate_data.params[1] : null;
+}
+
 describe('bedroom_count ask (unit-band lane)', () => {
   test('is askable, with its own one-question copy and a trailing question when combined', () => {
     expect(_private.ASKABLE_MISSING.has('bedroom_count')).toBe(true);
@@ -941,8 +947,13 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(result.handled).toBe(true);
     await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
-      callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 1,
+      callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
+      supersedeAttempt: expect.stringMatching(/^[0-9a-f-]{36}$/), bedroomCountOverride: 1,
     });
+    // The same attempt token is what the guard stamp wrote on the estimate.
+    const guardStamp = mockState.updates.find((u) => u.table === 'estimates').payload.estimate_data;
+    expect(guardStamp.__raw).toMatch(/'reprice_attempt', \?::text/);
+    expect(guardStamp.params[1]).toBe(mockMaybeDraftEstimateForCall.mock.calls[0][0].supersedeAttempt);
     expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
     // Durable reprice state: pending BEFORE the attempt, cleared with the replacement id AFTER.
     const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
@@ -1016,7 +1027,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     // The explicit correction is an atomic one-key JSONB delete.
     await clearEstimateRepricePending('est-1');
     const upd = mockState.updates.find((u) => u.table === 'estimates');
-    expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at'\)/);
+    expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at' - 'reprice_attempt'\)/);
   });
 
   test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {
@@ -1040,7 +1051,9 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(estimateUpdates[0].payload.estimate_data.__raw).toMatch(/jsonb_set\(estimate_data, '\{estimatorEngine\}'.*jsonb_build_object\('reprice_pending_at'/);
     expect(estimateUpdates[0].payload.estimate_data.params[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(estimateUpdates[1].payload).toMatchObject({ status: 'draft', scheduled_at: null });
-    expect(estimateUpdates.some((u) => /- 'reprice_pending_at'\)/.test(String(u.payload.estimate_data?.__raw || '')))).toBe(false);
+    // …and the unschedule is attempt-scoped (an operator revision that deleted the token makes it a no-op).
+    expect(mockState.raws.some((r) => /reprice_attempt' = \?/.test(r.sql) && r.params?.[0] === guardStampAttempt(mockState))).toBe(true);
+    expect(estimateUpdates.some((u) => /- 'reprice_pending_at'/.test(String(u.payload.estimate_data?.__raw || '')))).toBe(false);
     expect(mockNotifyAdmin).toHaveBeenCalled();
   });
 

@@ -1059,7 +1059,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // never archived-without-successor (codex pre-push P0).
     const supersedeEstimateId = context?.supersedeEstimateId || null;
     const supersedeTarget = supersedeEstimateId
-      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId })
+      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId, attempt: context?.supersedeAttempt || null })
       : null;
     if (supersedeEstimateId && !supersedeTarget) {
       logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
