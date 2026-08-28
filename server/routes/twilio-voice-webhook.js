@@ -535,6 +535,14 @@ function withDeadline(promise, ms = STAMP_DEADLINE_MS, fallback = null) {
   return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
 }
 
+// A non-2 key on the language menu RE-PLAYS the greeting (hook P0): any DTMF
+// interrupts the greeting nested in the <Gather>, and that greeting IS the FL
+// §934.03 disclosure — the English continuation then reaches a RECORDED staff
+// leg, so the disclosure must be heard uninterrupted first. Twilio does not
+// report whether the nested <Play> completed, so the replay is unconditional.
+// Only the press-2 branch may skip it: the Spanish relay carries its own
+// non-interruptible disclosure. (Cost: a wrong-key caller hears the greeting
+// twice — the price of a complete disclosure, not an oversight.)
 // The Gather action contract: only an exact '2' selects Spanish. Anything
 // else (other digit, '*', '#', multi-char, missing, malformed) = English
 // continuation, and the continuation never re-offers the vestibule.
@@ -948,7 +956,7 @@ router.post('/voice', async (req, res) => {
             return res.type('text/xml').send(inner ? relayXml.replace('<Response>', `<Response>${inner}`) : relayXml);
           }
           const agentTwiml = new VoiceResponse();
-          appendLanguageVestibule(agentTwiml, { greetingUrl, vestibule }); // FL §934.03 disclosure before the agent leg
+          appendLanguageVestibule(agentTwiml, { greetingUrl, vestibule }); // FL §934.03 disclosure before the agent leg (replayed on a menu re-entry — see hook P0 note)
           appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
           return res.type('text/xml').send(agentTwiml.toString());
         }
@@ -964,7 +972,7 @@ router.post('/voice', async (req, res) => {
     // Adam/Virginia's cell and steal the caller before Twilio reaches the
     // Waves-owned voicemail recorder.
     const twiml = new VoiceResponse();
-    appendLanguageVestibule(twiml, { greetingUrl, vestibule });
+    appendLanguageVestibule(twiml, { greetingUrl, vestibule }); // greeting = disclosure; replayed on a menu re-entry (hook P0)
     const forwardNumbers = getFallbackForwardNumbers();
     if (forwardNumbers.length === 0) {
       logger.error('[voice] No inbound staff forward numbers configured; sending caller to Waves voicemail');

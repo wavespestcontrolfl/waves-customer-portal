@@ -98,6 +98,15 @@ describe('appendLanguageVestibule — the one implementation', () => {
 });
 
 describe('Gather action contract', () => {
+  test('a non-2 re-entry RE-PLAYS the greeting (it is the §934.03 disclosure and a key press interrupted it) with no second menu', () => {
+    // The route passes vestibule=null on a re-entry (never re-offered) and the
+    // unchanged greetingUrl: the English continuation opens with the full
+    // disclosure before the recorded staff leg.
+    const twiml = new VoiceResponse();
+    appendLanguageVestibule(twiml, { greetingUrl: GREETING, vestibule: null });
+    expect(twiml.toString()).toContain(`<Play>${GREETING}</Play>`);
+    expect(twiml.toString()).not.toContain('<Gather');
+  });
   test.each([
     [{ Digits: '2' }, true],
     [{ Digits: ' 2 ' }, true],

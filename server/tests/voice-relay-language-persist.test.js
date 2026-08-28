@@ -29,6 +29,8 @@ function convoWith({ language = 'es', tier = 'full', verified = true, callSid = 
   c.language = language;
   c._callerVerified = verified;
   c._callerContext = customerId ? { tier, customer: { id: customerId } } : null;
+  c._provedLanguage = null;
+  c._languageProof = null;
   return c;
 }
 
@@ -74,6 +76,42 @@ test.each([
   expect(await convoWith()._persistLanguagePreference()).toBe(false);
   expect(stampCustomerPreferredLanguage).not.toHaveBeenCalled();
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('preference NOT persisted'));
+  expect(convoWith()._provedLanguage).toBeNull();
+});
+
+describe('_proveSelectedLanguage — the ONE source for every language WRITER', () => {
+  test('proof sets _provedLanguage once; repeated calls reuse the same read', async () => {
+    const q = callLogRow({ caller_language: 'es' });
+    db.mockImplementation(() => q);
+    const c = convoWith();
+    expect(c._provedLanguage).toBeNull(); // the frame hint never pre-fills it
+    expect(await c._proveSelectedLanguage()).toBe('es');
+    expect(await c._proveSelectedLanguage()).toBe('es');
+    expect(c._provedLanguage).toBe('es');
+    expect(q.first).toHaveBeenCalledTimes(1);
+  });
+  test('no stamp ⇒ null and _provedLanguage stays null (lead capture then carries no language)', async () => {
+    db.mockImplementation(() => callLogRow({}));
+    const c = convoWith();
+    expect(await c._proveSelectedLanguage()).toBeNull();
+    expect(c._provedLanguage).toBeNull();
+  });
+  test('English session ⇒ no read at all', async () => {
+    db.mockImplementation(() => callLogRow({ caller_language: 'es' }));
+    expect(await convoWith({ language: 'en-US' })._proveSelectedLanguage()).toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+  test('a real session constructed with a Spanish hint starts the proof at setup and exposes only the proved value to the tool ctx', async () => {
+    db.mockImplementation(() => callLogRow({ caller_language: 'es' }));
+    const convo = new RelayConversation({ callSid: 'CA9', from: '+19415551234', language: 'es', send: jest.fn(), endSession: jest.fn() });
+    expect(convo.language).toBe('es');
+    expect(convo._languageProof).toBeInstanceOf(Promise);
+    expect(await convo._languageProof).toBe('es');
+    expect(convo._provedLanguage).toBe('es');
+    const convoNo = new RelayConversation({ callSid: 'CA8', from: '+19415551234', language: 'en-US', send: jest.fn(), endSession: jest.fn() });
+    expect(convoNo._languageProof).toBeNull();
+    expect(convoNo._provedLanguage).toBeNull();
+  });
 });
 
 test('a stalled call_log read is bounded — resolves false, never hangs', async () => {

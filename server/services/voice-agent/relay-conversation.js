@@ -427,6 +427,18 @@ class RelayConversation {
     // is not. Read by the tool ctx below.
     this._callerVerified = false;
     this._contextReady = null;
+    // Session language PROOF (codex #3561 r3). `this.language` is the setup
+    // frame's hint — it may steer speech (prompt addendum, spoken closes) but
+    // never account data. Anything that WRITES a language (the customer
+    // preference stamp, the lead capture hint) reads `_provedLanguage`, set
+    // only after the authenticated call_log row's metadata.caller_language
+    // (written by the signed /voice press-2 handler) confirms the selection.
+    // Absent proof ⇒ null ⇒ no language reaches any writer (fail closed).
+    this._provedLanguage = null;
+    this._languageProof = null;
+    if (this.callSid && require('./relay-language').isSpanish(this.language)) {
+      this._languageProof = this._proveSelectedLanguage();
+    }
     // Session-scoped lookup ref registry (Phase B lookup_customer): refs are
     // OPAQUE per-call handles — raw customer ids never cross the model
     // boundary in either direction, so the model can only reference accounts
@@ -564,6 +576,39 @@ class RelayConversation {
 
   /** Speak a line to the caller (no-op on empty). Everything spoken is recorded. */
   /**
+   * Re-prove the Spanish selection from the authenticated call_log row —
+   * once per session, bounded, detached (never on the caller's path).
+   * Resolves the proved language ('es') or null.
+   */
+  async _proveSelectedLanguage() {
+    if (this._languageProof) return this._languageProof;
+    const { isSpanish } = require('./relay-language');
+    if (!this.callSid || !isSpanish(this.language)) return null;
+    const work = (async () => {
+      try {
+        const proof = await withTimeout(
+          db('call_log').where({ twilio_call_sid: this.callSid }).first('metadata'),
+          LANGUAGE_STAMP_TIMEOUT_MS,
+          null,
+        );
+        let meta = proof && proof.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        if (meta && isSpanish(meta.caller_language)) {
+          this._provedLanguage = 'es';
+          return 'es';
+        }
+        logger.warn(`[voice-relay] Spanish session without a signed press-2 stamp on call_log — language NOT proved callSid=${this.callSid}`);
+        return null;
+      } catch (err) {
+        logger.warn(`[voice-relay] language proof read failed (non-blocking): ${err.message}`);
+        return null;
+      }
+    })();
+    this._languageProof = work;
+    return work;
+  }
+
+  /**
    * preferred_language='es' on the resolved customer — every leg fails closed:
    *   1. the session language is Spanish (setup-frame hint),
    *   2. the caller resolved CONFIDENTLY — ANI matched the account's own
@@ -585,15 +630,9 @@ class RelayConversation {
     if (!customerId || this._callerVerified !== true || !this.callSid) return false;
     this._languageStampStarted = true;
     try {
-      const proof = await withTimeout(
-        db('call_log').where({ twilio_call_sid: this.callSid }).first('metadata'),
-        LANGUAGE_STAMP_TIMEOUT_MS,
-        null,
-      );
-      let meta = proof && proof.metadata;
-      if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-      if (!meta || !isSpanish(meta.caller_language)) {
-        logger.warn(`[voice-relay] Spanish session without a signed press-2 stamp on call_log — preference NOT persisted callSid=${this.callSid}`);
+      const proved = await this._proveSelectedLanguage();
+      if (proved !== 'es') {
+        logger.warn(`[voice-relay] preference NOT persisted — selection not proved callSid=${this.callSid}`);
         return false;
       }
       const { stampCustomerPreferredLanguage } = require('../lead-from-extraction');
@@ -759,7 +798,9 @@ class RelayConversation {
           }
         }, 0);
       },
-      language: this.language,
+      // PROVED language only (codex #3561 r3): the lead writer stamps the
+      // customer's preferred_language from this — never the frame hint.
+      get language() { return convo._provedLanguage; },
       // Live getters like callerVerified below: a late-landing verification
       // UPGRADES the session context after this turn's ctx was built, and a
       // snapshot would run this turn's tools as the pre-upgrade caller.
@@ -1298,7 +1339,7 @@ class RelayConversation {
         phone: callerPhone,
         toPhone: this.to,
         callSid: this.callSid,
-        language: this.language,
+        language: this._provedLanguage, // proved only — never the frame hint
         // The floor's phone IS the setup frame's ANI — mark it as such, with
         // its verification verdict, so an unverified session's hangup lead
         // stays UNLINKED instead of resolving the claimed number's account.
