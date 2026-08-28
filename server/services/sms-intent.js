@@ -61,7 +61,7 @@ const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|hear
 // "…"` (any emoji, incl. skin-tone + ZWJ sequences). Missed until 2026-08-28:
 // the quoted appointment text then read as prose and tripped the scheduling
 // detector + the full bell/push pipeline.
-const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator})+';
+const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator}|[0-9#*]\\ufe0f?\\u20e3)+';
 const EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+${EMOJI_SEQ_RE}\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 
@@ -74,26 +74,37 @@ const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s
 // "warrants NO reply" — this is the deterministic notification-side twin.
 const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|kk?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|you\s+bet|sure|yep|yup|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|good\s+(?:morning|afternoon|evening|night)|bye|later|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|anytime|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
-// One trailing name after a thanks ("Thanks Adam", "Appreciate it Don!").
-const COURTESY_WITH_NAME_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,4}[a-z]{2,15}[,.!]*$`, 'iu');
-const STRIP_EMOJI_RE = new RegExp(EMOJI_SEQ_RE, 'gu');
+// One trailing name after a THANKS-family token ("Thanks Adam", "Appreciate
+// it Don!"). The word must look like a name (letters only, not a request
+// verb) — an unrestricted suffix turned "Thanks help" / "Ok call" into
+// closers (hook P1).
+const THANKS_FAMILY_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|got\s+it|(?:you'?re\s+)?welcome|my\s+pleasure)`;
+const NOT_A_NAME = new Set(['call', 'help', 'spray', 'come', 'cancel', 'reschedule', 'schedule', 'quote', 'invoice', 'refund', 'text', 'please', 'today', 'tomorrow', 'now', 'asap', 'urgent', 'stop', 'wait', 'again', 'back', 'soon', 'later', 'estimate', 'price', 'pay', 'bill', 'card', 'receipt', 'report', 'treat', 'treatment', 'service', 'visit', 'appointment', 'ants', 'bugs', 'roaches', 'weeds', 'rats', 'termites', 'mosquitoes', 'fleas', 'no', 'yes', 'not', 'never', 'dont', 'cant', 'wont', 'but', 'however', 'though', 'question', 'issue', 'problem', 'wrong', 'missed', 'still']);
+const COURTESY_WITH_NAME_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){0,3}${THANKS_FAMILY_RE}\\s*,?\\s*([a-z]{2,15})[,.!]*$`, 'iu');
+// Emoji that read as an acknowledgement when they are the WHOLE message.
+// Anything outside this list (❓ 🚨 📞 🐜 …) is a request, not a closer
+// (hook P1), so it is left in place and the courtesy grammar fails on it.
+const ACK_EMOJI_RE = /(?:[\u{1F44D}\u{1F44C}\u{1F64F}\u{1F44F}\u{1F64C}\u{1F91D}\u{1F4AF}\u{1FAF6}\u{1F60A}\u{1F642}\u{1F600}\u{1F601}\u{1F603}\u{1F604}\u{1F917}\u{1F970}\u{1F60D}\u{1F618}\u{1F44B}\u{2705}\u{2714}\u{2764}\u{1F9E1}\u{1F49B}\u{1F49A}\u{1F499}\u{1F49C}\u{1F5A4}\u{1F90D}\u{2665}\u{263A}\u{2728}\u{1F389}\u{1F44A}\u{1F498}\u{1F495}\u{1F496}\u{1F497}\u{1F49E}]\ufe0f?(?:\p{Emoji_Modifier}|\u200d\p{Extended_Pictographic}\ufe0f?)*)+/gu;
 const COURTESY_MAX_CHARS = 60;
 
 /**
  * True when the message is a pure courtesy closer (no question, no
- * scheduling/reschedule/away signal, no substantive content). Emoji-only
- * bodies ("👍", "🙏🙏") count. Fail-safe direction: any doubt → false, so a
- * real request never gets quieted.
+ * scheduling/reschedule/away signal, no substantive content).
+ * Acknowledgement-emoji-only bodies ("👍", "🙏🙏") count; any other emoji is
+ * content. Fail-safe direction: any doubt → false, so a real request never
+ * gets quieted.
  */
 function isCourtesyOnly(body) {
   const raw = String(body || '').trim();
   if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
   if (/[?]/.test(raw)) return false;
-  const stripped = raw.replace(STRIP_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
-  if (!stripped) return true; // emoji-only
+  const stripped = raw.replace(ACK_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (!stripped) return true; // acknowledgement-emoji-only
   if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
   if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
-  return COURTESY_ONLY_RE.test(stripped) || COURTESY_WITH_NAME_RE.test(stripped);
+  if (COURTESY_ONLY_RE.test(stripped)) return true;
+  const named = COURTESY_WITH_NAME_RE.exec(stripped);
+  return Boolean(named) && !NOT_A_NAME.has(named[1].toLowerCase());
 }
 
 function hasSchedulingIntent(body) {

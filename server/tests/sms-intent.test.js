@@ -60,6 +60,7 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
     expect(isSmsReaction('Reacted 👍🏽 to \u201cok\u201d')).toBe(true);
     expect(isSmsReaction('Reacted 👨‍👩‍👧 to an image')).toBe(true);
     expect(isSmsReaction('Removed ❤️ from "Thanks for the update"')).toBe(true);
+    expect(isSmsReaction('Reacted 1️⃣ to "Your service is scheduled for Thursday"')).toBe(true); // keycap (hook P1)
     expect(isSmsReaction('I reacted badly to the spray')).toBe(false);
     expect(hasSchedulingIntent('Reacted ❤️ to "Your service is scheduled for Thursday"')).toBe(true); // still prose to that detector — the webhook gates on isSmsReaction first
   });
@@ -81,6 +82,8 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
       'Hey Adam', 'Hello Adam, good afternoon.',
       'Sounds good let me know if you have any issues or need me! Appreciate it.',
       'Thanks — the invoice says $81', '', null,
+      'Ok call', 'Thanks help', 'Thanks spray', 'Thanks reschedule', // request word after a thanks is not a name (hook P1)
+      '❓', '🚨', '📞', '🐜', '👍❓', // non-acknowledgement emoji are content (hook P1)
     ]) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
     }

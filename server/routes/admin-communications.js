@@ -970,20 +970,33 @@ router.post('/messages/read', async (req, res, next) => {
     // sms_reply) and used to stay unread forever unless tapped from the bell
     // itself — the main reason the badge sat at four digits. Fail-soft: a
     // miss here never fails the read receipt.
+    // Bounded by the same cutoff as the message read: a conversation read
+    // clears bells up to readBefore; an explicit-ids read clears bells up
+    // to the newest of those messages — an SMS landing mid-request keeps
+    // its bell (hook P1).
     let notificationsCleared = 0;
     try {
-      const convIds = new Set(conversationIds);
+      const cutoffByConv = new Map();
+      for (const cid of conversationIds) cutoffByConv.set(cid, readBefore);
       if (ids.length) {
-        const rows = await db('messages').whereIn('id', ids).whereNotNull('conversation_id').distinct('conversation_id');
-        for (const r of rows) convIds.add(r.conversation_id);
+        const rows = await db('messages').whereIn('id', ids).whereNotNull('conversation_id')
+          .groupBy('conversation_id').select('conversation_id').max('created_at as latest');
+        for (const r of rows) {
+          const prior = cutoffByConv.get(r.conversation_id);
+          const latest = new Date(r.latest);
+          if (!prior || latest > prior) cutoffByConv.set(r.conversation_id, latest);
+        }
       }
-      if (convIds.size) {
-        const customerIds = await db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
-        if (customerIds.length) {
-          notificationsCleared = await db('notifications')
+      if (cutoffByConv.size) {
+        const threads = await db('conversations').whereIn('id', [...cutoffByConv.keys()]).whereNotNull('customer_id').select('id', 'customer_id');
+        for (const t of threads) {
+          const cutoff = cutoffByConv.get(t.id);
+          if (!cutoff) continue;
+          notificationsCleared += await db('notifications')
             .where({ category: 'inbound_sms' })
             .whereNull('read_at')
-            .whereIn('link', customerIds.map((cid) => `/admin/communications?thread=${cid}`))
+            .where('link', `/admin/communications?thread=${t.customer_id}`)
+            .where('created_at', '<=', cutoff)
             .update({ read_at: now });
         }
       }
