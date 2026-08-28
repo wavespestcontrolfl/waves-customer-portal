@@ -288,7 +288,9 @@ const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
 // lifecycle belongs to its NEWEST run — a newer sibling means this run is
 // stale and the queue row is not ours to change.
 async function newerSiblingRun(q, run) {
-  if (!run.opportunity_id || !run.created_at) return null;
+  if (!run.opportunity_id) return null;
+  // Fail closed: a run whose age is unknown cannot prove it is the newest.
+  if (!run.created_at) throw new Error(`run ${run.id} has no created_at — cannot verify it still owns opportunity ${run.opportunity_id}`);
   return q('autonomous_runs')
     .where('opportunity_id', run.opportunity_id)
     .whereNot('id', run.id)
@@ -377,7 +379,7 @@ async function reconcileTopicBlockedPrs(gh) {
       .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', TOPIC_BLOCK_PR_RETIRED))
       .orderByRaw('random()')
       .limit(25)
-      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes');
+      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes', 'created_at');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] topic-blocked reconcile query failed: ${err.message}`);
     return { count: 0 };

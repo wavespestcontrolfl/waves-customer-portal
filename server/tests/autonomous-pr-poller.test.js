@@ -819,6 +819,14 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const r4 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r4).toMatchObject({ count: 1, unparked: 0 });
     expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+
+    // No created_at on the reconciled row → the guard fails CLOSED (no un-park), never silently passes.
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [{ ...parked, created_at: null }] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r5 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r5).toMatchObject({ count: 1, unparked: 0 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
   });
 
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {
