@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
-const { claimProspectDomain } = require('../services/seo/prospect-domain-lock');
+const { claimProspectDomain, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -290,9 +290,25 @@ router.patch('/prospects/:id', async (req, res, next) => {
     }
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
     patch.updated_at = new Date();
-    const [row] = await db('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
-    if (!row) return res.status(404).json({ error: 'prospect not found' });
-    res.json({ prospect: row });
+    // A status edit that REOPENS a row into active outreach (lost/rejected/
+    // placed/live/indexed → prospect/contacted/negotiating) is a board
+    // admission like an insert: it goes through the same per-domain guard
+    // (prospect-domain-lock) and is refused while another row for the domain is
+    // already in active outreach — otherwise both are claimable by the worker.
+    const result = await db.transaction(async (trx) => {
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain');
+      if (!current) return { missing: true };
+      const entersOutreach = 'status' in patch && ACTIVE_OUTREACH_STATUSES.includes(patch.status) && !ACTIVE_OUTREACH_STATUSES.includes(current.status);
+      if (entersOutreach) {
+        const { inFlight } = await claimProspectDomain(trx, current.target_domain);
+        if (inFlight && inFlight.id !== current.id) return { inFlight };
+      }
+      const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
+      return { row };
+    });
+    if (result.missing) return res.status(404).json({ error: 'prospect not found' });
+    if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    res.json({ prospect: result.row });
   } catch (err) { next(err); }
 });
 

@@ -79,6 +79,24 @@ describe('every board writer takes the shared lock inside its check+insert trans
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/); // nothing on the board outside the trx
   });
 
+  test('admin PATCH: a status edit entering active outreach goes through the guard inside the trx, before the update; sibling in flight → 409', () => {
+    const s = src('routes/admin-backlink-agent-v2.js');
+    const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
+    const iTrx = block.indexOf('db.transaction(async (trx)');
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain')");
+    const iGate = block.indexOf("ACTIVE_OUTREACH_STATUSES.includes(patch.status) && !ACTIVE_OUTREACH_STATUSES.includes(current.status)");
+    const iLock = block.indexOf('claimProspectDomain(trx, current.target_domain)');
+    const iUpdate = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).update(patch)");
+    expect(iTrx).toBeGreaterThan(-1);
+    expect(iRead).toBeGreaterThan(iTrx);
+    expect(iGate).toBeGreaterThan(iRead);
+    expect(iLock).toBeGreaterThan(iGate);
+    expect(iUpdate).toBeGreaterThan(iLock);
+    expect(block).toMatch(/inFlight\.id !== current\.id/); // the row itself never blocks its own edit
+    expect(block).toMatch(/result\.inFlight\) return res\.status\(409\)/);
+    expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/);
+  });
+
   test('strategy agent create_link_prospects: lock → pair re-check → insert on the trx; a raced pair is a duplicate, not a throw', () => {
     const s = src('services/seo/backlink-strategy-tools.js');
     const block = s.slice(s.indexOf("case 'create_link_prospects'"), s.indexOf("case 'list_prospects'"));
