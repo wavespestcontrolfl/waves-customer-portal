@@ -231,7 +231,22 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false }, trx = null) {
+// Owner ruling 2026-08-28: automatic credit application is the CUSTOMER's
+// choice — customers.auto_apply_account_credit (portal slider, default
+// false). Read with the caller's connection so a locked transaction sees
+// one snapshot; a missing row or column reads as OFF (fail toward leaving
+// the balance untouched). `lock` takes the customer row FOR UPDATE so the
+// answer is serialized against a concurrent slider change (the apply's
+// own transaction uses it; probes and quotes read without locking).
+async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } = {}) {
+  if (!customerId) return false;
+  let q = dbh('customers').where({ id: customerId });
+  if (lock) q = q.forUpdate();
+  const row = await q.first('auto_apply_account_credit');
+  return row?.auto_apply_account_credit === true;
+}
+
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -246,6 +261,17 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // The customer's opt-in gates every AUTOMATIC apply (owner ruling
+    // 2026-08-28). `customerRequested` marks the one non-automatic caller
+    // — estimate acceptance, where the customer just accepted a price
+    // presented net of their credit — and the admin apply-credit route
+    // posts its movement directly. Read FOR UPDATE on the customer row
+    // (same invoice → customer lock order as the balance movement below)
+    // so a slider flip cannot commit between this check and the
+    // consumption; re-asserted on the locked balance row too.
+    if (!customerRequested && !(await customerAutoApplyEnabled(invoice.customer_id, t, { lock: true }))) {
+      return { applied: 0, skipped: 'customer_opt_out' };
+    }
     // Stopped-dunning honored on the CREDIT side too (pre-push P0 round
     // 9): "stop collecting this invoice" (disputed bill, check in the
     // mail) must not have account credit consumed — or the invoice flipped
@@ -385,7 +411,10 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (activePlan) return { applied: 0, skipped: 'active_payment_plan' };
     // Lock the customer row (also locked by postCreditMovement) so the balance
     // we price against can't move under us.
-    const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits');
+    const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits', 'auto_apply_account_credit');
+    if (!customerRequested && customer?.auto_apply_account_credit !== true) {
+      return { applied: 0, skipped: 'customer_opt_out' };
+    }
     // Partial application is now safe: every charge path (Stripe PI / autopay /
     // Terminal) and the webhook amount-verification price from amount due
     // (total − credit_applied) via invoiceAmountDue, so a collectible invoice
@@ -683,6 +712,7 @@ async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null,
 }
 
 module.exports = {
+  customerAutoApplyEnabled,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
   WAVEGUARD_EXTENSION_CREDIT_BY,

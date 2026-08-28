@@ -606,6 +606,59 @@ describe('manual_call — call-shaped checks apply (codex 2026-08-14)', () => {
     const result = await evalManual(SAT_11AM_EDT);
     expect(result.denialReasons).toContain('outside_call_window');
   });
+
+  describe('COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL (owner shakedown override)', () => {
+    afterEach(() => { delete process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL; });
+
+    test('a live override (≤24h ahead) opens the window after hours and on weekends for a human dial sheet', async () => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(WED_1800_EDT.getTime() + 2 * HOUR).toISOString();
+      armAllowedBaseline();
+      expect((await evalManual(WED_1800_EDT)).denialReasons).not.toContain('outside_call_window');
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(SAT_11AM_EDT.getTime() + 2 * HOUR).toISOString();
+      armAllowedBaseline();
+      expect((await evalManual(SAT_11AM_EDT)).denialReasons).not.toContain('outside_call_window');
+    });
+
+    // codex P1 on #3555: the override must never authorize the automated
+    // path. A voice evaluation opens only when the caller vouches the case
+    // is admin-approved (supervisedDial); the default stays on the clock.
+    test('a live override opens an after-hours VOICE call only when supervisedDial is set', async () => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(WED_1800_EDT.getTime() + 2 * HOUR).toISOString();
+      armAllowedBaseline();
+      expect((await evalVoice(WED_1800_EDT)).denialReasons).toContain('outside_call_window');
+      armAllowedBaseline();
+      const supervised = await ContactPolicy.evaluate('cust-1', { channel: 'voice', purpose: 'late_payment', now: WED_1800_EDT, supervisedDial: true });
+      expect(supervised.denialReasons).not.toContain('outside_call_window');
+    });
+
+    test('isWithinCallWindow honors the override only for supervised callers', () => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(WED_1800_EDT.getTime() + 2 * HOUR).toISOString();
+      expect(ContactPolicy.isWithinCallWindow(WED_1800_EDT)).toBe(false);
+      expect(ContactPolicy.isWithinCallWindow(WED_1800_EDT, { supervised: false })).toBe(false);
+      expect(ContactPolicy.isWithinCallWindow(WED_1800_EDT, { supervised: true })).toBe(true);
+      expect(ContactPolicy.isWithinCallWindow(WED_11AM_EDT)).toBe(true); // in-window needs no override
+    });
+
+    test('isSupervisedApprover: only admin:* actors are supervised (autodial/NULL/unknown fail closed)', () => {
+      expect(ContactPolicy.isSupervisedApprover('admin:adam@wavespestcontrol.com')).toBe(true);
+      expect(ContactPolicy.isSupervisedApprover('system:autodial')).toBe(false);
+      expect(ContactPolicy.isSupervisedApprover(null)).toBe(false);
+      expect(ContactPolicy.isSupervisedApprover(undefined)).toBe(false);
+      expect(ContactPolicy.isSupervisedApprover('adminish')).toBe(false);
+      expect(ContactPolicy.isSupervisedApprover(42)).toBe(false);
+    });
+
+    test.each([
+      [() => new Date(WED_1800_EDT.getTime() - 1000).toISOString(), 'already expired'],
+      [() => new Date(WED_1800_EDT.getTime() + 25 * HOUR).toISOString(), 'more than 24h ahead'],
+      [() => 'tomorrow-ish', 'unparseable'],
+      [() => '', 'empty'],
+    ])('override value that is %s is ignored — window stays closed (fail closed)', async (value) => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = value();
+      armAllowedBaseline();
+      expect((await evalManual(WED_1800_EDT)).denialReasons).toContain('outside_call_window');
+    });
+  });
 });
 
 describe('consent provenance + reassigned-number staleness', () => {

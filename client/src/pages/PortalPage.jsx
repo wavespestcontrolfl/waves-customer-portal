@@ -5295,9 +5295,34 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 
-function BillingTab({ customer }) {
+function BillingTab({ customer, refreshCustomer }) {
   const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
+  // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
+  // balance stays on the account until the customer turns this on. Server-
+  // authoritative (/auth/me autoApplyAccountCredit); optimistic flip, revert
+  // on failure.
+  const [autoApplyCredit, setAutoApplyCredit] = useState(!!customer?.autoApplyAccountCredit);
+  const [autoApplyCreditBusy, setAutoApplyCreditBusy] = useState(false);
+  useEffect(() => { setAutoApplyCredit(!!customer?.autoApplyAccountCredit); }, [customer?.autoApplyAccountCredit]);
+  const handleAutoApplyCreditToggle = async () => {
+    if (autoApplyCreditBusy) return;
+    const next = !autoApplyCredit;
+    setAutoApplyCreditBusy(true);
+    setAutoApplyCredit(next);
+    try {
+      await api.updateAccountCreditPreference(next);
+      // Awaited so a second flip cannot start before the authoritative
+      // /auth/me reload lands (out-of-order reloads would show the
+      // opposite of the persisted preference).
+      if (typeof refreshCustomer === 'function') await refreshCustomer();
+    } catch (err) {
+      setAutoApplyCredit(!next);
+      console.error('account-credit preference update failed', err);
+    } finally {
+      setAutoApplyCreditBusy(false);
+    }
+  };
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
   const [autopay, setAutopay] = useState(null);
@@ -6567,7 +6592,7 @@ function BillingTab({ customer }) {
         </div>
       )}
 
-      {(totalCredits > 0 || credits.length > 0) && (
+      {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}>Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Adjustments</div>
@@ -6587,6 +6612,30 @@ function BillingTab({ customer }) {
             }}>
               <span>Total Account Credit</span>
               <span>{money(totalCredits)}</span>
+            </div>
+          )}
+          {(totalCredits > 0 || autoApplyCredit) && (
+            <div
+              data-testid="auto-apply-credit-row"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 12, border: '1px solid #E7E2D7',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Apply my credit to invoices automatically</div>
+                <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+                  {autoApplyCredit
+                    ? 'Your credit is applied to your open and future invoices before anything is charged.'
+                    : 'Off — your credit stays on your account until you turn this on.'}
+                </div>
+              </div>
+              <ToggleSwitch
+                checked={autoApplyCredit}
+                disabled={autoApplyCreditBusy}
+                onChange={handleAutoApplyCreditToggle}
+                label="Apply my account credit to invoices automatically"
+              />
             </div>
           )}
           {[
@@ -7298,6 +7347,13 @@ function ServicePrefsSection() {
 // token swap.
 const inFlightPropertyPrefSaves = new Set();
 
+// Mirrors IRRIGATION_INPUT_FIELDS in server/routes/property.js (camelCase):
+// a successful save of any of these stamps the row's irrigation_system on.
+const IRRIGATION_EDIT_FIELDS = new Set([
+  'irrigationControllerLocation', 'irrigationZones', 'irrigationInchesPerWeek', 'irrigationRunMinutes',
+  'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationIssues',
+]);
+
 function PropertyTab({ customer }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -7312,12 +7368,26 @@ function PropertyTab({ customer }) {
   // Identity these edits belong to. The whole portal tree remounts on any
   // property/customer change, so capturing once at mount is sufficient.
   const editsCustomerIdRef = useRef(customer?.id);
+  const [serverHasLawnCare, setServerHasLawnCare] = useState(null);
+  // A legacy row stored "off" by the retired toggle: the report and Monday
+  // email suppress derivation until the customer's next irrigation edit
+  // stamps it on, so the card must not claim a figure they aren't counting.
+  const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
     setLoadError('');
     api.getPropertyPreferences()
-      .then(d => { setPrefs(d.preferences); lastSavedRef.current = d.preferences; setLoading(false); })
+      .then(d => {
+        setPrefs(d.preferences);
+        lastSavedRef.current = d.preferences;
+        // Server-side lawn eligibility (tier / turf type OR recurring lawn
+        // service evidence) — the same test the PUT applies to Weekly
+        // Inches, so the field never renders and then drops on save.
+        if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
+        setIrrigationSuppressed(d.irrigationSuppressed === true);
+        setLoading(false);
+      })
       .catch(err => {
         setLoadError(err?.message || 'Could not load property preferences.');
         setLoading(false);
@@ -7364,6 +7434,11 @@ function PropertyTab({ customer }) {
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
+          // The server stamps irrigation_system=true on any irrigation
+          // write, so suppression ends when THIS batch — the one that
+          // actually carried an irrigation field — succeeds. Never a shared
+          // flag: an older non-irrigation PUT resolving must not clear it.
+          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) setIrrigationSuppressed(false);
         } catch (err) {
           // Re-queue UNDER newer edits (a field re-edited since this PUT left
           // wins) so the next flush retries these without clobbering fresher
@@ -7630,8 +7705,14 @@ function PropertyTab({ customer }) {
     systemType: prefs.irrigationSystemType,
   });
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
+  // Stored "off" from the retired toggle: the report and Monday email
+  // suppress a prefs-only schedule — typed inches AND a derived figure alike
+  // — until an irrigation save stamps the row on. Say so for either.
+  const irrigationSuppressedNote = irrigationSuppressed && (explicitInchesEntered || derivedIrrigation.inchesPerWeek != null)
+    ? `${explicitInchesEntered ? 'Your Weekly Inches entry' : 'This schedule'} isn't being counted yet — irrigation was switched off earlier. Save any change here and we'll start counting it.`
+    : null;
   const derivedIrrigationLine = (() => {
-    if (!prefs.irrigationSystem || prefs.irrigationRunMinutes == null) return null;
+    if (prefs.irrigationRunMinutes == null) return null;
     if (derivedIrrigation.inchesPerWeek != null) {
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
       return explicitInchesEntered
@@ -7665,7 +7746,10 @@ function PropertyTab({ customer }) {
   const fullAddress = formatPropertyAddress(customer);
   const cleanTurf = (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '').trim() || 'Not set';
   const tierHasLawnCare = ['Silver', 'Gold', 'Platinum'].includes(String(customer.tier || ''));
-  const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim();
+  // Local shortcut OR the server's recurring-lawn-service evidence — a
+  // standalone lawn-plan customer with no turf type on file used to get no
+  // Weekly Inches field at all (found on a customer's phone 2026-08-27).
+  const hasLawnCare = tierHasLawnCare || !!String(customer.property?.lawnType || '').trim() || serverHasLawnCare === true;
   // Schema semantics (initial_schema.js): property_sqft IS the treated lawn
   // area and bed_sqft is the separate ornamental-bed measurement — never
   // subtract one from the other, that understates the service area.
@@ -7687,9 +7771,22 @@ function PropertyTab({ customer }) {
   const irrigationInchesSummary = Number.isFinite(irrigationInches) && irrigationInches > 0
     ? ` · ${irrigationInches.toFixed(2).replace(/\.00$/, '')}" / week`
     : (Number.isFinite(irrigationRunMinutes) && irrigationRunMinutes > 0 ? ` · ${irrigationRunMinutes} min / zone` : '');
-  const irrigationSummary = prefs.irrigationSystem
-    ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
-    : 'No irrigation system listed';
+  const wateringDayCount = Array.isArray(prefs.wateringDays) ? prefs.wateringDays.length : 0;
+  const irrigationSummaryParts = [
+    prefs.irrigationZones ? `${prefs.irrigationZones} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}` : '',
+    wateringDayCount ? `${wateringDayCount} watering day${wateringDayCount === 1 ? '' : 's'}` : '',
+    irrigationInchesSummary.replace(/^ · /, ''),
+    prefs.rainSensor ? 'rain sensor' : '',
+  ].filter(Boolean);
+  // Any persisted irrigation input is a schedule on file — watering days,
+  // head type, controller location or notes alone must not read as empty.
+  const irrigationHasAnything = irrigationSummaryParts.length > 0
+    || (Array.isArray(prefs.irrigationSystemType) && prefs.irrigationSystemType.length > 0)
+    || !!String(prefs.irrigationControllerLocation || '').trim()
+    || !!String(prefs.irrigationScheduleNotes || '').trim();
+  const irrigationSummary = irrigationSummaryParts.length
+    ? irrigationSummaryParts.join(' · ')
+    : (irrigationHasAnything ? 'Schedule details on file' : 'Add your watering schedule');
   const MOWING_DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const MOWING_TIME_SUMMARY = { morning: 'mornings', midday: 'midday', afternoon: 'afternoons', varies: 'time varies' };
   const mowingDaysList = MOWING_DAY_ORDER.filter(d => (Array.isArray(prefs.mowingDays) ? prefs.mowingDays : []).includes(d));
@@ -8001,115 +8098,117 @@ function PropertyTab({ customer }) {
       </PropertySection>
 
       <PropertySection title="Irrigation" icon="droplet" summary={irrigationSummary}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, gap: 12 }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Irrigation system</div>
-            <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>Watering volume and timing help us read lawn stress correctly.</div>
+        {/* Irrigation is on by default (owner ruling 2026-08-27) — no toggle;
+            the fields are always available. The server stamps
+            irrigation_system=true on any irrigation write. */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Irrigation system</div>
+          <div style={{ fontSize: 14, color: muted, marginTop: 2 }}>
+            {hasLawnCare
+              ? 'Watering volume and timing let your lawn reports compare what the lawn gets to what it needs.'
+              : 'Watering volume and timing help us read lawn stress correctly.'}
           </div>
-          <ToggleSwitch checked={!!prefs.irrigationSystem} onChange={() => updateField('irrigationSystem', !prefs.irrigationSystem)} label="Irrigation system" />
         </div>
-        {hasLawnCare && !prefs.irrigationSystem && (
-          <div style={{ marginTop: 2, marginBottom: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-            Turn this on and add your weekly watering so your lawn service reports can compare it to the recommended amount for your grass type and the season.
+        <div style={fieldGrid}>
+          {textInput('irrigationControllerLocation', 'e.g., Left side of garage, gray box', 'Controller Location')}
+          <div>
+            <label style={labelStyle}>Number of Zones</label>
+            <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={100} label="Irrigation zones" />
+          </div>
+          {irrigationMinutesInput()}
+          {hasLawnCare && irrigationInchesInput()}
+        </div>
+        {/* Lawn customers only — the copy references the Weekly Inches
+            field, which is gated on hasLawnCare just above. */}
+        {hasLawnCare && irrigationSuppressedNote && (
+          <div style={{ marginTop: 6, fontSize: 12, color: B.glassNavy, fontWeight: 650, lineHeight: 1.45 }} data-testid="irrigation-suppressed-note">
+            {irrigationSuppressedNote}
           </div>
         )}
-        {prefs.irrigationSystem && (
-          <>
-            <div style={fieldGrid}>
-              {textInput('irrigationControllerLocation', 'e.g., Left side of garage, gray box', 'Controller Location')}
-              <div>
-                <label style={labelStyle}>Number of Zones</label>
-                <NumberStepper value={prefs.irrigationZones} onChange={v => updateField('irrigationZones', v)} max={100} label="Irrigation zones" />
-              </div>
-              {irrigationMinutesInput()}
-              {hasLawnCare && irrigationInchesInput()}
-            </div>
-            {/* Lawn customers only — the copy references the Weekly Inches
-                field, which is gated on hasLawnCare just above. */}
-            {hasLawnCare && derivedIrrigationLine && (
-              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
-                {derivedIrrigationLine}
-              </div>
-            )}
-            {hasLawnCare && (
-              <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
-                Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
-              </div>
-            )}
-            <div style={{ marginTop: 16 }}>
-              <label style={labelStyle}>Watering Days</label>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
-                  // Legacy rows can hold full day names ("Monday") the server
-                  // now rejects — every edit restates the field in canonical
-                  // keys via the runtime's EXACT alias map (a prefix rule
-                  // fabricated days from non-day text), unknowns dropped, so
-                  // a stale value can never 400 the customer's correction.
-                  const CANONICAL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-                  const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [])
-                    .map(d => DAY_ALIASES[String(d || '').trim().toLowerCase()])
-                    .filter(Boolean);
-                  const active = days.includes(day);
-                  return (
-                    <button key={day} type="button" aria-pressed={active} onClick={() => {
-                      const next = active ? days.filter(d => d !== day) : [...days, day];
-                      updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
-                    }} style={{
-                      ...PORTAL_BUTTON_BASE,
-                      minWidth: 44,
-                      padding: '8px 10px',
-                      fontSize: 14,
-                      borderRadius: 8,
-                      letterSpacing: 0,
-                      boxShadow: 'none',
-                      background: active ? '#F8FCFE' : '#fff',
-                      color: active ? B.glassNavy : muted,
-                      border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
-                    }}>{day}</button>
-                  );
-                })}
-              </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 220px', gap: 16, marginTop: 16, alignItems: 'end' }}>
-              <div>
-                <label style={labelStyle}>System Type</label>
-                <PillSelector
-                  multiple
-                  value={Array.isArray(prefs.irrigationSystemType)
-                    ? prefs.irrigationSystemType
-                    : (prefs.irrigationSystemType ? [prefs.irrigationSystemType] : [])}
-                  // Legacy rows can hold off-vocabulary types ("bubbler") the
-                  // server now rejects; PillSelector carries prior values
-                  // through, so every edit drops unknowns — the customer's
-                  // selection replaces the stale value instead of 400ing.
-                  onChange={v => updateField('irrigationSystemType', v.map(t => String(t).toLowerCase()).filter(t => ['spray', 'drip', 'rotor'].includes(t)))}
-                  options={[
-                    { value: 'spray', label: 'In-ground Spray' },
-                    { value: 'drip', label: 'Drip' },
-                    { value: 'rotor', label: 'Rotor' },
-                  ]}
-                />
-                <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
-                  Select all that apply — many properties mix spray, drip, and rotor zones.
-                </div>
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
-                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Rain sensor</div>
-                <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
-              </div>
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>
-              <div>
-                <label style={labelStyle}>Schedule Notes</label>
-                {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
-              </div>
-              <div>
-                <label style={labelStyle}>Known Issues</label>
-                {textArea('irrigationIssues', "e.g., Zone 4 doesn't reach the back corner", 3)}
-              </div>
-            </div>
-          </>
+        {/* While suppressed the note above is the only word on the figure —
+            a derived line ("is what we'll use") would contradict it. */}
+        {hasLawnCare && derivedIrrigationLine && !irrigationSuppressed && (
+          <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
+            {derivedIrrigationLine}
+          </div>
         )}
+        {hasLawnCare && (
+          <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+            Enter the estimated total irrigation applied to the lawn each week. Most St. Augustine lawns are evaluated against about 1 inch per week, adjusted for rainfall and site conditions.
+          </div>
+        )}
+        <div style={{ marginTop: 16 }}>
+          <label style={labelStyle}>Watering Days</label>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => {
+              // Legacy rows can hold full day names ("Monday") the server
+              // now rejects — every edit restates the field in canonical
+              // keys via the runtime's EXACT alias map (a prefix rule
+              // fabricated days from non-day text), unknowns dropped, so
+              // a stale value can never 400 the customer's correction.
+              const CANONICAL_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+              const days = (Array.isArray(prefs.wateringDays) ? prefs.wateringDays : [])
+                .map(d => DAY_ALIASES[String(d || '').trim().toLowerCase()])
+                .filter(Boolean);
+              const active = days.includes(day);
+              return (
+                <button key={day} type="button" aria-pressed={active} onClick={() => {
+                  const next = active ? days.filter(d => d !== day) : [...days, day];
+                  updateField('wateringDays', CANONICAL_DAYS.filter(d => next.includes(d)));
+                }} style={{
+                  ...PORTAL_BUTTON_BASE,
+                  minWidth: 44,
+                  padding: '8px 10px',
+                  fontSize: 14,
+                  borderRadius: 8,
+                  letterSpacing: 0,
+                  boxShadow: 'none',
+                  background: active ? '#F8FCFE' : '#fff',
+                  color: active ? B.glassNavy : muted,
+                  border: `1px solid ${active ? B.wavesBlue : '#D8D0C0'}`,
+                }}>{day}</button>
+              );
+            })}
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 220px', gap: 16, marginTop: 16, alignItems: 'end' }}>
+          <div>
+            <label style={labelStyle}>System Type</label>
+            <PillSelector
+              multiple
+              value={Array.isArray(prefs.irrigationSystemType)
+                ? prefs.irrigationSystemType
+                : (prefs.irrigationSystemType ? [prefs.irrigationSystemType] : [])}
+              // Legacy rows can hold off-vocabulary types ("bubbler") the
+              // server now rejects; PillSelector carries prior values
+              // through, so every edit drops unknowns — the customer's
+              // selection replaces the stale value instead of 400ing.
+              onChange={v => updateField('irrigationSystemType', v.map(t => String(t).toLowerCase()).filter(t => ['spray', 'drip', 'rotor'].includes(t)))}
+              options={[
+                { value: 'spray', label: 'In-ground Spray' },
+                { value: 'drip', label: 'Drip' },
+                { value: 'rotor', label: 'Rotor' },
+              ]}
+            />
+            <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }}>
+              Select all that apply — many properties mix spray, drip, and rotor zones.
+            </div>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, padding: '10px 12px', border: '1px solid #E7E2D7', borderRadius: 8, background: subtle }}>
+            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Rain sensor</div>
+            <ToggleSwitch checked={!!prefs.rainSensor} onChange={() => updateField('rainSensor', !prefs.rainSensor)} label="Rain sensor installed" />
+          </div>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, marginTop: 16 }}>
+          <div>
+            <label style={labelStyle}>Schedule Notes</label>
+            {textArea('irrigationScheduleNotes', 'e.g., Runs Mon/Wed/Fri at 4am. Zone 3 seems to run too long.', 3)}
+          </div>
+          <div>
+            <label style={labelStyle}>Known Issues</label>
+            {textArea('irrigationIssues', "e.g., Zone 4 doesn't reach the back corner", 3)}
+          </div>
+        </div>
       </PropertySection>
 
       <PropertySection title="Mowing" icon="sprout" summary={mowingSummary}>
@@ -15344,7 +15443,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty } = useAuth();
+  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
@@ -16045,7 +16144,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={() => setShowReportIssue(true)} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}

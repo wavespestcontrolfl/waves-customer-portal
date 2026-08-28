@@ -76,10 +76,41 @@ const CALL_WINDOW_END_HOUR = 18; // exclusive
 // The ONE call-window predicate (codex gh-r14): evaluate() and
 // origination's claim-boundary recheck must agree — via datetime-et, never
 // raw new Date() ET math (the timestamptz trap).
-function isWithinCallWindow(now) {
+// `supervised` = a human is placing this call (manual_call channel, or a
+// voice case approved by an admin actor). ONLY supervised calls may ride
+// the owner-run override below (codex P1 on #3555): the autodial sweep
+// promotes as 'system:autodial' and must stay bound to the real window
+// even if the override is set while its gate is on.
+function isWithinCallWindow(now, { supervised = false } = {}) {
+  if (supervised && callWindowOverrideActive(now)) return true;
   const et = etParts(now);
   const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
   return weekday && et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
+}
+
+// Owner-run shakedown override (owner-approved 2026-08-27): an ISO instant in
+// COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL lets the window pass until that
+// instant. Self-expiring, and capped at 24h ahead so a mistyped year can never
+// become a standing bypass — an unparseable or too-far value is IGNORED (fail
+// closed), never treated as "open". Unset the var to end it early. While it is
+// on, only supervised (hand-dialed) cases can go out: the autodial sweep has
+// its own gate and is expected to stay off during a shakedown.
+const CALL_WINDOW_OVERRIDE_MAX_MS = 24 * 60 * 60 * 1000;
+function callWindowOverrideActive(now) {
+  const raw = process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL;
+  if (!raw) return false;
+  const until = Date.parse(raw);
+  const nowMs = new Date(now).getTime();
+  if (!Number.isFinite(until) || !Number.isFinite(nowMs)) return false;
+  return until > nowMs && until - nowMs <= CALL_WINDOW_OVERRIDE_MAX_MS;
+}
+
+// The supervised-actor test shared by every dial-path reader of
+// collection_cases.approved_by: the admin dial endpoint stamps
+// 'admin:<email>'; the autodial sweep stamps 'system:autodial'. Anything
+// else (NULL, unknown prefix) is NOT supervised — fail closed.
+function isSupervisedApprover(approvedBy) {
+  return typeof approvedBy === 'string' && approvedBy.startsWith('admin:');
 }
 
 // Reassigned-number staleness: no customer-initiated contact from the number
@@ -188,7 +219,7 @@ async function loadEligibleInvoices(customerId) {
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [] } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -427,7 +458,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       // manual_call too (codex 2026-08-14 P1): a dial sheet must not
       // authorize an after-hours collection call just because a human
       // places it.
-      if (!isWithinCallWindow(now)) deny('outside_call_window');
+      // The owner override reaches only SUPERVISED calls: a human dial
+      // sheet (manual_call) or a voice case an admin approved
+      // (`supervisedDial`, derived from approved_by by the caller).
+      const supervised = channel === 'manual_call' || supervisedDial === true;
+      if (!isWithinCallWindow(now, { supervised })) deny('outside_call_window');
     }
 
     // ── Automated-voice-only checks ─────────────────────────────────────
@@ -520,6 +555,7 @@ module.exports = {
   evaluate,
   loadEligibleInvoices,
   isWithinCallWindow,
+  isSupervisedApprover,
   // Exported for tests / PR B reuse.
   PILOT_MIN_BALANCE_CENTS,
   PILOT_MAX_BALANCE_CENTS,

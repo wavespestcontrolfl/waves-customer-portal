@@ -1169,6 +1169,47 @@ describe('executeMerge', () => {
       .toBe('autopay_enabled, autopay_paused_until, autopay_pause_reason');
   });
 
+  it('carries a loser account-credit auto-apply opt-out onto an opted-in winner (most-restrictive; its credit moves with it)', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      autopay_enabled: true, autopay_paused_until: null, auto_apply_account_credit: true,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      autopay_enabled: true, autopay_paused_until: null, auto_apply_account_credit: false, account_credits: '40.00',
+    };
+    const state = { restrictionUpdate: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (payload.auto_apply_account_credit === false) state.restrictionUpdate = payload;
+          return 1;
+        }
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.restrictionUpdate).toMatchObject({ auto_apply_account_credit: false });
+    expect(state.restrictionUpdate.autopay_enabled).toBeUndefined();
+    expect(result.repointed['customers.autopay_restrictions']).toBe('auto_apply_account_credit');
+    // the reverse (loser opted IN, winner opted OUT) never re-enables
+    winner.auto_apply_account_credit = false; loser.auto_apply_account_credit = true; state.restrictionUpdate = null;
+    const again = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.restrictionUpdate).toBeNull();
+    expect(again.repointed['customers.autopay_restrictions']).toBeUndefined();
+  });
+
   it('carries a loser-only unit onto a street-only winner (address_line2 backfill)', async () => {
     const winner = {
       id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',

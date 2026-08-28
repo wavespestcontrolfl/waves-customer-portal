@@ -48,6 +48,7 @@ const logger = require('../../logger');
 const script = require('./script');
 const { isVoiceLatePaymentEnabled, isPayLinkEnabled } = require('./gates');
 const { isStaffedHours } = require('./staffed-hours');
+const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 
@@ -286,6 +287,11 @@ class CollectionsConversation {
       ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })()
       : (row.metadata || {});
     if (!meta.collectionCaseId) return this._refuse('no_case_linkage');
+    // Admin-approved calls may ride the owner call-window override for the
+    // staffed-hours (transfer vs callback) branch; autodial calls never do.
+    // Immutable call_log stamp from origination only (codex #3560 P2/P0 +
+    // hook) — the case's approved_by is mutable; stamp-less = unsupervised.
+    this._supervised = callSupervision(meta);
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
@@ -1430,7 +1436,7 @@ class CollectionsConversation {
   // otherwise a callback card for the office.
   async _humanEscape() {
     if (this.ended) return;
-    const staffed = isStaffedHours(this._now());
+    const staffed = isStaffedHours(this._now(), { supervised: this._supervised === true });
     if (staffed) {
       this.say(script.TRANSFER_ANNOUNCEMENT);
       await this._finish('conversation_transferred', {

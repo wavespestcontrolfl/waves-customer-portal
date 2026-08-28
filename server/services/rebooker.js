@@ -55,6 +55,50 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
 
+// Series sibling-projection clash horizon (rescheduleSeries): a shifted
+// FUTURE occurrence only hard-aborts the sweep when its recomputed date
+// lands within this many days of today. Beyond it the calendar is
+// placeholder-land — the recurring seeder itself commits overlapping
+// 12:00–13:00 placeholder rows months out, and auto-dispatch/admin re-place
+// stops as their dates approach — so a far-future "clash" is not a real
+// double-booking. Hard-aborting on one made most self-serve series
+// reschedules impossible for customers with a second plan (2026-08-14 field
+// report: every offered slot 409'd because a projection collided with a
+// seeded placeholder 6 months out). The ANCHOR row — the visit the customer
+// actually picked — is always hard-checked regardless of this horizon, as
+// are siblings landing inside it, and so is ANY sibling whose occupant is
+// not positively a seeded placeholder (isSeededPlaceholderRow). A
+// beyond-horizon placeholder overlap commits at its cadence date WITHOUT a
+// window (no occupancy — never two occupying rows) and is flagged
+// (`conflicted`) so route callers can park an admin retiming notification.
+const SERIES_SIBLING_CLASH_HORIZON_DAYS = Math.max(
+  1,
+  Number(process.env.REBOOKER_SIBLING_CLASH_HORIZON_DAYS) || 60
+);
+
+// True when a projected sibling date is close enough to today that an
+// occupancy overlap there is a real double-booking (see the horizon const).
+function siblingClashWithinHorizon(dateStr) {
+  const horizonEnd = etDateString(addETDays(new Date(), SERIES_SIBLING_CLASH_HORIZON_DAYS));
+  return String(dateStr).split('T')[0] <= horizonEnd;
+}
+
+// A conflicting row is a SEEDED PLACEHOLDER — disposable for the
+// beyond-horizon rule — only when it is positively identified as one: a
+// recurring child the seeder wrote (is_recurring + recurring_parent_id)
+// that is still `pending` and was never customer-confirmed, and is not a
+// live estimate hold. Anything else on the window (a one-off booking, a
+// confirmed/dispatched occurrence, a hold) is a real appointment and the
+// series sweep must still abort on it regardless of horizon.
+function isSeededPlaceholderRow(row) {
+  return Boolean(row)
+    && row.is_recurring === true
+    && !!row.recurring_parent_id
+    && row.status === 'pending'
+    && !row.customer_confirmed
+    && !row.reservation_expires_at;
+}
+
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
 // the new anchor date, or moving the anchor to a new weekday would keep
@@ -1308,9 +1352,16 @@ class SmartRebooker {
         // resolution. The series path fixes each sibling's date
         // deterministically from the cadence (nextRecurringDate) and has no
         // tolerance search to slide an occurrence into a free window, so an
-        // unplaceable sibling aborts the whole all-or-none shift the same way
-        // the anchor and single-visit paths signal an unresolvable conflict —
-        // throw SLOT_TAKEN, roll back, commit nothing overlapping.
+        // unplaceable NEAR-TERM sibling aborts the whole all-or-none shift
+        // the same way the anchor and single-visit paths signal an
+        // unresolvable conflict — throw SLOT_TAKEN, roll back, commit
+        // nothing overlapping. BEYOND the clash horizon (see
+        // SERIES_SIBLING_CLASH_HORIZON_DAYS) the overlap is with
+        // placeholder-land, not a real route: commit the cadence date the
+        // owner ruling calls for and flag the occurrence (`conflicted`) for
+        // the callers' admin-review parking instead of dead-ending the
+        // customer.
+        let sibClashBeyondHorizon = false;
         if (!isAnchor && updateData.window_start) {
           // Kept-tech slot-reserve lock (rung 3) — same lock the anchor and
           // single-visit paths take, keeping the global order even though the
@@ -1345,14 +1396,51 @@ class SmartRebooker {
             excludeStatuses: TERMINAL,
           });
           if (occClash.length) {
-            if (!overlapAdvisory) {
-              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            if (overlapAdvisory) {
+              // Staff-advisory mode (admin dispatch): overlaps never block a
+              // save — collect the date for the warnings[] the route returns.
+              overlapWarnDates.add(String(date).split('T')[0]);
+            } else if (siblingClashWithinHorizon(date) || !occClash.every(isSeededPlaceholderRow)) {
+              // A near-term projection onto an occupied window is a real
+              // double-booking — and so is a far-out one whose occupant is
+              // anything but a seeded placeholder (isSeededPlaceholderRow).
+              // Abort all-or-none. subcode lets customer
+              // surfaces explain that the WINDOW doesn't fit the plan (another
+              // time may), instead of the misleading "just taken" retry loop
+              // (code stays SLOT_TAKEN — rain-out and admin callers branch
+              // on it and must keep working unchanged).
+              throw Object.assign(new Error('That time doesn\'t work with this plan\'s upcoming visits — try another time or day'), {
                 statusCode: 409,
                 isOperational: true,
                 code: 'SLOT_TAKEN',
+                subcode: 'SERIES_PROJECTION',
               });
+            } else {
+              // Beyond the horizon and every occupant is a seeded
+              // placeholder: commit the occurrence at its cadence date
+              // WINDOWLESS. A windowless row carries no occupancy (the
+              // probe's window predicate never matches it), so no two
+              // occupying rows ever share the window — the invariant holds
+              // — and the NULL window is the durable signal: dispatch
+              // routes windowless rows freely and the operator retimes it
+              // as the date approaches, exactly like a windowless prepay
+              // seed. Flagged (`conflicted`) so callers park the review
+              // notification as well.
+              sibClashBeyondHorizon = true;
+              updateData.window_start = null;
+              updateData.window_end = null;
+              // Legacy presentation fields too: seeded children inherit the
+              // parent's time_window, and customer-facing context / route
+              // reorder fall back to window_display → time_window when
+              // window_start is null — left alone they would keep promising
+              // the abandoned time.
+              updateData.time_window = null;
+              updateData.window_display = null;
+              // Expiry was derived from the timed window above — recompute
+              // for the windowless row (helper applies its windowless default).
+              updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, null);
+              logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} projected onto a seeded-placeholder window ${String(date).split('T')[0]} ${occurrenceWindow.start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committed at cadence WITHOUT a window, flagged for retiming`);
             }
-            overlapWarnDates.add(String(date).split('T')[0]);
           }
         }
 
@@ -1399,6 +1487,13 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
+        if (sibClashBeyondHorizon) {
+          // The row just went timed → windowless: pre-close its reminder in
+          // THIS trx (windows_preclosed marker), or the sync trigger's
+          // recompute leaves it armed for the 08:00 placeholder time.
+          const AppointmentReminders = require('./appointment-reminders');
+          await AppointmentReminders.precloseWindowlessReminderInTx(trx, sib.id);
+        }
 
         if (sib.status !== 'confirmed') {
           // transitioned_by is a UUID FK to technicians; the route
@@ -1417,14 +1512,16 @@ class SmartRebooker {
         touched.push({
           id: sib.id,
           date,
-          windowStart: win.start || sib.window_start,
-          windowEnd: win.end || sib.window_end,
-          // Always false now: a sibling that would land on an occupied window
-          // aborts the whole series (SLOT_TAKEN) instead of committing an
-          // unassigned-but-overlapping row, so no occurrence is ever parked.
-          // Retained for the callers that still read it (admin-dispatch and
-          // reschedule-public park-for-dispatch filters) — they now see none.
-          conflicted: false,
+          windowStart: sibClashBeyondHorizon ? null : (win.start || sib.window_start),
+          windowEnd: sibClashBeyondHorizon ? null : (win.end || sib.window_end),
+          // True only for a BEYOND-horizon occurrence whose projected window
+          // held a seeded placeholder — committed at its cadence date
+          // WINDOWLESS (see above); near-term clashes and real-booking
+          // clashes abort the whole trx and never reach here. Callers
+          // (admin-dispatch, reschedule-public) park flagged occurrences as a
+          // schedule_conflict admin notification for retiming; the tech is
+          // KEPT.
+          conflicted: sibClashBeyondHorizon,
         });
       }
 

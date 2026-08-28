@@ -37,13 +37,40 @@ async function acquireSelfBookingDayCapLock(trx, dateStr) {
   );
 }
 
+// A self_booked_appointments row is the booking's ORIGINAL slot copy; the
+// linked scheduled_services row (self_booking_id) is the LIVE visit. The
+// public reschedule path syncs the copy when the visit moves, but admin
+// moves don't — a visit moved off its booked day left the copy holding a
+// phantom max_self_books_per_day slot on the old date and NO slot on the new
+// one (2026-08-14 field find: a re-service moved-and-completed days earlier
+// still counted against its original day). So the day a self-booking
+// occupies for the cap is its EFFECTIVE date: the linked live visit's
+// scheduled_date while that visit is active; nothing once every linked
+// visit went inactive (same released set the voice-row counter uses); the
+// copy's own date only when no live row was ever linked (legacy bookings,
+// pre-visit-creation). Both counters — the offer builder's fullDays sweep
+// (routes/booking.js) and the commit gate below — key on this one
+// expression so offer and commit stay in lockstep. Bindings = the inactive
+// statuses (SELF_BOOKING_INACTIVE_STATUSES), in order.
+const SELF_BOOKING_INACTIVE_STATUSES = ['cancelled', 'rescheduled', 'skipped'];
+const SELF_BOOKING_EFFECTIVE_DATE_SQL = `(CASE WHEN EXISTS (
+    SELECT 1 FROM scheduled_services AS linked_visit
+     WHERE linked_visit.self_booking_id = self_booked_appointments.id
+  ) THEN (
+    SELECT live_visit.scheduled_date FROM scheduled_services AS live_visit
+     WHERE live_visit.self_booking_id = self_booked_appointments.id
+       AND live_visit.status NOT IN (?, ?, ?)
+     ORDER BY live_visit.scheduled_date ASC
+     LIMIT 1
+  ) ELSE self_booked_appointments.date END)`;
+
 // Same non-cancelled predicate the availability builder counts full days
 // with. excludeSelfBookingId: a same-day reschedule replaces its own row —
 // counting the row being moved would reject the move on a full day even
 // though the final count is unchanged.
 async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingId = null } = {}) {
   const row = await trx('self_booked_appointments')
-    .where('date', String(dateStr))
+    .whereRaw(`${SELF_BOOKING_EFFECTIVE_DATE_SQL} = ?::date`, [...SELF_BOOKING_INACTIVE_STATUSES, String(dateStr)])
     .whereNot('status', 'cancelled')
     .modify((q) => {
       if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
@@ -616,3 +643,5 @@ module.exports = new AvailabilityEngine();
 // createSelfBooking (lazily, so the route ↔ service load order can't cycle).
 module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
 module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;
+module.exports.SELF_BOOKING_EFFECTIVE_DATE_SQL = SELF_BOOKING_EFFECTIVE_DATE_SQL;
+module.exports.SELF_BOOKING_INACTIVE_STATUSES = SELF_BOOKING_INACTIVE_STATUSES;

@@ -134,18 +134,25 @@ describe('invoiceCreditWouldFullyCover — held-coverage probe (Codex #2507 roun
   const COVERED_INVOICE = { customer_id: 'cust-1', total: 100, credit_applied: 0 };
 
   test('credit ≥ amount due → would fully cover', async () => {
-    setQueues({ customers: [qb({ first: { account_credits: 150 } })] });
+    setQueues({ customers: [qb({ first: { account_credits: 150, auto_apply_account_credit: true } })] });
     await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(true);
   });
 
   test('partial credit → would NOT fully cover (normal apply + PI mint captures the method)', async () => {
-    setQueues({ customers: [qb({ first: { account_credits: 40 } })] });
+    setQueues({ customers: [qb({ first: { account_credits: 40, auto_apply_account_credit: true } })] });
     await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(false);
   });
 
   test('credit counts against amount DUE (total − credit_applied), not raw total', async () => {
-    setQueues({ customers: [qb({ first: { account_credits: 60 } })] });
+    setQueues({ customers: [qb({ first: { account_credits: 60, auto_apply_account_credit: true } })] });
     await expect(invoiceCreditWouldFullyCover({ ...COVERED_INVOICE, credit_applied: 50 })).resolves.toBe(true);
+  });
+
+  test('opted-OUT customer (portal slider off, the default) → never covers, whatever the balance — mirrors createInvoicePaymentIntent reading the balance as zero', async () => {
+    setQueues({ customers: [qb({ first: { account_credits: 150, auto_apply_account_credit: false } })] });
+    await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(false);
+    setQueues({ customers: [qb({ first: { account_credits: 150 } })] }); // missing / NULL flag reads as OFF
+    await expect(invoiceCreditWouldFullyCover(COVERED_INVOICE)).resolves.toBe(false);
   });
 
   test('payer-billed invoices never probe (homeowner credit must not touch them)', async () => {

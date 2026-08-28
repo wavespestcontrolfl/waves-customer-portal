@@ -17,7 +17,7 @@ jest.mock('../services/payment-lifecycle-email', () => ({
   sendPaymentMethodExpiring: jest.fn(async () => ({ ok: true })),
 }));
 jest.mock('../services/annual-prepay-renewals', () => ({
-  getCardExpiryExemptCustomerIds: jest.fn(async () => new Set()),
+  getCardExpiryExemptions: jest.fn(async () => ({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map() })),
 }));
 jest.mock('../services/autopay-eligibility', () => {
   const actual = jest.requireActual('../services/autopay-eligibility');
@@ -30,7 +30,8 @@ jest.mock('../services/autopay-eligibility', () => {
 
 const db = require('../models/db');
 const { getChargeableAutopayMethod } = require('../services/autopay-eligibility');
-const { getCardExpiryExemptCustomerIds } = require('../services/annual-prepay-renewals');
+const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals');
+const exemptions = (customerIds = [], charged = []) => ({ customerIds: new Set(customerIds), chargeMethodIdsByCustomer: new Map(charged) });
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { sendCardExpiryWarnings } = require('../services/autopay-notifications');
 
@@ -130,18 +131,50 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
 
 describe('sendCardExpiryWarnings — prepay-covered customers', () => {
   test('a customer still covered at the 60-day horizon is skipped entirely (no walk, no SMS)', async () => {
-    getCardExpiryExemptCustomerIds.mockResolvedValueOnce(new Set([CUSTOMER.id]));
+    getCardExpiryExemptions.mockResolvedValueOnce(exemptions([CUSTOMER.id]));
     wireDb({ customers: [thenable([CUSTOMER])] });
     const res = await sendCardExpiryWarnings();
     expect(res.sent).toBe(0);
     expect(getChargeableAutopayMethod).not.toHaveBeenCalled();
     expect(sendCustomerMessage).not.toHaveBeenCalled();
-    const [asOf] = getCardExpiryExemptCustomerIds.mock.calls[0];
+    const [asOf] = getCardExpiryExemptions.mock.calls[0];
     expect(asOf).toBe('2026-10-25'); // ET today (2026-08-26) + 60 days
   });
 
+  // PER METHOD (#3533 follow-up): the warning is about the method this job
+  // evaluates — a covered customer whose forthcoming charge rides a
+  // DIFFERENT card (an estimate hold's frozen card) is not warned about the
+  // Auto Pay card that charge never touches.
+  const expiringCurrent = () => ({
+    customers: [thenable([CUSTOMER])],
+    payment_methods: [
+      thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa', last_four: '4242', exp_month: '9', exp_year: '26' }]),
+    ],
+  });
+  test("covered customer whose only charge uses ANOTHER card → the evaluated card's warning is skipped (after the walk)", async () => {
+    getCardExpiryExemptions.mockResolvedValueOnce(exemptions([], [[CUSTOMER.id, new Set(['pm-hold'])]]));
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb(expiringCurrent());
+    const res = await sendCardExpiryWarnings();
+    expect(res.sent).toBe(0);
+    expect(getChargeableAutopayMethod).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('covered customer whose charge uses THIS card → warned; an unresolved charge method warns too', async () => {
+    getCardExpiryExemptions.mockResolvedValueOnce(exemptions([], [[CUSTOMER.id, new Set(['pm-cur'])]]));
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb(expiringCurrent());
+    expect((await sendCardExpiryWarnings()).sent).toBe(1);
+    jest.clearAllMocks();
+    getCardExpiryExemptions.mockResolvedValueOnce(exemptions([], [[CUSTOMER.id, null]]));
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb(expiringCurrent());
+    expect((await sendCardExpiryWarnings()).sent).toBe(1);
+  });
+
   test('coverage lookup failure fails toward the warning', async () => {
-    getCardExpiryExemptCustomerIds.mockRejectedValueOnce(new Error('boom'));
+    getCardExpiryExemptions.mockRejectedValueOnce(new Error('boom'));
     getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
     wireDb({
       customers: [thenable([CUSTOMER])],

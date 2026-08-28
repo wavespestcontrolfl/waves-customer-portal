@@ -123,8 +123,11 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   }
 
   // ── FULL revalidation at dial time ─────────────────────────────────────
+  // Supervised = admin-approved case; autodial promotions never ride the
+  // owner call-window override (codex P1 on #3555).
+  const supervised = ContactPolicy.isSupervisedApprover(caseRow.approved_by);
   const verdict = await ContactPolicy.evaluate(caseRow.customer_id, {
-    channel: 'voice', purpose: 'late_payment', now,
+    channel: 'voice', purpose: 'late_payment', now, supervisedDial: supervised,
   });
   if (!verdict.allowed) {
     await setCaseState(caseRow, {
@@ -197,7 +200,7 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   // predicate is contact-policy's own; the expiry re-check rides IN the
   // claim's WHERE below via this same fresh clock.
   const claimNow = clock();
-  if (!ContactPolicy.isWithinCallWindow(claimNow)) {
+  if (!ContactPolicy.isWithinCallWindow(claimNow, { supervised })) {
     return { dialed: false, reason: 'outside_call_window' };
   }
   // customer_id is IN the fence (codex gh-r11): a merge committing between
@@ -262,6 +265,11 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
         caseVersion: caseRow.case_version,
         collectionsIdempotencyKey: idempotencyKey,
         ledgerId: ledgerEntry.id,
+        // Supervision is IMMUTABLE call metadata (codex #3560 P2): the
+        // case's approved_by is cleared by writeCallOutcome, so a webhook
+        // retry re-deriving it from the case would flip a supervised call
+        // to unsupervised mid-flow. Every in-call reader uses this stamp.
+        collectionsSupervised: supervised === true,
       }),
     })
     .returning(['id']);

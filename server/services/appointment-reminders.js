@@ -1661,6 +1661,41 @@ const AppointmentReminders = {
     return record;
   },
 
+  /**
+   * Pre-close the reminder row of a visit that JUST went windowless inside
+   * the caller's transaction (rebooker series sweep: a beyond-horizon
+   * occurrence committed without a window). The DB sync trigger only HOLDS
+   * a row that was already pre-closed; a timed row losing its window would
+   * otherwise be re-armed at the 08:00 placeholder time nobody chose.
+   * Same durable marker + closed-windows shape the placeholder insert and
+   * outbound-review-confirm's windowless conversion write, guarded by the
+   * live row actually being windowless (a concurrent move that assigned a
+   * real window owns the row's state instead). Slot advisory lock first —
+   * the order registration and the trigger use. Returns rows updated.
+   */
+  async precloseWindowlessReminderInTx(trx, scheduledServiceId) {
+    if (!trx || !scheduledServiceId) return 0;
+    const armed = await trx('appointment_reminders')
+      .where({ scheduled_service_id: scheduledServiceId, cancelled: false })
+      .first('id', 'customer_id', 'appointment_time');
+    if (!armed) return 0;
+    await trx.raw('SELECT pg_advisory_xact_lock(reminder_slot_lock_key(?::uuid, ?::timestamptz))', [armed.customer_id, armed.appointment_time]);
+    return trx('appointment_reminders')
+      .where({ id: armed.id, cancelled: false })
+      .whereRaw('EXISTS (SELECT 1 FROM scheduled_services ss WHERE ss.id = appointment_reminders.scheduled_service_id AND ss.window_start IS NULL)')
+      .update({
+        suppressed_by_sibling: true,
+        windows_preclosed: true,
+        confirmation_sent: true,
+        confirmation_sent_at: trx.raw('COALESCE(confirmation_sent_at, NOW())'),
+        reminder_72h_sent: true,
+        reminder_72h_sent_at: trx.raw('COALESCE(reminder_72h_sent_at, NOW())'),
+        reminder_24h_sent: true,
+        reminder_24h_sent_at: trx.raw('COALESCE(reminder_24h_sent_at, NOW())'),
+        updated_at: new Date(),
+      });
+  },
+
   async registerVisitReminderInTx(conn, { scheduledServiceId, customerId, appointmentTime, serviceType, source, createdAt }) {
     if (!conn || !scheduledServiceId || !customerId) return null;
     const apptTime = parseETDateTime(appointmentTime);
