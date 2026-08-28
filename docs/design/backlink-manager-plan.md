@@ -98,7 +98,7 @@ t.string('agent_state').notNullable().defaultTo('new');
 // new → investigating → qualified → ready_to_acquire → acquiring → acquired → watching | not_reproducible | rejected
 // agent_state is an AGGREGATE over the domain's placements, recomputed by the bridge job / on every placement transition:
 //   ready_to_acquire = ≥1 placement stamped AUTO_* or approved and still 'prospect'   (stays/returns here while ANY authorized placement is pending — e.g. a second GBP location)
-//   acquiring        = ≥1 placement leased and none pending-unleased
+//   acquiring        = ≥1 placement leased OR `placed` (submitted, awaiting the Judge's verification) and none pending-unleased
 //   acquired         = ≥1 placement live/indexed and no authorized placement pending
 // Claimability is decided per PLACEMENT (§7): the registry must merely not be new/investigating/not_reproducible/rejected/watching.
 t.integer('score');                               // Waves Link Score (§8), recomputed on enrichment/D30
@@ -681,7 +681,7 @@ t.string('idempotency_key').notNullable().unique(); // initial: `${prospect_id}:
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
-t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist
+t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged','manual_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist. `manual_charged` = an owner-paid purchase (OWNER_MANUAL_PAYMENT or auto_renew_unavoidable) recorded by the human settlement: inserted terminal in one transaction with the `human` attempt, with amount/final_cents, receipt as merchant_ref, terms_snapshot and paid_through — it counts in the owner budget, the duplicate guard and cost reporting, and the paid term is written from it, never from the attempt alone
                                                     // reserved → voided (pre-exposure only) | reserved → submitting → close_pending → charged | submitting → ambiguous → reconciled_charged | reconciled_not_charged
 t.uuid('approval_id');                              // → seo_link_approvals (dimension='payment', action = 'purchase' for purchase_kind='initial', 'renewal' for 'renewal') when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
@@ -803,8 +803,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   and reports `auto_renew_disabled`. If the issuer cannot mint single-use numbers, purchases
   on merchants that only sell auto-renewing terms are **refused outright** (`voided`,
   `outcome='auto_renew_unavoidable'`), including for owner-approved rows — the owner may buy
-  such a listing manually outside the system and record it as a `human` attempt with its own
-  renewal date. No purchase is ever left depending on a future job to prevent a charge.
+  such a listing manually outside the system and record it through the manual settlement
+  form (`manual_charged` ledger row + `human` attempt), which sets its renewal date. No purchase is ever left depending on a future job to prevent a charge.
   Intentional renewals are produced by a **renewal job** that, `renewal_lead_days` (default 21)
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
@@ -812,7 +812,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   (`agent_state='watching'`) if the policy no longer authorizes it. A merchant that cannot sell
   a one-off renewal stays on the refusal path above (`auto_renew_unavoidable`): the renewal job
   never mints for it, owner-approved or not; the owner renews manually outside the system and
-  records a `human` attempt with the new paid-through date. A renewal is leased
+  records it through the manual settlement form (`manual_charged` purchase row + `human`
+  attempt, then the paid term). A renewal is leased
   through a **renewal-specific predicate** (`claim(?mode=renewal)`), keyed to the open,
   unleased `renewal` reservation rather than to the placement lifecycle: the placement stays
   `placed`/`live`/`indexed` and the registry stays `acquired` (their verified state is never
@@ -950,8 +951,10 @@ together:
   acquired; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row — except
   `OWNER_MANUAL_PAYMENT`, which is never leasable for any payment claim (no reservation, no
-  mint: the owner pays outside the system and records a `human` attempt whose settlement
-  writes the paid term; the placement's non-payment dimensions proceed normally), and
+  mint: the owner pays outside the system and records the charge through the manual
+  settlement form, which atomically inserts a `manual_charged` purchase row + a `human`
+  attempt and only then writes the paid term; the placement's non-payment dimensions proceed
+  normally), and
   `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
   `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
