@@ -310,6 +310,57 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
   );
 }
 
+/**
+ * ESTIMATE REQUESTED on a call by an EXISTING customer (codex #3569): a
+ * lifecycle customer deliberately gets no lead, so when Sandy could not give a
+ * number and promised a written estimate, this feed row is the ONLY artifact
+ * that can fulfil the promise. Same doctrine as the contact instruction above:
+ * `bell: true` so the policy cannot silence it, suppressed ≠ persisted, and
+ * the caller (relay-tools) reads the boolean to decide whether the promise
+ * may be spoken at all. Dedupe: one card per call.
+ * @returns {Promise<{persisted:boolean, suppressed:boolean}>}
+ */
+async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opts = {}) {
+  if (!customerId) return { persisted: false, suppressed: false };
+  try {
+    const NotificationService = require('./notification-service');
+    const who = [extracted.first_name, extracted.last_name].filter(Boolean).map((v) => properCase(String(v).trim())).join(' ') || 'an existing customer';
+    const service = extracted.requested_service || extracted.matched_service || null;
+    const notif = await NotificationService.notifyAdmin(
+      'billing',
+      `📝 Estimate requested on a phone call — ${who}`,
+      [
+        'An existing customer asked about pricing on a call and the voice agent could not give a number.',
+        'The caller was told a written estimate will be sent — this card is that obligation.',
+        service ? `Service asked about: ${service}.` : null,
+        extracted.call_summary ? `Call summary: ${String(extracted.call_summary).slice(0, 400)}` : null,
+      ].filter(Boolean).join('\n'),
+      {
+        icon: '📝',
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        bell: true,
+        metadata: {
+          customerId,
+          source: 'voice_agent',
+          kind: 'estimate_request',
+          callSid: opts.callSid || null,
+          dedupeKey: opts.callSid ? `relay-estimate-request:${opts.callSid}` : undefined,
+          requested_service: service,
+        },
+      },
+    );
+    if (!notif || notif.suppressed || !notif.id) {
+      logger.error(`[voice-agent-lead] estimate request for customer ${customerId} did NOT persist to the admin feed${notif && notif.suppressed ? ` (suppressed:${notif.reason || 'internal_test'})` : ''}`);
+      return { persisted: false, suppressed: !!(notif && notif.suppressed) };
+    }
+    logger.info(`[voice-agent-lead] estimate request surfaced for existing customer ${customerId}`);
+    return { persisted: true, suppressed: false };
+  } catch (err) {
+    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.message}`);
+    return { persisted: false, suppressed: false };
+  }
+}
+
 // ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is truthy
 // on purpose (`{ id: null, suppressed: true }`), so a bare truthiness check
 // read "no row was written" as success. With `bell: true` the policy can no
@@ -871,5 +922,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
-  sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage,
+  sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage, surfaceEstimateRequestForCustomer,
 };

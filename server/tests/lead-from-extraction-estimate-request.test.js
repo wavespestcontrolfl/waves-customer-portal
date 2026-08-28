@@ -1,0 +1,43 @@
+/**
+ * surfaceEstimateRequestForCustomer (codex #3569): the ONLY artifact behind a
+ * written-estimate promise to an EXISTING customer (who gets no lead).
+ * bell:true, one card per call, suppressed ≠ persisted, errors non-blocking.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+
+const { notifyAdmin } = require('../services/notification-service');
+const { surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
+
+beforeEach(() => jest.clearAllMocks());
+
+test('files a billing card with bell:true, the customer link, and a per-call dedupe key', async () => {
+  notifyAdmin.mockResolvedValue({ id: 'n-1' });
+  const out = await surfaceEstimateRequestForCustomer('c-1', { first_name: 'pat', last_name: 'LEE', requested_service: 'mosquito', call_summary: 'asked what monthly costs' }, { callSid: 'CA1' });
+  expect(out).toEqual({ persisted: true, suppressed: false });
+  expect(notifyAdmin).toHaveBeenCalledWith(
+    'billing',
+    expect.stringContaining('Estimate requested on a phone call — Pat Lee'),
+    expect.stringContaining('written estimate will be sent'),
+    expect.objectContaining({
+      bell: true,
+      link: '/admin/customers?customerId=c-1',
+      metadata: expect.objectContaining({ customerId: 'c-1', kind: 'estimate_request', callSid: 'CA1', dedupeKey: 'relay-estimate-request:CA1', requested_service: 'mosquito' }),
+    }),
+  );
+});
+
+test('suppressed sentinel or missing id ⇒ NOT persisted', async () => {
+  notifyAdmin.mockResolvedValue({ id: null, suppressed: true, reason: 'internal_test' });
+  expect(await surfaceEstimateRequestForCustomer('c-1', {}, {})).toEqual({ persisted: false, suppressed: true });
+  notifyAdmin.mockResolvedValue(null);
+  expect(await surfaceEstimateRequestForCustomer('c-1', {}, {})).toEqual({ persisted: false, suppressed: false });
+});
+
+test('no customer ⇒ no card; a thrown notify is non-blocking', async () => {
+  expect(await surfaceEstimateRequestForCustomer(null, {}, {})).toEqual({ persisted: false, suppressed: false });
+  expect(notifyAdmin).not.toHaveBeenCalled();
+  notifyAdmin.mockRejectedValue(new Error('boom'));
+  expect(await surfaceEstimateRequestForCustomer('c-1', {}, {})).toEqual({ persisted: false, suppressed: false });
+});

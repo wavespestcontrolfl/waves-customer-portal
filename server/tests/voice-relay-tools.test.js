@@ -3,7 +3,10 @@
  * Verifies the tools call the shared booking engine, format slots for speech,
  * stay read-only, and respect the selfBooking gate.
  */
-jest.mock('../services/lead-from-extraction', () => ({ createLeadFromExtraction: jest.fn() }));
+jest.mock('../services/lead-from-extraction', () => ({
+  createLeadFromExtraction: jest.fn(),
+  surfaceEstimateRequestForCustomer: jest.fn(async () => ({ persisted: true, suppressed: false })),
+}));
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn() }));
 jest.mock('../routes/booking', () => ({
   _internals: {
@@ -64,7 +67,7 @@ describe('Phase 2 context tools gate (VOICE_RELAY_CONTEXT_ENABLED, fail-closed)'
       required: ['call_summary'],
       properties: [
         'address_line1', 'callback_phone', 'city', 'contact_preference', 'call_summary',
-        'do_not_contact_request', 'email', 'first_name', 'last_name', 'lead_quality',
+        'do_not_contact_request', 'email', 'estimate_requested', 'first_name', 'last_name', 'lead_quality',
         'pain_points', 'preferred_contact_method', 'preferred_date_time', 'requested_service',
         'urgency_reason', 'zip',
       ],
@@ -300,6 +303,47 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     expect(out).toMatch(/no new lead was created/i);
     expect(out).not.toMatch(/Lead saved/);
     expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: false }));
+  });
+
+  // codex #3569: a promised written estimate needs an artifact. A new lead is
+  // one; a lifecycle customer gets no lead, so the estimate-request card is —
+  // and the promise is only authorized when that card actually persisted.
+  describe('estimate_requested — the promise follows the artifact', () => {
+    const { surfaceEstimateRequestForCustomer } = require('../services/lead-from-extraction');
+    test('existing customer + card persisted ⇒ promise authorized, WHEN from CLOCK DATA', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+      surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
+      const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito' }, { from: '+19415551234', callSid: 'CA-est' });
+      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito' }), { callSid: 'CA-est' });
+      expect(out).toMatch(/estimate request IS on the office queue/);
+      expect(out).toMatch(/no new lead was created/i);
+    });
+    test('existing customer + card NOT persisted ⇒ promise withdrawn', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+      surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: false, suppressed: true });
+      const out = await executeTool('capture_lead', { call_summary: 'wants a price', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est2' });
+      expect(out).toMatch(/could NOT be queued — do NOT promise a written estimate/);
+    });
+    test('new lead ⇒ the lead is the artifact; no card', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-9', created: true });
+      surfaceEstimateRequestForCustomer.mockClear();
+      const out = await executeTool('capture_lead', { call_summary: 'new caller wants a price', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est3' });
+      expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+      expect(out).toMatch(/Lead saved/);
+      expect(out).toMatch(/estimate request IS on the office queue/);
+    });
+    test('no matched customer and no lead ⇒ promise withdrawn', async () => {
+      // (a FAILED capture returns its own "could not be saved" result before any promise; this is the
+      // no-lead / no-customer outcome that reaches the estimate branch)
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false });
+      const out = await executeTool('capture_lead', { call_summary: 'x', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est4' });
+      expect(out).toMatch(/could NOT be queued/);
+    });
+    test('not requested ⇒ result unchanged (no estimate note either way)', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+      const out = await executeTool('capture_lead', { call_summary: 'support call' }, { from: '+19415551234', callSid: 'CA-est5' });
+      expect(out).not.toMatch(/estimate request/);
+    });
   });
 
   test('writes the lead, marks captured, drops invalid quality', async () => {

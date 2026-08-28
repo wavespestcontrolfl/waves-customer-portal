@@ -102,8 +102,8 @@ const PRICE_LINE_NO_CONTEXT =
   + ' number over the phone but Waves will send a written estimate — the office turns these'
   + ' around quickly during business hours; you cannot see the clock on this call, so never say'
   + ' whether the office is open now or promise a delivery time — then, before anything else,'
-  + ' get their first and last name, email address, and full service street address so it can'
-  + ' go out.';
+  + ' get their first and last name, email address, and full service street address, and call'
+  + ' capture_lead with estimate_requested: true so the request is on the office queue.';
 
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
@@ -165,7 +165,9 @@ const PRICE_LINE_CONTEXT = [
   '  will send a written estimate — during office hours that is usually about 15 minutes; if',
   '  CLOCK DATA says the office is closed, say it goes out when the office opens and follow the',
   '  callback rules — then, before anything else, get their first and last name, email address,',
-  '  and full service street address so it can go out.',
+  '  and full service street address, and call capture_lead with estimate_requested: true. Only',
+  '  the tool result confirms the request is queued; if it says it could not be, do not promise',
+  '  an estimate — say a team member will follow up.',
 ].join('\n');
 
 function agentDisplayName() {

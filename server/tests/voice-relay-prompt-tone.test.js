@@ -36,6 +36,9 @@ test('pricing fallback (gate on): the same capture when get_pricing cannot retur
   expect(ctx).toMatch(/CLOCK DATA says the office is closed/);
   expect(ctx).toMatch(/first and last name, email address,\s+and full service street address/);
   expect(ctx).toMatch(/quote ONLY numbers the get_pricing tool returned/);
+  expect(ctx).toMatch(/capture_lead with estimate_requested: true/);
+  expect(ctx).toMatch(/if it says it could not be, do not promise/);
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/capture_lead with estimate_requested: true/);
 });
 
 test('the four capture fields are the job even on a price-only call', () => {

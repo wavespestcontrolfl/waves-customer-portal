@@ -88,6 +88,12 @@ const TOOLS = [
           enum: ['phone', 'sms', 'email', 'unspecified'],
           description: 'How the caller asked to be reached, if they said. Omit when they did not say.',
         },
+        estimate_requested: {
+          type: 'boolean',
+          description: 'True when the caller asked about pricing and you could not give them a number on this call, '
+            + 'so a written estimate was promised. The office fulfils it — the tool result tells you whether the '
+            + 'request was actually queued.',
+        },
         do_not_contact_request: {
           type: 'boolean',
           description: 'True ONLY if the caller asked us to stop contacting them (or stop texting/emailing them). '
@@ -1287,6 +1293,32 @@ async function executeTool(name, input = {}, ctx = {}) {
       // does not exist, and the model must not be told one was saved.
       const leadCreated = Boolean(capturedLeadId);
       if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated });
+      // ⭐ A PROMISED ESTIMATE NEEDS AN ARTIFACT (codex #3569). A new lead IS
+      // the artifact (the office works it). A lifecycle customer gets no lead,
+      // so the promise would otherwise rest on a call summary nobody is paged
+      // about — file the estimate-request card, and let the result below tell
+      // the model whether the promise may be spoken.
+      let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
+      if (input.estimate_requested === true) {
+        if (leadCreated) {
+          estimateQueued = true;
+        } else if (leadResult && leadResult.customerId) {
+          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
+          const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, extracted, { callSid: ctx.callSid || null })
+            : { persisted: false };
+          estimateQueued = surfaced && surfaced.persisted === true;
+        } else {
+          estimateQueued = false;
+        }
+      }
+      const estimateNote = estimateQueued === true
+        ? ' The estimate request IS on the office queue: you may tell the caller a written estimate will be '
+          + 'sent — set WHEN from the latest CLOCK DATA, never a time you cannot know.'
+        : (estimateQueued === false
+          ? ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
+            + 'Waves team member will follow up, nothing stronger.'
+          : '');
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
         + `callSid=${ctx.callSid || 'n/a'}`
@@ -1332,11 +1364,11 @@ async function executeTool(name, input = {}, ctx = {}) {
         return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
           + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
           + 'a Waves team member will follow up, and do not say a new request or appointment was created.'
-          + suppressionNote + pageCaveat;
+          + suppressionNote + pageCaveat + estimateNote;
       }
       return 'Lead saved successfully. Let the caller know a Waves team member will follow up to confirm '
         + 'details and scheduling — set WHEN from the latest CLOCK DATA (never "shortly" while the office '
-        + 'is closed).' + suppressionNote + pageCaveat;
+        + 'is closed).' + suppressionNote + pageCaveat + estimateNote;
     }
 
     if (name === 'get_availability') {
