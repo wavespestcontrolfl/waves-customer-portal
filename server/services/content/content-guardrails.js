@@ -2386,6 +2386,21 @@ function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false
   return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
 }
 
+// Fail-closed park on the MANUAL lanes too (publishAstro / calendar run
+// only this evaluator): a blog body outside the writer's plain subset is a
+// P1. Refresh drafts grandfather by FEATURE NAME — a form the live prior
+// body already carried (a legacy hand-written <a href="tel:">) does not
+// make the post unpublishable, but any NEWLY introduced form still parks.
+function unsupportedBodySyntaxFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  if (!targetIsBlog) return null;
+  const reasons = unsupportedBodySyntax(body);
+  if (!reasons.length) return null;
+  const prior = new Set(isRefresh ? unsupportedBodySyntax(priorBody) : []);
+  const added = reasons.filter((r) => !prior.has(r));
+  if (!added.length) return null;
+  return finding('P1', 'UNSUPPORTED_BODY_SYNTAX', `Body uses Markdown/HTML syntax outside the supported writer subset (${added.join(', ')}) — parked for review (owner ruling 2026-08-28).`);
+}
+
 // CTA-wording hard rule (owner 2026-08-27) — enforced HERE so every blog
 // publish lane (manual /blog/:id/publish-astro, legacy BlogWriter,
 // refresh) carries it, via seo-completion-gate's shared collector (lazy
@@ -4507,6 +4522,7 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // rule 2026-08-27). Body-only (a pipe table can't ship in a meta), with
     // the standard refresh grandfather.
     rawMarkdownTableFinding(body, { targetIsBlog, isRefresh, priorBody }),
+    unsupportedBodySyntaxFinding(body, { targetIsBlog, isRefresh, priorBody }),
     // CTA-wording hard rule — every blog lane, with the standard refresh
     // grandfather; the post's service (when the lane knows it) arms the
     // service-tying half too (see forbiddenCtaWordingFinding).

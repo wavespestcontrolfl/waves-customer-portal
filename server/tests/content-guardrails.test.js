@@ -2146,6 +2146,28 @@ describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
   });
 });
 
+describe('unsupported body syntax on the manual lanes (owner ruling 2026-08-28)', () => {
+  const HTML_ANCHOR = 'Intro.\n\n<a href="/contact/">Get a Termite Estimate</a>\n';
+
+  test('blog body outside the writer subset P1s; non-blog and plain bodies pass', () => {
+    const r = guardrails.evaluate({ body: HTML_ANCHOR, frontmatter: {} }, { targetIsBlog: true });
+    const f = r.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX');
+    expect(f && f.severity).toBe('P1');
+    expect(f.message).toMatch(/raw_html_anchor/);
+    expect(guardrails.evaluate({ body: HTML_ANCHOR, frontmatter: {} }, {}).findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+    expect(guardrails.evaluate({ body: 'Plain [Get a Termite Estimate](/contact/) text.', frontmatter: {} }, { targetIsBlog: true }).findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+  });
+
+  test('refresh grandfathers forms the live prior body already carried, by feature name only', () => {
+    const kept = guardrails.evaluate({ body: HTML_ANCHOR + '\nMore text.', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(kept.findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+    const added = guardrails.evaluate({ body: HTML_ANCHOR + '\n<span hidden>x</span>', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    const f = added.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX');
+    expect(f && f.message).toMatch(/hidden_or_styled_markup/);
+    expect(f.message).not.toMatch(/raw_html_anchor/);
+  });
+});
+
 describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
   const TABLE_BODY = 'Intro.\n\n| Method | Cost |\n| --- | --- |\n| DIY | $10 |\n';
 
