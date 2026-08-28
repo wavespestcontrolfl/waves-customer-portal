@@ -185,6 +185,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('service-quality adjectives need the reviewer\'s words (rating-only reviews get none)', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad our team was helpful, honest, and efficient. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
+  });
   test('quantified tenure needs the whole phrase in the review', () => {
     const g = grounding({ text: '10/10 great service', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], city: null } });
     expect(verify(good('Hi Dana, thank you for trusting us with the pest control for 10 years.'), g)).toBe('unlisted_relationship_claim');

@@ -5,6 +5,7 @@
 const mockDraft = jest.fn();
 const mockPublish = jest.fn();
 const mockNotify = jest.fn(async () => ({}));
+const mockAccountFacts = jest.fn(async () => null);
 const mockGbp = { isLocationConfigured: jest.fn(async () => true) };
 const state = { rows: [], raws: [] };
 
@@ -15,6 +16,8 @@ jest.mock('../config/locations', () => ({ WAVES_LOCATIONS: [{ id: 'sarasota', na
 jest.mock('../services/review-reply/grounding', () => ({
   buildReplyGrounding: jest.fn(async (row) => ({ version: 'grounding-v1', reviewId: row.id, reviewerName: row.reviewer_name, customerId: row.customer_id || null, review: { rating: row.star_rating, text: row.review_text || '' }, account: null, provenance: {} })),
   loadActiveTechFirstNames: jest.fn(async () => ['Marcus']),
+  loadAccountFacts: (...a) => mockAccountFacts(...a),
+  accountFingerprint: (a) => (a ? `fp:${a.city || ''}|${a.tenure || ''}` : 'fp:none'),
 }));
 jest.mock('../services/review-reply/drafter', () => ({
   draftReviewReply: (...a) => mockDraft(...a),
@@ -108,6 +111,7 @@ beforeEach(() => {
   delete process.env.REVIEW_AUTO_REPLY_MIN_STARS;
   delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
   mockDraft.mockResolvedValue(GOOD_DRAFT);
+  mockAccountFacts.mockReset().mockResolvedValue(null);
   mockPublish.mockImplementation(async ({ reviewId, autoFields, guard }) => {
     const r = state.rows.find((x) => x.id === reviewId);
     // Mirrors the real publisher's in-claim recheck: the guard runs on a fresh row.
@@ -349,17 +353,17 @@ describe('processDueAutoReplies — state machine', () => {
   test('a publish retry reuses the stored verified draft instead of calling the model again', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const fp = Runner.reviewFingerprint(row());
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp } })];
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
     await Runner.processDueAutoReplies();
     expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
     expect(state.rows[0].auto_reply_status).toBe('posted');
     // A stale prompt version goes back to the model.
-    state.rows = [row({ id: 'v0', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: 'old', auto_reply_version: 'reply-v0', auto_reply_grounding: { fingerprint: fp } })];
+    state.rows = [row({ id: 'v0', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: 'old', auto_reply_version: 'reply-v0', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
     await Runner.processDueAutoReplies();
     expect(mockDraft).toHaveBeenCalledTimes(1);
     // So does a draft written for different review text (reviewer edited it).
-    state.rows = [row({ id: 'ed', review_text: 'Edited: actually not great', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp } })];
+    state.rows = [row({ id: 'ed', review_text: 'Edited: actually not great', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
     await Runner.processDueAutoReplies();
     expect(mockDraft).toHaveBeenCalledTimes(2);
   });
@@ -561,6 +565,24 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats).toMatchObject({ retry: 1, posted: 0 });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
     expect(Runner.reviewFingerprint(row({ customer_id: 'cust-a' }))).not.toBe(Runner.reviewFingerprint(row({ customer_id: 'cust-b' })));
+  });
+
+  test('an account-fact change (city corrected) while drafting or before a retry invalidates the draft', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ customer_id: 'cust-a' })];
+    mockAccountFacts.mockResolvedValueOnce({ city: 'Venice', tenure: 'new' }); // at draft time (via snapshot)
+    mockAccountFacts.mockResolvedValueOnce({ city: 'Sarasota', tenure: 'new' }); // at the pre-PUT guard
+    // The grounding mock has account null; make the snapshot carry the draft-time fingerprint.
+    const { buildReplyGrounding } = require('../services/review-reply/grounding');
+    buildReplyGrounding.mockImplementationOnce(async (r) => ({ version: 'grounding-v1', reviewId: r.id, reviewerName: r.reviewer_name, customerId: r.customer_id, review: { rating: r.star_rating, text: r.review_text || '' }, account: await mockAccountFacts(r.customer_id), provenance: {} }));
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ retry: 1, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
+    // Reuse on retry also requires the account fingerprint to match.
+    state.rows = [row({ customer_id: 'cust-a', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row({ customer_id: 'cust-a' })), accountFingerprint: 'fp:Venice|new' } })];
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).toHaveBeenCalledTimes(2); // 1 = the original draft, 2 = redraft (stale account facts)
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

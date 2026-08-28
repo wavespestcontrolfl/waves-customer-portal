@@ -162,6 +162,15 @@ async function loadAccountFacts(customerId, conn = db) {
   };
 }
 
+// Stable hash of the derived account facts — the runner compares it before
+// publishing so a city correction / new completed visit made while a draft
+// was in flight (same customer_id) invalidates the draft.
+function accountFingerprint(account) {
+  const a = account || null;
+  const key = a ? `${a.relationship || ''}|${a.tenure || ''}|${[...(a.serviceCategories || [])].sort().join(',')}|${a.city || ''}` : 'none';
+  return require('crypto').createHash('sha1').update(key).digest('hex');
+}
+
 /**
  * Build the grounding pack for one google_reviews row.
  * @param {object} review google_reviews row
@@ -233,6 +242,8 @@ module.exports = {
   SERVED_CITIES,
   buildReplyGrounding,
   loadActiveTechFirstNames,
+  loadAccountFacts,
+  accountFingerprint,
   // exported for tests
   reviewerFirstName,
   detectTopics,

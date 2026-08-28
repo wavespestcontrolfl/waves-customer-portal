@@ -30,7 +30,7 @@ const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix } = require('./draft-prefix');
-const { buildReplyGrounding, loadActiveTechFirstNames } = require('./grounding');
+const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
@@ -180,8 +180,8 @@ async function releaseClaim(row, patch = {}) {
 // fresh row read: our claim token must still be on the row (an admin skip,
 // a dismissal, or another worker clears/replaces it) and the row must not be
 // dismissed. Any mismatch = this invocation is stale and must not post.
-function claimGuard(row, { publishingText = null } = {}) {
-  return (fresh) => {
+function claimGuard(row, { publishingText = null, accountFingerprint: expectedAccountFp = null } = {}) {
+  return async (fresh) => {
     if (fresh.dismissed) return 'review was dismissed';
     const held = fresh.auto_reply_claimed_until ? new Date(fresh.auto_reply_claimed_until).toISOString() : null;
     if (held !== row._claimToken) return 'auto-reply claim was lost';
@@ -196,6 +196,14 @@ function claimGuard(row, { publishingText = null } = {}) {
     // were drafting) is a human intervention: never post over it.
     const human = humanDraftOn({ ...fresh, auto_reply_draft: row.auto_reply_draft || fresh.auto_reply_draft });
     if (human && human !== String(publishingText || '').trim()) return HUMAN_DRAFT;
+    // The account facts the draft was written from (city, tenure,
+    // categories, relationship) are re-derived now: a correction made while
+    // the draft was in flight — same customer_id — makes it stale too.
+    if (expectedAccountFp) {
+      let current;
+      try { current = accountFingerprint(await loadAccountFacts(fresh.customer_id)); } catch { return 'account facts could not be re-read'; }
+      if (current !== expectedAccountFp) return REVIEW_CHANGED;
+    }
     return null;
   };
 }
@@ -329,6 +337,7 @@ function groundingSnapshot(grounding) {
   // Everything the model saw, minus the review text itself (already on the row).
   return {
     version: grounding.version,
+    accountFingerprint: accountFingerprint(grounding.account),
     fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}|${String(grounding.reviewerName || '').trim().toLowerCase()}|${grounding.customerId || ''}`).digest('hex'),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
@@ -399,8 +408,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     && merged.auto_reply_draft
     && merged.auto_reply_version === REPLY_VERSION
     // …and it was drafted for THIS rating + text (a reviewer edit since
-    // then makes it stale: redraft).
-    && storedGrounding?.fingerprint === reviewFingerprint(merged);
+    // then makes it stale: redraft)…
+    && storedGrounding?.fingerprint === reviewFingerprint(merged)
+    // …and for the SAME derived account facts (city / tenure / categories).
+    && storedGrounding?.accountFingerprint === accountFingerprint(await loadAccountFacts(merged.customer_id).catch(() => null));
   let draft;
   let snapshot;
   if (reusable) {
@@ -464,7 +475,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         auto_reply_claimed_until: null,
       },
       auditMeta: { version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly },
-      guard: claimGuard(row),
+      guard: claimGuard(row, { accountFingerprint: snapshot?.accountFingerprint || null }),
       // Both cron and Post-now report "posted" = live on Google; a local-only
       // save (no GBP creds) must surface as an error, never as posted.
       requireGoogle: true,
@@ -599,7 +610,7 @@ async function postNow(reviewId, actor) {
         auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
-        guard: claimGuard(row, { publishingText: existing }),
+        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraftOn(row) ? null : storedFp && row.auto_reply_grounding?.accountFingerprint || null }),
         requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };
