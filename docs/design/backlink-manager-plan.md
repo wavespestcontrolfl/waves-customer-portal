@@ -120,6 +120,7 @@ t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('re
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
+t.boolean('baseline').notNullable().defaultTo(false); // existing-backlink import placeholder (§4): descriptive only, never executable
 // All authority-relevant flags are NOT NULL: the investigator must answer each explicitly (its JSON schema requires them);
 // §6.3's validity step also asserts they are literal booleans and consistent with the type (paid_listing/membership/
 // association/sponsorship ⇒ payment_required; self_service_free ⇒ NOT payment_required; not_reproducible/unknown ⇒ INVALID).
@@ -151,6 +152,7 @@ t.unique(['domain_id', 'path_key']);
 ```js
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
+t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
 t.string('authority');            // authority level under which this placement was/will be acted on
 t.text('source_detail');
 t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
@@ -280,6 +282,17 @@ CSV rows. Steps, all idempotent:
    `GATE_SEO_INTELLIGENCE`; cached in `enrichment`.
 4. **Queue for investigation** — `agent_state='investigating'`; `owner_seed` first.
 
+**Legacy board backfill (step 1, runs with the migration, idempotent).** Every existing
+`seo_link_prospects` row — including the 56 June drafts — gets a registry domain (canonical
+host; `source` = the row's existing `source`, `source_detail='legacy_prospect'`) and a path
+(`acquisition_type` mapped from `link_type`: outreach lanes → `resource_outreach`/
+`editorial_outreach`, directory/citation/social → `self_service_account`; `submission_url =
+target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
+low; `last_investigated_at = null` so the investigator refreshes it) and is linked via
+`domain_id`/`path_id`. No claim-predicate change ships before this backfill has run; the
+step-4 predicate treats a legacy row exactly like a new one (it still needs investigation →
+bridge → authority before any send).
+
 **Feeders that call the same endpoint** (as jobs, not UI):
 - **Competitor-gap ingestion** — every `seo_competitor_backlinks` domain not yet in the
   registry (the 7,553). Weekly after the Sunday scan; `source='competitor_gap'`.
@@ -298,7 +311,14 @@ CSV rows. Steps, all idempotent:
   `link_type` (directory/citation → `self_service_free` or `self_service_account`,
   editorial/resource → `editorial_outreach`/`resource_outreach`, else `unknown` pending the
   investigator), `submission_url=source_url`, `confidence` low until investigated, and set
-  as `best_path_id` so recursive discovery (§9) can qualify it. Idempotent via
+  as `best_path_id` so recursive discovery (§9) can qualify it. A baseline path is written
+  with **every required field explicit** so the schema holds without invented authority:
+  `account_required=false`, `email_verification=false`, `payment_required=false`,
+  `legal_attestation=false`, `agent_completable=false` (⇒ it can never receive an `AUTO_*`
+  level), `link_type` = the classified type, `confidence=0.1`, `last_investigated_at=null`
+  and `baseline=true` (new boolean; a baseline path is non-executable by definition — the
+  §6.3 validity step already returns `INVALID` on a null `last_investigated_at`, and the
+  investigator replaces it with a real path on the first pass). Idempotent via
   `findPlacementRow`/`path_key`; excluded from acquisition (nothing to acquire) and from the
   Source×funnel *acquired* counts (reported separately as "existing").
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
@@ -428,7 +448,9 @@ acted on by anyone until enrichment and investigation have run).
 `link-authority` job takes every `qualified` domain with a `best_path_id` and, per domain,
 inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses the Waves
 money page for the placement (scorer topic mapping → `targetPageOf`; homepage for
-listing-style paths), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
+listing-style paths) and, for signup-lane paths, **one placement per GBP location**
+(`location_key`, from `config/locations.js` — the existing runner's per-location identity,
+preserved), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
 `source` = the domain's first-touch source, `link_type` = the path's lane) if none exists
 for that (domain, page), runs the §6.3 decision, stamps `authority` on the **placement**
 (the path only receives the informational `authority_last_decided`, which does not bump its
@@ -501,7 +523,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   transition, under the budget lock and before minting, re-runs the pure §6.3 decision on the
   *current* inputs and re-checks the approval (`path_revision`, `decision_inputs_hash`,
   not invalidated/consumed), the placement's current non-superseded path, and every relevant
-  kill switch (`GATE_LINK_AUTHORITY`, `GATE_LINK_AUTO_PAID`, lane gate) — any change since
+  kill switch (`GATE_LINK_PAYMENTS`; `GATE_LINK_AUTO_PAID` for `AUTO_PAID_WITHIN_POLICY`;
+  `GATE_LINK_AUTHORITY` for any `AUTO_*`) — any change since
   reservation ⇒ the row is `voided` (no card was ever minted) and re-parked. A gate flipped
   off, or a domain whose score/spam/confidence moved, between reservation and submission can
   never reach the merchant.
@@ -528,8 +551,12 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   fetched (two steps: mint+persist, then fetch). A crash between mint and persist is
   recoverable by construction: the hourly sweep, for any `submitting` row with a null
   `issuer_card_id`, asks the issuer for the card created under that idempotency key —
-  found ⇒ persist its id and close it (the row goes `ambiguous` as usual); not found ⇒ no
-  card exists and the row may be re-driven. A retry of the mint with the same key returns
+  found ⇒ persist its id and close it (the row goes `ambiguous` as usual); **not found
+  (conclusive, from the issuer's idempotency lookup) ⇒ the sweep performs the ONE backward
+  transition, `submitting → reserved`** (sweep-only, under the budget lock, lease cleared,
+  `submitting_at` nulled, attempt recorded `mint_not_started`) — no instrument ever existed,
+  so nothing can have been charged — and the placement is claimable again for a fresh
+  `reserved → submitting` under the same idempotency key. A retry of the mint with the same key returns
   the same card, never a second one, so one purchase can never hold two live instruments (the merchant cannot authorize or capture
   more than the ledger approved, whatever the checkout later shows; the issuer's program-wide
   monthly limit is a second ceiling, not the control). If the issuer cannot set a per-card
@@ -555,12 +582,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
   under the same lock/budget/idempotency rules — or lets the listing lapse
-  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal reservation is
-  claimable: the claim predicate's "no open purchase" rule excludes `submitting` and
-  `ambiguous` purchases and any `reserved` purchase held by another lease, but the
-  `deterministic_runner` may claim the placement whose matching `renewal` reservation is
-  unleased (the lease then binds that purchase row); the paid term written on
-  `charged`/`reconciled_charged` advances `renews_at`. A renewal never charges
+  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal is leased
+  through a **renewal-specific predicate** (`claim(?mode=renewal)`), keyed to the open,
+  unleased `renewal` reservation rather than to the placement lifecycle: the placement stays
+  `placed`/`live`/`indexed` and the registry stays `acquired` (their verified state is never
+  rewritten), the lease binds the purchase row, the `deterministic_runner` is the only
+  eligible provider, and the usual authority/approval/gate re-checks run on the reservation.
+  The paid term written on `charged`/`reconciled_charged` advances `renews_at`. A renewal never charges
   without its own reservation and, where the merchant does not support one-off renewal, its
   own owner approval.
 - **A reservation is charged against the month it is submitted in.** The
@@ -606,7 +634,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
 - **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
-  prior state (`reserved→voided`, `reserved→submitting`, `submitting→close_pending|ambiguous`,
+  prior state (`reserved→voided`, `reserved→submitting`, `submitting→reserved` [sweep only,
+  issuer-confirmed no card], `submitting→close_pending|ambiguous`,
   `close_pending→charged` only with `card_closed_at`, `close_pending→ambiguous`,
   `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
   stale lease or a wrong prior state affects 0 rows and returns 409.
@@ -630,7 +659,14 @@ is that the cap check inside its existing advisory-lock claim transaction enforc
 `min(policy.auto_outreach_daily_cap, LINK_OUTREACH_DAILY_CAP)` for auto-sends (owner-approved
 sends keep the hard cap only) — the policy cap is never checked outside that lock, so
 concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no reply) go
-through the same gate **with a fail-closed reply check**: today the sender stores only a
+through the same gate as a **distinct claimable step**: the first send leaves the row
+`status='contacted'`, `outreach_status='sent'` (as shipped), so a follow-up is modelled on
+its own columns — `follow_up_due_at` (= sent + 10d), `follow_up_status`
+(`none|due|drafted|sent|skipped`), `follow_up_send_token` (its own idempotency claim, same
+advisory-lock shape as the first send) — and leased with `claim(?type=outreach&mode=followup)`,
+whose predicate accepts `contacted` rows with `outreach_status='sent'`, `follow_up_status='due'`
+and the send authority still valid. One follow-up per placement, ever. It runs **with a
+fail-closed reply check**: today the sender stores only a
 Gmail thread reference and detects nothing, so step 4 adds, inside the locked send claim, a
 Gmail thread reconciliation (`threads.get` on `outreach_thread_ref`; any message not from
 `contact@` = a reply) and skips the follow-up on a reply, a bounce, or a lookup
@@ -657,7 +693,10 @@ together:
   `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row; the path's lane
   gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
-  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no `submitting`/`close_pending`/
+  `GATE_LINK_PAYMENTS` for ANY `payment_required` path — the payment-lane kill switch — and
+  additionally `GATE_LINK_AUTO_PAID` only when the stamped authority is
+  `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` row needs
+  the payments gate, not the auto-paid gate); no `submitting`/`close_pending`/
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
   (an unleased `renewal` reservation is claimable by the runner, §6.3); and the provider requesting
   the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
@@ -832,7 +871,9 @@ New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
 `GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`; **off ⇒ the claim route
 grants no automated lease at all** — every row, pre-existing ones included, is
 `awaiting_owner` and only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
-(separately arms `AUTO_PAID_WITHIN_POLICY`), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
+(separately arms `AUTO_PAID_WITHIN_POLICY` — never required for owner-approved payments),
+`GATE_LINK_PAYMENTS` (the payment-lane kill switch: off ⇒ no purchase of any authority is
+minted or submitted; owner-approved rows wait), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
 the registry's `ready_to_acquire` + stamped authority is the *only* allowlist: the
 authority-aware claim predicate is unconditional (not gated), and `SIGNUP_RUNNER_ALLOWLIST`
 is retired in that PR: its domains are migrated into registry rows/paths (`source_detail=
