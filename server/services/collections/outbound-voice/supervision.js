@@ -12,7 +12,11 @@
  * case and are durably backfilled so a later webhook retry — after the
  * outcome cleared approved_by — classifies the call exactly as the first
  * attempt did (codex #3560 P0). A failed case read resolves unsupervised
- * WITHOUT backfilling, so the next retry can still succeed.
+ * WITHOUT backfilling, so the next retry can still succeed. Two concurrent
+ * legacy derivations can disagree if approved_by moves between them: the
+ * conditional backfill decides the winner, and the loser returns the
+ * PERSISTED stamp — never its own local value — so every request applies
+ * the same classification future requests will read (hook P1).
  */
 
 const db = require('../../../models/db');
@@ -33,13 +37,22 @@ async function resolveCallSupervision({ row, meta, database = db }) {
     return false;
   }
   try {
-    await database('call_log')
+    const won = await database('call_log')
       .where({ id: row.id })
       .whereRaw("COALESCE(metadata->>'collectionsSupervised', '') = ''")
       .update({
         metadata: database.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ collectionsSupervised: supervised })]),
         updated_at: new Date(),
-      });
+      })
+      .returning(['id']);
+    const rows = Array.isArray(won) ? won.length : Number(won) || 0;
+    if (rows > 0) return supervised;
+    // Lost the race (or already stamped since our read): the persisted
+    // stamp is authoritative for this request too.
+    const fresh = await database('call_log').where({ id: row.id }).first('metadata');
+    let stored = fresh && fresh.metadata;
+    if (typeof stored === 'string') { try { stored = JSON.parse(stored); } catch { stored = null; } }
+    if (stored && typeof stored.collectionsSupervised === 'boolean') return stored.collectionsSupervised;
   } catch (err) {
     logger.warn(`[collections-supervision] backfill failed for call_log ${row.id}: ${err.message}`);
   }
