@@ -1952,6 +1952,32 @@ describe('Astro publisher idempotency guard', () => {
     },
   );
 
+  test('a republish while an earlier topic-blocked PR still owes its close settles it first; unsettled → refused (BLOG_PR_RETIRE_PENDING), no new PR (hook r23 P1)', async () => {
+    const post = {
+      id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',
+      astro_status: 'publish_failed', astro_pr_number: 99, astro_branch_name: 'content/blog-ant-trails-bradenton-old1', astro_retire_pr_number: 98,
+    };
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(post) }));
+    // GitHub keeps #98 open no matter what (the close is rejected).
+    gh.getPr.mockImplementation(async (n) => ({ number: n, state: 'open', merged: false, head: { ref: `content/blog-old-${n}` } }));
+    gh.closePr.mockRejectedValue(new Error('502'));
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.toMatchObject({ code: 'BLOG_PR_RETIRE_PENDING' });
+    expect(gh.closePr).toHaveBeenCalledWith(98);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+
+    // The close lands → the debt settles and the republish proceeds (fails
+    // later on this minimal post, but not with the retire refusal).
+    jest.clearAllMocks();
+    db.mockImplementation(() => chain({ first: jest.fn().mockResolvedValue(post) }));
+    const closed = new Set();
+    gh.getPr.mockImplementation(async (n) => ({ number: n, state: closed.has(n) ? 'closed' : 'open', merged: false, head: { ref: `content/blog-old-${n}` } }));
+    gh.closePr.mockImplementation(async (n) => { closed.add(n); });
+    await expect(AstroPublisher.publishAstro('post-1')).rejects.not.toMatchObject({ code: 'BLOG_PR_RETIRE_PENDING' });
+    expect(gh.closePr).toHaveBeenCalledWith(98);
+    expect(gh.closePr).toHaveBeenCalledWith(99);
+  });
+
   test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
     const post = {
       id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',

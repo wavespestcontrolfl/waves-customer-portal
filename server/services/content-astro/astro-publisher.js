@@ -1092,6 +1092,22 @@ async function publishAstro(postId) {
       throw tErr;
     }
   }
+  // A row still owing GitHub a close for an earlier topic-blocked PR
+  // (astro_retire_pr_number) settles that FIRST, and fails closed if it
+  // cannot: a republish whose stale cleanup silently failed could otherwise
+  // be topic-blocked later and overwrite the older PR's debt, leaving that
+  // PR human-mergeable with nothing revisiting it. pages-poll keeps retrying
+  // the close each tick, so the refusal clears itself.
+  if (post.astro_retire_pr_number) {
+    const r = await retireTopicBlockedPostPr(post);
+    if (!r.retired) {
+      const rErr = new Error(r.merged
+        ? `PR #${post.astro_retire_pr_number} was merged before it could be retired — the row now follows that merge; reload it before publishing again`
+        : `earlier topic-blocked PR #${post.astro_retire_pr_number} could not be retired yet (${r.reason || 'still open'}); republish is refused until it is closed (retried automatically each pages-poll tick)`);
+      rErr.code = 'BLOG_PR_RETIRE_PENDING';
+      throw rErr;
+    }
+  }
   if (
     (post.astro_status === 'build_failed' || post.astro_status === 'publish_failed')
     && (post.astro_pr_number || post.astro_branch_name)
@@ -2487,7 +2503,11 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       // …and record the close the row now owes GitHub for the rejected PR
       // (astro_retire_pr_number) in the SAME write, so the debt is as durable
       // as the park itself.
-      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed', astro_retire_pr_number: post.astro_pr_number } : {}),
+      // An older debt is never overwritten (publishAstro refuses to open a
+      // new PR while one is outstanding, so this is belt-and-braces): the
+      // older PR is the one nothing else tracks, while this PR keeps the
+      // row's markers for cleanupStaleAstroPr on the next republish.
+      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed', astro_retire_pr_number: post.astro_retire_pr_number || post.astro_pr_number } : {}),
       updated_at: new Date(),
     });
     if (err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish) {

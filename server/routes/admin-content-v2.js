@@ -946,7 +946,10 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
       || err.code === 'BLOG_GUARDRAILS_FAILED'
       || err.code === 'BLOG_COMPARISON_GATE_FAILED'
       || err.code === 'BLOG_TOPIC_TARGETING_BLOCKED';
-    res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
+    // An earlier topic-blocked PR still awaiting its close: try again once
+    // pages-poll has retired it — 409, not a server failure.
+    const status = isClientErr ? 400 : err.code === 'BLOG_PR_RETIRE_PENDING' ? 409 : 500;
+    res.status(status).json({ error: err.message, details: err.details });
   } finally {
     if (renewTimer) clearInterval(renewTimer);
     // Settle any in-flight renewal so claimStamp reflects the DB before the
