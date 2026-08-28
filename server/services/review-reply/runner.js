@@ -510,11 +510,18 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'parked', reason: 'verifier_reject' };
   }
 
-  if (humanOnly && intent !== 'post_now') {
+  // Hard invariant: 1-3★ / unrated never publish an UNSEEN draft — not even
+  // for Post now. postNow() publishes a previously surfaced draft itself;
+  // reaching this point with intent 'post_now' means no such draft existed
+  // (or it no longer verified), so the freshly generated text is parked for
+  // the person to read. Their next Post now publishes it.
+  if (humanOnly) {
     const reason = rating === 0 ? 'unrated' : 'low_rating';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, reason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
-    await bell(merged, { title: `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`, body: `${summarize(merged)} — a reply is drafted and waiting for your review. Nothing was posted.`, reason, action: true });
-    return { outcome: 'parked', reason, mode: draft.mode };
+    if (intent !== 'post_now') {
+      await bell(merged, { title: `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`, body: `${summarize(merged)} — a reply is drafted and waiting for your review. Nothing was posted.`, reason, action: true });
+    }
+    return { outcome: 'parked', reason, mode: draft.mode, drafted: intent === 'post_now' };
   }
 
   if (cfg.mode !== 'auto' && intent !== 'post_now') {

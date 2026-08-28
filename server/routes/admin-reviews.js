@@ -394,6 +394,11 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
   try {
     const result = await AutoReply.postNow(req.params.id, { type: 'admin', adminUserId: req.technicianId || null });
     if (result.outcome !== 'posted') {
+      // A 1-3★ / unrated review with no surfaced draft: the draft was just
+      // created and parked; the person reads it, then posts it.
+      if (result.drafted) {
+        return res.status(409).json({ error: 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.', outcome: result.outcome, reason: result.reason || null, drafted: true });
+      }
       return res.status(409).json({ error: `Could not post: ${result.reason || result.outcome}`, outcome: result.outcome, reason: result.reason || null });
     }
     res.json({ success: true, outcome: result.outcome, mode: result.mode || null });

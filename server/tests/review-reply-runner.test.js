@@ -985,6 +985,24 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0]).toMatchObject({ actor: { type: 'admin', adminUserId: 'u1' }, text: expect.stringContaining('Sorry'), requireGoogle: true });
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
+  test('postNow on a 1-3★ / unrated row with NO surfaced draft never posts an unseen reply: it drafts + parks; the next Post now publishes it (hook P1)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    for (const star_rating of [2, 0]) {
+      state.rows = [row({ id: 'lo', star_rating, auto_reply_status: 'queued' })];
+      const r = await Runner.postNow('lo', { type: 'admin', adminUserId: 'u1' });
+      expect(r).toMatchObject({ outcome: 'parked', reason: star_rating === 0 ? 'unrated' : 'low_rating', drafted: true });
+      expect(mockPublish).not.toHaveBeenCalled();
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text, auto_reply_claimed_until: null });
+      // Second Post now: the surfaced draft is published as the admin.
+      // (jsonb comes back as an object from Postgres; the in-memory rig stored the string.)
+      state.rows[0].auto_reply_grounding = JSON.parse(state.rows[0].auto_reply_grounding);
+      const r2 = await Runner.postNow('lo', { type: 'admin', adminUserId: 'u1' });
+      expect(r2.outcome).toBe('posted');
+      expect(mockPublish).toHaveBeenCalledTimes(1);
+      mockPublish.mockClear();
+    }
+  });
+
   test('postNow re-verifies a stored AUTO draft against current posted replies; a failing verdict drafts fresh', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const stored = 'Hi Dana,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Sarasota Team';
