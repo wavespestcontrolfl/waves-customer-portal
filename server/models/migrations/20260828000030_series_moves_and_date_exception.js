@@ -54,7 +54,7 @@ exports.up = async function up(knex) {
       t.integer('skipped_count').notNullable().defaultTo(0);
       t.integer('exception_count').notNullable().defaultTo(0);
       t.integer('conflict_count').notNullable().defaultTo(0);
-      t.string('status', 20).notNullable().defaultTo('committed'); // committed | failed | reverted
+      t.string('status', 20).notNullable().defaultTo('committed'); // committed | failed | reverted | superseded
       t.text('error');
       t.jsonb('rows').notNullable().defaultTo('[]');
       t.jsonb('result');

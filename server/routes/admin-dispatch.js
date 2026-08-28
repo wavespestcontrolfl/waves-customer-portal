@@ -14148,13 +14148,16 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     if (notify && markers.notified_at) {
       notificationSent = true;
     } else if (notify) {
-      const svc = await db('scheduled_services')
-        .where('scheduled_services.id', serviceId)
-        .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-        .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-        .first();
-      if (!svc?.phone) {
-        notificationError = 'Customer phone unavailable';
+      // Recipient routing, opt-in/opt-out and service-contact delivery come
+      // from the shared appointment sender (AppointmentReminders.
+      // safeSendAppointment — the same path sendRescheduleNoticeForVisit
+      // uses), never a direct customers.phone text: a primary who opted out,
+      // has no phone, or routes appointment texts to an authorized service
+      // contact gets exactly what the single-visit notice would do.
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
+      if (!customer) {
+        notificationError = 'Customer not found';
       } else if (String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || '').slice(0, 10) !== String(newDate).split('T')[0]) {
         // A replayed/retried pass: the anchor was moved again after this
         // series move committed — the recorded text would announce a
@@ -14171,33 +14174,38 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
         try {
-          const body = await renderRequiredTemplate('appointment_series_rescheduled', {
-            first_name: svc.first_name || 'there',
-            start_date: displayDate,
-            window_text: windowText,
-          }, {
-            workflow: 'dispatch_series_reschedule',
-            entity_type: 'scheduled_service',
-            entity_id: serviceId,
-          });
-          const msg = await sendCustomerMessage({
-            to: svc.phone,
-            body,
-            channel: 'sms',
-            audience: 'customer',
-            purpose: 'appointment',
-            customerId: svc.customer_id,
-            identityTrustLevel: 'phone_matches_customer',
+          const AppointmentReminders = require('../services/appointment-reminders');
+          const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
+          const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
+            const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
+            return renderRequiredTemplate('appointment_series_rescheduled', {
+              first_name: firstName,
+              start_date: displayDate,
+              window_text: windowText,
+            }, {
+              workflow: 'dispatch_series_reschedule',
+              entity_type: 'scheduled_service',
+              entity_id: serviceId,
+            });
+          }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText }, {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
             // neighboring rain-out and quick-move actions (nothing re-enqueues
             // this exact message; a held night send would silently drop the
             // notice for a next-morning move).
             operatorInitiated: true,
-            metadata: { original_message_type: 'reschedule_series_confirmation', reasonText, seriesMoveId },
+            preDispatchCheck: async () => {
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'status');
+              if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
+              if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
+                return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
+              }
+              const stillDate = String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0];
+              return stillDate ? { ok: true } : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
+            },
           });
-          notificationSent = !(msg?.blocked || msg?.sent === false);
-          if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+          if (!notificationSent) notificationError = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
           if (notificationSent) {
             await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
             await stampMarker('notified_at', { customer_notified: true });

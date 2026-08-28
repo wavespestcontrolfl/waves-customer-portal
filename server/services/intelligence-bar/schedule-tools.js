@@ -560,7 +560,7 @@ async function moveStopsToDay(input) {
   // Lazy require: rebooker is heavy (sockets, comms) — only needed on commit.
   const {
     LIVE_LIFECYCLE_RESET, applyLiveMoveSideEffects, applyLiveMovePostCommitEffects,
-    needsLifecycleRewind, applyTrackLifecycleCas,
+    needsLifecycleRewind, applyTrackLifecycleCas, collectiveMoveGateOn, dateExceptionStamp,
   } = require('../rebooker');
   const movedIds = new Set();
   // Committed stops whose landing block overlaps another appointment on the
@@ -614,6 +614,16 @@ async function moveStopsToDay(input) {
     const observedDate = s.scheduled_date instanceof Date
       ? s.scheduled_date.toISOString().slice(0, 10)
       : (s.scheduled_date ? String(s.scheduled_date).slice(0, 10) : null);
+    // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this batch mover
+    // writes ONE row per stop and cannot shift a cadence visit's sister
+    // visits, so with the gate on a recurring stop is refused (reported as
+    // skipped) rather than silently moved per-visit — refuse-don't-drop,
+    // same as reschedule_appointment. Gate off: the move is a this-visit-only
+    // date exception (rebooker.dateExceptionStamp).
+    if (collectiveMoveGateOn() && s.is_recurring === true && observedDate !== dateStr) {
+      skippedConflict.push({ id: s.id, status: s.status, reason: 'collective_move_required' });
+      continue;
+    }
     const { lockTechDays } = require('../scheduling/tech-day-lock');
     // Advisory overlap note for THIS stop, set inside the trx but reported
     // only after the CAS commits (a missed CAS rolls back and must not warn).
@@ -661,6 +671,7 @@ async function moveStopsToDay(input) {
       )
         .update({
         scheduled_date: dateStr,
+        ...(observedDate !== dateStr ? dateExceptionStamp(s, 'admin_ib') : {}),
         // Old day's sequence number is meaningless on the new date — NULL
         // appends the stop after the target day's ordered run.
         route_order: null,

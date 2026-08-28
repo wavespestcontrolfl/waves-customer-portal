@@ -158,12 +158,15 @@ describe('reschedule() choke point', () => {
   });
   afterEach(() => { SmartRebooker.rescheduleSeries = realSeries; });
 
-  function wireLookup(svc) {
+  function wireLookup(svc, { priorMove = undefined } = {}) {
     db.transaction = jest.fn();
+    const priorLookup = chain({ first: jest.fn().mockResolvedValue(priorMove) });
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(svc) });
+      if (table === 'series_moves') return priorLookup;
       throw new Error(`Unexpected db table ${table}`);
     });
+    return { priorLookup };
   }
 
   test('gate on + cadence row + date delta delegates to rescheduleSeries, carrying the caller pin as expectAnchor', async () => {
@@ -177,9 +180,26 @@ describe('reschedule() choke point', () => {
     expect(result.seriesMoveId).toBe('sm-1');
     expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS,
-      expectAnchor: { scheduled_date: BASE, window_start: '09:00:00' },
+      // The FULL scheduling pin rides along (duration too), and the retry
+      // identity is minted here so the series path records it.
+      expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', estimated_duration_minutes: 60 },
+      operationKey: `svc-1:${TARGET}:13:00`,
     });
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a retry after the first attempt committed (anchor already ON the target) replays the prior move instead of a same-date single edit', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const { priorLookup } = wireLookup(anchorRow({ scheduled_date: TARGET }), {
+      priorMove: { id: 'sm-prior', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 3, rescheduledOccurrences: [] } },
+    });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-prior', occurrencesRescheduled: 3 });
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    // Derived keys are honored only within the retry horizon.
+    expect(priorLookup.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:13:00`, status: 'committed' });
+    expect(priorLookup.where).toHaveBeenCalledWith('created_at', '>', expect.any(Date));
   });
 
   test.each([
@@ -403,11 +423,19 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
-  test('callers that mint no key get the action identity anchor:from:to as the operation key', async () => {
+  test('callers that mint no key get the request identity anchor:target:start; an older committed row with that key is superseded first', async () => {
     const { seriesMovesInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
-    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${BASE}:${TARGET}` });
-    expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${BASE}:${TARGET}`, status: 'committed' });
+    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${TARGET}:09:00` });
+    expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:09:00`, status: 'committed' });
+    expect(seriesMovesInsert.update).toHaveBeenCalledWith({ status: 'superseded' });
+  });
+
+  test('the series anchor pin also fences window_end and duration (a start-only resolution derives its window from them)', async () => {
+    wireSeriesMocks([sib('svc-1', BASE, { estimated_duration_minutes: 90 }), sib('svc-2', SIB1)]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', estimated_duration_minutes: 60 },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
   });
 
   test('a repeated operation_key replays the committed result without re-running the sweep', async () => {

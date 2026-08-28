@@ -206,6 +206,28 @@ function snapshotRow(row) {
   return out;
 }
 
+// Series retry identity. A client-minted operationKey wins. Without one the
+// key is derived from IMMUTABLE request data — this anchor, the target date,
+// the requested start — never from the anchor's current date (which already
+// equals the target once the first attempt committed, so a retry would mint
+// a different key and shift/skip wrongly). Derived keys are honored only
+// within a short retry horizon: a genuine later move of the same visit to
+// the same slot is a new action, and its predecessor with that key is marked
+// superseded before the new row claims the unique index.
+const SERIES_RETRY_HORIZON_MS = 10 * 60 * 1000;
+function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
+  if (typeof options.operationKey === 'string' && options.operationKey) {
+    return { key: options.operationKey, derived: false };
+  }
+  const win = parseWindow(newWindow);
+  return { key: `${serviceId}:${dateOnly(newDate)}:${win.start ? String(win.start).slice(0, 5) : '-'}`, derived: true };
+}
+async function findPriorSeriesMove(conn, serviceId, { key, derived }) {
+  const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
+  if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
+  return q.orderBy('created_at', 'desc').first();
+}
+
 // What an operation_key replay hands back for a committed move: the result
 // stored WITH the row in the move transaction, or — for a row whose result
 // column is somehow empty — the same occurrence list rebuilt from the
@@ -719,17 +741,31 @@ class SmartRebooker {
     // `expect` pin (date/window) carries over as the series writer's own
     // expectAnchor fence; excludeServiceIds is a batch-mover concept the
     // series path has no use for.
-    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn()
-      && service.is_recurring === true
-      && dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
-      const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
-      if (expect && (expect.scheduled_date || expect.window_start) && !seriesOptions.expectAnchor) {
-        seriesOptions.expectAnchor = {
-          ...(expect.scheduled_date ? { scheduled_date: expect.scheduled_date } : {}),
-          window_start: expect.window_start ?? null,
-        };
+    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
+      // A retry of a series move that already committed finds the anchor ON
+      // the target (no date delta) — resolve the prior move by request
+      // identity BEFORE branching on the anchor's mutable date, so the
+      // retry replays it (and its caller can finish the effects) instead of
+      // falling into a same-date single edit.
+      const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey);
+      if (prior) return replaySeriesMoveResult(prior, newDate);
+      if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
+        const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
+        // The caller's full scheduling pin rides along: a start-only or
+        // date-only resolution derived its window from window_end /
+        // estimated_duration_minutes, so those must fence the series anchor
+        // too, not just date + start.
+        if (expect && !seriesOptions.expectAnchor) {
+          const pin = {};
+          for (const col of ['scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes']) {
+            if (Object.prototype.hasOwnProperty.call(expect, col)) pin[col] = expect[col];
+          }
+          if (Object.keys(pin).length) seriesOptions.expectAnchor = pin;
+        }
+        seriesOptions.operationKey = opKey.key;
+        return this.rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, seriesOptions);
       }
-      return this.rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, seriesOptions);
     }
     const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
     // Evidence-based rewind test — broader than wasLive (live track_state
@@ -1203,13 +1239,10 @@ class SmartRebooker {
     // submissions still serialize on the partial unique index (the loser
     // replays the winner), while a later genuine move back to the same date
     // (the anchor then sits elsewhere) is a different action.
-    const operationKey = typeof options.operationKey === 'string' && options.operationKey
-      ? options.operationKey
-      : `${serviceId}:${dateOnly(service.scheduled_date)}:${dateOnly(newDate)}`;
+    const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
+    const operationKey = opKey.key;
     {
-      const prior = await db('series_moves')
-        .where({ anchor_service_id: serviceId, operation_key: operationKey, status: 'committed' })
-        .first();
+      const prior = await findPriorSeriesMove(db, serviceId, opKey);
       if (prior) return replaySeriesMoveResult(prior, newDate);
     }
     const {
@@ -1322,8 +1355,15 @@ class SmartRebooker {
           const hm = (t) => (t ? String(t).slice(0, 5) : null);
           const expDate = norm(options.expectAnchor.scheduled_date);
           const expStart = hm(options.expectAnchor.window_start);
+          const has = (col) => Object.prototype.hasOwnProperty.call(options.expectAnchor, col);
+          const expEnd = has('window_end') ? hm(options.expectAnchor.window_end) : undefined;
+          const expDuration = has('estimated_duration_minutes')
+            ? (options.expectAnchor.estimated_duration_minutes ?? null)
+            : undefined;
           if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
-            || (expStart && hm(anchorRow.window_start) !== expStart)) {
+            || (expStart && hm(anchorRow.window_start) !== expStart)
+            || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
+            || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
             throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
               statusCode: 409,
               isOperational: true,
@@ -1808,6 +1848,14 @@ class SmartRebooker {
       // makes two concurrent same-key requests serialize here — the loser
       // rolls back and replays the winner's result (see the catch below).
       seriesMoveId = crypto.randomUUID();
+      if (opKey.derived) {
+        // A derived key beyond the retry horizon is a NEW action on the same
+        // slot: retire its predecessor so the committed-rows unique index
+        // admits this move (the old row keeps its snapshots for Undo).
+        await trx('series_moves')
+          .where({ anchor_service_id: serviceId, operation_key: operationKey, status: 'committed' })
+          .update({ status: 'superseded' });
+      }
       // The replay payload is written WITH the row, in this trx — a
       // committed move whose result a later retry cannot see would let that
       // retry claim effects without any occurrences to sync.
@@ -1854,10 +1902,7 @@ class SmartRebooker {
       return touched;
     }).catch(async (err) => {
       if (err?.code === '23505') {
-        const prior = await db('series_moves')
-          .where({ anchor_service_id: serviceId, operation_key: operationKey, status: 'committed' })
-          .first()
-          .catch(() => null);
+        const prior = await findPriorSeriesMove(db, serviceId, opKey).catch(() => null);
         if (prior) return { replayedFrom: prior };
       }
       await recordFailedSeriesMove(failedMoveFields, err);
@@ -1904,6 +1949,23 @@ class SmartRebooker {
       } catch (err) {
         logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
       }
+    }
+
+    // A call-booked package's follow-up (visit 2, linked by parent_service_id
+    // — not a cadence sibling) stays spaced from its primary, same as the
+    // single path; best-effort outside the trx.
+    try {
+      const shifted = await shiftCallFollowUpsForParentMove({
+        conn: db,
+        parentServiceId: serviceId,
+        fromDate: dateOnly(service.scheduled_date),
+        toDate: seriesDateStr,
+      });
+      if (shifted > 0) {
+        logger.info(`[rebooker] shifted ${shifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
+      }
+    } catch (err) {
+      logger.error(`[rebooker] call follow-up shift after series move failed for ${serviceId}: ${err.message}`);
     }
 
     // Same escalation check the single-visit path runs — a series re-anchor
