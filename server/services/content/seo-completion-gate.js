@@ -641,20 +641,36 @@ function extractLinks(body) {
   // Whitespace INSIDE the link syntax may include single newlines but
   // never a BLANK line — that ends the paragraph, so "(\n\n/contact/)"
   // renders no link.
-  const skipInlineWs = (str, from) => {
+  // A single newline inside the link syntax still cannot cross a
+  // PARAGRAPH boundary — "[Get a Termite Estimate](\n> /contact/)" (the
+  // quote interrupts the paragraph), "(\n# /contact/)", "(\n- /contact/)"
+  // render no link. `atBoundary(k)` answers for the line that starts at
+  // `str[k]`, using the SAME rule as link labels.
+  const skipInlineWs = (str, from, atBoundary) => {
     let k = from;
     let nl = 0;
     // "\r" rides along with its "\n" (CRLF is one line ending); only the
     // second NEWLINE — a blank line — rejects the link.
     while (k < str.length && /[ \t\n\r]/.test(str[k])) {
-      if (str[k] === '\n') { nl += 1; if (nl > 1) return -1; }
+      if (str[k] === '\n') {
+        nl += 1;
+        if (nl > 1) return -1;
+        if (atBoundary && atBoundary(k + 1)) return -1;
+      }
       k += 1;
     }
     return k;
   };
-  const parseInlineDest = (str) => {
+  // `base` = absolute offset of `str[0]` in `sMd`; `openQuoteDepth` = the
+  // quote depth the link opened at. Together they let every newline inside
+  // the syntax be judged against the real line it starts.
+  const parseInlineDest = (str, base, openQuoteDepth, depthAt) => {
     if (str[0] !== '(') return null;
-    let i = skipInlineWs(str, 1);
+    const atBoundary = (k) => {
+      const le = str.indexOf('\n', k);
+      return labelBoundaryLine(str.slice(k, le === -1 ? undefined : le), openQuoteDepth, depthAt(base + k));
+    };
+    let i = skipInlineWs(str, 1, atBoundary);
     if (i === -1) return null;
     let destRaw;
     if (str[i] === '<') {
@@ -680,19 +696,22 @@ function extractLinks(body) {
     // Only whitespace, then an optional VALID title ('"…"', "'…'", "(…)"),
     // then whitespace and the closing ")" may follow the destination —
     // "(/contact/ garbage)" renders no link.
-    let j = skipInlineWs(str, i);
+    let j = skipInlineWs(str, i, atBoundary);
     if (j === -1) return null;
     if (str[j] === '"' || str[j] === "'" || str[j] === '(') {
       const closeCh = str[j] === '(' ? ')' : str[j];
       const parenTitle = str[j] === '(';
       j += 1;
+      // A title may wrap lines, but never across a paragraph boundary
+      // (blank line, deepening quote, heading/list/HTML-block opener).
       while (j < str.length && str[j] !== closeCh) {
         if (str[j] === '\\') { j += 1; }
         else if (parenTitle && str[j] === '(') return null;
+        else if (str[j] === '\n' && (str[j + 1] === '\n' || str[j + 1] === '\r' || atBoundary(j + 1))) return null;
         j += 1;
       }
       if (j >= str.length) return null;
-      j = skipInlineWs(str, j + 1);
+      j = skipInlineWs(str, j + 1, atBoundary);
       if (j === -1) return null;
     }
     if (str[j] !== ')') return null;
@@ -711,7 +730,7 @@ function extractLinks(body) {
       const lEnd = balancedLabelEnd(text, j, openQuoteDepth, () => openQuoteDepth);
       if (lEnd === -1) continue;
       const after = text.slice(lEnd + 1);
-      if (parseInlineDest(after)) return true;
+      if (parseInlineDest(after, 0, openQuoteDepth, () => openQuoteDepth)) return true;
       const fullRef = after.match(refLabel);
       if (fullRef && defs.get(label(fullRef[1] || text.slice(j + 1, lEnd)))) return true;
       if (after[0] !== '(' && after[0] !== ':' && after[0] !== '[' && defs.get(label(text.slice(j + 1, lEnd)))) return true;
@@ -731,7 +750,7 @@ function extractLinks(body) {
     if (!text) { i = end; continue; }
     if (labelContainsLink(text, openQuoteDepth)) continue;
     const rest = sMd.slice(end + 1);
-    const inline = parseInlineDest(rest);
+    const inline = parseInlineDest(rest, end + 1, openQuoteDepth, depthAtPos);
     if (inline) {
       links.push({ anchor: text, href: dest(inline.destRaw) });
       consumed.push([i, end + 2 + inline.end]);

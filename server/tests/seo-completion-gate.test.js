@@ -1402,6 +1402,39 @@ describe('seo-completion-gate', () => {
     });
     expect(newlineInDest.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
 
+    // A single newline inside the syntax cannot cross a PARAGRAPH boundary
+    // either: a DEEPENING quote line, a heading, a list opener, or an HTML
+    // block opener after "(" ends the paragraph — CommonMark renders no
+    // link, so presence is not satisfied. Same-depth quoted continuation
+    // still soft-wraps, and a title may wrap within the paragraph.
+    for (const body of [
+      '[Get a Termite Estimate](\n> /contact/) x.',
+      '[Get a Termite Estimate](\n# /contact/) x.',
+      '[Get a Termite Estimate](\n- /contact/) x.',
+      '[Get a Termite Estimate](\n<div>/contact/</div>) x.',
+      '[Get a Termite Estimate](/contact/ "Book\n> now") x.',
+      '[Get a Termite Estimate](/contact/\n> "Book now") x.',
+    ]) {
+      const crossed = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(crossed.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    }
+    for (const body of [
+      '> [Get a Termite Estimate](\n> /contact/) x.',
+      '[Get a Termite Estimate](/contact/ "Book\nnow") x.',
+      '> [Get a Termite Estimate](/contact/\n> "Book now") x.',
+    ]) {
+      const wrapped = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(wrapped.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    }
+
     // /book/ is a live conversion route — a wording-free actionable anchor
     // pointing there is the forbidden shape.
     const bookRoute = SeoCompletionGate.evaluate({
