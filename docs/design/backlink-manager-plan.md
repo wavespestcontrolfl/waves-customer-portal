@@ -261,7 +261,7 @@ t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
-                                      //   'slot_reserved','submitting','submit_ambiguous',            -- submission lifecycle (§13)
+                                      //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back (lease expired, or ET-day rollover re-reservation) — terminal, audit-only, NEVER counted by the cap query
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
@@ -278,10 +278,14 @@ migration `20260622000010`) is **backfilled idempotently in step 1**, and the cu
 expand/contract in that same PR: `seo_link_attempts` carries `legacy_attempt_id` (uuid,
 partial UNIQUE where not null) and the backfill is ONE pure, re-runnable function
 (`INSERT … ON CONFLICT (legacy_attempt_id) DO NOTHING`, keyed by the legacy row id) that
-runs (a) in the migration, pre-deploy, and (b) as a catch-up at the start of every
-`signup-runner` `run()` and once at boot — so a legacy row written by an OLD pod during the
-rolling deploy (after the migration, before the new writer is live) is picked up by the next
-catch-up, never lost. The same deploy moves `recordAttempt` and every reader of
+runs (a) in the migration, pre-deploy, (b) as a catch-up at the start of every
+`signup-runner` `run()` and once at boot, and (c) as a **gate-independent recurring
+catch-up** — the same function under `runExclusive('link-registry-catchup')` on the existing
+6-hourly scheduler tick, unconditionally, whether or not the runner gate is on — so a legacy
+row written by an OLD pod during the rolling deploy (after the migration, after the new pod's
+boot catch-up, before the old pod drains) is picked up within 6h by a pod that never runs the
+runner, never lost. The catch-up is removed only by the step-2 contract migration, after the
+legacy table is dropped. The same deploy moves `recordAttempt` and every reader of
 `seo_signup_attempts` to `seo_link_attempts`; there is no dual-write. (Today the runner is
 gated OFF in prod with 0 legacy attempts, so the race is theoretical — the catch-up makes the
 cutover correct regardless.) Mapping — `blocked_account` →
@@ -521,10 +525,19 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   `*_cost_cents` field** — the model never emits an amount: it returns the quoted price and
   renewal text verbatim (`price_text`, `renewal_price_text`, each with the page URL it was read
   from) and the investigator derives `estimated_cost_cents` / `renewal_cost_cents`
-  deterministically with the shipped `price-scan/extract.parsePriceText()` (strict: a range,
-  a percentage, a promo badge or an empty string parses to null) → `Math.round(n * 100)`
-  integer cents; an unparseable quote leaves the cents null, which §6.3's validity step turns
-  into INVALID for a `payment_required` path until an owner enters the amount on the card —
+  deterministically: a **currency gate first** — the quote must carry an explicit USD marker
+  (`$` with no non-US prefix, `US$`, `USD`; `€`, `£`, `CAD`, `A$`, `C$`, `MXN`, any other ISO
+  code or symbol, or NO marker ⇒ `currency='unknown'`, cents null) — then the shipped
+  `price-scan/extract.parsePriceText()` (strict: a range, a percentage, a promo badge or an
+  empty string parses to null; it does not validate currency, which is why the gate precedes
+  it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown'))
+  is a column on the path, copied into every approval `terms_snapshot` and stamped on every
+  purchase row; §6.3's validity step returns INVALID for any `payment_required` path whose
+  `currency ≠ 'USD'` (no conversion is ever performed — a non-USD listing is an owner
+  card), and the pre-mint/pre-submit final-total read verifies the LIVE checkout currency is
+  USD as well as `final_cents` (any other currency ⇒ `voided`, `outcome='price_changed'`).
+  An unparseable or non-USD quote leaves the cents null, which §6.3's validity step turns
+  into INVALID for a `payment_required` path until an owner enters the USD amount on the card —
   a hallucinated or mis-scaled number can therefore never reach authority, an approval, or a
   budget reservation — plus
   `confidence` and `reasons`, and — for any `payment_required` path — the `merchant_binding`
@@ -573,7 +586,7 @@ auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; fre
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
-auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions (in-flight and unresolved work holds its slot until a terminal, reconciled outcome); re-checked before submit; 0 ⇒ no automated submissions)
+auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions for that `slot_day` (in-flight and unresolved work holds its slot until a terminal, reconciled outcome; `slot_released` rows never count); re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
 presentment_window_days      = 10        (minimum wait after last card exposure — `card_exposed_at` — before an ambiguous purchase may be reconciled as not charged; may only be raised)
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
@@ -1367,12 +1380,17 @@ unset its gate; budget kill = the issuer program's limit.
   is idempotency-guarded like a purchase:** the slot row carries its ET date
   (`slot_day = etDateString(now)`); immediately before the irreversible call, under the same
   advisory lock, the provider compares `slot_day` with the current ET day — if the day rolled
-  over the old slot is released and a new one atomically reserved against the NEW day's cap
-  (no room ⇒ the attempt is `skipped`, never submitted) — and only then flips the attempt
-  `slot_reserved → submitting` (durable, conditional on the lease); a `submitting` attempt is never released by the sweep — if the worker dies before
+  over the old slot is released — the attempt row flips `slot_reserved → slot_released`
+  (conditional on the lease and prior outcome; audit kept, cap freed) — and a NEW attempt row
+  is atomically reserved against the NEW day's cap (no room ⇒ that new row is `skipped`, never
+  submitted) — and only then flips the live attempt `slot_reserved → submitting` (durable,
+  conditional on the lease). The only edges out of `slot_reserved` are `submitting` (worker,
+  under the lock) and `slot_released` (worker on day rollover, or the sweep on lease expiry —
+  both conditional on `outcome='slot_reserved'`, so a row that already advanced is never
+  released); a `submitting` attempt is never released by the sweep — if the worker dies before
   reporting, the sweep parks it as `submit_ambiguous`, the placement is excluded from
   re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
-  the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released. The runner's
+  the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released (→ `slot_released`). The runner's
   `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
   one conversation per inbox
   (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
