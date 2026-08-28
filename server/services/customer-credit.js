@@ -235,10 +235,14 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
 // choice — customers.auto_apply_account_credit (portal slider, default
 // false). Read with the caller's connection so a locked transaction sees
 // one snapshot; a missing row or column reads as OFF (fail toward leaving
-// the balance untouched).
-async function customerAutoApplyEnabled(customerId, dbh = db) {
+// the balance untouched). `lock` takes the customer row FOR UPDATE so the
+// answer is serialized against a concurrent slider change (the apply's
+// own transaction uses it; probes and quotes read without locking).
+async function customerAutoApplyEnabled(customerId, dbh = db, { lock = false } = {}) {
   if (!customerId) return false;
-  const row = await dbh('customers').where({ id: customerId }).first('auto_apply_account_credit');
+  let q = dbh('customers').where({ id: customerId });
+  if (lock) q = q.forUpdate();
+  const row = await q.first('auto_apply_account_credit');
   return row?.auto_apply_account_credit === true;
 }
 
@@ -261,8 +265,11 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // 2026-08-28). `customerRequested` marks the one non-automatic caller
     // — estimate acceptance, where the customer just accepted a price
     // presented net of their credit — and the admin apply-credit route
-    // posts its movement directly. Checked before any lock or side effect.
-    if (!customerRequested && !(await customerAutoApplyEnabled(invoice.customer_id, t))) {
+    // posts its movement directly. Read FOR UPDATE on the customer row
+    // (same invoice → customer lock order as the balance movement below)
+    // so a slider flip cannot commit between this check and the
+    // consumption; re-asserted on the locked balance row too.
+    if (!customerRequested && !(await customerAutoApplyEnabled(invoice.customer_id, t, { lock: true }))) {
       return { applied: 0, skipped: 'customer_opt_out' };
     }
     // Stopped-dunning honored on the CREDIT side too (pre-push P0 round
@@ -404,7 +411,10 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     if (activePlan) return { applied: 0, skipped: 'active_payment_plan' };
     // Lock the customer row (also locked by postCreditMovement) so the balance
     // we price against can't move under us.
-    const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits');
+    const customer = await t('customers').where({ id: invoice.customer_id }).forUpdate().first('id', 'account_credits', 'auto_apply_account_credit');
+    if (!customerRequested && customer?.auto_apply_account_credit !== true) {
+      return { applied: 0, skipped: 'customer_opt_out' };
+    }
     // Partial application is now safe: every charge path (Stripe PI / autopay /
     // Terminal) and the webhook amount-verification price from amount due
     // (total − credit_applied) via invoiceAmountDue, so a collectible invoice

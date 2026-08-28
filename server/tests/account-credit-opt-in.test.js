@@ -44,7 +44,7 @@ describe('applyAccountCreditToInvoice — customer opt-in gate', () => {
     const calls = world({ optIn: false });
     const result = await applyAccountCreditToInvoice({ invoiceId: 'inv-1' });
     expect(result).toEqual({ applied: 0, skipped: 'customer_opt_out' });
-    expect(calls.customers).toEqual(expect.arrayContaining([['first', 'auto_apply_account_credit']]));
+    expect(calls.customers).toEqual(expect.arrayContaining([['forUpdate'], ['first', 'auto_apply_account_credit']]));
     expect(calls.invoices.find((c) => c[0] === 'update')).toBeUndefined();
     expect(calls.ledger).toEqual([]);
   });
@@ -68,6 +68,24 @@ describe('applyAccountCreditToInvoice — customer opt-in gate', () => {
     const result = await applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true });
     expect(result.skipped).not.toBe('customer_opt_out');
     expect(calls.customers.find((c) => c[0] === 'first' && c[1] === 'auto_apply_account_credit')).toBeUndefined();
+  });
+
+  test('the opt-in is re-asserted on the LOCKED balance row — a flip that lands between the gate and the movement consumes nothing', async () => {
+    let reads = 0;
+    const calls = { invoices: [], customers: [], plans: [], ledger: [] };
+    db.mockImplementation((table) => {
+      if (table === 'invoices') return chain([INVOICE], calls.invoices);
+      // first read (gate) says ON, the locked balance read says OFF
+      if (table === 'customers') return chain(() => [{ id: 'c1', account_credits: '500.00', auto_apply_account_credit: (reads++ === 0) }], calls.customers);
+      if (table === 'payment_plans') return chain([], calls.plans);
+      if (table === 'customer_credit_ledger') return chain([], calls.ledger);
+      throw new Error(`unexpected table ${table}`);
+    });
+    expect(await applyAccountCreditToInvoice({ invoiceId: 'inv-1' })).toEqual({ applied: 0, skipped: 'customer_opt_out' });
+    expect(calls.ledger).toEqual([]);
+    expect(calls.customers.filter((c) => c[0] === 'first').map((c) => c.slice(1))).toEqual([
+      ['auto_apply_account_credit'], ['id', 'account_credits', 'auto_apply_account_credit'],
+    ]);
   });
 
   test('customerAutoApplyEnabled: true only for an explicit true; missing customer → false', async () => {

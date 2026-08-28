@@ -1810,8 +1810,13 @@ const StripeService = {
     }
 
     let projectedCreditApplied = Number(invoice.credit_applied) || 0;
-    if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
-      const { getBalance, computeApplication } = require('./customer-credit');
+    // Same eligibility as the charge path's apply (gate AND the customer's
+    // opt-in, owner ruling 2026-08-28) — an opted-out customer's quote must
+    // be the gross total, or the confirmed quote and the charge disagree
+    // and the charge rejects it as stale.
+    const { getBalance, computeApplication, customerAutoApplyEnabled } = require('./customer-credit');
+    if (require('../config/feature-gates').gates.autoApplyAccountCredit
+      && await customerAutoApplyEnabled(invoice.customer_id)) {
       const balance = await getBalance(invoice.customer_id);
       const projection = computeApplication({
         total: invoice.total,
