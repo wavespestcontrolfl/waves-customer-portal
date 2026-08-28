@@ -95,6 +95,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       return null;
     }
     const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
+    const acceptanceNote = await acceptanceNoteFor(estimateId);
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'estimate.accepted_onboarding',
       to: email,
@@ -102,7 +103,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
         first_name: firstName,
         service_type: clean(serviceLabel) || 'service',
         appointment_line: appointmentLineFor(appointment),
-        acceptance_note: await acceptanceNoteFor(estimateId),
+        acceptance_note: acceptanceNote,
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
@@ -116,6 +117,12 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       suppressProviderErrorLog: true,
     });
     logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
+    // The copy went out (a deduped sent-ish row counts): stamp fulfilment so
+    // the catch-up sweep stops retrying this acceptance.
+    if (acceptanceNote && result?.sent) {
+      await db('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('copy_emailed_at')
+        .update({ copy_emailed_at: new Date() });
+    }
     return result;
   } catch (err) {
     const reason = err.status

@@ -1288,14 +1288,26 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     // Engine-shaped rows (result.lineItems / raw engineResult.lineItems).
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, lineItems: [{ service: 'termite_bond', bondTerm: 'annual' }] }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({ engineResult: { lineItems: [{ service: 'termite_trenching', description: 'Termidor trench' }] } }))).toBe(false);
-    // Commercial proposal: termite building line, or contractual terms.
-    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, buildings: [{ lineItems: [{ description: 'Termite bait stations', frequency: 'quarterly' }] }] } }))).toBe(false);
+    // Terms-neutral lanes: any commercial proposal, commercial category, invoice-mode billing.
+    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, buildings: [{ lineItems: [{ description: 'Pest service', frequency: 'quarterly' }] }] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, commercialTerms: { initialTermMonths: 12, paymentTerms: 'net30' } } }))).toBe(false);
+    expect(acceptanceTermsApplyTo({ ...withData({}), category: 'COMMERCIAL' })).toBe(false);
+    expect(acceptanceTermsApplyTo({ ...withData({}), bill_by_invoice: true })).toBe(false);
     // Fail closed: malformed / empty / non-object rows.
     expect(acceptanceTermsApplyTo({ estimate_data: '{not json' })).toBe(false);
     expect(acceptanceTermsApplyTo({ estimate_data: null })).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [] }, oneTime: { items: [] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: ['pest'] }, oneTime: { items: [] } }))).toBe(false);
+  });
+
+  test('an annual-prepay accept is terms-neutral: no record, no 409, even with a version sent', async () => {
+    mockGateState.acceptanceTerms = true;
+    mockGateState.acceptanceTermsRequired = true;
+    seed({ id: 'est-terms-p', token: 'tok-terms-p-x0123456789' });
+    conversionOk();
+    const res = await putAccept('tok-terms-p-x0123456789', { paymentMethodPreference: 'prepay_annual' });
+    expect(res.status).not.toBe(409);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
   test('absent version: accepts unrecorded under `true` (pre-gate tab), refused under `required`; gate OFF records nothing', async () => {

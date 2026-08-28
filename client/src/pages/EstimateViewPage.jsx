@@ -4962,7 +4962,9 @@ function EstimateViewPageInner() {
           // only when the server served acceptanceTerms (gate on), with the
           // version it served. The server records the verbatim text for that
           // version, or 409s TERMS_VERSION_STALE if the copy moved under us.
-          termsVersion: data?.acceptanceTerms?.version || undefined,
+          // Never for annual prepay: the line is not shown for that lane (paid
+          // up front), so nothing is attested and nothing is recorded.
+          termsVersion: (paymentPreference !== 'prepay_annual' && data?.acceptanceTerms?.version) || undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -6471,7 +6473,7 @@ function EstimateViewPageInner() {
                 prepay={paymentPreference === 'prepay_annual'}
               />
             ) : null}
-            acceptanceTermsSlot={data?.acceptanceTerms ? (
+            acceptanceTermsSlot={data?.acceptanceTerms && paymentPreference !== 'prepay_annual' ? (
               <AcceptanceTermsLine terms={data.acceptanceTerms} />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent

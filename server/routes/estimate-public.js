@@ -274,9 +274,16 @@ function acceptanceTermsApplyTo(estimate) {
     try { d = JSON.parse(d); } catch { return false; }
   }
   if (!d || typeof d !== 'object') return false;
+  // Terms-neutral lanes get nothing (GH/pre-push Codex P1): commercial
+  // estimates (authored proposals and auto-priced alike — their terms live
+  // in the proposal or the account manager's paperwork) and invoice-mode
+  // billing (the invoice states its own payment terms).
+  if (estimate.bill_by_invoice === true) return false;
+  if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL') return false;
+  if (isCommercialAutoAcceptEstimate(estimate)) return false;
   const result = d.result && typeof d.result === 'object' ? d.result : d;
   const proposal = d.proposal && typeof d.proposal === 'object' ? d.proposal : null;
-  if (proposal?.enabled === true && proposal.commercialTerms && typeof proposal.commercialTerms === 'object') return false;
+  if (proposal?.enabled === true) return false;
   const list = (v) => (Array.isArray(v) ? v : []);
   // The converter's extractors own the supported containers (result /
   // nested results / root one_time / oneTimeItems / specItems …) — reuse
@@ -8798,8 +8805,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
+    // Annual prepay is paid up front, so the "due when each service is
+    // completed" line does not describe that transaction: the page hides the
+    // line and sends no attestation for a prepay accept, and the route
+    // records nothing for it (terms-neutral lane).
     const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms')
-      && acceptanceTermsApplyTo(estimate);
+      && acceptanceTermsApplyTo(estimate)
+      && req.body?.paymentMethodPreference !== 'prepay_annual';
     const recordAcceptanceTerms = acceptanceTermsActive
       && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
     // A STALE attestation is always refused: the tab rendered an older copy

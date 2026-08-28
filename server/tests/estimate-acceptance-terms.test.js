@@ -106,7 +106,9 @@ describe('accepted-onboarding email recipient', () => {
     jest.doMock('../models/db', () => (table) => {
       const b = {};
       b.where = () => b;
+      b.whereNull = () => b;
       b.orderBy = () => b;
+      b.update = async () => 1;
       b.first = async () => {
         if (table === 'customers') return undefined;
         if (table === 'estimates') return { token: 'tok-cl', customer_name: 'Pat Q. Tester', customer_email: 'pat@example.com' };
@@ -134,7 +136,9 @@ describe('accepted-onboarding email recipient — linked customer without a usab
     jest.doMock('../models/db', () => (table) => {
       const b = {};
       b.where = () => b;
+      b.whereNull = () => b;
       b.orderBy = () => b;
+      b.update = async () => 1;
       b.first = async () => {
         if (table === 'customers') return { id: 'cust-1', first_name: 'Pat', email: '' };
         if (table === 'estimates') return { token: 'tok-cl', customer_name: 'Pat Tester', customer_email: 'pat@example.com' };

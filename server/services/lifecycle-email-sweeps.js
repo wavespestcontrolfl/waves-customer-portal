@@ -351,26 +351,33 @@ async function runBondRenewalSweep() {
 // P1): the accept route's post-commit onboarding email — which carries the
 // promised copy of the accepted terms — is fire-and-forget, so a crash or a
 // provider failure between commit and send would leave a recorded
-// acceptance with no emailed copy. Every estimate_acceptances row in the
-// look-back window with no sent-ish email_messages row for its key gets the
-// send re-attempted here: the stable key first (a sent-but-unlogged race
-// dedupes harmlessly), then — when that key is wedged on a failed/blocked
-// row — a day-scoped retry key, exactly the bond-renewal pattern above.
-const ACCEPTANCE_COPY_LOOKBACK_DAYS = 14;
+// acceptance with no emailed copy. Fulfilment is tracked ON THE RECORD
+// (estimate_acceptances.copy_emailed_at, stamped by the sender): every
+// unfulfilled acceptance is re-attempted daily with no time limit — the
+// stable key first (a sent-but-unstamped race dedupes harmlessly and gets
+// stamped), then a day-scoped retry key when the stable key is wedged on a
+// failed/blocked row (the bond-renewal pattern above). An acceptance with
+// no usable email at all cannot be fulfilled by mail: after
+// ACCEPTANCE_COPY_ESCALATE_DAYS the office is notified ONCE
+// (copy_escalated_at) so a person can hand over the copy — the accepted
+// page and PDF carry the same record — instead of the promise silently
+// lapsing (rule 14: exceptions park and surface).
 const ACCEPTANCE_COPY_SETTLE_MINUTES = 30; // give the post-commit send time to land
+const ACCEPTANCE_COPY_ESCALATE_DAYS = 7;
 const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
 
 async function runAcceptanceCopySweep() {
-  if (!(await db.schema.hasTable('estimate_acceptances'))) return { sent: 0, checked: 0 };
+  if (!(await db.schema.hasTable('estimate_acceptances'))) return { sent: 0, checked: 0, escalated: 0 };
   const now = Date.now();
   const rows = await db('estimate_acceptances')
-    .where('accepted_at', '>=', new Date(now - ACCEPTANCE_COPY_LOOKBACK_DAYS * 86400000))
+    .whereNull('copy_emailed_at')
     .where('accepted_at', '<=', new Date(now - ACCEPTANCE_COPY_SETTLE_MINUTES * 60000))
     .orderBy('accepted_at', 'asc')
-    .select('estimate_id', 'customer_id');
+    .select('id', 'estimate_id', 'customer_id', 'accepted_at', 'copy_escalated_at');
   const seen = new Set();
   let sent = 0;
   let checked = 0;
+  let escalated = 0;
   for (const row of rows) {
     if (seen.has(row.estimate_id)) continue;
     seen.add(row.estimate_id);
@@ -381,9 +388,14 @@ async function runAcceptanceCopySweep() {
         .where('idempotency_key', 'like', `${baseKey}%`)
         .whereIn('status', SENT_ISH)
         .first('id');
-      if (delivered) continue;
+      if (delivered) {
+        // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
+        await db('estimate_acceptances').where({ estimate_id: row.estimate_id }).whereNull('copy_emailed_at')
+          .update({ copy_emailed_at: new Date() });
+        continue;
+      }
       const wedged = await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
-      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'estimate_data');
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data');
       if (!estimate) continue;
       const { sendEstimateAcceptedOnboarding } = require('./estimate-accepted-email');
       const EstimateConverter = require('./estimate-converter');
@@ -398,13 +410,26 @@ async function runAcceptanceCopySweep() {
         appointment: null,
         idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
       });
-      if (result?.sent) sent += 1;
+      if (result?.sent) { sent += 1; continue; }
+      // null = no usable email anywhere (sender skipped). Not a mail problem
+      // to retry — surface it once so a person can deliver the copy.
+      const ageDays = (now - new Date(row.accepted_at).getTime()) / 86400000;
+      if (result === null && !row.copy_escalated_at && ageDays >= ACCEPTANCE_COPY_ESCALATE_DAYS) {
+        const NotificationService = require('./notification-service');
+        await NotificationService.notifyAdmin(
+          'estimate',
+          `Acceptance copy not deliverable: ${estimate.customer_name || 'customer'}`,
+          `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)} with no usable email on the customer or the estimate. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`,
+        );
+        await db('estimate_acceptances').where({ id: row.id }).update({ copy_escalated_at: new Date() });
+        escalated += 1;
+      }
     } catch (err) {
       logger.error(`[lifecycle-sweeps] acceptance copy resend failed for estimate ${row.estimate_id}: ${err.message}`);
     }
   }
-  if (sent) logger.info(`[lifecycle-sweeps] re-sent ${sent} acceptance copy email(s) (${checked} checked)`);
-  return { sent, checked };
+  if (sent || escalated) logger.info(`[lifecycle-sweeps] acceptance copies: ${sent} re-sent, ${escalated} escalated (${checked} checked)`);
+  return { sent, checked, escalated };
 }
 
 async function runDailySweeps() {

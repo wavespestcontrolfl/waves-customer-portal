@@ -37,6 +37,12 @@ exports.up = async function up(knex) {
     t.timestamp('accepted_at', { useTz: true }).notNullable();
     t.string('ip', 64);
     t.string('user_agent', 1000);
+    // Fulfilment of the "email you a copy" line: stamped when the onboarding
+    // email carrying the verbatim copy was sent (post-commit send or the
+    // daily catch-up sweep); copy_escalated_at = the office was notified once
+    // that no usable email exists for this acceptance.
+    t.timestamp('copy_emailed_at', { useTz: true });
+    t.timestamp('copy_escalated_at', { useTz: true });
     t.timestamps(true, true);
 
     t.index('estimate_id');
