@@ -102,12 +102,30 @@ test('each lifecycle email first is matched by template_key and reported with it
   expect(bodies).toContain('status: sent');
 });
 
-test('an undelivered ops email leaves the first unmarked so the next tick retries', async () => {
+test('claim is stamped BEFORE the send; an undelivered email releases it so the next tick retries', async () => {
   state.autopay_log.push({ event_type: 'removal_refused', customer_id: 'cust-1', payment_method_id: 'pm-live', details: '{}', created_at: '2026-08-28T12:00:00.000Z' });
-  email.send.mockImplementation(async () => ({ ok: false, error: 'smtp down' }));
+  const order = [];
+  db.mockImplementation((table) => { order.push(table); return builderFor(table); });
+  email.send.mockImplementation(async () => { order.push('smtp'); return { ok: false, error: 'smtp down' }; });
   const res = await runPaymentMethodFirstsWatch();
   expect(res).toEqual({ reported: [] });
-  expect(state.ops_email_send_state).toEqual([]);
+  // ops_email_send_state claim write happens before smtp.
+  const claimAt = order.indexOf('ops_email_send_state', order.indexOf('autopay_log'));
+  expect(claimAt).toBeGreaterThan(-1);
+  expect(claimAt).toBeLessThan(order.indexOf('smtp'));
+  // Released: row exists but last_sent_at is null → next tick treats it as pending.
+  expect(state.ops_email_send_state).toEqual([expect.objectContaining({ email_key: `${MARKER_PREFIX}removal_refused`, last_sent_at: null })]);
+  email.send.mockImplementation(async () => ({ ok: true }));
+  const again = await runPaymentMethodFirstsWatch();
+  expect(again).toEqual({ reported: ['removal_refused'] });
+});
+
+test('a claimed-but-crashed first is NOT re-sent (duplicate-safe direction)', async () => {
+  state.autopay_log.push({ event_type: 'removal_refused', customer_id: 'cust-1', payment_method_id: 'pm-live', details: '{}', created_at: '2026-08-28T12:00:00.000Z' });
+  state.ops_email_send_state.push({ email_key: `${MARKER_PREFIX}removal_refused`, last_sent_at: new Date() });
+  const res = await runPaymentMethodFirstsWatch();
+  expect(res).toEqual({ reported: [] });
+  expect(email.send).not.toHaveBeenCalled();
 });
 
 test('all three reported → the watch retires (no reads of the watched tables)', async () => {

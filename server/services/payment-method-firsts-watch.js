@@ -109,6 +109,13 @@ async function stampMarker(name) {
     .merge({ last_sent_at: now, updated_at: now });
 }
 
+// Send failed after the claim: release it so the next tick retries.
+async function releaseMarker(name) {
+  await db('ops_email_send_state')
+    .where({ email_key: markerKey(name) })
+    .update({ last_sent_at: null, updated_at: new Date() });
+}
+
 function isOff() {
   return String(process.env.PM_GUARD_FIRSTS_WATCH || '').toLowerCase() === 'off';
 }
@@ -136,23 +143,43 @@ async function runPaymentMethodFirstsWatch() {
     }
     if (!hit) continue;
 
-    const when = new Date(hit.at).toLocaleString('en-US', { timeZone: 'America/New_York' });
-    const res = await require('./email').send({
-      to: OPS_TO,
-      subject: `FIRST: ${first.label}`,
-      heading: first.label,
-      body: `Seen ${when} ET.<ul style="padding-left:20px;margin:12px 0;">${hit.lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
-        + 'This is a one-time notice from the #3556 payment-method guard watch; it will not repeat for this event. '
-        + `Kill switch: PM_GUARD_FIRSTS_WATCH=off.`,
-    });
-    if (!res || res.ok === false) {
-      // Never mark a first as reported when the email did not go out —
-      // an undelivered notice is the one way this watch could lose the
-      // signal it exists to deliver. The next tick retries.
-      logger.error(`[pm-guard-firsts] ops email for ${first.name} did not send${res?.error ? `: ${res.error}` : ''}`);
+    // CLAIM before SMTP (GH codex #3564 r1 P1): stamping after the send left
+    // a crash/retry gap where an accepted email could be sent again on the
+    // next tick. Claim first; a failed send releases the claim so the next
+    // tick retries. Residual: a crash between the claim and SMTP accept
+    // loses that one notice rather than duplicating it — the marker row in
+    // ops_email_send_state makes that visible, and deleting the row re-arms
+    // the first (SMTP has no idempotent send to reconcile against).
+    try {
+      await stampMarker(first.name);
+    } catch (err) {
+      logger.error(`[pm-guard-firsts] claim failed for ${first.name}: ${err.message}`);
       continue;
     }
-    await stampMarker(first.name);
+    const when = new Date(hit.at).toLocaleString('en-US', { timeZone: 'America/New_York' });
+    let res;
+    try {
+      res = await require('./email').send({
+        to: OPS_TO,
+        subject: `FIRST: ${first.label}`,
+        heading: first.label,
+        body: `Seen ${when} ET.<ul style="padding-left:20px;margin:12px 0;">${hit.lines.map((l) => `<li>${l}</li>`).join('')}</ul>`
+          + 'This is a one-time notice from the #3556 payment-method guard watch; it will not repeat for this event. '
+          + `Kill switch: PM_GUARD_FIRSTS_WATCH=off.`,
+      });
+    } catch (err) {
+      res = { ok: false, error: err.message };
+    }
+    if (!res || res.ok === false) {
+      logger.error(`[pm-guard-firsts] ops email for ${first.name} did not send${res?.error ? `: ${res.error}` : ''} — claim released, next tick retries`);
+      try {
+        await releaseMarker(first.name);
+      } catch (err) {
+        // Claim stuck with no email: log loudly — the row is the evidence.
+        logger.error(`[pm-guard-firsts] could not release claim for ${first.name}: ${err.message} (delete ops_email_send_state '${markerKey(first.name)}' to re-arm)`);
+      }
+      continue;
+    }
     sent.push(first.name);
     logger.info(`[pm-guard-firsts] reported ${first.name} (seen ${new Date(hit.at).toISOString()})`);
   }
