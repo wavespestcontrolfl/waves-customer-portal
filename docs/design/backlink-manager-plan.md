@@ -192,7 +192,7 @@ and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable();
 t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','payment','communication'))
 t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
-t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence (approval.action must match the dimension: acquire | renewal ↔ payment/execution, outreach_send/followup ↔ communication)
+t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence; the referenced approval's `dimension` must equal this row's dimension (enforced in the approval transaction)
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
 t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when the dimension's action completed (e.g. communication after `sent`) — a satisfied dimension is never re-decided
 t.unique(['prospect_id', 'dimension']);
@@ -300,13 +300,14 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.integer('path_revision').notNullable();     // the path's revision_<dimension of this approval's action> at approval time (§3.2) — never the global counter
 t.text('decision_inputs_hash').notNullable(); // hash of the §6.3 inputs at approval (spam_score, score, confidence, estimated/renewal cents, flags); a mismatch at claim time invalidates the approval
-t.boolean('money_action').notNullable();      // = action IN ('acquire','renewal') AND the path's payment_required at approval time — same-row, so the money CHECK below can see it; FALSE for outreach_send / outreach_followup approvals on a paid path (the communication approval never carries payment terms; the payment dimension has its own approval)
+t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT money_action OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT money_action OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
-t.string('action').notNullable();             // CHECK (action IN ('acquire','outreach_send','outreach_followup','renewal')) — an approval authorizes exactly one action
+t.string('dimension').notNullable();          // CHECK (dimension IN ('execution','payment','communication')) — the authority dimension this approval satisfies
+t.string('action').notNullable();             // CHECK (action IN ('acquire','purchase','renewal','outreach_send','outreach_followup')) AND CHECK ((dimension='execution' AND action='acquire') OR (dimension='payment' AND action IN ('purchase','renewal')) OR (dimension='communication' AND action IN ('outreach_send','outreach_followup'))) — an approval authorizes exactly one action in exactly one dimension; a paid membership has an execution/acquire approval AND a separate payment/purchase approval
 t.text('action_hash');                        // outreach_send/followup: sha256 of (recipient email, subject, body) of the draft the owner saw; renewal: the renewal_period_key — the send claim recomputes it and refuses on mismatch (an edited/replaced draft is a new approval)
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
@@ -318,9 +319,10 @@ invalidated, not consumed, whose `path_id` is the placement's current, non-super
 whose `path_revision` equals that path's current `revision_<dimension>` (per-dimension —
 a price change bumps `revision_payment` only) AND whose
 `decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
-numbers, not whatever they became), and whose `action` matches the step being leased with
-`action_hash` matching the current draft (send) / follow-up draft (followup, which needs its
-own approval) / period (renewal) — an owner-approved send can only send the exact text and
+numbers, not whatever they became), and whose `dimension`+`action` match the step being leased (execution/acquire for
+submit, payment/purchase|renewal for mint, communication/outreach_send|followup for send)
+with `action_hash` matching the current draft (send) / follow-up draft (followup, which needs
+its own approval) / period (renewal) — an owner-approved send can only send the exact text and
 recipient that was approved;
 the final-total guard compares `final_cents` to the approval's immutable `max_payable_cents`
 and refuses when the approval lacks one (it cannot, by CHECK, for a paid path — the guard is
@@ -626,7 +628,7 @@ t.integer('final_cents');                           // the checkout's final tota
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
 t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist
                                                     // reserved → voided (pre-exposure only) | reserved → submitting → close_pending → charged | submitting → ambiguous → reconciled_charged | reconciled_not_charged
-t.uuid('approval_id');                              // → seo_link_approvals when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
+t.uuid('approval_id');                              // → seo_link_approvals (dimension='payment', action = purchase_kind) when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
