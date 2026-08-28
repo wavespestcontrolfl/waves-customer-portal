@@ -311,6 +311,8 @@ max_spam_score               = 10
 # 1. Fail-closed quality floors — evaluated FIRST, before any AUTO_* or OWNER_* branch.
 #    A row that fails a floor is DENY regardless of who would have acted; owner override is
 #    the explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE, never DENY→AUTO.
+#    MISSING is failing: every required signal must be a finite number (not null/NaN/undefined).
+if not all finite(domain.spam_score, score, path.confidence, amount_cents if path.payment_required) → DENY
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score
@@ -328,7 +330,9 @@ if path.account_required → AUTO_ACCOUNT if auto_account_creation else awaiting
 else → AUTO_FREE
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
-including one per floor proving DENY beats every AUTO_* and OWNER_* branch.
+including one per floor proving DENY beats every AUTO_* and OWNER_* branch, and one per
+required signal proving null / NaN / undefined → DENY (an unenriched domain can never be
+acted on, by anyone, until enrichment and investigation have run).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
@@ -352,7 +356,9 @@ t.string('authority').notNullable();
 t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
-t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
+t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
+t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
+t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
@@ -385,8 +391,11 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
   total. The provider can never charge an amount the ledger has not reserved.
 - **Renewals are separate purchases; a merchant can never charge outside the ledger.** A
   reservation covers exactly one charge, and the instrument enforces it: each purchase is paid
-  with a **single-use virtual card number** (issuer-generated per reservation, `merchant_ref`
-  records it) that is **closed immediately after `charged`/`voided`/reconciliation** — so an
+  with a **single-use virtual card number** (issuer-generated per reservation; the ledger
+  stores only the issuer's opaque `issuer_card_id` + `card_last4` — the PAN/CVV are fetched
+  from the issuer at `submitting` time, handed to the provider in memory for that one
+  checkout, and never written to the ledger, attempts, evidence, sessions, logs or prompts)
+  that is **closed immediately after `charged`/`voided`/reconciliation** — so an
   armed auto-renewal, a merchant retry, or a stored-card charge has no live number to hit.
   The provider still selects the non-recurring option or disables auto-renew where offered
   and reports `auto_renew_disabled`. If the issuer cannot mint single-use numbers, purchases
