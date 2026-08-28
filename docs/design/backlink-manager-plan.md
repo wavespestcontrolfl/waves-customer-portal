@@ -1,457 +1,493 @@
-# Backlink Manager — Design Plan
+# Backlink Manager — Design Plan v2
 
-**Status:** Draft / pre-implementation
+**Status:** Plan of record (supersedes the 2026-05-30 v1 below the fold — see §15)
 **Owner:** Adam
-**Date:** 2026-05-30
-**Surface:** `/admin/seo → Backlinks → Link Building` (new sub-tab)
+**Date:** 2026-08-28
+**Surface:** `/admin/seo → Backlinks → Agent` (existing `BacklinkAgentPanel`) + `Link Building`
+
+> **The objective is not to discover backlinks or submit forms. The objective is to
+> autonomously acquire and retain high-quality referring domains, subject to explicit
+> quality, budget, and authority policies.**
 
 ---
 
-## 1. Goal
+## 0. Why a v2
 
-Add the one missing layer to the portal's backlink system: an **outbound link-building
-pipeline** that tracks every link prospect from *identified target* → *live, followed, and
-indexed*. Today the portal monitors the *inbound* profile (toxicity, loss, snapshots) and
-*acquires* low-tier links (Playwright signup agent), but nothing tracks the lifecycle of a
-single intended link, and **nothing checks indexing status at all**.
+v1 (May) built the intelligence/control plane and it works: the prospect board, the
+verifier/indexer, the strategist feed, the DataForSEO gap feeder, the claim/report worker
+contract, the approval-gated outreach sender, and — as of PR #3544 — canonical link identity,
+one board-admission guard for every writer, and a ledger-durable loss/alert/recovery loop.
 
-Hermes Agent (Nous Research, self-hosted) is adopted **only as the autonomous acquisition
-worker** ("the hands"), behind a strict write-back boundary. It is never the strategist and
-never the system of record.
+What never crossed into production is **execution**: the Hermes (Nous, Docker) worker was
+never deployed and has never claimed a row; the Playwright v1 signup worker has 12 queue items
+pending since April and 0 profiles; 56 drafted outreach emails have waited since June behind a
+manual send valve that v1 §9 designed to stay closed "until proven"; every paid or
+account-requiring path dead-ends at `needs_account` / `paid` with nobody holding it.
 
-### Field mapping (the requested columns → schema)
+The historical failure mode is therefore specific: **Waves has repeatedly built discovery
+and strategy; it has not shipped the part that acts.** v2 does not add another discovery
+engine or strategist. It adds the four things that let execution run unattended under policy:
+a domain registry with *acquisition paths*, an investigator that fills them, an authority
+policy that decides who may act, and a D30 learning loop that tells the policy what worked.
 
-| Requested field        | Column                          | Source of truth                |
-|------------------------|---------------------------------|--------------------------------|
-| Prospect               | `target_domain` / `target_url`  | strategy agent / manual / gap  |
-| Link status on Google  | `indexing_status`               | **GSC URL Inspection API**     |
-| Target page            | `target_page`                   | strategist (the money page)    |
-| Anchor text            | `anchor_planned` / `anchor_text`| planned vs. verified-live      |
-| Placement date         | `placement_date` / `first_live_at` | verifier                    |
-| Live URL               | `live_url`                      | Hermes report → verifier       |
-| Link type              | `link_type`                     | strategist / classifier        |
-| Follow / nofollow      | `is_dofollow`                   | **live verifier** (not assumed)|
-| Indexing status        | `indexing_status`               | GSC URL Inspection             |
-| Quality signals        | `quality_signals` (jsonb)       | DataForSEO + computed          |
+Everything already shipped is a **dependency**, not work to redo (§1).
 
 ---
 
-## 2. Architecture — Brain / Books / Hands
+## 1. Shipped components (dependencies)
+
+| Component | Where | Role in v2 |
+|---|---|---|
+| Prospect board | `seo_link_prospects` (migration `20260530000010` + 3 alters) | **Placement** row = (domain, Waves page); lifecycle `prospect → contacted → negotiating → placed → live → indexed / lost / rejected` |
+| Board admission guard | `server/services/seo/prospect-domain-lock.js` (#3544) | `claimProspectDomain` (advisory lock + lane-aware domain probe), `findPlacementRow` (canonical host + page spellings), `targetPageOf/Variants`. **Every writer goes through it**, including v2 intake. |
+| Verifier / indexer | `link-prospect-verifier.js`, `link-prospect-indexer.js` | The Judge. Promotes `placed → live → indexed` from crawl / DataForSEO / GSC; demotes on definitive absence; scan-tracked evidence only (#3544) |
+| Inbound monitor + ledger | `backlink-monitor.js`, `seo_backlinks`, `seo_backlink_events` (#3544) | Verified loss (2 misses + crawl), canonical identity, `merged` twins, durable admin-bell alerts, `lost_recovery` prospects |
+| Gap feeder | `competitor-gap-miner.js`, `competitor-discovery.js` → `seo_competitor_backlinks` | 7,553 unreviewed rows = the largest raw inventory; v2 ingests it (§4) |
+| Local opportunity feed | `local-opportunity-prospector/promoter.js` | Stays; writes through the guard |
+| Scorer + lane classifier | `prospect-scorer.js` (relevance, lead value, contactability gate, `CLAIMABLE_LINK_TYPES`), `signup-classifier.js` | Quality score. v2 adds path + persistence terms (§8) |
+| Worker contract | `GET /api/integrations/backlink-worker/claim`, `POST …/report` (`link-prospect-worker.js`, `hermes-auth.js`, `GATE_HERMES_WORKER`, `HERMES_SERVICE_TOKEN`) | The `claim → act → report` boundary. Kept verbatim; v2 puts providers behind it (§7) |
+| Deterministic signup runner | `signup-runner.js`, `signup-evidence.js`, `GATE_SIGNUP_RUNNER`, `SIGNUP_RUNNER_ALLOWLIST`, `HERMES_SIGNUP_EMAIL` (chromium in the prod image) | First `BrowserAgentProvider` implementation (§7) |
+| Outreach drafter + sender | `backlink-outreach-drafter.js` (`GATE_OUTREACH_DRAFTER`), `link-prospect-outreach.js` (`GATE_LINK_OUTREACH`, `LINK_OUTREACH_DAILY_CAP`, Gmail `contact@`, idempotent send, `send_error` reconcile), `comms-lint.js` | The `OutreachProvider` (§7) under the bounded mandate (§6.4) |
+| Strategist | `backlink-strategy-agent*.js`, `create_link_prospects` / `list_prospects` | Stays on demand; becomes one more *source* into the registry |
+| SSRF-safe fetch | `contact-finder.fetchPage()` | The only page fetcher the investigator may use |
+| Admin UI | `BacklinkAgentPanel` (Agent sub-tab), Link Building board, outreach approvals | Extended, not replaced (§11) |
+
+---
+
+## 2. Architecture — Brain / Books / Hands / Judge
 
 ```
-  BRAIN (exists, keep)              BOOKS (build)                      HANDS (Hermes, new)
-  ────────────────────              ─────────────                      ──────────────────
-  waves-backlink-strategist    →    seo_link_prospects board     ←     Hermes acquisition
-  Claude MODELS.FLAGSHIP            (Postgres = canonical funnel)       worker (self-hosted)
-  decides WHAT to pursue,           reconciled nightly vs GSC +         executes signup/outreach,
-  prioritizes, writes prospects     live profile (seo_backlinks)        crawls to verify, reports back
+ BRAIN                       BOOKS (Postgres = truth)             HANDS                          JUDGE
+ discovery feeds             seo_link_domains                     BrowserAgentProvider           link-prospect-verifier
+ path investigator     →     seo_link_acquisition_paths     →     OutreachProvider          →    link-prospect-indexer
+ scorer + persistence        seo_link_prospects (placements)      deterministic runner            backlink-monitor
+ authority policy            attempts / evidence / costs          (claim → act → report)          D30 survival + ledger
+                             authority decisions, D30 outcomes
 ```
 
-**Invariants**
-1. **Brain stays Claude.** Strategy/prioritization remains the existing Managed Agent on
-   `MODELS.FLAGSHIP`. Per standing rule "best system regardless of cost," we do not move
-   reasoning onto Hermes' open/multi-model routing.
-2. **Books stay in Postgres.** `seo_link_prospects` is the single funnel. Hermes never holds
-   canonical state — its persistent memory holds *procedural* knowledge ("how to sign up at
-   site X"); the portal DB holds *factual* state ("what is live and indexed").
-3. **Verify, don't trust.** Hermes *claims* a placement; the portal's own verifier + GSC
-   *confirm* it. A prospect only reaches `live`/`indexed` via portal-side verification.
+**Governing principle:** *Agents propose and execute acquisition actions; Postgres owns
+truth; verification — never agent self-report — determines success.*
+
+Invariants carried from v1: the board is the single funnel; a worker's report moves a row to
+`placed` at most; only the Judge promotes to `live`/`indexed`; every board write goes through
+`prospect-domain-lock`; DataForSEO spend stays behind `GATE_SEO_INTELLIGENCE`.
+
+Dropped from v1: the Hermes (Nous, Docker) worker as *the* hands; the X poller as a primary
+source; "paid" and "needs account" as workflow states; the manual outreach valve as a permanent
+design choice.
 
 ---
 
 ## 3. Data model
 
-### 3.1 New migration — `seo_link_prospects`
-
-`server/models/migrations/2026XXXX_seo_link_prospects.js`
+### 3.1 `seo_link_domains` — the registry (one row per canonical host)
 
 ```js
-exports.up = async (knex) => {
-  await knex.schema.createTable('seo_link_prospects', (t) => {
-    t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
-
-    // Target (where the link will live)
-    t.text('target_domain').notNullable();
-    t.text('target_url');                       // specific page, if known
-    t.integer('domain_rating');
-
-    // Our side
-    t.text('target_page').notNullable();        // the Waves money page being linked to
-    t.string('anchor_planned');                 // anchor the strategist wants
-    t.text('anchor_text');                       // anchor actually found live
-
-    // Classification
-    t.string('link_type');                       // editorial|directory|citation|guest_post|resource|social|haro
-    t.string('source').notNullable();            // strategy_agent|competitor_gap|signup_agent|manual
-    t.uuid('source_ref');                        // FK-ish back-pointer (gap id / queue id), nullable
-
-    // Lifecycle
-    t.string('status').notNullable().defaultTo('prospect');
-    // prospect → contacted → negotiating → placed → live → indexed → lost | rejected
-    t.string('priority');                        // high|medium|low (from strategist)
-    t.date('placement_date');                    // when link went live (manual or detected)
-    t.timestamp('first_live_at');                // first time verifier saw it live
-
-    // Verified attributes (NEVER trusted from the agent's self-report)
-    t.text('live_url');                          // exact URL the link sits on
-    t.boolean('is_dofollow');                    // read from live rel=, null until verified
-    t.string('indexing_status').defaultTo('not_checked'); // not_checked|indexed|not_indexed|crawled_not_indexed
-    t.timestamp('last_live_check');
-    t.timestamp('last_index_check');
-
-    // Intelligence
-    t.jsonb('quality_signals');                  // DataForSEO-sourced: {rank, referring_domains, spam_score, page_relevance, anchor_health}
-    t.uuid('backlink_id').references('id').inTable('seo_backlinks'); // promoted link, once it appears inbound
-
-    // Outreach / ops
-    t.string('owner');                           // human or 'hermes'
-    t.text('outreach_thread_ref');               // email thread / channel id
-    t.timestamp('outreach_sent_at');
-    t.timestamp('claimed_at');                   // worker lease timestamp (claim/report contract)
-    t.string('claimed_by');                      // 'hermes' lease holder
-    t.text('evidence_url');                      // screenshot/proof from the worker
-    t.integer('attempts').defaultTo(0);
-    t.text('notes');
-    t.decimal('cost', 10, 2);
-
-    t.timestamps(true, true);
-    t.unique(['target_domain', 'target_page']);  // one prospect per (site, money-page)
-    t.index('status');
-    t.index('indexing_status');
-  });
-};
-
-exports.down = (knex) => knex.schema.dropTableIfExists('seo_link_prospects');
+t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
+t.text('domain').notNullable().unique();          // canonicalProspectDomain(): lower, no scheme/www/port/path
+t.string('source').notNullable();                 // provenance enum (§3.5)
+t.text('source_detail');                          // e.g. 'backlinks_csv_2026_08', gap id, X post URL, seed note
+t.uuid('source_ref');
+t.string('discovery_priority').notNullable().defaultTo('normal'); // owner_seed | normal
+t.integer('domain_rating'); t.integer('organic_traffic'); t.integer('spam_score');
+t.integer('referring_domains'); t.integer('competitors_linked');
+t.jsonb('enrichment');                            // raw DataForSEO summary, cached
+t.timestamp('enriched_at');
+t.uuid('best_path_id');                           // → seo_link_acquisition_paths
+t.string('agent_state').notNullable().defaultTo('new');
+// new → investigating → qualified → ready_to_acquire → acquiring → acquired → watching | not_reproducible | rejected
+t.integer('score');                               // Waves Link Score (§8), recomputed on enrichment/D30
+t.text('score_reasons');                          // human-readable why (shown on the registry row)
+t.timestamp('watch_recheck_at');                  // for agent_state='watching'
+t.text('notes'); t.string('owner');
+t.timestamps(true, true);
+t.index(['agent_state']); t.index(['source']);
 ```
 
-### 3.2 Relationship to existing tables (no duplication)
+### 3.2 `seo_link_acquisition_paths` — **the central abstraction**
 
-- `seo_backlinks` — inbound profile (toxicity/loss). A prospect **promotes** to it: when the
-  nightly cross-link finds `live_url` in `seo_backlinks`, set `backlink_id` and
-  `status='indexed'` (or `live`). `seo_backlinks` stays the inbound source of truth.
-- `seo_competitor_backlinks` — already has `prospect_status`/`outreach_sent_at`. These rows
-  become a **feeder**: a competitor-gap row the strategist greenlights creates a
-  `seo_link_prospects` row (`source='competitor_gap'`, `source_ref = gap.id`). The gap table
-  stays intel; the board owns the lifecycle.
-- `backlink_agent_queue` / `backlink_agent_profiles` — the Playwright signup pipeline. Each
-  completed profile creates/updates a prospect (`source='signup_agent'`). Migrated to Hermes
-  in §8.
+A domain is not useful until Waves knows *how* to get a link from it. One domain may expose
+several ways; each is a row.
 
----
-
-## 4. Reconciliation jobs (portal-side "verify, don't trust")
-
-Three jobs keep the board honest. All in `server/services/seo/`, wired into
-`server/services/scheduler.js` (existing weekly Sunday 3:30am backlink scan stays).
-
-### 4.1 Live / follow verifier — `link-prospect-verifier.js`
-- **Primary source = DataForSEO Backlinks API** (`/backlinks/backlinks/live`). Per-link it
-  returns `dofollow`, `anchor`, `is_lost`, `first_seen`, `last_seen`, `rank`, `backlink_spam_score`
-  — so for any link DataForSEO has indexed we set `is_dofollow` / `anchor_text` / live-vs-lost
-  **without crawling**. ⚠️ The existing `dataforseo.getBacklinks()` hard-filters
-  `['dofollow','=',true]` — add a `getBacklinkDetail(targetUrl/sourceUrl)` (or relax the
-  filter) so nofollow links are visible to the verifier.
-- **Fallback = direct crawl** for *fresh* links not yet in DataForSEO's index: fetch
-  `live_url`, confirm an `<a>` to a `wavespestcontrol.com` target page, read `rel=` for real
-  follow/nofollow, capture live `anchor_text`. (Reuse `onPageAudit` / the existing
-  `waves-customer-portal-link-verifier` worktree logic.)
-- Transitions: `placed → live` (found, set `first_live_at`), `live → lost` (DFS `is_lost`
-  or crawl miss).
-- **Schedule:** nightly. DataForSEO pass first (cheap, batched), crawl only the residue.
-
-### 4.2 Indexer — `link-prospect-indexer.js`  ← the net-new capability
-**Correction (2026-05-30):** GSC URL Inspection works **only on URLs inside our own verified
-property** — it *cannot* inspect a third-party linking page. So `indexing_status` (the requested
-"link status on Google", which is about the *external* page hosting our link) uses **DataForSEO**,
-and GSC URL Inspection is repurposed for what it *can* do — confirming our own money pages.
-
-- **`indexing_status` (external linking page)** → `dataforseo.checkIndexed(live_url)`, a
-  `site:` SERP lookup. Returns `indexed | not_indexed | unknown`. An unindexed linking page
-  passes ~no equity, so this is the signal that matters.
-- **`quality_signals.target_indexed` (our money page)** → `SearchConsole.inspectUrl(target_page)`
-  via the existing service-account client (`urlInspection.index.inspect`, `webmasters.readonly`
-  scope — confirmed authorized). Cached per unique `target_page` within a run to save quota.
-- Only checks prospects already `live`/`indexed`; oldest `last_index_check` first; capped per
-  run (DataForSEO SERP costs credits → gated by `seoIntelligence`). Promotes `live → indexed`
-  when the linking page is found indexed; demotes back if it drops out.
-- **Schedule:** nightly (5:00AM ET), after the verifier (4:30AM ET).
-
-### 4.3 Profile cross-link — folded into the nightly scan
-- After `BacklinkMonitor.scan()`, match live `seo_backlinks.source_url` against
-  prospect `live_url`; on hit set `backlink_id` + promote status. Closes the loop between
-  "we built it" (outbound) and "Google sees it on our profile" (inbound).
-
-### 4.4 DataForSEO usage map (we already have access — `DATAFORSEO_LOGIN/PASSWORD`)
-
-| Need                     | DataForSEO endpoint                          | Used by            |
-|--------------------------|----------------------------------------------|--------------------|
-| Live / follow / lost     | `/backlinks/backlinks/live`                  | §4.1 verifier      |
-| Domain quality signals   | `/backlinks/summary/live`, bulk `rank`/`spam_score`/`referring_domains` | `quality_signals`  |
-| Page relevance / live-check fallback | `/on_page/instant_pages` (`onPageAudit`) | §4.1 fallback |
-| **Prospect discovery**   | `/backlinks/domain_intersection/live`, `/backlinks/competitors/live` | feeder (below) |
-
-**Discovery feeder (new).** DataForSEO domain-intersection ("links competitors have that we
-don't") can auto-source prospects straight into the board (`source='competitor_gap'`,
-quality_signals pre-filled), complementing the strategist and reducing dependence on the
-X-poller for sourcing. Runs alongside the weekly strategy cycle; the strategist triages the
-feed and sets `priority`/`target_page` before it's worked.
-
-**Credit discipline:** all DataForSEO is gated by `seoIntelligence` and already logs per-call
-cost. Use **bulk** endpoints for quality signals (one call, many domains), batch the verifier,
-and align discovery to the existing weekly Sunday cadence rather than per-prospect calls.
-
----
-
-## 5. Hermes integration (the hands)
-
-### 5.1 Deployment — **Docker** (decided 2026-05-30)
-- Self-hosted per Nous instructions (`hermes setup`) using the **Docker sandbox backend**, in
-  its own container, not in the portal process. Reaches the portal only over the HTTP contract
-  below. Subagents get isolated Docker exec environments (the §2 "parallel processing" win).
-- **Outreach sends via the existing Waves Gmail OAuth** (decided 2026-05-30) — Hermes does not
-  own a separate inbox. See §9 for the deliverability mitigation this choice requires.
-
-### 5.2 Ownership split
-| Hermes owns (procedural memory)        | Portal owns (canonical state)         |
-|----------------------------------------|---------------------------------------|
-| How to sign up / fill a form at site X | Whether a link is live / followed     |
-| Learned skills, retry heuristics       | Indexing status (GSC)                  |
-| Vision/browser session state           | Funnel status, priority, costs        |
-| Channel/outreach drafting              | Approval gates, audit trail           |
-
-### 5.3 Write-back contract (two endpoints — extend `admin-backlink-agent-v2.js`)
-
-A worker, not a peer system. Add to the existing router (already auth'd
-`adminAuthenticate, requireTechOrAdmin`; Hermes uses a service token):
-
-```
-GET  /api/admin/backlink-agent/prospects/claim?n=10&type=signup|outreach
-       → leases N prospects in status 'prospect' (type-filtered), sets
-         claimed_at/claimed_by='hermes' under a transaction + FOR UPDATE SKIP LOCKED
-         so parallel Hermes subagents never grab the same row. Returns work packets
-         plus `business_profile` — the canonical NAP (brand, website, contact email,
-         per-office address/phone/place-id from config/locations.js) the worker MUST
-         copy verbatim on signups; it never invents business details.
-
-POST /api/integrations/backlink-worker/report
-       body: { prospect_id, lease_token, outcome: 'placed'|'failed'|'skipped',
-               live_url, claimed_anchor, evidence_url, notes, cost }
-       → records the CLAIM only: status 'prospect'→'placed' (never straight to 'live').
-         The nightly verifier (§4.1) + GSC (§4.2) independently promote to live/indexed.
-       Guards: 'placed' REQUIRES live_url (else the row is verifier-invisible and
-       unclaimable → 400). lease_token (the claimed_at from /claim) is REQUIRED and the
-       update is conditional on it — a late report from a swept/reclaimed lease affects
-       0 rows and returns 409 (stale_lease), so it can't clobber another worker's claim.
+```js
+t.uuid('id').primary(); t.uuid('domain_id').notNullable().references('seo_link_domains.id');
+t.string('acquisition_type').notNullable();
+//  self_service_free | self_service_account | paid_listing | membership | association |
+//  sponsorship | vendor_registration | business_claim | resource_outreach |
+//  editorial_outreach | partnership | content_submission | not_reproducible | unknown
+t.text('submission_url');
+t.decimal('estimated_cost', 10, 2); t.decimal('renewal_cost', 10, 2); t.string('renewal_period'); // annual|monthly|none
+t.boolean('account_required'); t.boolean('email_verification'); t.boolean('payment_required');
+t.boolean('legal_attestation');                   // signed agreement / vendor terms / W-9 etc.
+t.boolean('agent_completable');                   // investigator's judgement: can the runner finish alone
+t.string('expected_rel');                         // dofollow | nofollow | sponsored | unknown
+t.string('expected_indexability');                // indexable | noindex | unknown
+t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
+t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
+t.numeric('confidence', 3, 2);                    // 0–1
+t.string('authority');                            // decided authority level (§6), stamped by policy
+t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
+t.timestamp('last_investigated_at');
+t.timestamps(true, true);
+t.unique(['domain_id', 'acquisition_type', 'submission_url']);
 ```
 
-Lease expiry: an hourly sweep returns `claimed_at` older than N hours (default 6) back to
-`prospect` (stuck-worker recovery). The lease_token is that `claimed_at` timestamp.
+### 3.3 `seo_link_prospects` — placements (existing; additive columns)
+
+```js
+t.uuid('domain_id').references('seo_link_domains.id');
+t.uuid('path_id').references('seo_link_acquisition_paths.id');
+t.string('authority');            // authority level under which this placement was/will be acted on
+t.text('source_detail');
+```
+New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
+and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
+`admin-backlink-agent-v2.js` is the contract; the worker's `claim()` never leases either.
+
+### 3.4 `seo_link_attempts` — every execution, whoever performed it
+
+```js
+t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
+t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
+t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send
+t.string('outcome').notNullable();    // placed | drafted | failed | skipped | needs_owner | captcha | blocked
+t.decimal('cost', 10, 2); t.integer('duration_ms');
+t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
+t.timestamps(true, true);
+```
+`signup-evidence.js` writes here for the deterministic runner (its current ledger folds in).
+
+### 3.5 Provenance enum (`seo_link_domains.source`)
+
+`owner_seed` · `list_import` · `competitor_gap` · `competitor_clone` · `recursive` ·
+`x` · `google_search` · `dataforseo` · `strategy_agent` · `existing_backlink` ·
+`lost_recovery` · `local_opportunity`
+
+`owner_seed` means **investigate immediately**, not **qualified**: it bypasses the cheap
+prefilter and the contactability gate, never the score; the row shows its reasons and an
+*Acquire anyway* override. Bulk lists are `list_import` + `source_detail` — never `owner_seed`.
+
+### 3.6 Credentials — `seo_link_credentials`
+
+`self_service_account` paths create accounts. Credentials are stored encrypted at rest
+(column-level, key derived from the existing app secret — confirm the in-repo helper at build;
+do not add a dependency for this), scoped per `domain_id`, readable only by the runner's resume
+path, and **never** written to `seo_link_attempts.detail`, logs, evidence, or LLM prompts.
+The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
+(`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths.
+
+### 3.7 Policy — `seo_link_policy` (single row, admin-editable, env-overridable)
+
+See §6.2. Defaults ship conservative (everything owner-gated) and are loosened by Adam in the
+Policy panel, not by code.
 
 ---
 
-## 6. Strategy agent — feed the board (the brain) — **SHIPPED (M2)**
+## 4. Intake — one pipeline for every source
 
-The existing `waves-backlink-strategist` runs audit → gap → discovery → queue → outreach-ideas
-→ report. M2 gives it the board as an output target. Two tools added to the `switch` in
-`server/services/seo/backlink-strategy-tools.js` and declared in `backlink-strategy-agent-config.js`:
+`POST /api/admin/backlink-agent/opportunities/bulk`  (admin auth; also called internally)
+
+Accepts raw text: domains, URLs, an X post URL, a competitor backlink URL, a pasted list,
+CSV rows. Steps, all idempotent:
+
+1. **Normalize** — extract hosts/URLs from the text; `canonicalProspectDomain()` for the host;
+   keep the URL as a *submission_url hint*.
+2. **Dedupe** — against `seo_link_domains.domain` and, for placement hints, via
+   `findPlacementRow`. Existing rows are *updated* (new provenance appended to
+   `source_detail`, priority raised if the new source is `owner_seed`), never duplicated.
+3. **Enrich** — DataForSEO bulk summary (rank, traffic, spam, referring domains) in one call
+   per batch; `competitors_linked` from `seo_competitor_backlinks`. Behind
+   `GATE_SEO_INTELLIGENCE`; cached in `enrichment`.
+4. **Queue for investigation** — `agent_state='investigating'`; `owner_seed` first.
+
+**Feeders that call the same endpoint** (as jobs, not UI):
+- **Competitor-gap ingestion** — every `seo_competitor_backlinks` domain not yet in the
+  registry (the 7,553). Weekly after the Sunday scan; `source='competitor_gap'`.
+- **Existing profile** — `seo_backlinks` active domains → `source='existing_backlink'`,
+  `agent_state='acquired'` (so recursive discovery and D30 have a baseline).
+- **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
+  registry row (`source='lost_recovery'`).
+- **Strategist / local opportunity** — unchanged writers; they additionally upsert the domain.
+- **Recursive discovery (§9)** — `source='recursive'`.
+
+**UI (Agent tab):** one box — *"Add backlink opportunities — paste domains, URLs, X posts, or
+an entire list"* → **Analyze opportunities**. No `target_page`; the scorer's topic mapping
+picks the money page when the placement is created.
+
+---
+
+## 5. Path investigator — the bridge from "known" to "reproducible"
+
+A job, not a chat: for each `investigating` domain, answer **"Can Waves reproduce a link
+here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
+
+- **Inputs:** the domain, its enrichment, the submission-URL hints, and — for
+  `competitor_gap` rows — the competitor's actual source URL (the page the link lives on).
+- **Fetch:** `contact-finder.fetchPage()` only (SSRF-pinned; refuses private hosts; bounded
+  bytes). Candidate pages: the hint, the competitor page, and a fixed probe list
+  (`/submit`, `/add-listing`, `/join`, `/membership`, `/members`, `/vendors`,
+  `/sponsors`, `/advertise`, `/directory`, `/resources`, `/contact`, `/signup`, `/register`)
+  — capped at ~8 fetches per domain.
+- **Reasoning:** one `WORKHORSE`-tier call through `server/services/llm/call.js` (never a
+  hardcoded model id) with a strict JSON schema = the path fields in §3.2 plus
+  `confidence` and `reasons`. Price/renewal text is quoted verbatim into `investigation`.
+  `not_reproducible` is a first-class answer (a competitor's editorial mention, a
+  private partnership) and closes the domain honestly instead of leaving it "unknown".
+- **Outputs:** paths + `best_path_id` (highest expected value per §8) + `agent_state`
+  (`qualified` / `not_reproducible` / `watching` when the path exists but is closed today).
+- **Cost discipline:** ~8 fetches + 1 LLM call per domain; batch of N per run
+  (`LINK_INVESTIGATOR_BATCH`, default 50); `owner_seed` jumps the queue. Re-investigate on
+  `watch_recheck_at`, on a failed attempt, or after 90 days.
+
+This step is what turns the gap table into an **acquisition inventory**. Nothing enters the
+acquisition queue without a path row with `confidence ≥ policy.min_path_confidence`.
+
+---
+
+## 6. Acquisition authority — permission, separated from quality
+
+### 6.1 Levels (`authority` on path + placement)
+
+`AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
+`OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `DENY`
+
+**Paid is an attribute of a path; it is not a workflow state.** The level is *computed* from
+the path's attributes and the policy at decision time, then stamped for the audit trail.
+
+### 6.2 Policy (`seo_link_policy`, Policy panel on the Agent tab)
+
+```text
+auto_account_creation        = true
+auto_outreach_min_score      = 80
+auto_outreach_daily_cap      = 10        (≤ LINK_OUTREACH_DAILY_CAP, which remains the hard ceiling)
+monthly_paid_budget          = 500
+max_auto_purchase            = 50
+auto_paid_min_score          = 80
+auto_paid_min_d30_confidence = 0.6
+membership_requires_owner    = true
+legal_attestation_requires_owner = true
+min_path_confidence          = 0.6
+max_spam_score               = 10
+```
+
+### 6.3 Decision (pure function, unit-tested; recorded on the placement)
 
 ```
-create_link_prospects  → batch insert into seo_link_prospects (target_domain/url, target_page,
-                         anchor_planned, link_type, priority, domain_rating, notes;
-                         source='strategy_agent'). De-dupes on (target_domain, target_page).
-list_prospects(status) → read board slice for situational awareness (called FIRST to avoid
-                         dupes; finds re-work like "live but not indexed" / "lost → re-pitch").
+if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
+if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
+if path.payment_required:
+    if cost ≤ max_auto_purchase and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
+       and (month_spend + cost) ≤ monthly_paid_budget → AUTO_PAID_WITHIN_POLICY
+    else → OWNER_PAYMENT
+if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
+    → AUTO_OUTREACH if score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
+if path.account_required → AUTO_ACCOUNT if auto_account_creation else OWNER_PAYMENT-style park
+if spam/score/confidence below floors → DENY
+else → AUTO_FREE
 ```
 
-(Tool is plural/batch — `create_link_prospects` — matching the existing `add_targets_to_queue`
-convention, so the agent writes many prospects in one call.)
+`OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
+`bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
+expected rel, D30 confidence, and **Approve** / **Reject** / **Watch**. Approval is a portal
+click (never email-reply — repo rule: email approval is never extended to money movement).
+On approve the runner resumes the same path with the stored session.
 
-System-prompt addendum (shipped): the agent must `list_prospects` first, then `create_link_prospects`
-for the higher-value lanes (editorial / resource / guest_post / HARO / local partnerships), score
-priority on dual ROI, and keep using `add_targets_to_queue` for bulk Tier 4–5 directory signups.
+**Money mechanics:** `AUTO_PAID_WITHIN_POLICY` uses one dedicated **virtual card with a hard
+monthly limit** as the only payment instrument the runner can use; the bank enforces the
+ceiling independently of our code. `monthly_paid_budget` is a soft cap tracked in
+`seo_link_attempts.cost`. Owner-approved purchases above `max_auto_purchase` use the same
+card after the click.
 
----
+### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
 
-## 7. API routes (summary)
+Auto-send when **all** hold: authority `AUTO_OUTREACH`; score ≥ `auto_outreach_min_score`;
+`comms-lint` clean; recipient is a business inbox (never a customer); the draft contains no
+reciprocal promise, payment, discount, guarantee, or unusual commitment (drafter classifier +
+lint rule); and the day's sends < `auto_outreach_daily_cap`. Anything else → the existing
+approval queue. Sender, idempotency, `send_error` reconciliation and the trailing-24h cap are
+the shipped `link-prospect-outreach.js` unchanged. Follow-ups (one, +10 days, only if no
+reply) go through the same gate.
 
-New, mounted under the existing `admin-backlink-agent-v2.js` router:
-
-| Method | Path                                              | Purpose                         |
-|--------|---------------------------------------------------|---------------------------------|
-| GET    | `/prospects`                                      | board list (filter status/type) |
-| POST   | `/prospects`                                      | manual add                      |
-| PATCH  | `/prospects/:id`                                  | edit status/notes/owner         |
-| POST   | `/prospects/:id/recheck`                          | force verifier + GSC recheck    |
-| GET    | `/prospects/claim`  *(service-token)*             | Hermes lease (§5.3)             |
-| POST   | `/prospects/report` *(service-token)*             | Hermes write-back (§5.3)        |
-
----
-
-## 8. UI — `Link Building` sub-tab
-
-Add a 5th sub-tab to `BacklinksTab` in `client/src/pages/admin/SEOPage.jsx`
-(alongside overview/citations/gaps/llm). A funnel board:
-
-- **Smart views (status filters):** `Needs outreach` (prospect/contacted), `In progress`
-  (placed), `Live — not indexed` (live + indexing_status≠indexed), `Indexed` (won),
-  `Lost — re-pitch`.
-- **Columns:** target domain (DR), target page, anchor (planned→actual), type,
-  follow/nofollow badge, indexing badge, placement date, owner, live-URL link.
-- **Row actions:** recheck, edit status, open evidence screenshot.
-- **Header KPIs:** prospects, placed, live, indexed, lost; "indexing rate" = indexed/live.
+The 56 drafts from June are the first batch through this mandate (self-disqualifying and
+national-magazine drafts fail the lint/score floor; the Sunrise cluster dedupes by domain
+under `claimProspectDomain`).
 
 ---
 
-## 9. Guardrails (must ship with v1)
+## 7. Hands — providers behind the existing contract
 
-- **Footprint / deliverability (raised by the Gmail decision):** because outreach sends from
-  the **primary Waves Gmail** (not an isolated inbox), reputation protection shifts entirely to
-  *behavioral* controls — there's no domain to sacrifice. Therefore in v1: outreach stays
-  **human-approval-gated** (`status='contacted'` requires a click, not auto-send), hard
-  **rate-limit** (e.g. ≤10–15 cold sends/day), personalized one-to-one only (no templated
-  blasts), and reuse the existing centralized SMTP gate + send-idempotency guard from the email
-  audit work so a loop can't double-send. This is the trade for using the real inbox: keep the
-  send valve manual until volume/quality is proven, *then* consider loosening.
-- **ToS / CAPTCHA:** scope Hermes to editorial / HARO / resource / whitelisted directories.
-  No blast signups. The existing worker already aborts on CAPTCHA — preserve that.
-- **Memory drift:** every Hermes run reconciles to Postgres. The board, not Hermes, is
-  canonical; Hermes self-reports are claims pending verification.
-- **GSC quota:** indexer respects the ~2k/day inspection cap, oldest-checked-first.
+`claim → act → report` stays exactly as shipped (`/api/integrations/backlink-worker/*`):
+`claim` leases `prospect` rows (`FOR UPDATE SKIP LOCKED`), `report` moves to `placed` /
+`drafted` / `failed` / `skipped` and now also `needs_owner`, requires `live_url` for `placed`,
+rejects stale leases. **The board does not care which provider did the work.**
 
----
-
-## 10. Feature gates & env
-
-`server/config/feature-gates.js` (mirror existing `backlinkAgent`):
+```ts
+interface BrowserAgentProvider {
+  investigate(domain, hints): PathCandidate[]          // optional; the investigator may delegate
+  createAccount(path, identity, inbox): Session
+  completeForm(path, identity, session): FormResult
+  submit(path, session): SubmitResult                  // returns live_url when known
+  resumeSession(path, session, ownerDecision?): SubmitResult
+  captureEvidence(session): { evidence_url }
+}
+interface OutreachProvider { draft(prospect, research): Draft; send(draft): SendResult; followUp(prospect): Draft }
 ```
-hermesWorker: isProd ? process.env.GATE_HERMES_WORKER === 'true' : true,   // claim/report endpoints
-linkProspectOutreach: process.env.GATE_LINK_OUTREACH === 'true',           // auto-send (default OFF)
+
+Implementations, in order:
+1. **`deterministic_runner`** — the existing `signup-runner.js` (Playwright + form filler),
+   extended for `account_required`, `email_verification` (IMAP verifier), `payment_required`
+   (virtual card, only under `AUTO_PAID_WITHIN_POLICY` or after owner approval), and
+   **resumable sessions** (persisted browser state per `domain_id`).
+2. **`openai_cua` / `claude_cu` / `stagehand` / `grok`** — same interface, run in the
+   benchmark (§10). A provider never receives credentials it does not need and never
+   receives the Waves identity beyond the canonical NAP packet the contract already sends.
+3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
+
+Provider selection per attempt is a policy field (`preferred_provider`, plus per-path override
+learned from attempt outcomes). Outreach: `OutreachProvider` = drafter + `link-prospect-outreach`.
+
+---
+
+## 8. Judge — verification, D30, and the learning loop
+
+- **Verification** is unchanged and authoritative: verifier (crawl + DataForSEO, scan-tracked
+  rows only), indexer (`site:` SERP), profile cross-link, `first_live_at`, `is_dofollow` read
+  from live `rel`. A provider report never sets `live`.
+- **D30 survival** = placement `live`/`indexed` at `first_live_at + 30d` (and again at D90).
+  Derived nightly from `last_live_check` + `seo_backlink_events`; stored on the placement
+  (`d30_live`, `d90_live`) — this is the only success metric that counts.
+- **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
+  and per `domain` into `seo_link_learning` (small table, replaced each night). The scorer reads
+  them:
+
 ```
-Env: `HERMES_SERVICE_TOKEN` (claim/report auth), `HERMES_BASE_URL` (if portal ever calls out).
+Expected Link Value  ≈ quality(DR, traffic, spam, relevance)
+                       × P(index | path, domain)
+                       × P(live at D30 | source, path)
+Acquisition Efficiency ≈ Expected Link Value / (cash cost + agent cost + owner effort)
+```
+Normalized 0–100; no fake-dollar SEO valuation. `best_path_id`, queue order, and the
+authority thresholds all read Expected Link Value, so the system answers *"where do the next
+$100 and the next 10 agent actions go?"* from evidence. Reporting (Agent tab): Source ×
+qualified × acquired × indexed × live-D30 × median DR × cost per D30 domain; the same by path.
 
 ---
 
-## 11. Migration off the Playwright signup worker (phased)
+## 9. Recursive discovery
 
-1. **Coexist** — Hermes handles *new* signup/outreach prospects; Playwright worker keeps
-   running. Both write to the board.
-2. **Compare** — track success rate per worker (`owner` + `attempts`) for ~2 weeks.
-3. **Cut over** — if Hermes' skill-learning beats the brittle selector worker, retire
-   `signup-worker.js`; keep `x-poller` (feeds queue) and `email-verifier`.
-
----
-
-## 12. Milestones
-
-- **M1 — Board (no Hermes):** migration + routes + UI + manual add + verifier + GSC indexer.
-  Delivers the requested tracker immediately, fed by the strategist + manual entry.
-- **M2 — Strategist feed:** ✅ SHIPPED — `create_link_prospects` / `list_prospects` tools.
-- **M3 — Hermes hands:**
-  - **M3a — claim/report contract:** ✅ SHIPPED — `GET/POST /api/integrations/backlink-worker/{claim,report}`
-    (service-token auth `hermes-auth.js`, `hermesWorker` gate), `link-prospect-worker.js`
-    (FOR UPDATE SKIP LOCKED lease; `report` only moves prospects to `placed` — verifier promotes
-    to live), hourly lease-expiry sweep. Env: `HERMES_SERVICE_TOKEN`, `GATE_HERMES_WORKER`,
-    `GATE_LINK_OUTREACH`. Outreach lane stays unserved until `linkProspectOutreach` is on.
-  - **M3b — approval-gated outreach send** (Gmail OAuth, `contact@wavespestcontrol.com`, rate-limit) — ✅ SHIPPED:
-    `link-prospect-outreach.js` — `saveDraft` + `sendOutreach` + `reconcileSendError`, gated by
-    `linkProspectOutreach`, trailing-24h rate-limit (`LINK_OUTREACH_DAILY_CAP`, default 12, counted by
-    `outreach_attempted_at` so an attempt counts regardless of outcome). Send is idempotent + concurrency-safe:
-    cap-check + claim run under a pg advisory lock; the claim stamps a private `outreach_send_token` and returns
-    the locked row, so rollback/finalize touch only their own claim and the sent draft is the current one.
-    Outreach state machine `none→drafted→sending→sent`, with `send_error` for AMBIGUOUS Gmail failures (may have
-    reached Gmail) — never silently requeued: a stuck/ambiguous send is resolved only by the explicit
-    `reconcileSendError` (`sent` vs `requeue`). Gmail send via `email/gmail-client` (sender `contact@`), with an
-    `isConnected` pre-check so a misconfig fails clean. Worker gains a `drafted` outcome (Hermes hybrid lane:
-    research + draft, human approves); `claim()` skips drafted/sending/sent/send_error rows; reports validate the
-    recipient + reject reopening a sent/in-flight outreach. New columns
-    `outreach_to_email/subject/body/status/send_token/attempted_at`. Admin routes `prospects/outreach/pending`,
-    `prospects/:id/outreach/{draft,send,reconcile}` (the auth'd send IS the approval click). 51 unit tests.
-    The approval-queue UI in the Link Building board is the immediate follow-up.
-  - **M3c — Hermes agent deployment** (Docker, skill that calls claim/report) — signup skill SHIPPED in the
-    dashboard; the **outreach auto-draft skill is authored** at `docs/hermes/waves-outreach-drafter-skill.md`
-    (claim `?type=outreach` → research → compose one-to-one draft → report `outcome:"drafted"` → lands in the
-    M3b approval queue). Deploying it into the Hostinger Skills tab + flipping `GATE_LINK_OUTREACH` are operator steps.
-- **M4 — Cutover:** retire Playwright worker per §11.
-
-M1 alone satisfies "Backlink Manager with all the columns." Hermes is M3 — additive, gated,
-reversible.
+After a domain reaches `acquired` (or is ingested as `existing_backlink`) with
+`acquisition_type` in (directory, membership, association, vendor_registration): read its
+co-listed businesses from the placement page (`fetchPage`), take the strongest N (DataForSEO
+bulk rank), run domain-intersection on them, and feed common referring domains into intake as
+`source='recursive'`, `source_ref = originating domain`. Capped per week; behind
+`GATE_SEO_INTELLIGENCE`. The lineage lets the Source table show which seeds *generated*
+durable links, not just which produced one.
 
 ---
 
-## 13. Open decisions
+## 10. Provider benchmark
 
-1. ~~**GSC scope**~~ — **RESOLVED 2026-05-30: URL Inspection authorized.** GSC indexer (§4.2)
-   unblocked; confirm the live client surfaces `urlInspection.index.inspect` (widen scope to
-   `.../auth/webmasters` if the readonly client doesn't expose it).
-2. ~~**Hermes host**~~ — **RESOLVED: Docker** sandbox backend, own container (§5.1).
-3. ~~**Outreach channel**~~ — **RESOLVED: reuse existing Waves Gmail OAuth**, sender
-   `contact@wavespestcontrol.com` for now (Adam will switch the sending identity later) (§5.1).
-   Mitigation for using the primary inbox is mandatory, not optional (§9): approval-gated send +
-   rate-limit + existing SMTP idempotency guard. **N/A for M1** — outreach is M3.
-4. ~~**Auto-promote vs. manual**~~ — **RESOLVED: fully automatic.** The verifier promotes
-   `placed → live → indexed` for all link types with no human glance (it only *reads* live
-   reality via crawl/DataForSEO/GSC — promotion is an observation, not an outbound action, so
-   it's low-risk to automate). Note this is separate from the outreach **send** valve in §9,
-   which stays manually gated.
+Same 30 unseen qualified domains to each provider under identical policy; score:
+verified dofollow + indexed + live at D30 (40), no human step (20), correct fields (10),
+time (10), cost (10), recovery from UI change (5), evidence quality (5). Results are rows in
+`seo_link_attempts`; the Agent tab shows the table. No provider is chosen by preference —
+`preferred_provider` follows the numbers.
 
 ---
 
-## 14. Target taxonomy & seed lists
+## 11. UI — Agent tab (existing panel, extended)
 
-**Driving principle — dual ROI.** For local home-services the best link targets are also
-referral/revenue partners. Score `priority` on *link value × lead value*, not DR alone: a
-realtor "preferred vendors" page (link **+** WDO closings) outranks a DR-50 generic directory.
+1. **Add opportunities** box (§4) + list import (CSV upload = same endpoint).
+2. **Registry** table: domain, DR/traffic/spam, competitors linked, best path (type · cost ·
+   expected rel), score + reasons, agent state, provenance; row → paths + attempts + evidence;
+   *Acquire anyway* / *Watch* / *Reject*.
+3. **Owner queue**: `awaiting_owner` cards (§6.3) — Approve / Reject / Watch.
+4. **Policy** panel (§6.2) — the only place thresholds change; every change is logged.
+5. **Outcomes**: Source × funnel × D30 and Path × funnel × D30 (§8); provider benchmark (§10).
+Link Building board and outreach approvals remain as shipped.
 
-**First-cycle focus = the WDO / real-estate lane (Tier 1).** Single highest-leverage angle:
-WDO inspections are transaction-critical for FL home sales, so realtors *need* a vendor and
-link naturally from resource pages. Point discovery + outreach here before spreading across
-all five tiers.
+---
 
-### `link_type` enum (board)
-`editorial | resource | guest_post | haro | directory | citation | social`
+## 12. Gates, env, kill switches
 
-### Tiers (priority order)
+Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
+`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report), `GATE_SIGNUP_RUNNER` +
+`SIGNUP_RUNNER_ALLOWLIST`, `GATE_OUTREACH_DRAFTER`, `GATE_LINK_OUTREACH` +
+`LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
-**Tier 1 — Local business partnerships** · `resource`/`editorial` · dofollow · **human-led**
-(Hermes finds + drafts, human closes) · *highest dual-ROI*
-- Real estate agents & brokerages — "resources / preferred vendor" pages; WDO wedge; "moving
-  to SWFL / new homeowner" guides
-- Property management & HOA management companies — recurring contracts + vendor pages
-- Home inspectors — mutual referral (non-competing)
-- Complementary home services (non-competing): landscapers w/o pest, pool, pressure washing,
-  gutter/irrigation, handyman — "trusted partners" cross-links
+New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
+`GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`; off ⇒ everything
+`awaiting_owner`), `GATE_LINK_AUTO_PAID` (separately arms `AUTO_PAID_WITHIN_POLICY`),
+`GATE_LINK_RECURSIVE_DISCOVERY`. The runner's allowlist is superseded by the registry's
+`ready_to_acquire` set once `GATE_LINK_AUTHORITY` is on (the registry *is* the allowlist);
+until then `SIGNUP_RUNNER_ALLOWLIST` stays authoritative. Kill for any lane = unset its gate;
+budget kill = the virtual card's limit.
 
-**Tier 2 — Local media & digital PR** · `editorial`/`haro` · **hybrid** (Hermes drafts, human
-sends) · high authority
-- Outlets: Bradenton Herald, Sarasota Herald-Tribune, Sarasota Magazine, SRQ Magazine,
-  Venice Gondolier, North Port Sun / Charlotte Sun, LWR Life; TV: WWSB ABC7
-- HARO / Qwoted / Featured — pest-expert quotes
-- Seasonal hooks: termite swarm (spring), lovebugs, mosquito + hurricane/post-storm surge,
-  no-see-ums, palmetto bugs, fall rodents
-- **Linkable asset:** the Pest Pressure engine = citable local pest-activity data (earned-media bait)
+---
 
-**Tier 3 — Civic / community / sponsorship** · `citation`/`directory` · **approval-gated**
-(`linkProspectOutreach`, costs money)
-- Chambers: Manatee, Greater Sarasota, Venice Area, North Port Area, Lakewood Ranch Business
-  Alliance (dofollow membership links)
-- Youth sports / Little League sponsorships, charity/nonprofit donor pages (humane society,
-  food bank), festivals/farmers markets, BNI groups
+## 13. Guardrails (must ship with each step)
 
-**Tier 4 — Industry / authoritative** · `directory`/`citation` · stable, high authority
-- NPMA, FPMA (Florida Pest Management Association) member directories
-- UF/IFAS Manatee/Sarasota County Extension (contribute as local pro)
-- FDACS license verification, BBB accredited profile
+- **SSRF** — every fetch through `contact-finder.fetchPage()`; providers run in their own
+  sandbox and receive URLs, never portal network access.
+- **Comms** — outreach targets are businesses; the customer-comms prohibition is enforced
+  by the recipient check in `link-prospect-outreach` (no customer email/phone ever matches).
+- **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
+  Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
+- **Footprint** — daily caps on sends and submissions; one conversation per inbox
+  (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
+- **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
+  `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
+  with `expected_rel='sponsored'` and scored accordingly.
+- **Money** — only the dedicated virtual card; hard limit at the bank; every charge is an
+  attempt row with cost; owner approval is a portal click.
+- **Truth** — a provider report is a claim; the Judge promotes; `merged`/`lost` semantics
+  from #3544 apply to everything acquired.
 
-**Tier 5 — Citation/directory baseline** · `directory`/`citation` · **Hermes/auto-signup lane**
-- Yelp, Apple/Bing Maps, Angi, Thumbtack, Houzz, Nextdoor, Porch — NAP consistency (already
-  partially covered by the citation auditor)
+---
 
-### Lane → worker → gate
-| Lane                              | Worker                         | Gate                        |
-|-----------------------------------|--------------------------------|-----------------------------|
-| Tier 1 partnerships, Tier 3 sponsor | Human-led (Hermes finds/drafts) | outreach approval ON        |
-| Tier 2 media / HARO               | Hybrid (Hermes drafts, human sends) | outreach approval ON     |
-| Tier 4–5 directories              | Hermes / auto-signup           | `hermesWorker`              |
+## 14. Build order (PR boundaries)
 
-The strategist's `create_link_prospect` (§6) seeds from these tiers; DataForSEO
-domain-intersection (§4.4) auto-fills Tier 1/4/5 candidates competitors already have.
+1. **Registry + paths + provenance + statuses** — migrations for §3.1–3.5, `awaiting_owner`/
+   `watching`, `domain_id/path_id/authority` on prospects, intake endpoint skeleton
+   (normalize/dedupe/upsert only). Docs-tested with contract tests on the guard.
+2. **Bulk intake** — paste box + CSV import + competitor-gap ingestion job + existing-profile
+   baseline. `Backlinks.csv` enters here as `list_import` / `backlinks_csv_2026_08`.
+3. **Path investigator** — job + schema-validated LLM call + probe list + cost caps;
+   `GATE_LINK_INVESTIGATOR`. Run it over the full gap ingestion; ship the Registry view.
+4. **Authority policy** — `seo_link_policy`, decision function + tests, owner cards,
+   Policy panel; `GATE_LINK_AUTHORITY`. Bounded outreach mandate (§6.4) lands here and
+   releases the June drafts through it.
+5. **Runner extension** — account creation + IMAP verification + resumable sessions +
+   payment step (virtual card) + `needs_owner` outcome; `GATE_LINK_AUTO_PAID`.
+6. **Provider interface + benchmark** — `BrowserAgentProvider`, adapters, benchmark table.
+7. **D30 loop** — `d30_live/d90_live`, `seo_link_learning`, scorer terms, Outcomes view.
+8. **Recursive discovery** — `GATE_LINK_RECURSIVE_DISCOVERY`.
+9. **Budget optimization** — queue ordering by Acquisition Efficiency; monthly report.
+
+Each step is dark-shipped behind its gate, reversible, and independently useful; steps 1–3
+are pure read/compute and can run in prod immediately after review.
+
+---
+
+## 15. What v1 got right (retained by reference)
+
+- §2 invariants and "verify, don't trust" — unchanged.
+- §4 reconciliation jobs (verifier 04:30 ET, indexer 05:00 ET, profile cross-link) — unchanged.
+- §14 dual-ROI target taxonomy: Tier 1 realtor / inspector / property-manager / complementary-
+  service partnerships (WDO wedge); Tier 2 local media + HARO with seasonal hooks and the Pest
+  Pressure engine as the linkable asset; Tier 3 chambers / sponsorships; Tier 4 NPMA / FPMA /
+  UF-IFAS / BBB; Tier 5 citations. Tiers now inform *quality* and `link_type`; they no longer
+  decide *permission* — §6 does.
+- `link_type` enum, board columns, Link Building smart views — unchanged.
+
+Superseded: v1 §5 (Hermes Docker worker), §9's permanent manual send valve, §11 Playwright
+cutover (replaced by the provider race), v1 open decisions 2–3.
+
+## 16. Open decisions
+
+1. Which encrypted-secret helper backs `seo_link_credentials` (existing in repo vs. new
+   column-level cipher) — decide in step 1's review.
+2. Virtual card issuer for the acquisition budget — Adam.
+3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
+   `LINK_OUTREACH_DAILY_CAP=12`) — Adam, at step 4.
+4. Whether `OWNER_MEMBERSHIP` cards should batch weekly (one digest) or ring per card — Adam.
