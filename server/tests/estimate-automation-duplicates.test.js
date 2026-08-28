@@ -238,6 +238,7 @@ describe('supersede support (clarify-reply re-draft): lock, then archive AFTER t
     const q = {
       select() { return q; },
       where(...a) { wheres.push(a); return q; },
+      whereIn(...a) { wheres.push(['whereIn', ...a]); return q; },
       whereNull(...a) { wheres.push(['whereNull', ...a]); return q; },
       forUpdate() { return q; },
       first: async () => row,
@@ -250,7 +251,7 @@ describe('supersede support (clarify-reply re-draft): lock, then archive AFTER t
     const trx = fakeTrx({ id: 'est-1', estimate_data: '{}' });
     await expect(lockSupersededDraftInTx(trx, { estimateId: 'est-1' })).resolves.toMatchObject({ id: 'est-1' });
     expect(trx.updates).toHaveLength(0);
-    expect(trx.wheres.some((w) => w[0] && w[0].status === 'draft')).toBe(true);
+    expect(trx.wheres.some((w) => w[0] === 'whereIn' && w[1] === 'status' && w[2].includes('scheduled'))).toBe(true);
     expect(trx.wheres.some((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toBe(true);
     await expect(lockSupersededDraftInTx(fakeTrx(null), { estimateId: 'est-1' })).resolves.toBeNull();
     await expect(lockSupersededDraftInTx(trx, { estimateId: null })).resolves.toBeNull();
@@ -266,7 +267,10 @@ describe('supersede support (clarify-reply re-draft): lock, then archive AFTER t
     expect(data.estimatorEngine.lane).toBe('yellow');
     expect(data.estimatorEngine.superseded_reason).toBe('clarify_bedroom_reply');
     expect(data.estimatorEngine.superseded_at).toBeDefined();
-    expect(trx.wheres.some((w) => w[0] && w[0].status === 'draft')).toBe(true);
+    // A scheduled row returns to an inert draft with no due time.
+    expect(payload.status).toBe('draft');
+    expect(payload.scheduled_at).toBeNull();
+    expect(trx.wheres.some((w) => w[0] === 'whereIn' && w[1] === 'status' && w[2].includes('scheduled'))).toBe(true);
     expect(trx.wheres.some((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toBe(true);
     await expect(archiveSupersededDraftInTx(trx, null, { reason: 'x' })).resolves.toBe(false);
     await expect(archiveSupersededDraftInTx(fakeTrx(null, { updateResult: 0 }), stale, { reason: 'x' })).resolves.toBe(false);

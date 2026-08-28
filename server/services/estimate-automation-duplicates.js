@@ -217,9 +217,14 @@ async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
  */
 async function lockSupersededDraftInTx(trx, { estimateId }) {
   if (!trx || !estimateId) return null;
+  // 'scheduled' = an unsent draft with a due time; superseding it must
+  // also cancel that schedule (archive below returns it to an inert draft).
+  // 'send_failed' = a refused/failed delivery attempt (the reprice guard
+  // itself parks a row there) — still unsent, still ours to replace.
   const stale = await trx('estimates')
-    .select('id', 'estimate_data')
-    .where({ id: estimateId, status: 'draft' })
+    .select('id', 'status', 'estimate_data')
+    .where({ id: estimateId })
+    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
     .whereNull('sent_at')
     .whereNull('archived_at')
     .forUpdate()
@@ -240,11 +245,17 @@ async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
     superseded_reason: reason || 'superseded',
   };
   const changed = await trx('estimates')
-    .where({ id: stale.id, status: 'draft' })
+    .where({ id: stale.id })
+    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
     .whereNull('sent_at')
     .whereNull('archived_at')
     .update({
       archived_at: new Date(),
+      // A scheduled row returns to an inert draft with no due time — the
+      // cron must never deliver the superseded price (same transition as
+      // linkage invalidation, estimator-engine/index.js).
+      status: 'draft',
+      scheduled_at: null,
       estimate_data: JSON.stringify(data),
       updated_at: new Date(),
     });

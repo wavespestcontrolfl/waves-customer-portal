@@ -802,7 +802,12 @@ function generateEstimate(input) {
         });
       }
       lineItems.push(result);
-      activeServiceKeys.push('pest_control');
+      // A fail-closed band line (quoteRequired, $0) is not an active
+      // recurring service: it must not grant the recurring-customer perk,
+      // count toward the WaveGuard tier, or read as "recurring pest
+      // present" to the one-time pricers (same rule as the commercial
+      // manual-quote branches).
+      if (!result.quoteRequired) activeServiceKeys.push('pest_control');
       recurringPestRoachType = result.roachType || 'none';
 
       // Auto-add the one-time Initial Roach Knockdown when recurring pest is

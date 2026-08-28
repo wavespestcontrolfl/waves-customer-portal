@@ -373,6 +373,20 @@ describe('snapshot integrity (hook P0 — engineInputs are browser-controlled)',
     const forged = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly, bi_monthly: { ...biMonthly, recurringPrice: 1 } } } };
     expect(verdict(forged, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'signature' });
   });
+  test('a fail-closed band line is NOT an active recurring service (no recurring-customer perk on the one-time line, no tier credit)', () => {
+    const oneTime = signed({ ...row(), serviceCode: 'oneTimePest', frequency: 'one_time', initialPrice: 202.4, recurringPrice: 202.4 });
+    const r = generateEstimate({
+      services: { pest: { frequency: 'quarterly' }, oneTimePest: {} }, propertyType: 'unknown', stories: 1, isCommercial: false,
+      address: ADDRESS,
+      unitBandPricing: { pest: { ...signed(), sig: 'f'.repeat(64) }, oneTimePest: oneTime },
+    });
+    const pest = r.lineItems.find((l) => l.service === 'pest_control');
+    const ot = r.lineItems.find((l) => l.service === 'one_time_pest');
+    expect(pest.quoteRequired).toBe(true);
+    expect(ot.isRecurringCustomer).toBe(false);
+    expect(ot.recurringCustomerDiscountRate).toBe(0);
+    expect(ot.price).toBe(202.4);
+  });
   test('eligibility is re-checked on replay: a real unit sqft, a roach program, or commercial makes a signed snapshot INELIGIBLE (standard pricer, not fail-closed)', () => {
     const base = { address: ADDRESS, unitBandPricing: { pest: signed() } };
     expect(verdict({ ...base, homeSqFt: 780 }, 'pest')).toEqual({ status: 'ineligible', reason: 'unit_sqft_resolved' });

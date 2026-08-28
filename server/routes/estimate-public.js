@@ -9983,6 +9983,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
+        // A bedroom re-price in flight (estimate-clarify-asks): the
+        // fallback dollars on this draft are being replaced — refuse the
+        // accept until the replacement lands (or the marker lapses).
+        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
+          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
+          err.status = 409;
+          throw err;
+        }
         // The call row is locked FOR UPDATE and HELD through the
         // acceptance write (codex P1, PR #3304 GH r6): an ordinary
         // SELECT would not serialize against the processor's concurrent

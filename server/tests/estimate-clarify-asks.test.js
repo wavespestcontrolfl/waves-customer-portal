@@ -41,7 +41,11 @@ jest.mock('../models/db', () => {
   // withClarifyLock: transaction executor doubles as the query builder; the
   // advisory-lock raw() is a no-op here.
   const trx = Object.assign((table) => makeBuilder(table), {
-    raw: async (sql, params) => { if (/pg_advisory_xact_lock/.test(String(sql))) mockState.locks.push(params); return {}; },
+    raw: (sql, params) => {
+      mockState.raws.push({ sql: String(sql), params });
+      if (/pg_advisory_xact_lock/.test(String(sql))) { mockState.locks.push(params); return Promise.resolve({}); }
+      return { __raw: String(sql), params };
+    },
   });
   dbMock.transaction = async (callback) => callback(trx);
   dbMock.raw = async () => ({});
@@ -104,7 +108,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [], locks: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [], locks: [], raws: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -843,9 +847,9 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(_private.ASKABLE_MISSING.has('bedroom_count')).toBe(true);
     const alone = _private.composeClarifyBody({ missing: ['bedroom_count'], firstName: 'Pat' });
     expect(alone.startsWith('Hi Pat, ')).toBe(true);
-    expect(alone).toMatch(/how many bedrooms is the unit \(studio, 1, 2, 3 or more\)\?/);
+    expect(alone).toMatch(/how many bedrooms is the unit \(studio, 1, 2, 3, or 4\+\)\?/);
     const combined = _private.composeClarifyBody({ missing: ['street_address', 'bedroom_count'], firstName: null });
-    expect(combined).toBe(`${_private.composeClarifyBody({ missing: ['street_address'], firstName: null })} Also, how many bedrooms is the unit (studio, 1, 2, 3 or more)? That sets the price for your apartment or condo.`);
+    expect(combined).toBe(`${_private.composeClarifyBody({ missing: ['street_address'], firstName: null })} Also, how many bedrooms is the unit (studio, 1, 2, 3, or 4+)? That sets the price for your apartment or condo.`);
   });
 
   test('extractBedroomReply reads counts as spoken; studio = 0; a bare number is not an answer', () => {
@@ -863,7 +867,13 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(extractBedroomReply('2')).toBeNull();
     // A bedroom-ONLY ask accepts the natural bare answer, bounded.
     expect(extractBedroomReply('2', { bareNumberOk: true })).toBe(2);
-    expect(extractBedroomReply(' 3+ ', { bareNumberOk: true })).toBe(3);
+    // Lower-bound replies below 4 straddle two bands ($99 vs $109) — not an answer;
+    // "4+" collapses into the four_plus band exactly.
+    expect(extractBedroomReply(' 3+ ', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('3 or more', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('4+', { bareNumberOk: true })).toBe(4);
+    expect(extractBedroomReply('3+ bedrooms')).toBeNull();
+    expect(extractBedroomReply('4 plus bedrooms')).toBe(4);
     expect(extractBedroomReply('One.', { bareNumberOk: true })).toBe(1);
     expect(extractBedroomReply('0', { bareNumberOk: true })).toBe(0);
     expect(extractBedroomReply('99', { bareNumberOk: true })).toBeNull();
@@ -921,8 +931,9 @@ describe('bedroom_count ask (unit-band lane)', () => {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
       flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
     };
-    // first() order: awaiting (unlocked), fresh (locked), then the ask row for
-    // the reprice_pending stamp, the estimate row, then the ask row again.
+    // first() order: awaiting (unlocked), fresh (locked), ask (reprice_pending
+    // stamp), estimate (origin), ask (cleared). The estimate guard is an
+    // atomic UPDATE with no read.
     const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
     mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
@@ -994,6 +1005,67 @@ describe('bedroom_count ask (unit-band lane)', () => {
     await handleClarifyReply({ phone: '+19415550142', body: '123 Main St, Sarasota' });
     const args = mockStartSmsThreadDraft.mock.calls[0][0];
     expect(args.supersedeEstimateId).toBeUndefined();
+  });
+
+  test('repricePendingActive: live inside the 30-minute window, lapsed after (a restart can never strand a draft)', () => {
+    const { repricePendingActive } = require('../services/estimate-clarify-asks');
+    const now = Date.parse('2026-08-28T12:00:00Z');
+    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:50:00Z' }, now)).toBe(true);
+    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:20:00Z' }, now)).toBe(false);
+    expect(repricePendingActive({}, now)).toBe(false);
+    expect(repricePendingActive(null, now)).toBe(false);
+    expect(repricePendingActive({ reprice_pending_at: 'garbage' }, now)).toBe(false);
+  });
+
+  test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-3' });
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
+    // first() order: awaiting, fresh(locked), ask (pending stamp), estimate (origin)
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    // ATOMIC JSONB path updates only — never a whole-blob rewrite that
+    // could erase a concurrent linkage marker.
+    const estimateUpdates = mockState.updates.filter((u) => u.table === 'estimates');
+    expect(estimateUpdates).toHaveLength(2);
+    expect(estimateUpdates[0].payload.estimate_data.__raw).toMatch(/jsonb_set\(estimate_data, '\{estimatorEngine\}'.*jsonb_build_object\('reprice_pending_at'/);
+    expect(estimateUpdates[0].payload.estimate_data.params[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(estimateUpdates[1].payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at'\)/);
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+  });
+
+  test('a guard that stamps ZERO rows (draft already sent/moved on) fails closed: answer recorded, no re-draft, operator bell', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-4' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+    };
+    mockState.firstQueue = [awaiting, awaiting, awaiting];
+    // update results: ask row bookkeeping (1), estimate guard (0 rows), pending stamp (1)…
+    mockState.updateResults = [0, 1];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/re-price the unit draft/i), expect.any(String), expect.objectContaining({ link: '/admin/estimates/est-1' }));
+  });
+
+  test('a bare number answers only a DELIVERED bedroom-only prompt — an unsent draft leaves an unrelated "2" alone', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockState.existingDraft = {
+      id: 'pend-1', customer_id: null, sent_at: null, status: 'pending',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
   });
 
   test('a bare "2" answers a bedroom-ONLY ask but not a combined ask', async () => {
