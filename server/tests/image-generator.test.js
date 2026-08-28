@@ -86,6 +86,11 @@ describe('buildPrompt', () => {
     expect(p).toMatch(/in-article illustration/);
     expect(p).not.toMatch(/hero/);
     expect(p).toMatch(/Subject: Reading the pellets\./);
+    // Section prose rides along as context (GH r1) — a generic heading alone illustrates nothing.
+    const withLead = buildPrompt({ title: 'Post', keyword: 'What to expect', topic: 'The technician sweeps eaves and treats entry points first.', mode: 'blog-body' });
+    expect(withLead).toMatch(/Subject: What to expect\. Context from the article: The technician sweeps eaves/);
+    // Hero prompts are unchanged.
+    expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
   });
   test('social-square wording differs', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);

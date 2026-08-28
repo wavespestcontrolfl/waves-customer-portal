@@ -3594,6 +3594,32 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
   });
 
+  test('bodyImageRefs: comments, JSX comments, code spans and escaped syntax are not images; an escaped backslash before ! still renders (GH r1)', () => {
+    const body = [
+      '![real](/images/2026/08/a.webp)',
+      '<!-- ![hidden](/images/2026/08/b.webp) -->',
+      '{/* ![jsx](/images/2026/08/c.webp) */}',
+      '`![span](/images/2026/08/d.webp)`',
+      '\\![escaped](/images/2026/08/e.webp)',
+      '\\\\![double-escaped renders](/images/2026/08/f.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/a.webp', '/images/2026/08/f.webp']);
+    // The section scanner sees the same thing: a commented-out image does not mark a section illustrated.
+    const slots = bodyImageSlots('## A\n\nProse.\n\n<!-- ![x](/i.webp) -->\n', 1);
+    expect(slots.map((sl) => sl.heading)).toEqual(['A']);
+  });
+
+  test('fail-closed: a draft that embeds the HERO in its body parks — the hero never counts as a body image (GH r1)', async () => {
+    gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/') ? { content: 'x', sha: 'h' } : null));
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![hero again](/images/blog/pest-control/drywood-frass-venice/hero.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toContain('embeds the hero image');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
   test('fail-closed: a draft image ref that is NOT committed (invented path / remote URL) parks instead of shipping a broken image (hook r2)', async () => {
     gh.getFile.mockResolvedValue(null);
     mockHeroGeneration();

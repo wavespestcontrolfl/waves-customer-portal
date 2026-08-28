@@ -1243,6 +1243,21 @@ describe('validateAutonomousRunGates', () => {
     expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
   });
 
+  test('body-image minimum (GATE_BLOG_BODY_IMAGES on): a fix that drops a generated in-article image is rejected; two distinct images pass (GH r1)', async () => {
+    const fg = require('../config/feature-gates');
+    const spy = jest.spyOn(fg, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
+    try {
+      const one = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![a again](/images/blog/x/body-1.webp)';
+      const res = await rem.validateAutonomousRunGates(one, RUN_REF, goodDeps());
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/body images: fix leaves 1 distinct/);
+      const two = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n## B\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, goodDeps())).ok).toBe(true);
+    } finally { spy.mockRestore(); }
+    // Gate off: no recount.
+    expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
+  });
+
   test('fail closed: missing run / row not in db / non-blog action / empty stored draft / missing brief', async () => {
     expect((await rem.validateAutonomousRunGates(MD, null, goodDeps())).ok).toBe(false);
     expect((await rem.validateAutonomousRunGates(MD, { id: 'ghost' }, goodDeps())).reason).toMatch(/not found/);

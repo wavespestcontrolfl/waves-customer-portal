@@ -97,7 +97,12 @@ function sizeFor(mode, api) {
 function buildPrompt({ title, topic, keyword, city, mode }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const base = `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
-  const focus = `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
+  // Body images name the SECTION (keyword) and carry its opening prose as
+  // context (topic) — a generic heading ("What to expect") alone would
+  // illustrate nothing in particular.
+  const focus = (mode === 'blog-body' && keyword && topic && topic !== keyword)
+    ? `Subject: ${keyword}. Context from the article: ${topic}`
+    : `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
   const local = city
     ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`
     : `Setting: SWFL residential — palm trees, tropical landscaping, sunny afternoon.`;

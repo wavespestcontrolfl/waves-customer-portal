@@ -1271,6 +1271,19 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     // fix's verdict atomically with the head re-pin (PR r13 P1): merge
     // governance reads the run's comparison_table_result, and a fix that
     // INTRODUCES a named competitor must flip the run to governed.
+    // 5. Body-image minimum (owner rule: ≥3 images per post). The publisher
+    //    inserted the in-article images before the PR opened; a fix that
+    //    rewrites a nearby section can drop one, and nothing else recounts.
+    let bodyImagesOn = false;
+    try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
+    if (bodyImagesOn) {
+      const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
+      const distinct = new Set(pub.bodyImageRefs(draft.body).map((r) => r.src)).size;
+      if (distinct < pub.BODY_IMAGE_MIN) {
+        return { ok: false, reason: `body images: fix leaves ${distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
+      }
+    }
+
     return { ok: true, comparisonResult };
   } catch (err) {
     return { ok: false, reason: `autonomous gate re-run failed: ${err.message}` };

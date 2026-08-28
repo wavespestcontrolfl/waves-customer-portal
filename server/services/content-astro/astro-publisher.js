@@ -1647,19 +1647,21 @@ function bodyImagesEnabled() {
 
 // Rendered image references in the body — fenced code is skipped (an
 // `![x](y)` inside a code block is text, not an image).
+// Only an ODD backslash run escapes the "!" (Markdown escape parity).
+const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g;
+
+// The body with every non-rendered region blanked (fenced/indented code,
+// code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
+// still address the original text. Shared stripper, so "rendered" here means
+// exactly what the table scanner and CTA extraction mean by it.
+function renderedBodyLines(body) {
+  return contentGuardrails.blankNonRenderedMarkdown(String(body || '')).split('\n');
+}
+
 function bodyImageRefs(body) {
   const out = [];
-  let inFence = false;
-  let fenceChar = '';
-  String(body || '').split('\n').forEach((line, index) => {
-    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
-    if (fence && (!inFence || fence[1][0] === fenceChar)) {
-      inFence = !inFence;
-      fenceChar = inFence ? fence[1][0] : '';
-      return;
-    }
-    if (inFence) return;
-    for (const m of line.matchAll(/!\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g)) out.push({ alt: m[1].trim(), src: m[2], line: index });
+  renderedBodyLines(body).forEach((line, index) => {
+    for (const m of line.matchAll(RENDERED_IMAGE_RE)) out.push({ alt: m[1].trim(), src: m[2], line: index });
   });
   return out;
 }
@@ -1696,6 +1698,7 @@ const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\
 // heading) is the fallback slot when too few sections qualify.
 function scanBodySections(body, { title = '' } = {}) {
   const lines = String(body || '').split('\n');
+  const rendered = renderedBodyLines(body);
   const sections = [];
   let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
   let inFence = false;
@@ -1734,7 +1737,7 @@ function scanBodySections(body, { title = '' } = {}) {
       }
       continue;
     }
-    for (const m of line.matchAll(/!\[[^\]]*\]\(([^)\s]*)[^)]*\)/g)) { cur.hasImage = true; cur.images.push(m[1]); }
+    for (const m of (rendered[i] || '').matchAll(RENDERED_IMAGE_RE)) { cur.hasImage = true; cur.images.push(m[2]); }
     if (line.trim() === '') { closePara(i); continue; }
     if (paraStart < 0) paraStart = i;
   }
@@ -1823,6 +1826,16 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
   const draftRefs = bodyImageRefs(body);
+  // The layout renders the hero; a body that embeds it repeats the picture
+  // and would count it toward the minimum — never a body image (astro
+  // CLAUDE.md: "never embed the hero_image in the body").
+  const heroSrc = String(frontmatter?.hero_image?.src || '');
+  const heroRef = draftRefs.find((r) => r.src === heroSrc || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(r.src));
+  if (heroRef) {
+    const err = new Error(`autonomous blog body images: draft for ${slug} embeds the hero image in the body (${heroRef.src}) — the layout renders the hero; body images must be distinct illustrations`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
   await assertDraftBodyImagesCommitted(draftRefs, slug);
   // Distinct pictures, not references — two links to one file is one image.
   const draftSrcs = new Set(draftRefs.map((r) => r.src));
