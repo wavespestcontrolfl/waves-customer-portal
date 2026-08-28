@@ -59,6 +59,11 @@ describe('review-derived facts', () => {
     expect(G.mentionedTechNames('Will was thorough and kind.', ['Will'])).toEqual([]);
     expect(G.mentionedTechNames('Our tech Will was thorough and kind.', ['Will'])).toEqual(['Will']);
     expect(G.mentionedTechNames('I hope Hope comes back next time.', ['Hope'])).toEqual(['Hope']);
+    // codex r38: date-like usage of a month-name technician is not a mention.
+    expect(G.mentionedTechNames('They came in May and fixed it.', ['May'])).toEqual([]);
+    expect(G.mentionedTechNames('Treated since June 3rd, no bugs.', ['June'])).toEqual([]);
+    expect(G.mentionedTechNames('Great job, August, our tech was thorough.', ['August'])).toEqual(['August']);
+    expect(G.mentionedTechNames('Our tech May was wonderful.', ['May'])).toEqual(['May']);
     expect(G.mentionedTechNames('marcus was great', ['Marcus'])).toEqual(['Marcus']);
   });
   test('topics come from the reviewer text', () => {

@@ -2178,6 +2178,12 @@ export default function ReviewsPage() {
             ...r,
             reply: replyText,
             replyUpdatedAt: new Date().toISOString(),
+            // The saved draft slot is consumed by the post (server-side the
+            // "[DRAFT]" became the reply): clear it and its identity so a
+            // follow-up edit does not report the obsolete draft as observed.
+            draftReply: null,
+            draftToken: null,
+            draftStale: false,
             // A manual post closes out the auto-reply state server-side
             // (skipped/manual_reply); mirror it so Retract — which deletes
             // whatever reply is live — is not offered on a human's reply.

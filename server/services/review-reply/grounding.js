@@ -110,8 +110,14 @@ function mentionedTechNames(text, techFirstNames) {
       const word = m[2];
       const capitalized = word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase();
       const before = text.slice(0, m.index + m[1].length).replace(/\s+$/, '');
+      const after = text.slice(m.index + m[1].length + word.length);
       const sentenceInitial = before === '' || /[.!?]$/.test(before);
-      if (capitalized && !sentenceInitial) { hit = true; break; }
+      // Date-like usage is not a name (codex r38): "came in May", "since
+      // June 3rd", "May 2026", "early August" — a preposition / date
+      // qualifier before, or a day / year after.
+      const dateBefore = /\b(?:in|on|by|since|until|till|during|of|from|through|around|early|late|mid|last|this|next|every|each|end\s+of|beginning\s+of|start\s+of|middle\s+of)$/i.test(before);
+      const dateAfter = /^\s*(?:\d{1,2}(?:st|nd|rd|th)?\b|(?:19|20)\d{2}\b|,\s*(?:19|20)\d{2}\b)/.test(after);
+      if (capitalized && !sentenceInitial && !dateBefore && !dateAfter) { hit = true; break; }
     }
     if (hit) found.push(name);
   }

@@ -19,6 +19,12 @@ jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/social-content-studio', () => ({ publishWithReviewLivenessLock: (...a) => mockLock(...a) }));
 const mockNotify = jest.fn(async () => ({}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
+const mockAccountFacts = jest.fn(async () => null);
+jest.mock('../services/review-reply/grounding', () => ({
+  loadAccountFacts: (...a) => mockAccountFacts(...a),
+  accountFingerprint: (a) => (a ? `fp:${a.city || ''}|${a.tenure || ''}` : 'fp:none'),
+  groundingCustomerId: (r) => (r && r.customer_id && r.link_source !== 'click_auto' ? r.customer_id : null),
+}));
 jest.mock('../config/locations', () => ({
   WAVES_LOCATIONS: [{ id: 'sarasota', name: 'Sarasota', googleLocationResourceName: 'accounts/1/locations/2' }],
 }));
@@ -308,6 +314,24 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_published_at: '2026-08-27T15:00:00Z' });
     expect(mockNotify).toHaveBeenCalledTimes(1);
     expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', needsAction: true });
+    // codex r38: account-derived facts changed while the PUT was in flight
+    // (review fingerprint unchanged) → parked for a person, never clean posted.
+    mockNotify.mockClear();
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null, review_text: 'Great', star_rating: 5, customer_id: 'c1' };
+    mockAccountFacts.mockResolvedValueOnce({ city: 'Sarasota', tenure: 'new' });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const ra = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' }, autoFields: { auto_reply_status: 'posted', auto_reply_grounding: JSON.stringify({ accountFingerprint: 'fp:Venice|new' }) } });
+    expect(ra.editedDuringPut).toBe(true);
+    expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    // Matching account facts → clean posted.
+    mockNotify.mockClear();
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null };
+    mockAccountFacts.mockResolvedValueOnce({ city: 'Venice', tenure: 'new' });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const rb = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' }, autoFields: { auto_reply_status: 'posted', auto_reply_grounding: JSON.stringify({ accountFingerprint: 'fp:Venice|new' }) } });
+    expect(rb.editedDuringPut).toBe(false);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
     // A HUMAN reply edited-during-PUT keeps the caller's own close fields
     // (never the automatic park — no auto-reply Retract for a person's text)
     // but the bell still rings (hook P1).

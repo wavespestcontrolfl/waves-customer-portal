@@ -481,11 +481,30 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       });
     const clean = { review_reply: replyText, reply_updated_at: db.fn.now(), ...(autoFields || {}) };
     let current = null;
-    let updated = await base().modify((qb) => whereSameContent(qb, prePutContent)).update(clean);
+    // Account-derived facts the draft was grounded on (city, relationship,
+    // categories) can change without the review fingerprint moving (codex
+    // r38): compare the current account fingerprint with the snapshot the
+    // pipeline stamped; a mismatch — or a failed read — parks instead of
+    // recording a clean 'posted'. Only pipeline drafts carry a snapshot.
+    let accountStale = false;
+    let accountCause = null;
+    const snapshot = (() => { try { return autoFields?.auto_reply_grounding ? JSON.parse(autoFields.auto_reply_grounding) : null; } catch { return null; } })();
+    if (snapshot?.accountFingerprint) {
+      try {
+        const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('./grounding');
+        const row = await db('google_reviews').where({ id: reviewId }).first();
+        const nowFp = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)));
+        if (nowFp !== snapshot.accountFingerprint) { accountStale = true; accountCause = 'account facts changed'; }
+      } catch (e) {
+        accountStale = true; accountCause = `account facts could not be re-read (${e.message})`;
+      }
+    }
+    let updated = accountStale ? 0 : await base().modify((qb) => whereSameContent(qb, prePutContent)).update(clean);
     if (updatedCount(updated) === 0) {
       current = await db('google_reviews').where({ id: reviewId }).first();
-      if (current && !current.missing_since && reviewFingerprint(current) !== prePutFingerprint) {
+      if (current && !current.missing_since && (accountStale || reviewFingerprint(current) !== prePutFingerprint)) {
         editedDuringPut = true;
+        if (accountStale) logger.warn(`[review-reply] ${reviewId}: ${accountCause} while the reply posted — parked for a person`);
         // Only a PIPELINE-owned reply (automation, or Post now stamping
         // 'posted') takes the automatic park — a human's reply keeps the
         // caller's own close fields so the UI never offers auto-reply

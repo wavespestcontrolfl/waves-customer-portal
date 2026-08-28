@@ -92,6 +92,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, thanks for the note about Marcus 🎉 we will tell him.'))).toBe('emoji');
     expect(verify(good('Hi Dana, Marcus was glad to help — the ants are gone for good now.'))).toBe('em_dash');
     expect(verify(good('Hi Dana, I am so glad Marcus could get the ants out of your kitchen.'))).toBe('first_person_singular');
+    expect(verify(good("Hi Dana, i'm thankful Marcus could get the ants out of your kitchen."))).toBe('first_person_singular');
     expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
   });
   test('never a link, email, phone, money, or street address', () => {
@@ -132,6 +133,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r38: activity-continuation framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments let your pets keep enjoying the yard.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids can carry on playing outside as usual.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants without changing your routine.'))).toBe('banned_phrase');
     // codex r37: quality-of-life / preserve / protect-your-pets framing.
     expect(verify(good("Hi Dana, Marcus got the ants and our treatments preserve your pets' quality of life."))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we protect your family every visit.'))).toBe('banned_phrase');

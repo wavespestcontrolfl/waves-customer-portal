@@ -82,7 +82,7 @@ const MONEY_RE = /\$\s*\d|\b\d+\s*(?:dollars|bucks)\b/i;
 // Case-insensitive, and the street name may be a numbered/ordinal token
 // ("123 4th St", "123 main st") — Florida addresses are often numbered streets.
 const ADDRESS_RE = /\b\d{1,6}\s+(?:[\w'.-]+\s){0,3}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|way|ct|court|cir|circle|pl|place|ter|terrace|trl|trail|pkwy|parkway|hwy|highway)\b\.?/i;
-const FIRST_PERSON_SINGULAR_RE = /\b(?:I|I'm|I've|I'd|I'll|my|me|mine)\b/;
+const FIRST_PERSON_SINGULAR_RE = /\b(?:I|I'm|I've|I'd|I'll|my|me|mine)\b/i;
 const BANNED_RE = new RegExp([
   // Incentives of every flavor (Google review policy).
   '\\bdiscount(?:s|ed)?\\b', '\\bfree\\b(?!\\s+to\\b)', '\\bcoupons?\\b', '\\bgift\\s*cards?\\b', '\\brewards?\\b',
@@ -115,6 +115,11 @@ const BANNED_RE = new RegExp([
   // "Unaffected / untouched / no negative consequences" (codex r34): the
   // outcome nouns and un-* adjectives are banned outright.
   '\\bunaffected\\b', '\\buntouched\\b', '\\bunbothered\\b', '\\bunscathed\\b', '\\bunharmed\\b', '\\bunhurt\\b', '\\bintact\\b', '\\bconsequences?\\b', '\\bside[- ]?effects?\\b', '\\bafter[- ]?effects?\\b', '\\brepercussions?\\b', '\\bdownsides?\\b', '\\bdrawbacks?\\b', '\\b(?:negative|adverse|ill|bad|unwanted|harmful|lasting)\\s+(?:[\\w-]+\\s+){0,2}?(?:effects?|outcomes?|reactions?|impacts?|results?)\\b',
+  // Activity-continuation framing (codex r38): "let your pets keep enjoying
+  // the yard", "allow the kids to carry on playing", "as usual", "routine".
+  '\\b(?:lets?|letting|allow\\w*|leav\\w*|free\\w*|enabl\\w*|permit\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\b',
+  '\\b(?:pets?|dogs?|cats?|kids?|children|babies|family|people|animals|everyone)\\s+(?:can|could|may|will|to|still)?\\s*(?:keep|continue|carry\\s+on|go\\s+on|resume|get\\s+back\\s+to|return\\s+to|stay|remain|enjoy|play|roam|run|romp|relax|use|go\\s+(?:out|outside|back))\\w*\\b',
+  '\\bas\\s+usual\\b', '\\broutines?\\b', '\\bwithout\\s+(?:changing|interrupt\\w*|disrupt\\w*|missing|skipping|pausing)\\b', '\\bno\\s+(?:change|interruption|disruption)s?\\b', '\\buninterrupted\\b', '\\bundisturbed\\b',
   // Quality-of-life / preserve / safeguard framing (codex r37).
   '\\bquality\\s+of\\s+life\\b', '\\bpreserv\\w*\\b', '\\bsafeguard\\w*\\b', '\\bshield\\w*\\b',
   '\\b(?:protect|defend|keep|look\\s+after|watch\\s+over|care\\s+for)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|loved\\s+ones|people|animals|grandkids|grandchildren)\\b',
