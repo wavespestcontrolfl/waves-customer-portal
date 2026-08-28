@@ -116,7 +116,7 @@ t.string('acquisition_type').notNullable();
 //  sponsorship | vendor_registration | business_claim | resource_outreach |
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
-t.decimal('estimated_cost', 10, 2); t.decimal('renewal_cost', 10, 2); t.string('renewal_period'); // annual|monthly|none
+t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required'); t.boolean('email_verification'); t.boolean('payment_required');
 t.boolean('legal_attestation');                   // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable');                   // investigator's judgement: can the runner finish alone
@@ -152,7 +152,7 @@ t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send
 t.string('outcome').notNullable();    // placed | drafted | failed | skipped | needs_owner | captcha | blocked
-t.decimal('cost', 10, 2); t.integer('duration_ms');
+t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false);
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
@@ -383,13 +383,17 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
   An owner-approved purchase whose final total exceeds the approved amount by more than
   `policy.owner_price_tolerance_cents` (default 0) is also refused and re-parked with the new
   total. The provider can never charge an amount the ledger has not reserved.
-- **Renewals are separate purchases; auto-renew is never left armed.** A reservation covers
-  exactly one charge. During checkout the provider MUST select the non-recurring option or
-  disable auto-renew where the merchant offers it, and report `auto_renew_disabled=true`; if
-  the merchant only sells auto-renewing terms the purchase is refused (`voided`,
-  `outcome='auto_renew_unavoidable'`) and re-parked as `OWNER_PAYMENT` with that fact on the
-  card — the owner may approve it knowingly, and the placement is then flagged
-  `recurring_merchant=true` for the renewal job to cancel/re-authorize before the next term.
+- **Renewals are separate purchases; a merchant can never charge outside the ledger.** A
+  reservation covers exactly one charge, and the instrument enforces it: each purchase is paid
+  with a **single-use virtual card number** (issuer-generated per reservation, `merchant_ref`
+  records it) that is **closed immediately after `charged`/`voided`/reconciliation** — so an
+  armed auto-renewal, a merchant retry, or a stored-card charge has no live number to hit.
+  The provider still selects the non-recurring option or disables auto-renew where offered
+  and reports `auto_renew_disabled`. If the issuer cannot mint single-use numbers, purchases
+  on merchants that only sell auto-renewing terms are **refused outright** (`voided`,
+  `outcome='auto_renew_unavoidable'`), including for owner-approved rows — the owner may buy
+  such a listing manually outside the system and record it as a `human` attempt with its own
+  renewal date. No purchase is ever left depending on a future job to prevent a charge.
   Intentional renewals are produced by a **renewal job** that, `renewal_lead_days` (default 21)
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
@@ -421,7 +425,7 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 - **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
   method the runner can use; the bank's limit is a second, independent ceiling — it is not the
   policy. Owner-approved purchases above `max_auto_purchase_cents` go through the same reservation
-  after the click. `seo_link_attempts.cost` mirrors `final_cents` for reporting only.
+  after the click. `seo_link_attempts.cost_cents` mirrors `final_cents` for reporting only.
 
 ### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
 
@@ -519,10 +523,22 @@ durable links, not just which produced one.
 
 ## 10. Provider benchmark
 
-Same 30 unseen qualified domains to each provider under identical policy; score:
-verified dofollow + indexed + live at D30 (40), no human step (20), correct fields (10),
-time (10), cost (10), recovery from UI change (5), evidence quality (5). Results are rows in
-`seo_link_attempts`; the Agent tab shows the table. No provider is chosen by preference —
+Two phases, because an acquisition action is irreversible and the board allows one
+conversation/placement per domain:
+1. **Replay phase (non-submitting):** every provider runs `investigate()` and
+   `completeForm()` up to — never through — the submit/send/pay step on the same domains,
+   in a sandbox session that is discarded; outputs (fields, path, evidence) are scored
+   against the investigator's ground truth and each other. No account is created, nothing is
+   sent or bought.
+2. **Cohort phase (live):** qualified domains are split into **disjoint, matched cohorts**
+   (stratified by path type, DR band, lane), one cohort per provider; exactly one provider
+   performs the irreversible action for any domain, through the normal guard/ledger. D30 is
+   measured per cohort.
+Score:
+verified dofollow + indexed + live at D30 (40, cohort phase), no human step (20), correct
+fields (10, replay phase), time (10), cost (10), recovery from UI change (5), evidence quality
+(5). Results are rows in `seo_link_attempts` (replay rows flagged `sandbox=true` and excluded
+from D30/learning); the Agent tab shows the table. No provider is chosen by preference —
 `preferred_provider` follows the numbers.
 
 ---
@@ -627,7 +643,8 @@ cutover (replaced by the provider race), v1 open decisions 2–3.
 
 1. Reconciliation source for `ambiguous` purchases: card-issuer transaction API vs. owner
    card only — decide at step 5 (issuer choice in 2 below determines it).
-2. Virtual card issuer for the acquisition budget — Adam.
+2. Virtual card issuer for the acquisition budget — must support single-use per-purchase
+   numbers with a hard monthly program limit (§6.3); Adam.
 3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
    `LINK_OUTREACH_DAILY_CAP=12`) — Adam, at step 4.
 4. Whether `OWNER_MEMBERSHIP` cards should batch weekly (one digest) or ring per card — Adam.
