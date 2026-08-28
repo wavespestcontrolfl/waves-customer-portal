@@ -72,7 +72,12 @@ const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s
 // ("Thanks, but you missed the backyard") falls through to the normal
 // pipeline. The drafter's own contract already defines this class as
 // "warrants NO reply" — this is the deterministic notification-side twin.
-const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|kk?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|you\s+bet|sure|yep|yup|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|good\s+(?:morning|afternoon|evening|night)|bye|later|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|anytime|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
+const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
+// Tokens that only close a thread when they sit NEXT TO a real closer: a bare
+// "Ok" / "Okay" can answer an operational question ("does 9am work?") the
+// same way a bare "yes" does, so alone it stays loud. Bare affirmatives
+// (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
+const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
 // you guys!"). Only KNOWN addressees qualify — the people customers actually
@@ -102,6 +107,7 @@ function isCourtesyOnly(body) {
   if (!stripped) return true; // acknowledgement-emoji-only
   if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
   if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
+  if (WEAK_ONLY_RE.test(stripped)) return false;
   if (COURTESY_ONLY_RE.test(stripped)) return true;
   const named = COURTESY_WITH_NAME_RE.exec(stripped);
   return Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, ''));

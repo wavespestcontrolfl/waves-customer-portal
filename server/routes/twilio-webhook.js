@@ -299,10 +299,12 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
-    // Dual-write to unified messages table. Wrapped in fire-and-forget
-    // because old sms_log writes still happen below; if this errors the
-    // legacy path keeps Virginia's inbox working.
-    require('../services/conversations').recordTouchpoint({
+    // Dual-write to unified messages table. Awaited (fail-soft — the catch
+    // keeps the legacy sms_log path serving Virginia's inbox on error) so the
+    // message row exists BEFORE the sms_reply bell below is written: the
+    // thread-read bell cross-clear only clears bells for threads with no
+    // unread message, which needs message-before-bell ordering (hook P1).
+    await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,

@@ -66,14 +66,15 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
   });
 
   test('pure courtesy closers are detected', () => {
-    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Okay', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'Np', 'Great', 'Got it', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'Sounds good']) {
+    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Ok great', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'Np', 'Great', 'Got it', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'Sounds good']) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, true]);
     }
   });
 
   test('anything that wants an answer is NOT courtesy (fail-safe direction)', () => {
     for (const t of [
-      'Yes', 'No', // answer a question we asked → drafter replies
+      'Yes', 'No', 'Sure', 'Yep', 'Yup', 'Okay', 'Ok', 'K', // may answer a question we asked → stay loud (hook P1)
+      'Good morning', 'Good afternoon', 'Hello', 'Bye', // greetings open threads, they do not close them (hook P1)
       'Thanks again Adam. Your opinion do you think the second session is going to be enough?',
       'Thanks, but you missed the backyard',
       'Sure, 8 AM works',
