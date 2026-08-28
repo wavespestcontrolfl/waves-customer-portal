@@ -4,6 +4,7 @@
 const db = require('../models/db');
 const { auditServiceCatalogChange, auditServicePackageChange } = require('./audit-log');
 const { inferCloseoutDefaults } = require('./service-closeout-requirements');
+const { refreshCatalogNames } = require('./service-catalog-names');
 
 const SERVICE_COLS = [
   'id', 'service_key', 'name', 'short_name', 'description', 'internal_notes',
@@ -425,7 +426,7 @@ async function createService(data, { audit } = {}) {
     const [row] = await trx('services').insert(insert).returning('*');
     await writeCatalogAudit('create', { after: row, audit, trx });
     return row;
-  });
+  }).then(refreshAfterCatalogWrite);
 }
 
 /**
@@ -541,7 +542,15 @@ async function updateService(id, data, { audit } = {}) {
       await writeCatalogAudit(changeType, { before, after: row, references: archiveReferences, audit, trx });
     }
     return row;
-  });
+  }).then(refreshAfterCatalogWrite);
+}
+
+// A renamed/created catalog service should display under its new name
+// without waiting for the 10-minute refresh. Best-effort: the cache is
+// display-only, so a failed refresh must not fail the catalog write.
+async function refreshAfterCatalogWrite(row) {
+  await refreshCatalogNames().catch(() => {});
+  return row;
 }
 
 /**

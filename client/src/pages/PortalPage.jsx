@@ -9984,9 +9984,16 @@ function MyPlanTab({ customer, focusService }) {
     return null;
   };
   const detectedServiceIds = [];
+  // Real catalog name of the visit that matched each card ("Seasonal Mosquito
+  // Control Service"), so the card never states the wrong program — the
+  // SERVICE_CATALOG names are family placeholders for tier padding only.
+  const detectedServiceNames = {};
   const addDetectedService = (service) => {
     const id = detectCatalogServiceId(service);
-    if (id && !detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+    if (!id) return;
+    if (!detectedServiceIds.includes(id)) detectedServiceIds.push(id);
+    const realName = service.serviceType || service.service_type || service.type;
+    if (realName && !detectedServiceNames[id]) detectedServiceNames[id] = realName;
   };
   // Only recurring, non-callback visits represent WaveGuard plan coverage. One-time
   // visits (e.g. a single termite inspection) and free re-service callbacks must not
@@ -10415,7 +10422,7 @@ function MyPlanTab({ customer, focusService }) {
                             <Icon name={iconName(svc.icon)} size={20} strokeWidth={1.8} />
                           </span>
                           <span style={{ minWidth: 0 }}>
-                            <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.glassNavy }}>{svc.name}</span>
+                            <span style={{ display: 'block', fontSize: 16, fontWeight: 850, color: B.glassNavy }}>{detectedServiceNames[svc.id] || svc.name}</span>
                             <span style={{ display: 'block', marginTop: 3, fontSize: 14, color: muted }}>{svc.frequencies[0]}</span>
                             {svc.id === 'lawn_care' && !lawnHealth.loading && lawnHealth.hasLawnCare && lawnHealth.scores && lawnHealth.initialScores && (() => {
                               const avg = Math.round(lawnHealth.scores.overallScore);

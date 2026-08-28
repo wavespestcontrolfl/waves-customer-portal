@@ -968,6 +968,10 @@ httpServer.listen(PORT, () => {
 
   (async () => {
     if (config.nodeEnv !== 'test') {
+      // Prime the catalog-name cache so normalizeServiceType passes real
+      // service identities through instead of collapsing them (see
+      // service-catalog-names.js). Ungated: display-only, no side effects.
+      require('./services/service-catalog-names').startCatalogNameRefresh(logger);
       initScheduledJobs();
       // Banking sync runs ungated (passive Stripe→DB mirror, no customer
       // side effects) so payout backfill keeps working when GATE_CRON_JOBS

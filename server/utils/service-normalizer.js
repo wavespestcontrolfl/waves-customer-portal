@@ -6,6 +6,7 @@
  */
 
 const { etDateString } = require('./datetime-et');
+const { canonicalCatalogName } = require('../services/service-catalog-names');
 
 // ─── SERVICE TYPE NORMALIZATION ──────────────────────────────────
 
@@ -19,8 +20,9 @@ const SERVICE_TYPE_MAP = [
   { match: /general\s*pest/i,                               type: 'General Pest Control' },
   { match: /pest\s*control.*service/i,                      type: 'Pest Control Service' },
   { match: /pest\s*control/i,                               type: 'Pest Control' },
-  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment Service' },
+  // German roach must precede the generic roach pattern or it never matches.
   { match: /german\s*roach/i,                               type: 'German Roach Treatment' },
+  { match: /cockroach|roach/i,                              type: 'Cockroach Treatment Service' },
   { match: /bed\s*bug/i,                                    type: 'Bed Bug Treatment Service' },
   { match: /ant\s*(control|treatment|extermination)/i,      type: 'Ant Treatment' },
   { match: /flea.*tick|tick.*flea/i,                        type: 'Flea & Tick Treatment' },
@@ -31,7 +33,8 @@ const SERVICE_TYPE_MAP = [
   // catalog identity collapses to 'Rodent Exclusion' (codex #3484 P2).
   { match: /wire\s*mesh/i,                                  type: 'Rodent Wire Mesh Exclusion Service' },
   { match: /rodent.*exclusion/i,                            type: 'Rodent Exclusion' },
-  { match: /rodent.*control|rat|mouse|mice/i,               type: 'Rodent Control' },
+  // Word-bounded: a bare /rat/ matched "Core AeRATion Service" → Rodent Control.
+  { match: /rodent.*control|\brats?\b|\bmouse\b|\bmice\b/i, type: 'Rodent Control' },
 
   // Termite
   { match: /wdo|wood\s*destroy|real\s*estate.*inspect/i,    type: 'WDO Inspection' },
@@ -54,7 +57,10 @@ const SERVICE_TYPE_MAP = [
   { match: /aerat/i,                                        type: 'Lawn Aeration' },
   { match: /sod/i,                                          type: 'Sod Installation' },
 
-  // Mosquito
+  // Mosquito — cadence identities are catalog services (mosquito_seasonal /
+  // mosquito_monthly) and must survive; the bare pattern is the legacy fallback.
+  { match: /seasonal.*mosquito|mosquito.*seasonal/i,        type: 'Seasonal Mosquito Control Service' },
+  { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Mosquito Control Service (Monthly)' },
   { match: /mosquito/i,                                     type: 'Mosquito Barrier Treatment' },
 
   // Tree & shrub
@@ -118,6 +124,12 @@ function normalizeServiceType(raw) {
   if (/foam[\s_-]*drill|drill[\s_&-]*(?:and[\s_-]*)?foam|recurring[\s_-]*(?:termite[\s_-]*)?foam|foam[\s_-]*recurring|termite[\s_-]*foam|termidor[\s_-]*foam/i.test(cleaned)) {
     return cleaned;
   }
+
+  // A real catalog identity passes through verbatim (case-normalized). The
+  // regex map below exists for legacy/raw imports and free-text labels; on a
+  // catalog name it only ever loses information (cadence, term, family).
+  const catalogName = canonicalCatalogName(cleaned);
+  if (catalogName) return catalogName;
 
   // Match against known patterns
   for (const mapping of SERVICE_TYPE_MAP) {
