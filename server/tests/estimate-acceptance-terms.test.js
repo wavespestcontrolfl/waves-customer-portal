@@ -154,7 +154,8 @@ describe('accepted-onboarding email recipient — linked customer without a usab
       b.orderBy = () => b;
       b.update = async () => 1;
       b.first = async () => {
-        if (table === 'customers') return { id: 'cust-1', first_name: 'Pat', email: '' };
+        // `name@host` looks like an address but is not deliverable — fall back.
+        if (table === 'customers') return { id: 'cust-1', first_name: 'Pat', email: 'pat@localhost' };
         if (table === 'estimates') return { token: 'tok-cl', customer_name: 'Pat Tester', customer_email: 'pat@example.com' };
         return undefined;
       };

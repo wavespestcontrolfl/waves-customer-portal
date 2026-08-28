@@ -26,6 +26,12 @@ function clean(value) {
   return String(value == null ? '' : value).trim();
 }
 
+// A deliverable-looking address (local@domain.tld) — a stored `name@host`
+// must not stop the estimate contact from being tried (GH Codex r6 P2).
+function usableEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean(value));
+}
+
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
 
 // scheduled_services rows carry scheduled_date (DATE) + window_start (TIME).
@@ -101,11 +107,11 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email')
       : null;
     let email = clean(customer?.email);
-    const estimateContact = email.includes('@')
+    const estimateContact = usableEmail(email)
       ? null
       : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
     if (estimateContact) email = clean(estimateContact.customer_email);
-    if (!email || !email.includes('@')) {
+    if (!usableEmail(email)) {
       logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
       // Distinct from a failure: nothing to retry until an address exists.
       return { sent: false, outcome: 'no_address' };

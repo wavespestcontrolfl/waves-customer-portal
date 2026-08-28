@@ -454,9 +454,12 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(gateIdx).toBeGreaterThan(customerFetchIdx); // after resolution (incl. just-created)
     expect(stampIdx).toBeGreaterThan(gateIdx); // the ONLY stamp lives inside the gate
     expect(src.indexOf('sourceEstimateId = srcEstIdStr;', stampIdx + 1)).toBe(-1);
-    // Window covers the gate + the acceptance-ownership fan-out that now
-    // sits inside the owned branch (acceptance-terms lane 2026-08-28).
-    const gateBlock = src.slice(gateIdx, gateIdx + 3200);
+    // Window = the gate through its mismatch warn (the gate body grew with
+    // the acceptance-terms lane; a fixed byte count would spill into later
+    // code that legitimately returns ok:false).
+    const gateEndIdx = src.indexOf('does not belong to booking customer', gateIdx);
+    expect(gateEndIdx).toBeGreaterThan(gateIdx);
+    const gateBlock = src.slice(gateIdx, gateEndIdx + 120);
     // linked estimate → must be THIS customer's
     expect(gateBlock).toMatch(/String\(sourceEstimateRow\.customer_id\) === String\(custId\)/);
     // unlinked estimate → contact match: last-10 phone, email only when the
