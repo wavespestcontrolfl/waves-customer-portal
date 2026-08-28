@@ -135,7 +135,12 @@ t.string('expected_indexability');                // indexable | noindex | unkno
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
 t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
 t.numeric('confidence', 3, 2);                    // 0–1
-t.integer('revision').notNullable().defaultTo(1);  // +1 whenever ANY in-place authority- or approval-relevant field changes: estimated_cost_cents, renewal_cost_cents, renewal_period, account_required, email_verification, payment_required, legal_attestation, agent_completable, expected_rel, link_type (acquisition_type / submission_url changes supersede the row instead — see above). Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
+t.integer('revision').notNullable().defaultTo(1);  // display/global counter: +1 whenever ANY in-place authority- or approval-relevant field changes (acquisition_type / submission_url changes supersede the row instead — see above)
+t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation
+t.integer('revision_communication').notNullable().defaultTo(1);  // +1 only on communication inputs: link_type, expected_rel (recipient/draft live on the approval hash)
+t.integer('revision_execution').notNullable().defaultTo(1);      // +1 only on execution inputs: account_required, email_verification, agent_completable, legal_attestation
+// Approvals and authority rows bind to THEIR dimension's revision (§3.3b/§3.6b); a price change bumps revision_payment
+// only, so a satisfied communication approval is untouched. Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
 t.string('authority_last_decided');               // informational copy of the latest §6 decision; NOT versioned, NOT approval-bound — the binding stamp lives on the placement
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
@@ -188,7 +193,7 @@ t.uuid('id').primary(); t.uuid('prospect_id').notNullable();
 t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','payment','communication'))
 t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
 t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence (approval.action must match the dimension: acquire | renewal ↔ payment/execution, outreach_send/followup ↔ communication)
-t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs
+t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
 t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when the dimension's action completed (e.g. communication after `sent`) — a satisfied dimension is never re-decided
 t.unique(['prospect_id', 'dimension']);
 ```
@@ -206,10 +211,12 @@ with a valid, **unconsumed, action-matching** approval — consumed by this step
 outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
 `AUTO_*` or `OWNER_*` with an approval that is valid and not invalidated (consumed is fine —
 the communication approval consumed by the send still satisfies the later mint of the same
-paid outreach placement, and vice versa). **Invalidation is scoped per dimension:** a path
-revision/hash change invalidates only the approvals whose dimension the changed inputs
-belong to (price, renewal, payment/legal flags → payment; recipient/draft → communication;
-type/URL → both). A completed communication attempt (`sent`) is a satisfied prerequisite for
+paid outreach placement, and vice versa). **Invalidation is scoped per dimension by construction:** each dimension has its own path
+revision (`revision_payment` / `revision_communication` / `revision_execution`, §3.2) and its
+own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
+(price, renewal, payment/legal flags → payment; recipient/draft → communication; type/URL →
+supersession, all dimensions). A dimension with `satisfied_at` set is validated by nothing
+further — it is done. A completed communication attempt (`sent`) is a satisfied prerequisite for
 the rest of that placement's life — a later price change never demands re-approving, let
 alone re-sending, a message that already went out. Any row at `DENY`/`INVALID`, or a required
 dimension with no row, blocks. A paid guest post thus cannot execute on a payment approval
@@ -291,7 +298,7 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
-t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (bumps on any authority/approval-relevant field change — §3.2)
+t.integer('path_revision').notNullable();     // the path's revision_<dimension of this approval's action> at approval time (§3.2) — never the global counter
 t.text('decision_inputs_hash').notNullable(); // hash of the §6.3 inputs at approval (spam_score, score, confidence, estimated/renewal cents, flags); a mismatch at claim time invalidates the approval
 t.boolean('money_action').notNullable();      // = action IN ('acquire','renewal') AND the path's payment_required at approval time — same-row, so the money CHECK below can see it; FALSE for outreach_send / outreach_followup approvals on a paid path (the communication approval never carries payment terms; the payment dimension has its own approval)
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
@@ -308,7 +315,8 @@ t.timestamp('consumed_at');                   // set when the leased execution r
 `seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
 invalidated, not consumed, whose `path_id` is the placement's current, non-superseded path,
-whose `path_revision` equals that path's current revision AND whose
+whose `path_revision` equals that path's current `revision_<dimension>` (per-dimension —
+a price change bumps `revision_payment` only) AND whose
 `decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
 numbers, not whatever they became), and whose `action` matches the step being leased with
 `action_hash` matching the current draft (send) / follow-up draft (followup, which needs its
