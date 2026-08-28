@@ -117,9 +117,12 @@ t.string('acquisition_type').notNullable();
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
 t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
-t.boolean('account_required'); t.boolean('email_verification'); t.boolean('payment_required');
-t.boolean('legal_attestation');                   // signed agreement / vendor terms / W-9 etc.
-t.boolean('agent_completable');                   // investigator's judgement: can the runner finish alone
+t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
+t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
+t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
+// All authority-relevant flags are NOT NULL: the investigator must answer each explicitly (its JSON schema requires them);
+// §6.3's validity step also asserts they are literal booleans and consistent with the type (paid_listing/membership/
+// association/sponsorship ⇒ payment_required; self_service_free ⇒ NOT payment_required; not_reproducible/unknown ⇒ INVALID).
 t.string('expected_rel');                         // dofollow | nofollow | sponsored | unknown
 t.string('expected_indexability');                // indexable | noindex | unknown
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
@@ -212,7 +215,7 @@ t.boolean('payment_required').notNullable();  // copied from the path at approva
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT payment_required OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
-t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (max_payable_cents >= approved_amount_cents); the final-total guard compares against THIS only — a later policy change never widens an existing approval
+t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT payment_required OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
@@ -329,7 +332,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -371,6 +374,8 @@ max_spam_score               = 10
 if not all finite(domain.spam_score, score, path.confidence) → INVALID        # unenriched / uninvestigated
 if path.acquisition_type in (not_reproducible, unknown) → INVALID             # nothing to execute
 if path.last_investigated_at is null → INVALID
+if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
+if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
@@ -380,6 +385,7 @@ if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score → DENY
 # 2. Authority (only reached by rows that passed every floor)
+if not path.agent_completable → OWNER_HUMAN_STEP      # the investigator judged a human must act; never AUTO_*
 if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
 if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
 if path.payment_required:
@@ -644,13 +650,16 @@ provider whose reasoning observes page state (DOM, screenshots, accessibility tr
 traces — i.e. every cloud CUA implementation) is restricted to non-payment steps; for a
 paid path it may prepare the checkout up to the payment form, then hands off to the broker
 (`outcome='ready_for_payment'`) and is never resumed on that page until the broker has
-submitted and the card is closed. **`charged` is committed only after the issuer confirms
-the card closed:** a successful submission lands in `close_pending`, the broker closes the
-card, and `close_pending → charged` requires `card_closed_at` (issuer-confirmed). If the
-close call fails or the worker dies in between, the row stays `close_pending` — a
-non-terminal state that consumes budget, blocks the placement and is retried by the hourly
-sweep (close, then confirm) until it becomes `charged`, or `ambiguous` if the issuer reports
-a second authorization in the meantime. The merchant token can therefore never outlive the
+submitted and the card is closed. **`charged` is committed only on issuer-confirmed
+capture AND closure:** a successful submission lands in `close_pending`; the broker closes
+the card; `close_pending → charged` requires BOTH `card_closed_at` (issuer-confirmed) AND an
+issuer-confirmed **captured** transaction on that card for exactly `final_cents` (a closed
+card proves nothing about capture — an authorization can still settle later, or never). A
+pending/missing capture keeps the row `close_pending` (non-terminal: consumes budget, blocks
+the placement, retried by the hourly sweep — close, then poll capture — up to the issuer's
+settlement window); a capture for a different amount, a second authorization, or the window
+expiring without capture → `ambiguous` for reconciliation. If the close call fails or the
+worker dies in between, the same sweep drives it. The merchant token can therefore never outlive the
 ledger's view of the purchase. The broker performs the payment in a **separate,
 observation-free browser context**: tracing, video, screenshots, DOM snapshots, HAR/network
 recording, accessibility dumps, console capture and every provider hook are **disabled on
@@ -790,11 +799,12 @@ unset its gate; budget kill = the issuer program's limit.
 - **Comms** — outreach targets are businesses. Today `link-prospect-outreach` only validates
   recipient *syntax*; step 4 adds a **fail-closed customer-recipient exclusion** before any
   auto-send: the recipient email (and its domain, when the domain is a customer's own) is
-  checked inside the send claim against every real contact source — `customers.email`,
-  `customers.service_contact_email`, `customers.service_contact2_email` (and any further
-  slot exposed by `services/customer-contact.js`, which is the canonical fan-out helper and
-  the one place to extend), and `leads.email` — a match or a lookup error routes the draft to
-  the approval queue, and the check is unit-tested against those exact columns.
+  checked inside the send claim against every real contact source — `customers.email` plus
+  **every** slot in `SERVICE_CONTACT_SLOTS` from `services/customer-contact.js` (today
+  `service_contact_email`, `service_contact2_email`, `service_contact3_email`; the lookup is
+  BUILT from that export so a new slot is covered automatically), and `leads.email` — a
+  match or a lookup error routes the draft to the approval queue, and the check is unit-tested
+  per slot (slot 3 included) rather than against a hand-written column list.
   The June drafts are released only through this path.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
