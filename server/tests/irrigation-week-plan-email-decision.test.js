@@ -54,7 +54,7 @@ describe('weekly email decision — plan mode', () => {
   test('hold: a big surplus against a small cool-season target (season from NOW, January)', () => {
     // The checked-in order is not in force in January — a year-round policy
     // is configured for this case (the fail-closed path is pinned separately).
-    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule' });
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', coverage: 'all' });
     let d;
     try {
       d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, forecastEt0Inches: 0.8, rainfallInches7d: 1.5, now: new Date('2026-01-19T12:00:00Z') });
@@ -123,5 +123,9 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/const isMondayET = etParts\(now\)\.dayOfWeek === 1;/);
     expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
+    // A snapshot-claim DB error falls back to the pre-plan email (never silence).
+    expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
+    // Delivery reconciliation is customer/week scoped (trigger_event_id).
+    expect(src).toMatch(/weekPlanDeliveryState\(\{ triggerEventId, idempotencyKey \}\)/);
   });
 });

@@ -1010,7 +1010,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
-    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0 },
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0 },
   };
   // Plan mode only on the plan week's MONDAY: a retry Tue–Sun cannot know
   // whether the customer's assigned watering day has already passed under a
@@ -1098,6 +1098,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         .digest('hex')
         .slice(0, 16);
       const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
+      const triggerEventId = `irrigation.weekly:${customer.id}:${weekEnding}`;
 
       if (decision.weekPlan) {
         const p = decision.weekPlan;
@@ -1108,7 +1109,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // has — stamp it and never replace it. In flight/unknown → touch
         // nothing. Otherwise write THIS decision (replacing only an unsent
         // row) and stamp it after the provider accepts.
-        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey };
+        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey, triggerEventId };
         // One plan per customer-week. A SENT snapshot with a different
         // idempotency key (the customer changed email mid-week) means the
         // week's email already went out — never send a second, possibly
@@ -1117,7 +1118,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           summary.deduped += 1;
           continue;
         }
-        const prior = await weekPlanDeliveryState(idempotencyKey);
+        const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
         if (prior.state === 'sent') {
           // Delivered by an earlier run: stamp exactly the row its record
           // names (none named → the report stays without a plan).
@@ -1126,7 +1127,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         } else if (prior.state !== 'pending') {
           const claim = await persistWeekPlan(snapshotArgs);
           snapshotArgs.claimToken = claim.claimToken;
-          if (!claim.claimed) {
+          if (claim.error) {
+            // A snapshot DB error is not contention: the week's email still
+            // goes out on the pre-plan template (a Tuesday retry could not
+            // restore a Monday-only plan), counted separately.
+            summary.plan.claim_error += 1;
+            decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+            snapshotArgs = null;
+          } else if (!claim.claimed) {
             // Another worker holds the customer-week (overlapping sweeps) or
             // the row is already sent — that worker's decision is the one
             // sent AND stored; this one must not send a second plan.
@@ -1153,7 +1161,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         payload: decision.payload,
         recipientType: 'customer',
         recipientId: customer.id,
-        triggerEventId: `irrigation.weekly:${customer.id}:${weekEnding}`,
+        triggerEventId,
         idempotencyKey,
         // "plan:<hash>" binds the durable message record to the snapshot it
         // was built from — reconciliation stamps only that row.
@@ -1183,7 +1191,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         } else if (result.deduped) {
           // Deduped without a provider attempt: the durable record decides,
           // and only the row it names is stamped.
-          const prior = await weekPlanDeliveryState(idempotencyKey);
+          const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
           if (prior.state === 'sent' && prior.decisionHash) {
             await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
           }
@@ -1224,7 +1232,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // the one both sent and stored; in flight/unknown → leave it for the
       // next run to reconcile.
       if (snapshotArgs && !snapshotArgs.reconciled) {
-        const prior = await weekPlanDeliveryState(snapshotArgs.idempotencyKey);
+        const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
         if (prior.state === 'sent') {
           if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
         } else if (prior.state === null || prior.state === 'blocked') {

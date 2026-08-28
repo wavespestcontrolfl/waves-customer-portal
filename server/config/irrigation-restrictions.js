@@ -15,7 +15,9 @@
  * the plan reports itself unavailable (the email keeps its pre-plan copy).
  *
  * Shape: { maxDaysPerWeek, effectiveFrom (YYYY-MM-DD), expiresOn (YYYY-MM-DD,
- * inclusive), label, source, hoursNote }.
+ * inclusive), label, source, hoursNote, coverage } — coverage REQUIRED:
+ * { counties: ['Manatee', …], partial: ['Charlotte'] } or the explicit
+ * marker 'all'.
  */
 const logger = require('../services/logger');
 const { etDateString, validCalendarDate } = require('../utils/datetime-et');
@@ -72,9 +74,18 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   return cityCounty;
 }
 
+// Jurisdiction is REQUIRED on every policy (env overrides included): either
+// { counties: [...], partial: [...] } or the explicit marker 'all'. A policy
+// without it is invalid → null (fail closed) — an operator can never bypass
+// the partial-Charlotte / unknown-county handling by omission.
+function validCoverage(coverage) {
+  if (coverage === 'all') return true;
+  return !!coverage && typeof coverage === 'object' && Array.isArray(coverage.counties) && coverage.counties.length > 0;
+}
+
 function coversCounty(policy, county) {
   const coverage = policy.coverage;
-  if (!coverage) return true; // an env policy without coverage applies everywhere it is configured
+  if (coverage === 'all') return !!county; // explicit all-jurisdictions marker still needs a known county
   if (!county) return false;
   const norm = (v) => String(v || '').trim().toLowerCase();
   const inList = (list) => (Array.isArray(list) ? list : []).some((x) => norm(x) === norm(county));
@@ -114,6 +125,7 @@ function validPolicy(p) {
   if (!Number.isInteger(days) || days < 0 || days > 7) return false;
   // Real calendar dates, not just the shape — a mistyped 2026-02-31 must not
   // keep legal guidance alive past its real expiry.
+  if (!validCoverage(p.coverage)) return false;
   if (!validCalendarDate(p.expiresOn)) return false;
   if (p.effectiveFrom != null && p.effectiveFrom !== '') {
     if (!validCalendarDate(p.effectiveFrom)) return false;
@@ -152,4 +164,4 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   };
 }
 
-module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, parseEnvPolicy, coversCounty, CITY_COUNTY, _lastLogged } };
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, _lastLogged } };

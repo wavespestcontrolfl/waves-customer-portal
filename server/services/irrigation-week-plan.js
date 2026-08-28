@@ -354,7 +354,9 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
     return { claimed, hash: claimed ? hash : null, claimToken: token };
   } catch (err) {
     logger.warn(`[irrigation-week-plan] snapshot claim failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return { claimed: false, hash: null, claimToken: token };
+    // Distinct from contention: the caller falls back to the pre-plan email
+    // rather than silencing the week's communication.
+    return { claimed: false, hash: null, claimToken: token, error: true };
   }
 }
 
@@ -385,8 +387,8 @@ function hashFromCategories(raw) {
 }
 
 /**
- * A prior run's delivery, from the durable email_messages record the library
- * keys by idempotency key: { state, decisionHash } — state 'sent' (provider
+ * A prior run's delivery, from the durable email_messages record — looked up
+ * at customer/week scope (trigger_event_id): { state, decisionHash } — state 'sent' (provider
  * accepted — sent/delivered/opened/clicked), 'blocked' (suppressed),
  * 'failed', 'pending' (queued / in flight / lookup failed), or null (no
  * attempt); decisionHash = the snapshot the delivered email was built from
@@ -394,19 +396,31 @@ function hashFromCategories(raw) {
  * never from a return shape or an exception, and stamps only the row whose
  * hash the record names.
  */
-async function weekPlanDeliveryState(idempotencyKey) {
-  if (!idempotencyKey) return { state: null, decisionHash: null };
+async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
+  // Customer/week scope (trigger_event_id) — recipient-independent, so a
+  // delivery made before an email change is still found; the recipient key
+  // is only a fallback for records without a trigger id.
+  const where = triggerEventId ? { trigger_event_id: triggerEventId } : (idempotencyKey ? { idempotency_key: idempotencyKey } : null);
+  if (!where) return { state: null, decisionHash: null };
   try {
-    const row = await db('email_messages').where({ idempotency_key: idempotencyKey }).first('status', 'categories');
-    if (!row) return { state: null, decisionHash: null };
-    const status = String(row.status || '').toLowerCase();
-    const decisionHash = hashFromCategories(row.categories);
-    if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return { state: 'sent', decisionHash };
-    if (status === 'blocked') return { state: 'blocked', decisionHash };
-    if (status === 'failed') return { state: 'failed', decisionHash };
-    return { state: 'pending', decisionHash };
+    const rows = await db('email_messages').where(where).select('status', 'categories');
+    if (!rows || !rows.length) return { state: null, decisionHash: null };
+    const classify = (row) => {
+      const status = String(row.status || '').toLowerCase();
+      if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
+      if (status === 'blocked') return 'blocked';
+      if (status === 'failed') return 'failed';
+      return 'pending';
+    };
+    // A delivered record wins over any other attempt for the week.
+    const sent = rows.find((r) => classify(r) === 'sent');
+    if (sent) return { state: 'sent', decisionHash: hashFromCategories(sent.categories) };
+    const pending = rows.find((r) => classify(r) === 'pending');
+    if (pending) return { state: 'pending', decisionHash: hashFromCategories(pending.categories) };
+    const last = rows[rows.length - 1];
+    return { state: classify(last), decisionHash: hashFromCategories(last.categories) };
   } catch (err) {
-    logger.warn(`[irrigation-week-plan] delivery state lookup failed for ${idempotencyKey}: ${err.message}`);
+    logger.warn(`[irrigation-week-plan] delivery state lookup failed for ${triggerEventId || idempotencyKey}: ${err.message}`);
     return { state: 'pending', decisionHash: null }; // unknown → treat as in flight: never replace, never delete
   }
 }

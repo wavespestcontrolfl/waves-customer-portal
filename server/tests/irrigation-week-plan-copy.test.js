@@ -279,6 +279,7 @@ describe('snapshot lifecycle — exactness contract', () => {
     const lost = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-2' });
     expect(lost.claimed).toBe(false);
     expect(lost.hash).toBeNull();
+    expect(lost.error).toBeUndefined(); // contention, not an error
     // mark-sent: keyed on the hash, unsent rows only; no hash → no-op.
     expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
     expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash })).toBe(true);
@@ -288,35 +289,48 @@ describe('snapshot lifecycle — exactness contract', () => {
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
     expect(calls.deleted).toBe(true);
     expect(calls.whereNull).toBe('sent_at');
+    // A DB error is reported distinctly so the sweep can fall back to the pre-plan email.
+    db.mockImplementation(() => ({ insert() { throw new Error('db down'); } }));
+    const errored = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-3' });
+    expect(errored).toMatchObject({ claimed: false, hash: null, error: true });
   });
 });
 
-describe('weekPlanDeliveryState — the durable record decides, and names the snapshot', () => {
+describe('weekPlanDeliveryState — the durable record decides, at customer/week scope, and names the snapshot', () => {
   const db = require('../models/db');
   const { weekPlanDeliveryState, planCategory, _private } = require('../services/irrigation-week-plan');
-  const withRow = (status, categories) => db.mockImplementation(() => ({ where() { return this; }, first: async () => (status === undefined ? undefined : { status, categories }) }));
+  const cap = {};
+  const withRows = (rows) => db.mockImplementation(() => ({ where(w) { cap.where = w; return this; }, select: async () => rows }));
 
   test.each([
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
-    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'], [undefined, null],
+    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
   ])('status %s → %s', async (status, expected) => {
-    withRow(status, JSON.stringify(['irrigation', 'plan:abc123']));
-    const r = await weekPlanDeliveryState('k');
+    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']) }]);
+    const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });
     expect(r.state).toBe(expected);
-    if (status !== undefined) expect(r.decisionHash).toBe('abc123');
+    expect(r.decisionHash).toBe('abc123');
+    expect(cap.where).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-23' });
+  });
+
+  test('no record → null; a delivered record wins across recipient keys (email changed mid-week)', async () => {
+    withRows([]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: null, decisionHash: null });
+    withRows([{ status: 'sent', categories: JSON.stringify(['plan:first']) }, { status: 'queued', categories: JSON.stringify(['plan:second']) }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: 'first' });
   });
 
   test('a record without a plan category names no snapshot (report stays absent)', async () => {
-    withRow('sent', JSON.stringify(['irrigation', 'irrigation_weekly', 'cut_back']));
-    expect(await weekPlanDeliveryState('k')).toEqual({ state: 'sent', decisionHash: null });
-    withRow('sent', ['irrigation', planCategory('deadbeef')]); // array form
-    expect((await weekPlanDeliveryState('k')).decisionHash).toBe('deadbeef');
+    withRows([{ status: 'sent', categories: JSON.stringify(['irrigation', 'irrigation_weekly', 'cut_back']) }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: null });
+    withRows([{ status: 'sent', categories: ['irrigation', planCategory('deadbeef')] }]); // array form
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).decisionHash).toBe('deadbeef');
     expect(_private.hashFromCategories('not json')).toBeNull();
   });
 
   test('lookup failure → pending (never replace, never delete); no key → null', async () => {
-    db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
-    expect(await weekPlanDeliveryState('k')).toEqual({ state: 'pending', decisionHash: null });
-    expect(await weekPlanDeliveryState(null)).toEqual({ state: null, decisionHash: null });
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => { throw new Error('db down'); } }));
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: null });
+    expect(await weekPlanDeliveryState({})).toEqual({ state: null, decisionHash: null });
   });
 });

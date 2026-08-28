@@ -39,7 +39,7 @@ describe('irrigation.weekly_plan template', () => {
   ])('%s renders with no unresolved placeholders', (reason, water) => {
     // January is outside the checked-in order's window — configure a
     // year-round policy so the hold case has a legal ceiling to plan under.
-    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', hoursNote: 'on your assigned day' });
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', hoursNote: 'on your assigned day', coverage: 'all' });
     let decision;
     try {
       decision = buildWeeklyEmailDecision({ ...BASE, ...water });
