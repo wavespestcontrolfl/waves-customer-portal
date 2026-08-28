@@ -970,33 +970,36 @@ router.post('/messages/read', async (req, res, next) => {
     // sms_reply) and used to stay unread forever unless tapped from the bell
     // itself — the main reason the badge sat at four digits. Fail-soft: a
     // miss here never fails the read receipt.
-    // Bounded by the same cutoff as the message read: a conversation read
-    // clears bells up to readBefore; an explicit-ids read clears bells up
-    // to the newest of those messages — an SMS landing mid-request keeps
-    // its bell (hook P1).
+    // Cleared only for threads with NO unread inbound left after this read,
+    // and only bells created before this request entered (`now`). Both
+    // together are the race guard: an SMS landing mid-request leaves an
+    // unread message row, so its thread is skipped entirely (hook P1 ×2 —
+    // a message-derived cutoff predates the bell, which is inserted seconds
+    // after the message).
     let notificationsCleared = 0;
     try {
-      const cutoffByConv = new Map();
-      for (const cid of conversationIds) cutoffByConv.set(cid, readBefore);
+      const convIds = new Set(conversationIds);
       if (ids.length) {
-        const rows = await db('messages').whereIn('id', ids).whereNotNull('conversation_id')
-          .groupBy('conversation_id').select('conversation_id').max('created_at as latest');
-        for (const r of rows) {
-          const prior = cutoffByConv.get(r.conversation_id);
-          const latest = new Date(r.latest);
-          if (!prior || latest > prior) cutoffByConv.set(r.conversation_id, latest);
-        }
+        const rows = await db('messages').whereIn('id', ids).whereNotNull('conversation_id').distinct('conversation_id');
+        for (const r of rows) convIds.add(r.conversation_id);
       }
-      if (cutoffByConv.size) {
-        const threads = await db('conversations').whereIn('id', [...cutoffByConv.keys()]).whereNotNull('customer_id').select('id', 'customer_id');
+      if (convIds.size) {
+        const threads = await db('conversations as cv')
+          .whereIn('cv.id', [...convIds])
+          .whereNotNull('cv.customer_id')
+          .whereNotExists(function stillUnread() {
+            this.select(1).from('messages as m')
+              .whereRaw('m.conversation_id = cv.id')
+              .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
+              .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); });
+          })
+          .select('cv.customer_id');
         for (const t of threads) {
-          const cutoff = cutoffByConv.get(t.id);
-          if (!cutoff) continue;
           notificationsCleared += await db('notifications')
             .where({ category: 'inbound_sms' })
             .whereNull('read_at')
             .where('link', `/admin/communications?thread=${t.customer_id}`)
-            .where('created_at', '<=', cutoff)
+            .where('created_at', '<=', now)
             .update({ read_at: now });
         }
       }
