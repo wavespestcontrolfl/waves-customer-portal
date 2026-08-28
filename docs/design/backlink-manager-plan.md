@@ -521,6 +521,7 @@ auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
 auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions (in-flight and unresolved work holds its slot until a terminal, reconciled outcome); re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
+presentment_window_days      = 10        (minimum wait after last card exposure before an ambiguous purchase may be reconciled as not charged; may only be raised)
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
 owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
 max_auto_purchase_cents      = 0
@@ -861,10 +862,14 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   only** (the issuer's transaction record for `issuer_card_id` — fetched by API or attached
   by the owner from the issuer portal; the owner card can present and confirm that evidence,
   never substitute for it): `reconciled_charged` when a
-  capture exists; `reconciled_not_charged` **only when the issuer confirms the card is
-  irrevocably closed AND shows no captured or pending authorization** — that confirmation is
-  the precondition for releasing the budget and allowing a new generation, never a lookup
-  that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
+  capture exists; `reconciled_not_charged` **only when (a) the issuer's full settlement/presentment
+  window (`policy.presentment_window_days`, default 10, ≥ the issuer's documented late-
+  presentment allowance) has elapsed since the LAST card exposure (`submitting_at`), AND
+  (b) an authoritative issuer check after that window confirms the card is irrevocably
+  closed and shows no captured, pending, authorized or clearing transaction** — that is the
+  precondition for releasing the budget and allowing a new generation, never a lookup that
+  merely found nothing yet (an offline/delayed presentment can appear days after closure).
+  Until then the row stays `ambiguous` and keeps consuming budget. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
 - **Authoritative transition table** (the CHECK enum + these edges are the whole machine):
   `reserved → voided` (worker/sweep, pre-exposure) · `reserved → submitting` (worker, after
