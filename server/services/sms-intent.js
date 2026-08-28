@@ -78,11 +78,6 @@ const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok
 // same way a bare "yes" does, so alone it stays loud. Bare affirmatives
 // (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
 const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
-// Gratitude / sign-off tokens: a message carrying one is a closer in any
-// context. Affirmatives without one ("Sounds good", "Great", "Will do") can
-// answer an operational question exactly like a bare "yes", so they only
-// close a thread when we are not awaiting an answer (hook P1 ×2).
-const STRONG_CLOSER_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|i\s+appreciate|we\s+appreciate|(?:you'?re\s+)?welcome|my\s+pleasure|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|you\s+(?:too|as\s+well)|cheers)`, 'iu');
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
 // you guys!"). Only KNOWN addressees qualify — the people customers actually
@@ -100,13 +95,12 @@ const COURTESY_MAX_CHARS = 60;
 /**
  * True when the message is a pure conversation closer with nothing to answer.
  *
- * Two tiers, chosen by `awaitingAnswer` (did OUR last text ask the customer a
- * question?). Default true = strict/context-free:
- *   - gratitude / sign-off ("Thanks!", "Appreciate it Adam", "You too") →
- *     always a closer;
- *   - bare affirmatives ("Sounds good", "Great", "Okay") and acknowledgement
- *     emoji (👍 🙏 ❤️) → a closer ONLY when we are not waiting on an answer —
- *     after "does 9am work?" a 👍 is the answer, and it stays loud.
+ * `awaitingAnswer` = did OUR last text ask the customer a question or give a
+ * reply directive? Default true = strict: nothing is quiet without context.
+ * With awaitingAnswer=false, gratitude / sign-offs ("Thanks!", "Appreciate it
+ * Adam"), bare affirmatives ("Sounds good", "Okay") and acknowledgement emoji
+ * (👍 🙏 ❤️) are closers. With an open question every one of them stays loud —
+ * after "does 9am work?" a 👍 is the answer, and "Thanks!" is a non-answer.
  * Always loud: any "?", digits, scheduling/reschedule/away signal, mixed
  * content, non-acknowledgement emoji (❓ 🚨 🐜). Fail-safe direction: doubt →
  * false.
@@ -124,8 +118,10 @@ function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
   const grammar = COURTESY_ONLY_RE.test(stripped)
     || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
   if (!grammar) return false;
-  if (STRONG_CLOSER_RE.test(stripped)) return true; // gratitude / sign-off
-  return !awaitingAnswer; // affirmative-only ("Sounds good", "Great", "Will do")
+  // Gratitude honors the open question too: "Thanks!" after "please confirm
+  // someone will be home" did not answer it (hook P1). The tiers differ only
+  // in what the grammar accepts; the context decides for all of them.
+  return !awaitingAnswer;
 }
 
 function hasSchedulingIntent(body) {

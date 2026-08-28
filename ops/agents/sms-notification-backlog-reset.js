@@ -42,8 +42,21 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
 
   // Pass 1 — classify unread inbound bodies in Node (the detectors are JS).
   // Attachments are content: a photo captioned "Thanks" is never a closer.
-  const unread = await c.query(`SELECT id, body, (media IS NOT NULL AND media::text NOT IN ('[]','null','')) AS has_media FROM messages WHERE channel='sms' AND direction='inbound' AND (is_read IS NOT TRUE)`);
-  const closers = unread.rows.filter((r) => isSmsReaction(r.body) || (!r.has_media && isCourtesyOnly(r.body))).map((r) => r.id);
+  // Same context rule as the webhook: a closer counts only when our last
+  // outbound to that customer (24h before it) asked nothing. Unknown → awaiting.
+  const ASKS = String.raw`\?|\yreply\y|\yrespond\y|\ytext\s+(us\s+)?back\y|\ylet\s+(us|me)\s+know\y|\yconfirm\y`;
+  const unread = await c.query(`
+    SELECT m.id, m.body, (m.media IS NOT NULL AND m.media::text NOT IN ('[]','null','')) AS has_media,
+           COALESCE(o.asks, true) AS awaiting
+    FROM messages m
+    LEFT JOIN conversations cv ON cv.id = m.conversation_id
+    LEFT JOIN LATERAL (
+      SELECT (l.message_body ~* $1) AS asks FROM sms_log l
+      WHERE l.direction='outbound' AND l.customer_id = cv.customer_id AND l.status IN ('queued','sent','delivered')
+        AND l.message_type <> 'internal_alert' AND l.created_at < m.created_at AND l.created_at > m.created_at - interval '24 hours'
+      ORDER BY l.created_at DESC LIMIT 1) o ON true
+    WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)`, [ASKS]);
+  const closers = unread.rows.filter((r) => isSmsReaction(r.body) || (!r.has_media && isCourtesyOnly(r.body, { awaitingAnswer: r.awaiting !== false }))).map((r) => r.id);
   console.log(`unread inbound sms messages: ${unread.rows.length}; reaction/courtesy closers: ${closers.length}`);
 
   // Pass 3 (optional) — stale rows.
@@ -87,7 +100,7 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
     return r.rowCount;
   };
   await readMsgs(closers, 'pass 1 (reaction/courtesy)');
-  const rl = await c.query(`UPDATE sms_log l SET is_read=true WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($1::uuid[]) AND twilio_sid IS NOT NULL)`, [closers]);
+  const rl = await c.query(`UPDATE sms_log l SET is_read=true, metadata = COALESCE(l.metadata,'{}'::jsonb) || ${stamp} WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($2::uuid[]) AND twilio_sid IS NOT NULL)`, [tag, closers]);
   console.log(`pass 1 (legacy sms_log mirror): marked ${rl.rowCount} rows read`);
   if (staleDays) {
     await readMsgs(staleMsgs.rows.map((r) => r.id), `pass 3 (stale >${staleDays}d messages)`);
@@ -106,6 +119,6 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
           AND n.link = '/admin/communications?thread=' || l.customer_id::text)`, [tag]);
   console.log(`pass 2 (bells with no unread message): marked ${r2.rowCount} notifications read`);
   await c.query('COMMIT');
-  console.log(`done. Rollback one batch: UPDATE messages SET is_read=false, read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE notifications SET read_at=NULL WHERE metadata->>'backlog_reset'='${tag}';`);
+  console.log(`done. Rollback one batch: UPDATE messages SET is_read=false, read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE notifications SET read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE sms_log SET is_read=false WHERE metadata->>'backlog_reset'='${tag}';`);
   await c.end();
 })().catch(async (e) => { console.error(e.message); process.exit(1); });
