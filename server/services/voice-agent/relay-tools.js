@@ -825,6 +825,9 @@ async function executeTool(name, input = {}, ctx = {}) {
         contact_preference: input.contact_preference || null,
         preferred_contact_method: input.preferred_contact_method || null,
         do_not_contact_request: input.do_not_contact_request === true,
+        // A promised written estimate rides the lead artifact (extracted_data,
+        // sticky-on) so staff working a NEW lead see the obligation.
+        estimate_requested: input.estimate_requested === true,
       };
       // ⭐ AN EXPLICIT VERBAL OPT-OUT IS HONOURED, NOT JUST FILED.
       //
@@ -1361,6 +1364,14 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'nothing stronger.'
         : '';
       if (!leadCreated) {
+        if (estimateQueued === true) {
+          // The estimate request IS a request the office now holds — the
+          // generic "do not say a request was created" line would contradict
+          // it (hook P1), so this branch states exactly what exists.
+          return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
+            + 'none should be. The call and your summary are on their record.' + estimateNote
+            + ' Do not say an appointment was created.' + suppressionNote + pageCaveat;
+        }
         return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
           + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
           + 'a Waves team member will follow up, and do not say a new request or appointment was created.'

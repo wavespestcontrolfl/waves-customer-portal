@@ -727,6 +727,11 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
     merged.source = 'voice_agent';
     merged.language = language || priorExtracted.language || null;
+    // A promised written estimate is STICKY-ON on the lead artifact (codex
+    // #3569): staff working the lead must see that a caller was told an
+    // estimate is coming, and a later capture that does not mention it must
+    // not erase the obligation.
+    if (extracted.estimate_requested === true) merged.estimate_requested = true;
     const contactPreference = contactPreferenceFields(extracted);
     if (contactPreference) {
       if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;

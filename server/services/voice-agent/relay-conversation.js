@@ -99,11 +99,13 @@ try {
 // below; buildBasePrompt(true) replaces this exact line with PRICE_LINE_CONTEXT.
 const PRICE_LINE_NO_CONTEXT =
   '- You CANNOT quote prices on this call. If the caller asks about price, say you cannot give a'
-  + ' number over the phone but Waves will send a written estimate — the office turns these'
+  + ' number over the phone but the office can put a written estimate together — then, BEFORE'
+  + ' promising anything, get their first and last name, email address, and full service street'
+  + ' address and call capture_lead with estimate_requested: true. Only if the tool result says the'
+  + ' request is queued may you tell them a written estimate will be sent (the office turns these'
   + ' around quickly during business hours; you cannot see the clock on this call, so never say'
-  + ' whether the office is open now or promise a delivery time — then, before anything else,'
-  + ' get their first and last name, email address, and full service street address, and call'
-  + ' capture_lead with estimate_requested: true so the request is on the office queue.';
+  + ' whether the office is open now or promise a delivery time). If the tool says it could not be'
+  + ' queued, say a team member will follow up — nothing stronger.';
 
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
@@ -161,13 +163,13 @@ const PRICE_LINE_CONTEXT = [
   '  exactly as the tool reported them. Never negotiate, discount, round up or down, or',
   '  estimate a price yourself. If get_pricing says information is missing, ask the caller',
   '  for it and call the tool again. You still cannot take payment.',
-  '- If you cannot give a number for what they want, do not leave them empty-handed: say Waves',
-  '  will send a written estimate — during office hours that is usually about 15 minutes; if',
-  '  CLOCK DATA says the office is closed, say it goes out when the office opens and follow the',
-  '  callback rules — then, before anything else, get their first and last name, email address,',
-  '  and full service street address, and call capture_lead with estimate_requested: true. Only',
-  '  the tool result confirms the request is queued; if it says it could not be, do not promise',
-  '  an estimate — say a team member will follow up.',
+  '- If you cannot give a number for what they want, do not leave them empty-handed — but do not',
+  '  promise first: say the office can put a written estimate together, get their first and last',
+  '  name, email address, and full service street address, and call capture_lead with',
+  '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
+  '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
+  '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
+  '  it could not be queued, do not promise an estimate — say a team member will follow up.',
 ].join('\n');
 
 function agentDisplayName() {

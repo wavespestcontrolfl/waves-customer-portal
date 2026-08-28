@@ -25,6 +25,10 @@ test('pricing fallback (gate off): written estimate, no clock promise, + the fou
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/turns these\s+around quickly during business hours/);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/never say\s+whether the office is open now or promise a delivery time/);
   expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/15 minutes/);
+  // ORDER: gather + tool BEFORE any promise; the promise is gated on the tool result.
+  expect(PRICE_LINE_NO_CONTEXT.indexOf('BEFORE promising anything')).toBeGreaterThan(-1);
+  expect(PRICE_LINE_NO_CONTEXT.indexOf('capture_lead with estimate_requested: true')).toBeLessThan(PRICE_LINE_NO_CONTEXT.indexOf('written estimate will be sent'));
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/Only if the tool result says the request is queued/);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/first and last name, email address, and full service street address/);
   expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/\$\s?\d/); // still never a figure
   expect(buildBasePrompt(false)).toBe(SYSTEM_PROMPT);
@@ -36,8 +40,10 @@ test('pricing fallback (gate on): the same capture when get_pricing cannot retur
   expect(ctx).toMatch(/CLOCK DATA says the office is closed/);
   expect(ctx).toMatch(/first and last name, email address,\s+and full service street address/);
   expect(ctx).toMatch(/quote ONLY numbers the get_pricing tool returned/);
-  expect(ctx).toMatch(/capture_lead with estimate_requested: true/);
-  expect(ctx).toMatch(/if it says it could not be, do not promise/);
+  expect(ctx).toMatch(/capture_lead with\s+estimate_requested: true/);
+  expect(ctx).toMatch(/do not\s+promise first/);
+  expect(ctx.indexOf('estimate_requested: true')).toBeLessThan(ctx.indexOf('usually about 15 minutes'));
+  expect(ctx).toMatch(/could not be queued, do not promise an estimate/);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/capture_lead with estimate_requested: true/);
 });
 

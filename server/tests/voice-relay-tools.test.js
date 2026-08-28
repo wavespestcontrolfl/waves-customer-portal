@@ -317,6 +317,8 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito' }), { callSid: 'CA-est' });
       expect(out).toMatch(/estimate request IS on the office queue/);
       expect(out).toMatch(/no new lead was created/i);
+      expect(out).not.toMatch(/do not say a new request/); // no self-contradiction when queued
+      expect(out).toMatch(/Do not say an appointment was created/);
     });
     test('existing customer + card NOT persisted ⇒ promise withdrawn', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
@@ -329,6 +331,8 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       surfaceEstimateRequestForCustomer.mockClear();
       const out = await executeTool('capture_lead', { call_summary: 'new caller wants a price', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est3' });
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+      // the flag rides the lead artifact (extracted_data, sticky-on)
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ estimate_requested: true }), expect.anything());
       expect(out).toMatch(/Lead saved/);
       expect(out).toMatch(/estimate request IS on the office queue/);
     });
