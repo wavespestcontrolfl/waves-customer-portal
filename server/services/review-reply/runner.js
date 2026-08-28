@@ -945,6 +945,11 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
       if (publishedExisting?.editedDuringPut) return { outcome: 'parked', reason: 'review_edited_after_post', mode: row.auto_reply_mode, live: true };
       return { outcome: 'posted', mode: row.auto_reply_mode };
     } catch (err) {
+      // The live read found our own earlier (uncertain / persist_failed)
+      // attempt on Google and the publisher promoted the row to posted
+      // (codex r69 / r76): that IS the posted outcome — the route answers 200
+      // and the card reloads with Retract, not a 409 over a reply we own.
+      if (err instanceof ReviewReplyError && err.code === CODES.HAS_REPLY && err.reconciled) return { outcome: 'posted', reconciled: true, mode: row.auto_reply_mode };
       if (err instanceof ReviewReplyError && err.code === CODES.PERSIST_FAILED) {
         // Live on Google, unrecorded locally: park, never back into the retry lane.
         await parkPersistFailed(row, { text: existing, version: row.auto_reply_version, mode: row.auto_reply_mode }, err);

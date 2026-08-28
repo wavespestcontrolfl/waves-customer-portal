@@ -1342,6 +1342,18 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0]).toMatchObject({ actor: { type: 'admin', adminUserId: 'u1' }, text: expect.stringContaining('Sorry'), requireGoogle: true });
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
+  test('postNow on a stored draft whose earlier uncertain PUT turns out to be live reports posted (reconciled), not 409 (codex r76)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const draft = 'Hi Dana,\n\nThanks.\n\nThe 🌊 Waves Pest Control Sarasota Team';
+    state.rows = [row({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft, auto_reply_mode: 'service_quality', auto_reply_version: 'reply-v1', review_reply: `[DRAFT] ${draft}`, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' } })];
+    const e = new ReviewReplyError('already_replied', 'landed', { status: 409 }); e.reconciled = true;
+    mockPublish.mockImplementationOnce(async () => { state.rows[0] = { ...state.rows[0], auto_reply_status: 'posted', auto_reply_reason: null, review_reply: draft, auto_reply_claimed_until: null }; throw e; });
+    const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' }, { expectedDraft: draft });
+    expect(r).toMatchObject({ outcome: 'posted', reconciled: true });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'posted', review_reply: draft, auto_reply_claimed_until: null });
+    expect(state.rows[0].auto_reply_reason).not.toBe('already_replied');
+  });
   test('postNow on a 1-3★ / unrated row with NO surfaced draft never posts an unseen reply: it drafts + parks; the next Post now publishes it (hook P1)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     for (const star_rating of [2, 0]) {
