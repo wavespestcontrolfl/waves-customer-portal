@@ -1698,50 +1698,43 @@ const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\
 // heading) is the fallback slot when too few sections qualify.
 function scanBodySections(body, { title = '' } = {}) {
   const lines = String(body || '').split('\n');
+  // ALL structure (headings, blank lines, paragraph openers, images) is read
+  // off the rendered view — fenced/indented code, code spans, comments and
+  // <pre> are blank there, so a "## heading" inside a comment or a fence is
+  // never a section and a code sample is never prose. Raw lines only feed
+  // the lead text.
   const rendered = renderedBodyLines(body);
   const sections = [];
   let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
-  let inFence = false;
-  let fenceChar = '';
   let paraStart = -1;
   const closePara = (end) => {
     if (paraStart < 0) return;
-    const text = lines.slice(paraStart, end).join(' ');
-    if (!NON_PROSE_LINE_RE.test(lines[paraStart])) {
+    if (!NON_PROSE_LINE_RE.test(rendered[paraStart])) {
       cur.lastProse = end; // insert BEFORE this index
-      if (!cur.lead) cur.lead = proseLead(text);
+      if (!cur.lead) cur.lead = proseLead(lines.slice(paraStart, end).join(' '));
     }
     paraStart = -1;
   };
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
-    if (fence && (!inFence || fence[1][0] === fenceChar)) {
-      closePara(i);
-      inFence = !inFence;
-      fenceChar = inFence ? fence[1][0] : '';
-      cur.hasBlock = true;
-      continue;
-    }
-    if (inFence) continue;
+  for (let i = 0; i < rendered.length; i++) {
+    const line = rendered[i];
     const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading) {
       closePara(i);
       // Only an H2 opens a new section: H3+ sub-headings stay INSIDE the
       // current H2 range, so their prose, images and lead roll up to it (an
       // H2 whose prose lives entirely under H3s is still eligible, and an
-      // image under an H3 marks the H2 illustrated). Any H1 closes the range.
-      if (heading[1].length === 2 || heading[1].length === 1) {
+      // image under an H3 marks the H2 illustrated). An H1 closes the range.
+      if (heading[1].length <= 2) {
         sections.push(cur);
         cur = heading[1].length === 2 ? { heading: heading[2].trim(), start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
       }
       continue;
     }
-    for (const m of (rendered[i] || '').matchAll(RENDERED_IMAGE_RE)) { cur.hasImage = true; cur.images.push(m[2]); }
+    for (const m of line.matchAll(RENDERED_IMAGE_RE)) { cur.hasImage = true; cur.images.push(m[2]); }
     if (line.trim() === '') { closePara(i); continue; }
     if (paraStart < 0) paraStart = i;
   }
-  closePara(lines.length);
+  closePara(rendered.length);
   sections.push(cur);
   return { lines, sections };
 }
@@ -3545,6 +3538,7 @@ module.exports = {
     countBodyImages,
     bodyImageRefs,
     validateBodyImageRefs,
+    scanBodySections,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
     fetchImageBuffer,

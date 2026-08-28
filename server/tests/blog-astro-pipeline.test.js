@@ -3430,6 +3430,25 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(slots.map((sl) => sl.heading)).not.toContain('not a heading inside a fence');
   });
 
+  test('bodyImageSlots: headings inside comments, <pre> and fences (incl. shorter backtick runs inside a longer fence) are never sections; code is never prose (hook r6)', () => {
+    const body = [
+      '## Real section', '', 'Real prose.', '',
+      '<!-- ## Commented heading', '', 'hidden prose -->', '',
+      '<pre>', '## Pre heading', 'pre text', '</pre>', '',
+      '````md', '## Fenced heading', '```', 'still inside the 4-backtick fence', '```', '````', '',
+      '## Second real', '', 'More prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections
+      ? AstroPublisher._internals.scanBodySections(body, { title: 'T' })
+      : { sections: [] };
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['Real section', 'Second real']);
+    const lines = body.split('\n');
+    expect(lines[slots[0].insertAt - 1]).toBe('Real prose.');
+    expect(lines[slots[1].insertAt - 1]).toBe('More prose.');
+    expect(sections.map((sec) => sec.heading)).not.toContain('Fenced heading');
+  });
+
   test('bodyImageSlots: H3 prose rolls up into its H2 (slot after the last sub-section paragraph); an image under an H3 marks the H2 illustrated', () => {
     const body = [
       'Intro.', '',
