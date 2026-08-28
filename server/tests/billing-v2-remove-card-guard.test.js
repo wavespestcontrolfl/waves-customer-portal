@@ -123,6 +123,13 @@ describe('DELETE /billing/cards/:id — removal guard', () => {
       expect(body.autopay).toEqual({ enabled: true, paused: false, methodId: 'pm-live' });
       expect(StripeService.removeCard).not.toHaveBeenCalled();
       expect(PaymentLifecycleEmail.sendPaymentMethodRemoved).not.toHaveBeenCalled();
+      // The refusal is observable: audit row for the firsts watch / 360 feed.
+      const { logAutopay } = require('../services/autopay-log');
+      await new Promise((r) => setImmediate(r));
+      expect(logAutopay).toHaveBeenCalledWith('cust-1', 'removal_refused', expect.objectContaining({
+        paymentMethodId: 'pm-live',
+        details: { source: 'portal_delete', paused: false },
+      }));
     }));
 
   test('no pointer, default+enabled row → still 409 (mirrors charge() fallback walk)', () =>
