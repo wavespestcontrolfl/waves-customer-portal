@@ -285,7 +285,10 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_OVERRIDE` · `DENY`
+`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+
+`INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
+`DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
 
 **Paid is an attribute of a path; it is not a workflow state.** The level is *computed* from
 the path's attributes and the policy at decision time, then stamped for the audit trail.
@@ -311,16 +314,19 @@ max_spam_score               = 10
 ### 6.3 Decision (pure function, unit-tested; recorded on the placement)
 
 ```
-# 1. Fail-closed quality floors — evaluated FIRST, before any AUTO_* or OWNER_* branch.
-#    A row that fails a floor is DENY regardless of who would have acted; owner override is
-#    the explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE, never DENY→AUTO.
-#    MISSING is failing: every required signal must be a finite number (not null/NaN/undefined).
-if not all finite(domain.spam_score, score, path.confidence) → DENY
-if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → DENY   # negative/zero/fractional money never reaches the ledger
+# 1a. VALIDITY — non-overrideable. Not policy: data and money that cannot be acted on by
+#     anyone, including the owner. "Acquire anyway" never reaches these rows.
+if not all finite(domain.spam_score, score, path.confidence) → INVALID        # unenriched / uninvestigated
+if path.acquisition_type in (not_reproducible, unknown) → INVALID             # nothing to execute
+if path.last_investigated_at is null → INVALID
+if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
+# 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
+#     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
+#     is the owner's explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE
+#     and records which floor(s) were overridden; DENY never becomes AUTO_*.
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
-   or score < policy.min_score
-   or path.acquisition_type in (not_reproducible, unknown) → DENY
+   or score < policy.min_score → DENY
 # 2. Authority (only reached by rows that passed every floor)
 if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
 if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
@@ -334,9 +340,10 @@ if path.account_required → AUTO_ACCOUNT if auto_account_creation else awaiting
 else → AUTO_FREE
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
-including one per floor proving DENY beats every AUTO_* and OWNER_* branch, and one per
-required signal proving null / NaN / undefined → DENY (an unenriched domain can never be
-acted on, by anyone, until enrichment and investigation have run).
+including one per policy floor proving DENY beats every AUTO_* and OWNER_* branch, one per
+required signal proving null / NaN / undefined → INVALID, and one proving OWNER_OVERRIDE is
+refused on INVALID (an unenriched or uninvestigated domain, or invalid money, can never be
+acted on by anyone until enrichment and investigation have run).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
@@ -399,7 +406,15 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   total. The provider can never charge an amount the ledger has not reserved.
 - **Renewals are separate purchases; a merchant can never charge outside the ledger.** A
   reservation covers exactly one charge, and the instrument enforces it: each purchase is paid
-  with a **single-use virtual card number** (issuer-generated per reservation; the ledger
+  with a **single-use virtual card number minted at `submitting` with an issuer-enforced
+  per-card spend ceiling equal to `final_cents`** (the merchant cannot authorize or capture
+  more than the ledger approved, whatever the checkout later shows; the issuer's program-wide
+  monthly limit is a second ceiling, not the control). If the issuer cannot set a per-card
+  ceiling, **no automated purchase is made** — the row is refused (`voided`,
+  `outcome='instrument_unavailable'`) and parked for the owner. Reconciliation compares the
+  captured amount against the ceiling; a capture above `final_cents` is impossible by
+  construction and any discrepancy is `ambiguous` until explained. (Issuer-generated per
+  reservation; the ledger
   stores only the issuer's opaque `issuer_card_id` + `card_last4` — the PAN/CVV are fetched
   from the issuer at `submitting` time, handed to the provider in memory for that one
   checkout, and never written to the ledger, attempts, evidence, sessions, logs or prompts)
