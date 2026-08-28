@@ -314,10 +314,15 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
  * ESTIMATE REQUESTED on a call by an EXISTING customer (codex #3569): a
  * lifecycle customer deliberately gets no lead, so when Sandy could not give a
  * number and promised a written estimate, this feed row is the ONLY artifact
- * that can fulfil the promise. Same doctrine as the contact instruction above:
- * `bell: true` so the policy cannot silence it, suppressed ≠ persisted, and
- * the caller (relay-tools) reads the boolean to decide whether the promise
- * may be spoken at all. Dedupe: one card per call.
+ * that can fulfil the promise. It is the SAME lane as the post-call
+ * "quote promised" bell (call-recording-processor): category 'lead', title
+ * "Quote promised on call — send it", metadata { callSid, quote_promised:true,
+ * no_lead:true } — so quotePromisedAlreadyNotified() recognises it (no second
+ * bell when the recording is processed) and the estimator engine can upgrade
+ * this row in place with the draft. Same doctrine as the contact instruction
+ * above: `bell: true` so the policy cannot silence it, suppressed ≠ persisted,
+ * and relay-tools reads the boolean to decide whether the promise may be
+ * spoken at all. Dedupe: one card per call (notifyAdmin dedupeKey).
  * @returns {Promise<{persisted:boolean, suppressed:boolean}>}
  */
 async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opts = {}) {
@@ -327,12 +332,11 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
     const who = [extracted.first_name, extracted.last_name].filter(Boolean).map((v) => properCase(String(v).trim())).join(' ') || 'an existing customer';
     const service = extracted.requested_service || extracted.matched_service || null;
     const notif = await NotificationService.notifyAdmin(
-      'billing',
-      `📝 Estimate requested on a phone call — ${who}`,
+      'lead',
+      'Quote promised on call — send it',
       [
-        'An existing customer asked about pricing on a call and the voice agent could not give a number.',
-        'The caller was told a written estimate will be sent — this card is that obligation.',
-        service ? `Service asked about: ${service}.` : null,
+        `${who}: the voice agent could not give a number and promised a written estimate (${service || 'service discussed on the call'}).`,
+        'Existing customer — no lead is tracking this promise; this card is the obligation. Send it before end of day.',
         // The details collected ON THIS CALL are the fulfilment details (hook
         // P1): the account's email/address may be stale or a different
         // property. Nothing here mutates the customer — staff decide.
@@ -351,10 +355,15 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         // one card per call, replays return the existing row.
         ...(opts.callSid ? { dedupeKey: `relay-estimate-request:${opts.callSid}` } : {}),
         metadata: {
+          // Canonical promised-quote markers (call-recording-processor reads
+          // callSid + quote_promised; no_lead = the no-lead lane).
           customerId,
+          callSid: opts.callSid || null,
+          quote_promised: true,
+          no_lead: true,
+          property_count: 1,
           source: 'voice_agent',
           kind: 'estimate_request',
-          callSid: opts.callSid || null,
           requested_service: service,
           // fulfilment details as captured (never applied to the customer here)
           first_name: extracted.first_name || null,

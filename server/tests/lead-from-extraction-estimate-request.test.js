@@ -12,19 +12,20 @@ const { surfaceEstimateRequestForCustomer } = require('../services/lead-from-ext
 
 beforeEach(() => jest.clearAllMocks());
 
-test('files a billing card with bell:true, the customer link, and a per-call dedupe key', async () => {
+test('files the CANONICAL quote-promised bell (lead lane, no_lead marker) with bell:true, the customer link, fulfilment details, and a per-call dedupe key', async () => {
   notifyAdmin.mockResolvedValue({ id: 'n-1' });
   const out = await surfaceEstimateRequestForCustomer('c-1', { first_name: 'pat', last_name: 'LEE', requested_service: 'mosquito', call_summary: 'asked what monthly costs', email: 'pat@example.com', address_line1: '12 Shell Dr', city: 'Venice', zip: '34285' }, { callSid: 'CA1', phone: '+19415551234' });
   expect(out).toEqual({ persisted: true, suppressed: false });
   expect(notifyAdmin).toHaveBeenCalledWith(
-    'billing',
-    expect.stringContaining('Estimate requested on a phone call — Pat Lee'),
-    expect.stringMatching(/written estimate will be sent[\s\S]*Email given on the call: pat@example\.com[\s\S]*Service address given on the call: 12 Shell Dr, Venice, 34285[\s\S]*Callback number: \+19415551234/),
+    'lead',
+    'Quote promised on call — send it',
+    expect.stringMatching(/^Pat Lee: the voice agent could not give a number and promised a written estimate \(mosquito\)\.[\s\S]*Existing customer — no lead is tracking this promise[\s\S]*Email given on the call: pat@example\.com[\s\S]*Service address given on the call: 12 Shell Dr, Venice, 34285[\s\S]*Callback number: \+19415551234/),
     expect.objectContaining({
       bell: true,
       link: '/admin/customers?customerId=c-1',
       dedupeKey: 'relay-estimate-request:CA1', // notifyAdmin's top-level dedupe option
-      metadata: expect.objectContaining({ customerId: 'c-1', kind: 'estimate_request', callSid: 'CA1', requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr', phone: '+19415551234' }),
+      // the markers call-recording-processor's quotePromisedAlreadyNotified() and the estimator upgrade read
+      metadata: expect.objectContaining({ customerId: 'c-1', callSid: 'CA1', quote_promised: true, no_lead: true, property_count: 1, kind: 'estimate_request', requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr', phone: '+19415551234' }),
     }),
   );
 });
