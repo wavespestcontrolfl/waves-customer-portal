@@ -62,10 +62,10 @@ describe('rolling-deploy compatibility of the board unique key', () => {
     }
     expect(hits.length).toBeGreaterThanOrEqual(5);
   });
-  test('the PATCH page-move dedupes within the row\'s own location scope', () => {
+  test('the PATCH page-move probe is location-AGNOSTIC while UNIQUE(target_domain, target_page) is still live (expand phase)', () => {
     const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
-    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key'\)/);
-    expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);
+    expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id \}\)/);
+    expect(s).not.toMatch(/location: current\.location_key/);
   });
 });
 

@@ -44,10 +44,13 @@ function parseOpportunities(text) {
   return { candidates: [...seen.values()], unresolved, dropped };
 }
 
+// The persisted hint is bounded (a pasted URL can carry an arbitrary query string).
+const URL_HINT_MAX = 500;
 function touchDetail(batchDetail, url) {
   const base = String(batchDetail || '').trim();
   if (!url) return base || null;
-  return base ? `${base} ${url}` : url;
+  const hint = String(url).slice(0, URL_HINT_MAX);
+  return base ? `${base} ${hint}` : hint;
 }
 
 /**
@@ -92,4 +95,4 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
   return base;
 }
 
-module.exports = { parseOpportunities, intake, _internals: { TOKEN_RE, X_POST_RE, hasPath, touchDetail } };
+module.exports = { parseOpportunities, intake, _internals: { TOKEN_RE, X_POST_RE, hasPath, touchDetail, URL_HINT_MAX } };

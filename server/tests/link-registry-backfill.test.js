@@ -39,6 +39,8 @@ function fakeDb({ prospects = [], legacyAttempts = [], hasLegacyTable = true } =
               const row = { id: `s${store.sources.length + 1}`, ...st.insert }; store.sources.push(row); return [{ id: row.id }];
             }
             if (t === 'seo_link_acquisition_paths') {
+              // partial unique (domain_id, path_key) WHERE superseded_by IS NULL → DO NOTHING
+              if (store.paths.some((p) => p.domain_id === st.insert.domain_id && p.path_key === st.insert.path_key && !p.superseded_by)) return [];
               const row = { id: `path${store.paths.length + 1}`, ...st.insert }; store.paths.push(row); return [{ id: row.id }];
             }
             if (t === 'seo_link_attempts') {
@@ -134,6 +136,33 @@ describe('backfillLegacyBoard (plan §4 legacy board backfill)', () => {
     const out = await backfillLegacyBoard(db2);
     expect(out).toMatchObject({ domainsCreated: 0, touches: 0, paths: 0, linked: 0 });
     expect(JSON.stringify(db._store)).toBe(before);
+  });
+
+  test('a path created by a concurrent catch-up between probe and insert is reselected, never duplicated', async () => {
+    const db = fakeDb({ prospects: [prospects[0]] });
+    // race: the probe sees nothing, then another run lands the path before our insert
+    const origBuilder = db.getMockImplementation();
+    let probes = 0;
+    db.mockImplementation((table) => {
+      const q = origBuilder(table);
+      if (table === 'seo_link_acquisition_paths') {
+        const first = q.first;
+        q.first = async () => {
+          probes += 1;
+          if (probes === 1) { db._store.paths.push({ id: 'raced', domain_id: 'd1', path_key: 'self_service_account:https://dir.example/add' }); return undefined; }
+          return first();
+        };
+      }
+      return q;
+    });
+    const out = await backfillLegacyBoard(db);
+    expect(out.paths).toBe(0);
+    expect(db._store.paths.map((p) => p.id)).toEqual(['raced']);
+    expect(db._store.prospectPatches[0].patch).toMatchObject({ path_id: 'raced' });
+    // the ON CONFLICT target compiles to the partial-index predicate
+    const knex = require('knex')({ client: 'pg' });
+    const sql = knex('seo_link_acquisition_paths').insert({ domain_id: 'd', path_key: 'k' }).onConflict(knex.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore().returning(['id']).toSQL().toNative().sql;
+    expect(sql).toMatch(/on conflict \(domain_id, path_key\) WHERE superseded_by IS NULL do nothing/i);
   });
 
   test('never inserts a board row (the pinned-writer guard stays intact)', async () => {

@@ -99,9 +99,14 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
       const path = acquisitionPathFromLegacyRow(r);
       let existing = await findActivePath(q, dom.id, path.path_key);
       if (!existing) {
-        const ins = await q('seo_link_acquisition_paths').insert({ ...path, domain_id: dom.id }).returning(['id']);
-        existing = ins[0];
-        out.paths += 1;
+        // Concurrent catch-ups (boot, runner, CLI) hold different locks: insert
+        // against the partial unique index and reselect the winner on conflict.
+        const ins = await q('seo_link_acquisition_paths').insert({ ...path, domain_id: dom.id })
+          .onConflict(q.raw('(domain_id, path_key) WHERE superseded_by IS NULL')).ignore()
+          .returning(['id']);
+        if (ins && ins.length) { existing = ins[0]; out.paths += 1; }
+        else existing = await findActivePath(q, dom.id, path.path_key);
+        if (!existing) throw new Error(`link-registry: lost race creating path ${path.path_key} for ${host}`);
       }
       const patch = {};
       if (!r.domain_id) patch.domain_id = dom.id;

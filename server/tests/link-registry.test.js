@@ -211,10 +211,17 @@ describe('ensureDomain (the one registry upsert)', () => {
     await expect(ensureBoth(db, { domain: 'x.example', source: 'nope' })).rejects.toThrow(/unknown source/);
     await expect(ensureBoth(db, { domain: '', source: 'owner_seed' })).rejects.toThrow(/empty domain/);
   });
-  test('touch_key: ref wins over detail; detail is case/space-normalized; "-" when neither', () => {
+  test('touch_key: ref wins over detail; detail is case/space-normalized; "-" when neither; long details become a fixed-length digest (bounded index entry)', () => {
     expect(R.touchKey('x', 'ref1', 'detail')).toBe('x:ref1');
     expect(R.touchKey('list_import', null, '  Backlinks CSV  2026 ')).toBe('list_import:backlinks csv 2026');
     expect(R.touchKey('recursive', null, null)).toBe('recursive:-');
+    const long = `paste:2026-08-28 https://dir.example/add?${'q=1&'.repeat(400)}`;
+    const k = R.touchKey('list_import', null, long);
+    expect(k).toMatch(/^list_import:sha256:[0-9a-f]{32}$/);
+    expect(k.length).toBeLessThan(60);
+    expect(R.touchKey('list_import', null, long)).toBe(k); // deterministic
+    expect(R.touchKey('list_import', null, `${long}x`)).not.toBe(k);
+    expect(R.touchKey('list_import', null, 'a'.repeat(R.TOUCH_DETAIL_MAX))).toBe(`list_import:${'a'.repeat(R.TOUCH_DETAIL_MAX)}`);
   });
 });
 async function ensureBoth(db, args) { return R.ensureDomain(db, args); }
@@ -287,6 +294,12 @@ describe('intake (dedupe + upsert; dryRun writes nothing)', () => {
     // a NEW url for a known host is a new touch, first-touch detail untouched
     await intake(db, { text: 'https://dir.example/submit', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
     expect(db._store.sources.length).toBe(3);
+    // an oversized pasted URL is bounded in the persisted hint and hashed in the touch key (never an unbounded index entry)
+    const { URL_HINT_MAX } = require('../services/seo/link-registry-intake')._internals;
+    await intake(db, { text: `https://huge.example/add?${'k=v&'.repeat(1000)}`, source: 'list_import', sourceDetail: 'paste:2026-08-28' });
+    const huge = db._store.sources.at(-1);
+    expect(huge.source_detail.length).toBeLessThanOrEqual('paste:2026-08-28 '.length + URL_HINT_MAX);
+    expect(huge.touch_key).toMatch(/^list_import:sha256:[0-9a-f]{32}$/);
     expect(db._store.domains.find((d) => d.domain === 'dir.example').source_detail).toBe('paste:2026-08-28 https://dir.example/add-your-business/');
   });
   test('empty / host-less text is a no-op result; an unknown source is refused before any read', async () => {

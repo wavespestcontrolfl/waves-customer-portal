@@ -16,6 +16,7 @@
  * Nothing here fetches, enriches, or moves money.
  */
 
+const crypto = require('crypto');
 const { canonicalProspectDomain } = require('./prospect-domain-lock');
 const { CLAIMABLE_LINK_TYPES } = require('./prospect-scorer');
 const { SPOKE_SITE_KEYS } = require('../content-astro/spoke-sites');
@@ -243,9 +244,14 @@ function attemptFromLegacyRow(a, { pathId = null } = {}) {
 // ensureDomain — the one registry upsert (§4 step 2 "dedupe", §3.4b touches)
 // ---------------------------------------------------------------------------
 
+// touch_key sits in the unique (domain_id, touch_key) btree: a long detail
+// (a pasted URL with a query string) is replaced by a fixed-length digest so
+// the index entry is bounded; short details stay readable.
+const TOUCH_DETAIL_MAX = 120;
 function touchKey(source, sourceRef, sourceDetail) {
   const detail = String(sourceDetail || '').trim().toLowerCase().replace(/\s+/g, ' ');
-  return `${source}:${sourceRef || detail || '-'}`;
+  const ident = detail.length > TOUCH_DETAIL_MAX ? `sha256:${crypto.createHash('sha256').update(detail).digest('hex').slice(0, 32)}` : detail;
+  return `${source}:${sourceRef || ident || '-'}`;
 }
 
 /**
@@ -300,5 +306,5 @@ module.exports = {
   ATTEMPT_PROVIDERS, ATTEMPT_ACTIONS, ATTEMPT_OUTCOMES, AUTHORITY_DIMENSIONS, AUTHORITY_LEVELS,
   NEVER_TARGET_HOSTS, isNeverTargetHost,
   mapLegacySource, mapLegacyOutcome, acquisitionTypeForLinkType, pathLinkTypeFor, normalizeSubmissionUrl, pathKey,
-  acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, ensureDomain,
+  acquisitionPathFromLegacyRow, attemptFromLegacyRow, touchKey, TOUCH_DETAIL_MAX, ensureDomain,
 };
