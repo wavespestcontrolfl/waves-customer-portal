@@ -1978,6 +1978,19 @@ describe('Astro publisher idempotency guard', () => {
     expect(gh.closePr).toHaveBeenCalledWith(99);
   });
 
+  test('the topic-gate failure stamp compare-and-sets on the lifecycle the gate ran against (a reconcile-discovered merge is never reverted) (codex r23 P1)', async () => {
+    const post = { id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton', astro_status: 'publish_failed', tag: 'pest-control' };
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    db.mockImplementation(() => read);
+    const topicGate = require('../services/content/topic-targeting-gate');
+    const spy = jest.spyOn(topicGate, 'evaluateBlogPostRow').mockRejectedValue(new Error('corpus unavailable'));
+    try {
+      await expect(AstroPublisher.publishAstro('post-1')).rejects.toThrow(/corpus unavailable/);
+      expect(read.where).toHaveBeenCalledWith({ id: 'post-1', astro_status: 'publish_failed' });
+      expect(read.update).toHaveBeenCalledWith(expect.objectContaining({ astro_status: 'publish_failed', astro_publish_error: expect.stringMatching(/could not run/) }));
+    } finally { spy.mockRestore(); }
+  });
+
   test('build_failed retry closes + deletes the stale PR/branch before republishing (no orphan)', async () => {
     const post = {
       id: 'post-1', title: 'Ant Trails', slug: 'ant-trails-bradenton',

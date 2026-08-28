@@ -886,6 +886,27 @@ describe('PR codex r22 (b4db7a542)', () => {
       expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
     }
   });
+  test('Charlotte (NC) and St. Augustine count with context; Charlotte County / Port Charlotte / St. Augustine grass stay footprint or topic (r23)', () => {
+    for (const t of ['Charlotte pest control', 'pest control in Charlotte', 'termite treatment Charlotte, NC', 'St. Augustine termite treatment', 'St Augustine pest control', 'pest control in St. Augustine']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['pest control in Port Charlotte', 'Port Charlotte pest control']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('footprint');
+    }
+    expect(gate.classifyGeoScope('Charlotte County pest control').scope).toBe('regional');
+    for (const t of ['mosquito control Charlotte Harbor', 'st. augustine grass chinch bugs in venice', 'St Augustine sod pests', 'charlotte asked about ants',
+      'kentucky bluegrass vs st augustine in bradenton', 'which is better st augustine or bahia in venice fl', 'zoysia vs. St. Augustine for sarasota lawns']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+  test('an ambiguous postal abbreviation after a contextual name needs the comma ("Boston in July" is a month, "Boston, IN" is Indiana)', () => {
+    for (const t of ['boston in july pest season', 'jupiter in the summer sky', 'homestead in bradenton', 'pests in jupiter or sarasota', 'weston me about ants']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    for (const t of ['Boston, IN pest control', 'pest control in Salem, OR', 'Homestead, FL termite bond', 'in Boston, MA', 'in Boston TX']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

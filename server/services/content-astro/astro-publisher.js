@@ -1061,6 +1061,24 @@ async function publishAstro(postId) {
       + `${post.astro_pr_number ? `, PR #${post.astro_pr_number}` : ''}); merge or unpublish it before republishing`,
     );
   }
+  // A row still owing GitHub a close for an earlier topic-blocked PR
+  // (astro_retire_pr_number) settles that FIRST, and fails closed if it
+  // cannot: a republish whose stale cleanup silently failed could otherwise
+  // be topic-blocked later and overwrite the older PR's debt, leaving that
+  // PR human-mergeable with nothing revisiting it. pages-poll keeps retrying
+  // the close each tick, so the refusal clears itself. BEFORE the topic gate:
+  // a merge the settlement discovers moves the row to 'merged', and the
+  // gate's failure stamp below must see that state, not race it.
+  if (post.astro_retire_pr_number) {
+    const r = await retireTopicBlockedPostPr(post);
+    if (!r.retired) {
+      const rErr = new Error(r.merged
+        ? `PR #${post.astro_retire_pr_number} was merged before it could be retired — the row now follows that merge; reload it before publishing again`
+        : `earlier topic-blocked PR #${post.astro_retire_pr_number} could not be retired yet (${r.reason || 'still open'}); republish is refused until it is closed (retried automatically each pages-poll tick)`);
+      rErr.code = 'BLOG_PR_RETIRE_PENDING';
+      throw rErr;
+    }
+  }
   // Topic-targeting gate (owner rulings 2026-08-27) — a NEW post may not be
   // built around an out-of-footprint geo, statewide-only framing, or an
   // entity a live post already owns. Runs BEFORE the stale-PR cleanup below
@@ -1073,7 +1091,12 @@ async function publishAstro(postId) {
   // a transient fail-closed the scheduler retries.
   {
     const topicGate = require('../content/topic-targeting-gate');
-    const stampTopicFailure = (message) => db('blog_posts').where({ id: postId }).update({
+    // Compare-and-set on the lifecycle the gate was run against: the
+    // reconcile (pages-poll) can find this row's earlier PR merged while
+    // the gate is in flight and move the row to 'merged' — an ID-only stamp
+    // would revert a live post to publish_failed and strand it (pollPending
+    // selects merged, not publish_failed).
+    const stampTopicFailure = (message) => db('blog_posts').where({ id: postId, astro_status: post.astro_status ?? null }).update({
       astro_status: 'publish_failed',
       astro_publish_error: String(message).slice(0, 1000),
     });
@@ -1090,22 +1113,6 @@ async function publishAstro(postId) {
       tErr.details = topic.findings;
       await stampTopicFailure(tErr.message);
       throw tErr;
-    }
-  }
-  // A row still owing GitHub a close for an earlier topic-blocked PR
-  // (astro_retire_pr_number) settles that FIRST, and fails closed if it
-  // cannot: a republish whose stale cleanup silently failed could otherwise
-  // be topic-blocked later and overwrite the older PR's debt, leaving that
-  // PR human-mergeable with nothing revisiting it. pages-poll keeps retrying
-  // the close each tick, so the refusal clears itself.
-  if (post.astro_retire_pr_number) {
-    const r = await retireTopicBlockedPostPr(post);
-    if (!r.retired) {
-      const rErr = new Error(r.merged
-        ? `PR #${post.astro_retire_pr_number} was merged before it could be retired — the row now follows that merge; reload it before publishing again`
-        : `earlier topic-blocked PR #${post.astro_retire_pr_number} could not be retired yet (${r.reason || 'still open'}); republish is refused until it is closed (retried automatically each pages-poll tick)`);
-      rErr.code = 'BLOG_PR_RETIRE_PENDING';
-      throw rErr;
     }
   }
   if (

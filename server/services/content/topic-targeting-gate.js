@@ -197,6 +197,11 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   // The guardrails' own documented exclusions (person names / common nouns).
   'Brandon', 'Sunrise', 'Plantation', 'Cocoa', 'Mobile', 'Stuart', 'Sebastian',
   'Orlando', 'Lakeland', 'Orange',
+  // Locally ambiguous out-of-footprint cities (PR #3549 codex r23): Charlotte
+  // (NC) vs the served Charlotte County / Port Charlotte / Charlotte Harbor —
+  // those footprint forms are scrubbed from the context scan only — and St.
+  // Augustine vs the grass (scrubbed by the shared metro-compound list).
+  'Charlotte', 'St. Augustine',
   // Major metros that are also names / words (PR #3549 codex r11).
   'Jackson', 'Lincoln', 'Madison', 'Aurora', 'Mesa', 'Buffalo',
   'Arlington', 'Springfield', 'Salem', 'Eugene', 'Tyler', 'Garland', 'Irving',
@@ -285,12 +290,19 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // activity") are excluded: both read as ordinary words before a service.
 // (Reading too: "Reading pest control labels" is a gerund, not Reading, PA.)
 const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading'].includes(n));
+// "St. Augustine" must match "St Augustine" / "St. Augustine" (cityRe's rule).
+const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+');
+// Footprint forms of a contextual name: never the out-of-footprint city.
+const CONTEXT_PLACE_FOOTPRINT_RE = /\b(?:port\s+charlotte|charlotte\s+(?:county|harbor)|(?:vs\.?|versus|or|and|than)\s+st\.?\s*augustine|st\.?\s*augustine\s+(?:vs\.?|versus|or|and|than))\b/gi;
+// "<Name>, <state>": an AMBIGUOUS postal abbreviation ("in" = Indiana, "or",
+// "me", …) counts only after a comma — "Boston in July" is a month, not
+// Indiana; safe abbreviations, state names and FL need no comma.
 const CONTEXT_PLACE_RE = new RegExp(
-  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
-  + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
-  + `|\\b(${PLACE_FIRST_NAMES.map(escapeRe).join('|')})\\s+(?:${SERVICE_INTENT})\\b`
-  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(${PLACE_FIRST_NAMES.map(escapeRe).join('|')})\\b(?![a-z])`
-  + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
+  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(placeAlt).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|,\\s*(?:${STATE_ABBR_AMBIGUOUS})\\b|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
+  + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(placeAlt).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
+  + `|\\b(${PLACE_FIRST_NAMES.map(placeAlt).join('|')})\\s+(?:${SERVICE_INTENT})\\b`
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(${PLACE_FIRST_NAMES.map(placeAlt).join('|')})\\b(?![a-z])`
+  + `|\\b(${CONTEXT_PLACE_NAMES.map(placeAlt).join('|')})(?:,\\s*(?:${STATE_ABBR_AMBIGUOUS})|,?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE}))\\b(?![a-z])`,
   'i'
 );
 
@@ -459,7 +471,7 @@ function classifyGeoScope(text) {
     ...findAll(OUT_OF_COUNTRY_RE, tg),
     ...findAll(NATIONWIDE_RE, tg),
     ...findAll(NAME_STATE_RE, tg),
-    ...findAll(CONTEXT_PLACE_RE, tg),
+    ...findAll(CONTEXT_PLACE_RE, tg.replace(CONTEXT_PLACE_FOOTPRINT_RE, ' ')),
     ...findAll(STATE_ABBR_RE, tg).map((s) => s.toUpperCase()),
     ...(SPLIT_COUNTY_RE.test(t) && !southHillsboroughRe()?.test(t) ? ['Hillsborough County'] : []),
   ];
