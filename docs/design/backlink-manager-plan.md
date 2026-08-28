@@ -788,8 +788,8 @@ locked transaction and refuse (409, row re-parked) unless it still supports the 
 for `AUTO_*` and `OWNER_*` stamps the current result must equal the stamp; for a
 dimension granted under a floor waiver the waiver must still be valid (its
 `overridden_floors[]` and inputs hash match the current floors/inputs — an override is
-honoured only for the exact failure the owner looked at) AND the dimension's own approval
-must be valid as for any `OWNER_*` — so a row whose confidence dropped or whose domain's spam
+honoured only for the exact failure the owner looked at) AND — when the underlying level is `OWNER_*` — the dimension's own approval
+must be valid exactly as for any unwaived `OWNER_*` row (an underlying `AUTO_*` level needs NO approval row, waived or not: the ONE rule, §3.3b/§7 — a waiver never adds an approval requirement and never removes one) — so a row whose confidence dropped or whose domain's spam
 rose after stamping cannot send or spend. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
@@ -1122,7 +1122,7 @@ together:
   `contacted`/`negotiating` for `mode=payment` and `mode=followup`; `placed`/`live`/`indexed`
   for `mode=renewal` (each mode's extra predicate is defined where the mode is) — the
   `prospect` restriction is never applied to the later-stage modes; registry
-  `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — claimability is a
+  `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — `mode=draft` ALSO accepts `qualified` (an owner-gated outreach placement without a draft stays `qualified` until the draft exists; the draft-lease bullet below is the authority on that mode's predicate) — claimability is a
   placement property, so a second location's placement is leasable after the first was
   acquired; and — for every mode EXCEPT `mode=draft`, which is exempt from this authority
   clause by construction (the draft-lease bullet below defines its own predicate; every
