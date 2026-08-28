@@ -997,10 +997,15 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     // must roll BOTH back: committing a re-attributed payout beside an
     // un-relinked review leaves an inconsistency payroll could pay (GH
     // codex #3483 r6 P1) — so a zero-row relink throws INSIDE the trx.
-    // Snapshot BEFORE the relink write: the auto-reply reconciliation below
-    // compares the row as it was (some drivers/mocks hand back live row
-    // references that the update mutates in place).
-    const beforeRelink = { ...review, customer_id: prior?.customer_id ?? review.customer_id };
+    // The FULL row as it is now, locked for this transaction (hook P1): the
+    // outer `review` read predates the location lock, and an automatic
+    // publish may have completed since. The auto-reply reconciliation below
+    // must CAS against the live state, and a publish in flight (live claim)
+    // must not have its customer moved underneath it.
+    const beforeRelink = { ...((await trx('google_reviews').where({ id: review.id }).forUpdate().first()) || review) };
+    if (beforeRelink.publish_claimed_until && new Date(beforeRelink.publish_claimed_until) > new Date()) {
+      throw operationalError('A reply is being posted for this review right now — try again in a moment', 409, 'reply_publish_in_flight');
+    }
     const count = await trx('google_reviews')
       .where({ id: review.id })
       .whereNull('missing_since')

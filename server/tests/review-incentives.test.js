@@ -251,6 +251,27 @@ describe('review incentives', () => {
     expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', cause: 'attribution', needsAction: true });
   });
 
+  test('re-attribution refuses while an automatic publish holds the review (live publish claim) — hook P1', async () => {
+    const conn = createDbMock({
+      customers: [
+        { id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true },
+        { id: 'customer-2', first_name: 'Customer', last_name: 'Two', active: true },
+      ],
+      technicians: [],
+      service_records: [],
+      google_reviews: [{
+        id: 'google-inflight', customer_id: 'customer-1', link_source: 'click_auto', auto_linked_at: '2026-05-29T16:05:00.000Z',
+        reviewer_name: 'Dana W.', star_rating: 5, review_text: 'Great', review_reply: null,
+        auto_reply_status: 'queued', auto_reply_reason: null, publish_claimed_until: '2099-01-01T00:00:00.000Z',
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota', google_review_id: 'accounts/1/locations/2/reviews/inflight',
+      }],
+    });
+    await expect(ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-inflight', customerId: 'customer-2', technicianId: null, serviceRecordId: null, noVisit: true, adminId: 'admin-1',
+    }, { conn })).rejects.toMatchObject({ code: 'reply_publish_in_flight', statusCode: 409 });
+    expect(conn.__state.rows.google_reviews[0].customer_id).toBe('customer-1');
+  });
+
   test('an explicit no-visit confirm never auto-resolves a technician or mints a payout', async () => {
     // The customer HAS a resolvable prior service — exactly the case where
     // the technician resolver would otherwise hijack a "Confirm match (no

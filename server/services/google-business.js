@@ -863,14 +863,20 @@ class GoogleBusinessService {
       // sync seeing the edited text as the existing fingerprint (no change
       // detected) and a posted reply attached to a rewritten review.
       const edited = await db.transaction(async (trx) => {
+        // The row as it is NOW, locked for this transaction (hook P1): a
+        // publisher can move it queued/drafted → posted between the pre-
+        // transaction snapshot and here; reconciling against the stale
+        // snapshot would CAS zero rows and leave a now-stale reply 'posted'.
+        const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
         await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
         // Conditional on the row STILL being parked for that reason (an admin
         // Skip in the meantime wins).
-        await applyRequeueOnIdentity(existing.id, existing, normalized, { conn: trx });
-        await applySyncReplyFields(existing.id, existingReplyFields, { conn: trx, expectedReply: existing.review_reply ?? null });
+        await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
+        const liveReplyFields = syncReplyFields(live, normalized, { fnNow: db.fn.now() });
+        await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null });
         // A reviewer edit: a POSTED reply parks for a person, a pipeline
-        // draft is cleared and requeued (compare-and-set on the snapshot).
-        return this._reconcileReviewEdit(existing, normalized, { conn: trx, bell: false });
+        // draft is cleared and requeued (compare-and-set on the LIVE state).
+        return this._reconcileReviewEdit(live, normalized, { conn: trx, bell: false });
       });
       // The action bell only after the park is durable.
       if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
@@ -1138,8 +1144,10 @@ class GoogleBusinessService {
         // fingerprint. The action bell fires only after commit.
         const placesEdit = { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id };
         const edited = await db.transaction(async (trx) => {
+          // Same live re-read under the lock as the authoritative upsert.
+          const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
           await trx('google_reviews').where({ id: existing.id }).update(upd);
-          return this._reconcileReviewEdit(existing, placesEdit, { conn: trx, bell: false });
+          return this._reconcileReviewEdit(live, placesEdit, { conn: trx, bell: false });
         });
         if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
         // A Places owner reply that differs from the local one goes through

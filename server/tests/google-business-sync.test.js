@@ -136,6 +136,7 @@ function createDbMock(initialRows = {}) {
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot() { return this; },
+      forUpdate() { return this; },
       select() { return this; },
       orderBy() { return this; },
       limit(n) { this._limit = n; return this; },
