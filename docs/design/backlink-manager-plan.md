@@ -121,7 +121,8 @@ t.string('acquisition_type').notNullable();
 //  sponsorship | vendor_registration | business_claim | resource_outreach |
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
-t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
+t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none
+t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; required (non-null, with a merchant_account_id or an issuer-lockable descriptor) before a paid path can be qualified; the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
@@ -136,7 +137,7 @@ t.string('expected_persistence');                 // durable | rotating | unknow
 t.string('link_type').notNullable();              // board lane the placement will carry; CHECK (link_type IN CLAIMABLE_LINK_TYPES — editorial|resource|guest_post|haro|directory|citation|social) so a path can never qualify with a lane the worker cannot lease (§6.3 validity also asserts it)
 t.numeric('confidence', 3, 2);                    // 0–1
 t.integer('revision').notNullable().defaultTo(1);  // display/global counter: +1 whenever ANY in-place authority- or approval-relevant field changes (acquisition_type / submission_url changes supersede the row instead — see above)
-t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation
+t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding
 t.integer('revision_communication').notNullable().defaultTo(1);  // +1 only on communication inputs: link_type, expected_rel (recipient/draft live on the approval hash)
 t.integer('revision_execution').notNullable().defaultTo(1);      // +1 only on execution inputs: account_required, email_verification, agent_completable, legal_attestation
 // Approvals and authority rows bind to THEIR dimension's revision (§3.3b/§3.6b); a price change bumps revision_payment
@@ -472,7 +473,11 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   — capped at ~8 fetches per domain.
 - **Reasoning:** one `WORKHORSE`-tier call through `server/services/llm/call.js` (never a
   hardcoded model id) with a strict JSON schema = the path fields in §3.2 plus
-  `confidence` and `reasons`. Price/renewal text is quoted verbatim into `investigation`.
+  `confidence` and `reasons`, and — for any `payment_required` path — the `merchant_binding`
+  (checkout origin + processor host + processor merchant/account id read from the observed
+  checkout chain; the schema requires it, and a paid path without a resolvable recipient
+  identity is written `agent_completable=false` so it can only be an owner step). Price/
+  renewal text is quoted verbatim into `investigation`.
   `not_reproducible` is a first-class answer (a competitor's editorial mention, a
   private partnership) and closes the domain honestly instead of leaving it "unknown".
 - **Outputs:** paths + `best_path_id` (highest expected value per §8) + `agent_state`
