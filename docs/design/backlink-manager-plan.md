@@ -227,9 +227,11 @@ revision (`revision_payment` / `revision_communication` / `revision_execution`, 
 own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
 (price, renewal, payment/legal flags → payment; recipient/draft → communication; type/URL →
 supersession, all dimensions). A dimension INSTANCE with `satisfied_at` set is validated by nothing further — it is done;
-but satisfaction is per action instance: a renewal (`instance_key` = period) and the
-follow-up (`instance_key='followup'`) are new rows that require their own decision and, when
-`OWNER_*`, their own fresh, action-matching approval — a consumed approval never satisfies a
+but satisfaction is per action instance: a renewal (`instance_key` = `${renewal_period_key}:${generation}`)
+and the follow-up (`instance_key` = `followup:${generation}`) are new rows — generation-bearing
+exactly like the initial `-:${generation}`, so a failed renewal/follow-up can open generation
+2 under the unique key — that require their own decision and, when `OWNER_*`, their own
+fresh, action-matching approval (claims and approval hashes use the full generation-bearing key) — a consumed approval never satisfies a
 later instance, and an unsatisfied later instance never blocks the durable prerequisite that
 an earlier one already satisfied (e.g. the initial send stays satisfied while the renewal's
 payment instance is pending). A completed communication attempt (`sent`) is a satisfied prerequisite for
