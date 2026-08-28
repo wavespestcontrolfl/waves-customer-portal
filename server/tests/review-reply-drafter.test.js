@@ -139,6 +139,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r59: "felt normal" + hyphenated / "at the half-hour mark" re-entry.
+    const gfn = grounding({ text: 'Great pest treatment. The tech felt professional. We have pets.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad your pets felt normal after the pest treatment.'), gfn)).toBe('banned_phrase');
+    const ghm = grounding({ text: 'The yard was available at the half-hour mark. Great pest treatment.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad the yard was available again at the half-hour mark after the pest treatment.'), ghm)).toBe('banned_phrase');
     // codex r58: "came out okay" with unrelated "came out" provenance.
     const gco = grounding({ text: 'Great pest treatment. The tech came out quickly. We have pets.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hello there, we are glad your pets came out okay after the pest treatment.'), gco)).toBe('banned_phrase');
@@ -327,6 +332,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('a lowercase staff name after a role noun needs provenance (codex r59)', () => {
+    const g = grounding({ text: 'Great service for ants', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad our technician kevin could help with your ants.'), g)).toBe('unlisted_name');
+    const g2 = grounding({ text: 'Great service for ants from kevin', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad our technician kevin could help with your ants.'), g2)).toBeNull();
+    expect(verify(good('Hello there, we are glad our tech was able to help with your ants.'), g)).toBeNull();
+  });
+
   test('technician credential / award claims need the reviewer\'s words (codex r52)', () => {
     expect(verify(good('Hi Dana, our certified technician Marcus did a great job with your ants.'))).toBe('unlisted_credential_claim');
     expect(verify(good('Hi Dana, our award-winning team is glad Marcus got the ants.'))).toBe('unlisted_credential_claim');

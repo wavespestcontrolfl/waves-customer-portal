@@ -686,8 +686,10 @@ describe('Google Business review sync', () => {
     expect(reviewRows).toHaveLength(1);
     expect(reviewRows[0]).toMatchObject({
       id: 'gbp-row-1',
-      star_rating: 5,
-      review_text: 'Original text', // still deferred to GBP — never overwritten here
+      // codex r59: a CORROBORATED edit is persisted with the reconciliation so
+      // the bell's card shows what the reviewer now says.
+      star_rating: 1,
+      review_text: 'Completely different text',
       review_reply: 'Hello Paula! Thanks!',
       auto_reply_status: 'parked',
       auto_reply_reason: 'review_edited_after_post',

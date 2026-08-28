@@ -139,12 +139,14 @@ const BANNED_RE = new RegExp([
   // "<protected subject> sailed | breezed | came | got | made it through …" (codex r52).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:sail|breez|cruis|coast|came|come|got|get|made\\s+it|went|go|pull|power|walk)\\w*\\s+(?:right\\s+|straight\\s+)?through\\b', '\\b(?:sailed|breezed|cruised|coasted)\\s+(?:right\\s+)?through\\b',
   // "<protected subject> came out | emerged | ended up | turned out | were … okay | fine | unharmed …" (codex r58).
-  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:came\\s+out|come\\s+out|emerg\\w*|end(?:ed|s)?\\s+up|turn(?:ed|s)?\\s+out|wound\\s+up|pull(?:ed|s)?\\s+through|were|are|was|is|remain\\w*|stay\\w*|seem\\w*|look\\w*|felt|feel\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:okay|ok|fine|alright|all\\s+right|unharmed|unscathed|unaffected|untouched|great|good|well|happy|comfortable|content|relaxed|calm|intact|none\\s+the\\s+worse|no\\s+worse|a-?ok)\\b',
+  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:came\\s+out|come\\s+out|emerg\\w*|end(?:ed|s)?\\s+up|turn(?:ed|s)?\\s+out|wound\\s+up|pull(?:ed|s)?\\s+through|were|are|was|is|remain\\w*|stay\\w*|seem\\w*|look\\w*|felt|feel\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:okay|ok|fine|alright|all\\s+right|unharmed|unscathed|unaffected|untouched|unbothered|unfazed|untroubled|great|good|well|happy|comfortable|content|relaxed|calm|intact|normal|themselves|like\\s+themselves|usual|the\\s+same|at\\s+ease|settled|none\\s+the\\s+worse|no\\s+worse|a-?ok)\\b',
   '\\bnone\\s+the\\s+worse\\b',
+  // "at the half-hour mark / 30-minute point" (codex r59).
+  '\\bat\\s+the\\s+(?:\\d+[- ]?|half[- ]?|quarter[- ]?|one[- ]|two[- ]|three[- ]|an?\\s+)?(?:minute|min|hour|hr|day)s?[- ]?(?:mark|point|line)\\b',
   // "a breeze / a walk in the park / no sweat / painless …" (codex r56).
   '\\b(?:a\\s+breeze|a\\s+walk\\s+in\\s+the\\s+park|no\\s+sweat|a\\s+non[- ]?(?:event|issue)|smooth\\s+sailing|painless\\w*|effortless\\w*|a\\s+piece\\s+of\\s+cake|a\\s+cinch|no\\s+big\\s+deal|nothing\\s+to\\s+it|a\\s+snap|a\\s+doddle|child.s\\s+play)\\b',
   // "<duration> later / afterwards" is a fixed interval in any position (codex r56).
-  '\\b(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\s+(?:later|afterwards?|on|thereafter|down\\s+the\\s+(?:road|line))\\b',
+  '\\b(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\s+(?:later|afterwards?|on|thereafter|down\\s+the\\s+(?:road|line))\\b',
   // "easy | gentle | light | kind | soft | mild | nice on <protected subject>" (codex r53).
   '\\b(?:easy|easier|easiest|light|lighter|kind|kinder|soft|softer|gentle|gentler|mild|milder|nice|nicer|good|better|fine|ok|okay)\\s+(?:enough\\s+)?on\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|skin|lungs|noses|eyes|paws)\\b',
   // "agreed with / sat well with / suited / got along with <protected
@@ -181,8 +183,8 @@ const BANNED_RE = new RegExp([
   // "ready after 30 minutes", "back to normal within an hour".
   // (Timeliness a reviewer wrote — "came out within 2 hours" — stays a
   // provenance question; only the RE-ENTRY shape is banned outright.)
-  '\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|let\\s+back|welcome\\s+back|back\\s+in|back\\s+out|back\\s+on|back\\s+home|back\\s+inside|back\\s+outside|return\\w*|went\\s+back|came\\s+back|come\\s+back|go\\s+back|re-?enter\\w*)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b',
-  '\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|welcome\\s+back)\\b',
+  '\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?|reopen\\w*|resum\\w*|access\\w*|open\\s+again|open|available(?:\\s+again)?|back\\s+in\\s+use|allowed\\s+back|let\\s+back|welcome\\s+back|back\\s+in|back\\s+out|back\\s+on|back\\s+home|back\\s+inside|back\\s+outside|return\\w*|went\\s+back|came\\s+back|come\\s+back|go\\s+back|re-?enter\\w*)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of|at\\s+the)\\s+(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\b',
+  '\\b(?:after|within|in|inside\\s+of)\\s+(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|welcome\\s+back)\\b',
   // Rank claims (claims-ledger rule) and competitor names.
   // Rank / superiority language in ANY grammatical wrapper (claims-ledger rule).
   '\\bbest\\b(?!\\s+(?:regards|wishes))', '\\bnumber\\s*one\\b', '#\\s?1\\b', '\\btop[-\\s]?(?:rated|notch|tier|choice|pick|ranked)\\b', '\\b(?:a|the)\\s+top\\s+(?:pest|lawn|company|team|choice|provider|service)\\b',
@@ -436,6 +438,16 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
   }
   const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
+  // A lowercase name after a staff role noun ("our technician kevin") is a
+  // name too (codex r59): it must be the reviewer's word or an allowed name.
+  const roleNameRe = /\b(?:tech(?:nician)?|inspector|specialist|team\s+member|crew\s+member|technician\s+named|rep|representative|manager|owner|guy|gal|man|lady|woman|fella)\s+([a-z][a-z'-]{1,20})\b/g;
+  const ROLE_FOLLOWERS = new Set(['was', 'is', 'did', 'who', 'that', 'will', 'has', 'had', 'came', 'and', 'or', 'from', 'at', 'on', 'to', 'for', 'in', 'of', 'the', 'a', 'an', 'we', 'you', 'your', 'our', 'they', 'he', 'she', 'it', 'got', 'took', 'made', 'handled', 'said', 'can', 'could', 'would', 'should', 'does', 'do', 'went', 'gets', 'get', 'visit', 'visits', 'visited', 'team', 'today', 'again', 'also', 'even', 'always', 'never', 'really', 'very', 'just', 'still', 'back', 'out', 'over', 'there', 'here', 'when', 'while', 'after', 'before', 'since', 'so', 'as', 'but', 'if', 'then', 'with', 'about', 'himself', 'herself']);
+  let rn;
+  while ((rn = roleNameRe.exec(body)) !== null) {
+    const w = rn[1].toLowerCase();
+    if (ROLE_FOLLOWERS.has(w) || allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || SENTENCE_STARTERS.has(w)) continue;
+    return 'unlisted_name';
+  }
   // Title-case words AND all-caps words ("KEVIN") both need provenance.
   const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;

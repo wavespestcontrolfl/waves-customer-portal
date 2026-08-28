@@ -1140,7 +1140,17 @@ class GoogleBusinessService {
             const editCorroborated = (editPlacesSec != null && editCandidateSec != null && editPlacesSec === editCandidateSec)
               || (!!editPhoto && editPhoto === String(candidate.reviewer_photo_url || '').trim());
             if (editCorroborated && !candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
-              await this._reconcileReviewEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
+              // Persist the corroborated edit WITH the reconciliation (codex
+              // r59): a requeued draft must redraft from the new text, and the
+              // action bell's card must show what the reviewer now says.
+              const placesEditContent = { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id };
+              const edited = await db.transaction(async (trx) => {
+                const liveCand = (await trx('google_reviews').where({ id: candidate.id }).forUpdate().first()) || candidate;
+                if (sampleSyncStart && liveCand.synced_at && new Date(liveCand.synced_at).getTime() > sampleSyncStart.getTime()) return 'yielded';
+                await trx('google_reviews').where({ id: candidate.id }).update({ star_rating: placesEditContent.star_rating, review_text: placesEditContent.review_text, ...(editPhoto ? { reviewer_photo_url: editPhoto } : {}) });
+                return this._reconcileReviewEdit(liveCand, placesEditContent, { conn: trx, bell: false });
+              });
+              if (edited === 'posted_parked') await this._bellEditedAfterPost(candidate, placesEditContent);
             }
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
             continue;
