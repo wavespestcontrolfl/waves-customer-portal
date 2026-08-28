@@ -118,6 +118,30 @@ describe('accepted-onboarding email recipient', () => {
   });
 });
 
+describe('accepted-onboarding email recipient — linked customer without a usable email', () => {
+  test('falls back to the estimate contact', async () => {
+    jest.resetModules();
+    const sendTemplate = jest.fn(async () => ({ ok: true }));
+    jest.doMock('../services/email-template-library', () => ({ sendTemplate, redactEmailAddresses: (s) => s }));
+    jest.doMock('../models/db', () => (table) => {
+      const b = {};
+      b.where = () => b;
+      b.orderBy = () => b;
+      b.first = async () => {
+        if (table === 'customers') return { id: 'cust-1', first_name: 'Pat', email: '' };
+        if (table === 'estimates') return { token: 'tok-cl', customer_name: 'Pat Tester', customer_email: 'pat@example.com' };
+        return undefined;
+      };
+      return b;
+    });
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    await sendEstimateAcceptedOnboarding({ customerId: 'cust-1', estimateId: 'est-cl', serviceLabel: 'Pest Control', appointment: null });
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    expect(sendTemplate.mock.calls[0][0].to).toBe('pat@example.com');
+    expect(sendTemplate.mock.calls[0][0].recipientId).toBe('cust-1');
+  });
+});
+
 describe('accepted-onboarding email acceptance_note', () => {
   // The terms promise "email you a copy" — the note is that copy: verbatim
   // recorded line (never the live constant), the instant, the estimate URL.

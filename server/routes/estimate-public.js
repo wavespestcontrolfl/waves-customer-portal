@@ -8740,8 +8740,18 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
-    const recordAcceptanceTerms = featureGates.isEnabled('estimateAcceptanceTerms');
-    if (recordAcceptanceTerms && acceptedTermsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
+    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms');
+    const recordAcceptanceTerms = acceptanceTermsActive
+      && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
+    // Transition for tabs that never received the terms payload (GH Codex
+    // P0): /data stamps `acceptance_terms_served_version` when it serves the
+    // terms to a customer tab, so an unattested accept is refused only when
+    // this estimate WAS served terms (a tab that showed them but did not
+    // attest, or a stale version) — a pre-gate tab (legacy SSR page, the
+    // previous React bundle) that never saw them accepts unrecorded, exactly
+    // as before the gate. Nothing is ever recorded without an attestation.
+    if (acceptanceTermsActive && !recordAcceptanceTerms
+      && (acceptedTermsVersion || estimate.acceptance_terms_served_version)) {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
@@ -10237,7 +10247,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
           terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
           accepted_at: acceptAuthorizedAt,
-          ip: clientIp(req) || null,
+          // Proxy-validated client (trust proxy = 1 hop in index.js), never
+          // the raw X-Forwarded-For head a requester can supply (GH Codex P1).
+          ip: String(req.ip || '').slice(0, 64) || null,
           user_agent: (req.get('user-agent') || '').slice(0, 1000) || null,
         });
         await trx('estimates').where({ id: estimate.id })
@@ -23495,6 +23507,20 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // its first two octets and reduces the user-agent to a family label —
     // enough to say "this device, this moment" without printing raw
     // telemetry on a PDF.
+    // Serving the terms to a real customer tab (not a headless document
+    // render or a staff draft preview) stamps the estimate so the accept
+    // route can require the attestation from that point on — see the
+    // transition note on PUT /accept.
+    const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms');
+    if (acceptanceTermsServed && !isPdfRenderPass && !adminDraftPreview
+      && estimate.acceptance_terms_served_version !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
+      try {
+        await db('estimates').where({ id: estimate.id })
+          .update({ acceptance_terms_served_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
+      } catch (e) {
+        logger.warn(`[estimate-data] acceptance terms served stamp failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
     let acceptanceRecord = null;
     if (estimate.status === 'accepted' && estimate.terms_version) {
       try {
@@ -23555,7 +23581,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // the page renders above Accept, served by the SERVER so the copy the
       // customer sees is the copy the accept route records. Absent when the
       // gate is off ⇒ response byte-identical to today.
-      ...(featureGates.isEnabled('estimateAcceptanceTerms') ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload() } : {}),
+      ...(acceptanceTermsServed ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload() } : {}),
       ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders

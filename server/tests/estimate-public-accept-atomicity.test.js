@@ -44,10 +44,11 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  * 12. Gate on + the client attests the served version → ONE estimate_acceptances
  *    row (verbatim snapshot, ip, ua, accepted_at) written in the accept
  *    transaction, estimates.terms_version + customers.accepted_terms_version
- *    stamped; a rolled-back accept leaves no record. A stale OR absent
- *    version 409s TERMS_VERSION_STALE before any mutation (the attestation is
- *    required under the gate). A gate-off server ignores the field and
- *    records nothing.
+ *    stamped; a rolled-back accept leaves no record. A stale version, or an
+ *    absent one once /data served the terms to this estimate, 409s
+ *    TERMS_VERSION_STALE before any mutation; a never-served (pre-gate) tab
+ *    accepts unrecorded. A gate-off server ignores the field and records
+ *    nothing. The recorded IP is the proxy-validated req.ip.
  */
 
 // ── In-memory fake knex ────────────────────────────────────────────────────
@@ -1156,8 +1157,12 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     });
   }
 
-  function seed(overrides) {
-    resetStore(recurringPestEstimate(overrides));
+  // Served = /data already handed this tab the terms (the stamp /data writes).
+  function seed(overrides, { served = true } = {}) {
+    resetStore(recurringPestEstimate({
+      ...(served ? { acceptance_terms_served_version: CURRENT } : {}),
+      ...overrides,
+    }));
     db.__state.tables.estimate_acceptances = [];
   }
 
@@ -1170,7 +1175,10 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
 
     const res = await fetch(`${base}/api/estimates/tok-terms-1-x0123456789/accept`, {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '203.0.113.9' },
+      // A requester-supplied X-Forwarded-For must never become the recorded
+      // IP: the record takes req.ip (proxy-validated under index.js's
+      // trust-proxy setting; the loopback here, where nothing is trusted).
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '198.51.100.77' },
       body: JSON.stringify({ termsVersion: CURRENT }),
     });
     expect(res.status).toBe(200);
@@ -1187,9 +1195,10 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
       method: 'public_estimate',
       terms_version: CURRENT,
       terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
-      ip: '203.0.113.9',
       user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
     });
+    expect(records[0].ip).toMatch(/127\.0\.0\.1|::1/);
+    expect(records[0].ip).not.toContain('198.51.100.77');
     expect(records[0].accepted_at).toBeTruthy();
     expect(storedEstimate().terms_version).toBe(CURRENT);
     expect(db.__state.tables.customers.find((c) => c.id === customerId).accepted_terms_version).toBe(CURRENT);
@@ -1220,7 +1229,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
-  test('absent version (gate on) is refused; attested version with the gate OFF records nothing', async () => {
+  test('absent version: refused once terms were served; a pre-gate tab (never served) accepts unrecorded; gate OFF records nothing', async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
     const noVersion = await putAccept('tok-terms-4-x0123456789', {});
@@ -1229,6 +1238,15 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(storedEstimate().status).toBe('sent');
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+
+    // Pre-gate tab: this estimate was never served the terms (legacy SSR page
+    // or the previous React bundle loaded before the flip) — accept as today.
+    seed({ id: 'est-terms-4b', token: 'tok-terms-4b-x012345678' }, { served: false });
+    conversionOk();
+    const preGate = await putAccept('tok-terms-4b-x012345678', {});
+    expect(preGate.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
 
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });

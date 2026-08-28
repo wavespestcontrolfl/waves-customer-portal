@@ -73,15 +73,17 @@ async function acceptanceNoteFor(estimateId) {
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment } = {}) {
   try {
     if (!estimateId) return null;
-    // Recipient: the linked customer, else the estimate's own contact (a
-    // phoneless one-time accept commits without a customer row).
+    // Recipient: the linked customer, else the estimate's own contact — a
+    // phoneless one-time accept commits without a customer row, and a linked
+    // customer row can carry no usable email while the estimate does.
     const customer = customerId
       ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email')
       : null;
-    const estimateContact = customer
+    let email = clean(customer?.email);
+    const estimateContact = email.includes('@')
       ? null
       : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
-    const email = clean(customer?.email || estimateContact?.customer_email);
+    if (estimateContact) email = clean(estimateContact.customer_email);
     if (!email || !email.includes('@')) {
       logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
       return null;

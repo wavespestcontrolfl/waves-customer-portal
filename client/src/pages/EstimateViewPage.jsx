@@ -80,7 +80,7 @@ import { loadStripeSdk } from '../lib/stripeLoader';
 import useModalFocus from '../hooks/useModalFocus';
 import { fmtMoney, fmtMoneySigned } from '../lib/money';
 import { proposalHasAuthoredTerms } from '../lib/proposal-sections';
-import { formatETDate } from '../lib/timezone';
+import { formatETDate, formatETDateTime } from '../lib/timezone';
 import { PRICE_FONT, W, waveGuardChipStyle } from '../components/estimate/tokens';
 import { DOC_COLUMN_MAX, DOC_FONT, docTransition } from '../theme-doc';
 
@@ -2816,6 +2816,33 @@ function AcceptanceTermsLine({ terms }) {
   );
 }
 
+/**
+ * The recorded acceptance on the accepted page: the verbatim line + terms
+ * the customer tapped Accept under, and the when / version / device of the
+ * tap. This is the surface the onboarding email's "full terms" link lands
+ * on (GH Codex P1); the PDF prints the same block. Rendered only when the
+ * server served a record (data.acceptance) — nothing for pre-gate accepts.
+ */
+function AcceptanceRecordCard({ acceptance }) {
+  if (!acceptance || !acceptance.termsText) return null;
+  const lines = String(acceptance.termsText).split('\n').filter(Boolean);
+  const meta = [
+    acceptance.acceptedAt ? `Accepted electronically · ${formatETDateTime(acceptance.acceptedAt, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })} ET` : null,
+    acceptance.termsVersion ? `Terms ${acceptance.termsVersion}` : null,
+    acceptance.device || null,
+    acceptance.recordId ? `Record ${acceptance.recordId}` : null,
+  ].filter(Boolean);
+  return (
+    <section style={estimateCard()} data-testid="acceptance-record">
+      <div style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600, marginBottom: 10 }}>Service &amp; payment authorization</div>
+      <div style={{ display: 'grid', gap: 6, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
+        {lines.map((line, i) => <div key={i}>{line}</div>)}
+      </div>
+      <div style={{ marginTop: 12, fontSize: 13, lineHeight: 1.5, color: ESTIMATE_MUTED }}>{meta.join(' · ')}</div>
+    </section>
+  );
+}
+
 export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
@@ -5002,8 +5029,9 @@ function EstimateViewPageInner() {
           if (body.code === 'TERMS_VERSION_STALE') {
             // The acceptance copy changed since this tab loaded — refetch so
             // the line above Accept is the one the server will record, keep
-            // the reservation and preference, and ask for one more tap.
-            await loadEstimate();
+            // the reservation, preference and plan selections, and ask for
+            // one more tap.
+            await loadEstimate({ preserveSelection: true });
             throw new Error(body.error || 'The terms were updated — please review the line above Accept and confirm again.');
           }
           if (body.code === 'PREPAY_QUOTE_STALE') {
@@ -6102,6 +6130,7 @@ function EstimateViewPageInner() {
             appointmentLabel={existingAppointment ? formatAppointmentLabel(existingAppointment) : null}
             appointmentServiceType={existingAppointment?.serviceType || null}
           />
+          <AcceptanceRecordCard acceptance={data.acceptance} />
           <AppShowcaseCard />
           <EstimateAddServiceRequestCard
             offer={addServiceOffer}
