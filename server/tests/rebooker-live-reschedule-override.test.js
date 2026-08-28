@@ -125,6 +125,8 @@ function wireRescheduleMocks(service) {
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
+    // The series writer always looks up a prior operation_key first — none here.
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected db table ${table}`);
   });
 
@@ -378,6 +380,8 @@ describe('live-status reschedule override (allowLive)', () => {
       if (table === 'property_preferences') {
         return chain({ first: jest.fn().mockResolvedValue(preferredDay ? { preferred_day: preferredDay } : null) });
       }
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -726,6 +730,8 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -795,6 +801,8 @@ describe('live-status reschedule override (allowLive)', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
     return { trx, techOverlapProbe, anchorUpdate };

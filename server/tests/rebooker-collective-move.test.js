@@ -128,7 +128,8 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
   const dbQueries = [anchorLookup, parentLookup];
   const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
   const priorLookup = chain({ first: jest.fn().mockResolvedValue(priorMove) });
-  const seriesMovesDb = chain();
+  // Non-replay tests: the (always-run) prior lookup finds nothing.
+  const seriesMovesDb = chain({ first: jest.fn().mockResolvedValue(undefined) });
   db.fn = { now: jest.fn(() => 'NOW()') };
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
@@ -400,6 +401,13 @@ describe('rescheduleSeries — one recorded operation', () => {
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' }))
       .rejects.toMatchObject({ statusCode: 409, code: 'OPERATION_KEY_REUSED' });
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('callers that mint no key get the action identity anchor:from:to as the operation key', async () => {
+    const { seriesMovesInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${BASE}:${TARGET}` });
+    expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${BASE}:${TARGET}`, status: 'committed' });
   });
 
   test('a repeated operation_key replays the committed result without re-running the sweep', async () => {

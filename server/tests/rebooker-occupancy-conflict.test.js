@@ -122,6 +122,8 @@ function wireRescheduleMocks(svc) {
   db.mockImplementation((table) => {
     if (table === 'scheduled_services') return dbQueries.shift();
     if (table === 'reschedule_log') return dbQueries.shift();
+    // The series writer always looks up a prior operation_key first — none here.
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected db table ${table}`);
   });
 
@@ -447,6 +449,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -506,6 +510,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -572,6 +578,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -649,6 +657,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -704,6 +714,8 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 

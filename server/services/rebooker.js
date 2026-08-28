@@ -1105,16 +1105,6 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    // operation_key dedupes the INITIATING action: a retried request (timeout,
-    // double tap, an agent re-running its tool) returns the committed result
-    // instead of shifting the series a second time. The series_moves id it
-    // carries is the idempotency key for every downstream effect.
-    if (options.operationKey) {
-      const prior = await db('series_moves')
-        .where({ anchor_service_id: serviceId, operation_key: options.operationKey, status: 'committed' })
-        .first();
-      if (prior) return replaySeriesMoveResult(prior, newDate);
-    }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
     // concurrency aborts are unaffected.
@@ -1202,6 +1192,26 @@ class SmartRebooker {
         code: 'SLOT_TAKEN',
       });
     }
+    // (After every pre-transaction validation above: a replay answers only a
+    // request the move itself would accept.)
+    // operation_key dedupes the INITIATING action: a retried request (timeout,
+    // double tap, an agent re-running its tool) returns the committed result
+    // instead of shifting the series a second time. The series_moves id it
+    // carries is the idempotency key for every downstream effect. Callers
+    // that mint no key get the action's natural identity — this anchor,
+    // from its current date, to the target — so two concurrent identical
+    // submissions still serialize on the partial unique index (the loser
+    // replays the winner), while a later genuine move back to the same date
+    // (the anchor then sits elsewhere) is a different action.
+    const operationKey = typeof options.operationKey === 'string' && options.operationKey
+      ? options.operationKey
+      : `${serviceId}:${dateOnly(service.scheduled_date)}:${dateOnly(newDate)}`;
+    {
+      const prior = await db('series_moves')
+        .where({ anchor_service_id: serviceId, operation_key: operationKey, status: 'committed' })
+        .first();
+      if (prior) return replaySeriesMoveResult(prior, newDate);
+    }
     const {
       isMonthBasedPattern, opts, deltaDays, pureCadenceDate, projectOccurrenceDate,
     } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
@@ -1229,7 +1239,7 @@ class SmartRebooker {
     let skippedCount = 0;
     const moveRows = [];
     const failedMoveFields = {
-      operation_key: options.operationKey || null,
+      operation_key: operationKey,
       anchor_service_id: serviceId,
       parent_service_id: parentId,
       customer_id: service.customer_id,
@@ -1843,9 +1853,9 @@ class SmartRebooker {
 
       return touched;
     }).catch(async (err) => {
-      if (err?.code === '23505' && options.operationKey) {
+      if (err?.code === '23505') {
         const prior = await db('series_moves')
-          .where({ anchor_service_id: serviceId, operation_key: options.operationKey, status: 'committed' })
+          .where({ anchor_service_id: serviceId, operation_key: operationKey, status: 'committed' })
           .first()
           .catch(() => null);
         if (prior) return { replayedFrom: prior };

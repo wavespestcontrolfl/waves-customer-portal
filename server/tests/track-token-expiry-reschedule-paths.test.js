@@ -95,6 +95,8 @@ describe('track token expiry on reschedule paths', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return dbQueries.shift();
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -181,6 +183,8 @@ describe('track token expiry on reschedule paths', () => {
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return dbQueries.shift();
       if (table === 'reschedule_log') return escalationCount;
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
 
@@ -228,6 +232,8 @@ describe('track token expiry on reschedule paths', () => {
     const scheduledQueries = [servicesQuery, updateQuery];
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
+      // The series writer always looks up a prior operation_key first — none here.
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected db table ${table}`);
     });
     // The mover wraps each per-stop CAS in a short trx solely to hold the

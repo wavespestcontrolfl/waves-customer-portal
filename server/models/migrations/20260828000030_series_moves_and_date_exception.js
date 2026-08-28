@@ -135,7 +135,7 @@ exports.up = async function up(knex) {
        WHERE s.id = l.scheduled_service_id
          AND s.is_recurring = true
          AND s.status NOT IN ('completed', 'cancelled')
-         AND s.scheduled_date >= CURRENT_DATE
+         AND s.scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date
          AND s.date_exception = false
     `);
      

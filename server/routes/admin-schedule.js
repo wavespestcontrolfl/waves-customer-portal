@@ -5962,6 +5962,17 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(svc.status))) {
                 throw Object.assign(new Error(`already ${svc.status}`), { isValidation: true });
               }
+              // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this
+              // bulk mover writes ONE row and cannot shift the sister visits,
+              // so with the gate on a DATE move of a cadence visit is refused
+              // rather than silently applied per-visit (refuse-don't-drop,
+              // same as the IB tool); the bulk series path is a follow-up.
+              if (collectiveMoveGateOn() && svc.is_recurring === true && dateOnly(svc.scheduled_date) !== bulkTargetDate) {
+                throw Object.assign(
+                  new Error('part of a recurring plan — with collective moves on, move it from Dispatch or the Edit appointment modal so its future visits follow'),
+                  { isValidation: true },
+                );
+              }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
               const updates = {
