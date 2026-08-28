@@ -690,7 +690,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     let res = await poller.pollPending();
     expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required: 0 distinct/) });
     expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ branch: openPr().head.ref, actionType: 'new_supporting_blog', frontmatter: expect.objectContaining({ title: 'Test Post' }) }));
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ branch: openPr().head.ref, actionType: 'new_supporting_blog', brief: expect.any(Object), frontmatter: expect.objectContaining({ title: 'Test Post' }) }));
 
     publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null });
     res = await poller.pollPending();

@@ -1331,15 +1331,17 @@ async function firstExistingRouteFile(basePaths, routeSlug, { ref = null } = {})
 }
 
 async function resolveExistingAstroFileForTarget(targetUrlOrPath, opts = {}) {
+  // `opts.ref`: resolve against a branch (the PR head) instead of main.
+  const { ref = null } = opts;
   const target = /^src\/content\//.test(String(targetUrlOrPath || '')) ? targetUrlOrPath : urlToAstroPath(targetUrlOrPath);
   if (target) {
-    const resolved = await resolveExistingAstroFile(target);
+    const resolved = await resolveExistingAstroFile(target, { ref });
     if (resolved) return resolved;
   }
 
   const registryPath = await registryAstroPathForTarget(targetUrlOrPath, opts);
   if (registryPath && registryPath !== target) {
-    const resolved = await resolveExistingAstroFile(registryPath);
+    const resolved = await resolveExistingAstroFile(registryPath, { ref });
     if (resolved) return resolved;
   }
 
@@ -1737,15 +1739,18 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
   let label = '';
   let ignoreHero = false;
   if (actionType === 'refresh_existing_page') {
-    // Same target resolution as publishRefresh; non-blog targets carry no
-    // body-image contract.
-    const target = filePath || urlToAstroPath(targetUrl);
-    if (!target) return { ok: false, reason: `refresh target unresolved (${targetUrl || 'no url'})` };
-    if (!isBlogTarget(target)) return { ok: true, reason: 'non_blog_target' };
-    found = await resolveExistingAstroFile(target, { ref: branch });
-    label = target;
+    // EXACTLY publishRefresh's target resolution (explicit file_path, else
+    // URL → path, else the content_registry source path — a blog canonical
+    // outside /blog/ lives there), on the PR head. Only a RESOLVED non-blog
+    // file is exempt; an unresolved target fails closed.
+    found = filePath
+      ? await resolveExistingAstroFile(filePath, { ref: branch })
+      : await resolveExistingAstroFileForTarget(targetUrl, { ref: branch });
+    label = filePath || targetUrl || 'refresh target';
+    if (!found) return { ok: false, reason: `refresh target ${label} not found on ${branch}` };
+    if (!isBlogTarget(found.path)) return { ok: true, reason: 'non_blog_target' };
     // Grandfather: the post on MAIN already embeds its hero in the body.
-    const live = await resolveExistingAstroFile(target);
+    const live = await resolveExistingAstroFile(found.path);
     if (live?.file?.content) {
       try { const lp = fm.parse(live.file.content); ignoreHero = bodyEmbedsHero(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { ignoreHero = false; }
     }

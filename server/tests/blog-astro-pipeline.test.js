@@ -3890,7 +3890,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     });
     const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
     expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toEqual({ ok: true, reason: null });
+    // A non-blog target is exempt only once RESOLVED on the branch; unresolved fails closed (hook r15).
+    gh.getFile.mockImplementationOnce(async (path, ref) => (ref === 'content/refresh-x' && path === 'src/content/services/pest-control-venice-fl.md' ? { content: '---\ntitle: S\n---\nService.', sha: 's' } : null));
     expect(await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).toEqual({ ok: true, reason: 'non_blog_target' });
+    expect((await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).reason).toMatch(/not found on content\/refresh-x/);
     // New-post lane: a FLAT legacy .md that renders the same route is the file publication updated → it is what gets checked.
     const flatFm = validFrontmatter({ slug: '/pest-control/drywood-frass-venice/', title: 'Drywood', canonical: 'https://www.wavespestcontrol.com/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/drywood-frass-venice/hero.webp', alt: 'h' }, og_image: '/images/blog/drywood-frass-venice/hero.webp' });
     const flatMd = fmModule.stringify(flatFm, 'Body without pictures.\n');

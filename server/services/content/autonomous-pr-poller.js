@@ -966,8 +966,12 @@ async function maybeAutoMerge(run, pr) {
     let bodyImages;
     try {
       const draftForImages = parseDraftPayload(run.draft_payload);
+      // The brief's category signals decide the route exactly as the
+      // publisher derived it (a lookup blip throws → withheld this tick).
+      const briefForImages = await briefCategorySignalsForRun(run);
       bodyImages = await publisher.assertBodyImagesAtHead({
         frontmatter: draftForImages?.frontmatter || {},
+        brief: briefForImages,
         branch,
         actionType: run.action_type,
         targetUrl: targetForRun(run).url,
