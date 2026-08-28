@@ -66,6 +66,14 @@ describe('publishAstro — topic-targeting gate', () => {
     await expect(pub.publishAstro('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
   });
 
+  test('a legacy status=published row with no astro fields is an existing post — exempt, corpus not consulted', async () => {
+    const { pub, updates, loader } = load({ post: { ...TAEXX_ROW, status: 'published', astro_status: null, astro_live_url: null }, corpusError: 'github_down' });
+    const err = await pub.publishAstro('post_1').catch((e) => e);
+    expect(err?.code).not.toBe('BLOG_TOPIC_TARGETING_BLOCKED');
+    expect(loader).not.toHaveBeenCalled();
+    expect(updates.some((u) => /TOPIC_|github_down/.test(String(u.patch.astro_publish_error || '')))).toBe(false);
+  });
+
   test('a post already live on the hub is a refresh — exempt from the gate even when the corpus is DOWN', async () => {
     const { pub, updates } = load({ post: { ...TAEXX_ROW, astro_status: 'live', astro_live_url: 'https://www.wavespestcontrol.com/pest-control/lakewood-ranch-taexx/' }, corpusError: 'github_down' });
     // Fails later on hero/GitHub plumbing this harness does not provide — what is pinned is that the failure is NOT the topic gate.

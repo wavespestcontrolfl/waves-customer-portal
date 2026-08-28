@@ -168,6 +168,10 @@ function nearestLocation(latitude, longitude) {
 // can emit must have an entry here, or a recovered city would silently route
 // to the Bradenton default — e.g. Charlotte-county leads must reach the Venice
 // office, not Bradenton.
+// The served south-Hillsborough localities. Also read by the content
+// topic-targeting gate: "Hillsborough County" targeting is out-of-footprint
+// unless one of these anchors it.
+const SOUTH_HILLSBOROUGH_CITIES = ['ruskin', 'apollo beach', 'sun city center', 'wimauma', 'gibsonton', 'riverview'];
 const CITY_TO_LOCATION = {
   'lakewood ranch': 'bradenton', 'bradenton': 'bradenton', 'university park': 'bradenton',
   'cortez': 'bradenton', 'anna maria': 'bradenton', 'bradenton beach': 'bradenton', 'holmes beach': 'bradenton',
@@ -178,8 +182,7 @@ const CITY_TO_LOCATION = {
   'parrish': 'parrish', 'palmetto': 'parrish', 'ellenton': 'parrish', 'terra ceia': 'parrish',
   // Northern reach into south Hillsborough served by the Parrish office
   // (mirrors the ZIP routing in routes/satisfaction.js).
-  'ruskin': 'parrish', 'apollo beach': 'parrish', 'sun city center': 'parrish',
-  'wimauma': 'parrish', 'gibsonton': 'parrish', 'riverview': 'parrish',
+  ...Object.fromEntries(SOUTH_HILLSBOROUGH_CITIES.map((c) => [c, 'parrish'])),
 };
 
 function resolveLocation(city) {
@@ -352,6 +355,7 @@ function resolveLocationFromCandidates(candidates = []) {
 module.exports = {
   WAVES_LOCATIONS,
   CITY_TO_LOCATION,
+  SOUTH_HILLSBOROUGH_CITIES,
   REVIEW_CITY_EXTRAS,
   REVIEW_CITY_TO_LOCATION,
   resolveReviewLocation,

@@ -63,6 +63,7 @@ const STOP_WORDS = new Set([
 function tokenize(text) {
   return String(text || '')
     .toLowerCase()
+    .replace(/[’']s\b/g, '') // possessive: "Taexx's" → taexx, never taexxs
     .replace(/[’']/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
     .split(/\s+/)
@@ -104,6 +105,9 @@ const CODES = Object.freeze({
 // live in the guardrails blocklist and classify as out_of_area.
 const REGIONAL_RE = /\b(southwest florida|sw florida|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
 const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
+// Compounds where "Florida"/"fl" is not geography: the Florida room (a
+// lanai-style sunroom) and the fluid ounce.
+const STATEWIDE_EXEMPT_RE = /\bflorida\s+rooms?\b|\bfl\.?\s*oz\b/gi;
 // Any other US state (or territory) named in targeting text is
 // out-of-footprint by construction. "Virginia" and "Washington" are left
 // out — both are common person names (Virginia runs the Waves office).
@@ -122,12 +126,22 @@ const STATE_ABBR_RE = new RegExp(
   + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`,
   'i'
 );
-// Hillsborough County is split: its south end (Ruskin, Apollo Beach, Sun City
-// Center, Wimauma, Gibsonton, Riverview — config/locations.js) is served from
-// Parrish; the rest is Tampa. County-wide targeting is out-of-area UNLESS a
-// served locality anchors it, which is why the county stays OUT of the shared
-// prose blocklist — "Ruskin, in south Hillsborough County" is a true claim.
+// Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
+// config/locations.js) is served from Parrish; the rest is Tampa. County-wide
+// targeting is out-of-area UNLESS one of those south-Hillsborough towns
+// anchors it — a served city elsewhere ("Hillsborough County vs Sarasota
+// County") does not. That is why the county stays OUT of the shared prose
+// blocklist: "Ruskin, in south Hillsborough County" is a true claim.
 const SPLIT_COUNTY_RE = /\bhillsborough county\b/i;
+let southHillsboroughCache;
+function southHillsboroughRe() {
+  if (southHillsboroughCache !== undefined) return southHillsboroughCache;
+  try {
+    const { SOUTH_HILLSBOROUGH_CITIES } = require('../../config/locations');
+    southHillsboroughCache = cityRe(SOUTH_HILLSBOROUGH_CITIES || []);
+  } catch { southHillsboroughCache = null; } // fail closed: the county always blocks
+  return southHillsboroughCache;
+}
 // Place names that are also ordinary words or person names. Deliberately
 // NOT in the shared content-guardrails blocklist (which scans body prose);
 // here they count only with geographic context — "in/near <Name>" or
@@ -250,10 +264,10 @@ function classifyGeoScope(text) {
     ...findAll(NAME_STATE_RE, t),
     ...findAll(CONTEXT_PLACE_RE, t),
     ...findAll(STATE_ABBR_RE, t).map((s) => s.toUpperCase()),
-    ...(!footprint.length && SPLIT_COUNTY_RE.test(t) ? ['Hillsborough County'] : []),
+    ...(SPLIT_COUNTY_RE.test(t) && !southHillsboroughRe()?.test(t) ? ['Hillsborough County'] : []),
   ];
   const regional = findAll(REGIONAL_RE, t);
-  const statewide = STATEWIDE_RE.test(t);
+  const statewide = STATEWIDE_RE.test(t.replace(STATEWIDE_EXEMPT_RE, ' '));
   let scope = 'none';
   if (out_of_area.length) scope = 'out_of_area';
   else if (footprint.length) scope = 'footprint';
@@ -354,8 +368,12 @@ async function loadLiveIndex() {
   return indexCorpus(corpus);
 }
 
+// A row already on the hub, or a legacy pre-Astro row the admin routes still
+// carry as status='published' (no astro_status / astro_live_url), is an
+// existing post: re-publishing it is a refresh, never a new sibling.
 function isLiveRow(post = {}) {
-  return post.astro_status === 'live' || post.astro_status === 'merged' || Boolean(post.astro_live_url);
+  return post.astro_status === 'live' || post.astro_status === 'merged' || Boolean(post.astro_live_url)
+    || post.status === 'published';
 }
 
 /**

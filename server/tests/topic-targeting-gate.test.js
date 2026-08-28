@@ -469,3 +469,34 @@ describe('entity identity = proper noun in body prose (uncapped audit 2026-08-27
     expect(gate.indexCorpus(corpus).properNouns.size).toBe(0);
   });
 });
+
+describe('PR codex r3 (86e165cc1)', () => {
+  test('"Florida room" and "fl oz" are not statewide targeting; "in Florida" still is', () => {
+    expect(gate.classifyGeoScope('Pest Control for Florida Rooms').scope).toBe('none');
+    expect(gate.classifyGeoScope('Pesticide Dilution in fl oz').scope).toBe('none');
+    expect(gate.evaluateDraftFraming({ frontmatter: { title: 'Keeping Bugs Out of Your Florida Room', slug: '/pest-control/florida-room-bugs/' } }).ok).toBe(true);
+    expect(gate.classifyGeoScope('new construction pest control in florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('florida room pest control in florida').scope).toBe('statewide');
+  });
+  test('the Hillsborough County exemption needs a south-Hillsborough town, not any served city', () => {
+    expect(gate.classifyGeoScope('Hillsborough County vs Sarasota County pest control').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('Pest control across Hillsborough County and Bradenton').scope).toBe('out_of_area');
+    for (const town of ['Ruskin', 'Apollo Beach', 'Sun City Center', 'Wimauma', 'Gibsonton', 'Riverview']) {
+      expect(gate.classifyGeoScope(`pest control in ${town}, Hillsborough County`).scope).toBe('footprint');
+    }
+  });
+  test('a legacy status=published row (no astro fields) is an existing post → refresh-exempt before the corpus loads', async () => {
+    const loadIndex = jest.fn().mockRejectedValue(new Error('github_down'));
+    const r = await gate.evaluateBlogPostRow({ title: 'Your Home Came With Taexx', keyword: 'taexx', slug: 'taexx-home', status: 'published', astro_status: null, astro_live_url: null }, { loadIndex });
+    expect(r).toMatchObject({ ok: true, applicable: false, skipped: 'already_live' });
+    expect(loadIndex).not.toHaveBeenCalled();
+    const fresh = await gate.evaluateBlogPostRow({ title: 'Your Home Came With Taexx', keyword: 'taexx', slug: 'taexx-home', status: 'draft' }, { loadIndex }).catch((e) => e);
+    expect(fresh).toBeInstanceOf(Error);
+  });
+  test('possessives normalize to the entity: "Taexx\'s" owns nothing new', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: "What Taexx's Tubes Mean for Your Home", slug: '/pest-control/what-taexxs-tubes-mean/', primary_keyword: "taexx's tubes" } }, { index, service: 'pest' });
+    expect(r.ok).toBe(false);
+    expect(r.findings.some((f) => f.code === gate.CODES.CANNIBALIZES_EXISTING)).toBe(true);
+  });
+});
