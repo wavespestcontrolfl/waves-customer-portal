@@ -90,6 +90,34 @@ describe('GATE_ESTIMATE_ACCEPTANCE_TERMS', () => {
   });
 });
 
+describe('accepted-onboarding email recipient', () => {
+  test('a customer-less accept emails the estimate contact with the acceptance note', async () => {
+    jest.resetModules();
+    const sendTemplate = jest.fn(async () => ({ ok: true }));
+    jest.doMock('../services/email-template-library', () => ({ sendTemplate, redactEmailAddresses: (s) => s }));
+    jest.doMock('../models/db', () => (table) => {
+      const b = {};
+      b.where = () => b;
+      b.orderBy = () => b;
+      b.first = async () => {
+        if (table === 'customers') return undefined;
+        if (table === 'estimates') return { token: 'tok-cl', customer_name: 'Pat Q. Tester', customer_email: 'pat@example.com' };
+        if (table === 'estimate_acceptances') return { terms_version: 'v2026-09', terms_text: 'Line.\nMore.', accepted_at: '2026-08-28T19:04:00Z' };
+        return undefined;
+      };
+      return b;
+    });
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    await sendEstimateAcceptedOnboarding({ customerId: null, estimateId: 'est-cl', serviceLabel: 'Pest Control', appointment: null });
+    expect(sendTemplate).toHaveBeenCalledTimes(1);
+    const call = sendTemplate.mock.calls[0][0];
+    expect(call.to).toBe('pat@example.com');
+    expect(call.recipientId).toBeNull();
+    expect(call.payload.first_name).toBe('Pat');
+    expect(call.payload.acceptance_note).toContain('“Line.”');
+  });
+});
+
 describe('accepted-onboarding email acceptance_note', () => {
   // The terms promise "email you a copy" — the note is that copy: verbatim
   // recorded line (never the live constant), the instant, the estimate URL.
@@ -125,16 +153,16 @@ describe('accepted-onboarding email acceptance_note', () => {
     expect(note).toMatch(/\/estimate\/tok-note-1$/);
   });
 
-  test('no record, or gate off → empty string (block dropped, email unchanged)', async () => {
+  test('no record → empty string (block dropped, email unchanged)', async () => {
     rows.acceptance = null;
-    let { _private } = require('../services/estimate-accepted-email');
+    const { _private } = require('../services/estimate-accepted-email');
     expect(await _private.acceptanceNoteFor('est-1')).toBe('');
+  });
 
+  test('a recorded acceptance is still emailed with the gate OFF (kill switch never hides evidence)', async () => {
     gateOn = false;
-    rows.acceptance = { terms_version: 'v2026-09', terms_text: 'x', accepted_at: '2026-08-28T19:04:00Z' };
-    jest.resetModules();
-    jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false }));
-    ({ _private } = require('../services/estimate-accepted-email'));
-    expect(await _private.acceptanceNoteFor('est-1')).toBe('');
+    rows.acceptance = { terms_version: 'v2026-09', terms_text: 'Line.\nMore.', accepted_at: '2026-08-28T19:04:00Z' };
+    const { _private } = require('../services/estimate-accepted-email');
+    expect(await _private.acceptanceNoteFor('est-1')).toContain('“Line.”');
   });
 });

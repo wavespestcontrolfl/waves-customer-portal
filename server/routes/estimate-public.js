@@ -8299,11 +8299,22 @@ async function handleEstimateView(req, res, next) {
     // their side effects) and never enter the experiment below.
     const estimatePdfRenderPass = req.query.mode === 'pdf'
       && featureGates.isEnabled('estimateDocPdf');
+    // Acceptance terms live ONLY in the React view (server-served line +
+    // drawer + the render-bound version attestation). The legacy server-HTML
+    // page neither renders them nor attests, so under the gate its accept
+    // would 409 TERMS_VERSION_STALE with no way forward (pre-push Codex P0).
+    // Same deal as the card-hold / recurring-card forces above. Only estimates
+    // that can still accept: expired / terminal / archived rows have no
+    // accept to protect and keep their SSR pages (the expired carve-out
+    // below). Gate-tied so the kill switch fully restores today's routing.
+    const acceptanceTermsForcesReactView = featureGates.isEnabled('estimateAcceptanceTerms')
+      && isEstimateAcceptActive(estimate);
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
       || recurringCardForcesReactView
-      || estimatePdfRenderPass;
+      || estimatePdfRenderPass
+      || acceptanceTermsForcesReactView;
 
     // Estimate-view v1/v2 holdback experiment (GATE_GROWTHBOOK). Only the plain
     // v2-by-default population is eligible: published, not an admin preview, not
@@ -8326,6 +8337,7 @@ async function handleEstimateView(req, res, next) {
       && !cardHoldForcesReactView
       && !recurringCardForcesReactView
       && !estimatePdfRenderPass
+      && !acceptanceTermsForcesReactView
       && !adminPreviewRequested
       // Only estimates that can still convert: isEstimateAcceptActive excludes
       // unpublished, terminal (accepted/declined/expired/send_failed), archived,
@@ -8347,6 +8359,16 @@ async function handleEstimateView(req, res, next) {
       return res.set('Content-Type', 'text/html').send(
         renderExpiredPage({ address: estimate.address, customerName: estimate.customer_name })
       );
+    }
+    // The /api/estimates/:token mount renders legacy HTML regardless of the
+    // React decision; under the acceptance-terms gate that page cannot
+    // accept (see acceptanceTermsForcesReactView), so send the visitor to
+    // the React URL for the same estimate instead of a dead-end 409. After
+    // the expired carve-out: an expired estimate cannot accept, so it keeps
+    // its personalized SSR expired page.
+    if (acceptanceTermsForcesReactView) {
+      const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+      return res.redirect(302, `/estimate/${encodeURIComponent(estimate.token)}${qs}`);
     }
 
     // Track every real view (count + last_viewed_at). Bot UAs and admin
@@ -11699,7 +11721,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // idempotent per estimate so an accept retry can't double-send. The
     // earliest visit the accept flow scheduled (if any) supplies the
     // appointment line; the template degrades cleanly when none exists.
-    if (customerId) {
+    // A phoneless one-time accept commits with NO customer row; under the
+    // acceptance-terms gate that customer was still promised an emailed
+    // copy, so the sender falls back to the estimate's own contact
+    // (pre-push Codex P1). Gate off ⇒ customer-less accepts email nothing,
+    // exactly as before.
+    if (customerId || recordAcceptanceTerms) {
       const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
       // DB-refreshed rows carry scheduled_date as a Date (pg materializes
       // date columns at local midnight); freshly-built rows carry the
@@ -23460,14 +23487,16 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
-    // Acceptance record for the document (GATE_ESTIMATE_ACCEPTANCE_TERMS):
-    // only for an accepted estimate that was recorded under the gate. The
-    // customer-facing shape masks the IP to its first two octets and reduces
-    // the user-agent to a family label — enough to say "this device, this
-    // moment" without printing raw telemetry on a PDF.
+    // Acceptance record for the document: an accepted estimate whose
+    // terms_version proves a record was committed. Deliberately NOT gated —
+    // the gate controls what is shown and written from now on; evidence
+    // already recorded stays on the accepted estimate even after the kill
+    // switch (pre-push Codex P1). The customer-facing shape masks the IP to
+    // its first two octets and reduces the user-agent to a family label —
+    // enough to say "this device, this moment" without printing raw
+    // telemetry on a PDF.
     let acceptanceRecord = null;
-    if (estimate.status === 'accepted' && estimate.terms_version
-      && featureGates.isEnabled('estimateAcceptanceTerms')) {
+    if (estimate.status === 'accepted' && estimate.terms_version) {
       try {
         const row = await db('estimate_acceptances')
           .where({ estimate_id: estimate.id })

@@ -21,7 +21,6 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
-const featureGates = require('../config/feature-gates');
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -51,10 +50,11 @@ function appointmentLineFor(appointment) {
 // (GATE_ESTIMATE_ACCEPTANCE_TERMS). This is that copy: the verbatim line the
 // customer accepted (from the recorded row, never the live constant), the
 // instant, and where the full terms print. EMPTY when nothing was recorded —
-// renderBlocks drops the empty paragraph, so a gate-off email reads exactly
-// as before.
+// renderBlocks drops the empty paragraph, so an email for an accept that
+// showed no terms reads exactly as before. Keyed on the RECORD, not the
+// gate: a row exists only if terms were shown and accepted, and evidence
+// already recorded is never hidden by the kill switch.
 async function acceptanceNoteFor(estimateId) {
-  if (!featureGates.isEnabled('estimateAcceptanceTerms')) return '';
   const row = await db('estimate_acceptances')
     .where({ estimate_id: estimateId })
     .orderBy('accepted_at', 'desc')
@@ -72,20 +72,26 @@ async function acceptanceNoteFor(estimateId) {
 
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment } = {}) {
   try {
-    if (!customerId || !estimateId) return null;
-    const customer = await db('customers')
-      .where({ id: customerId })
-      .first('id', 'first_name', 'email');
-    const email = clean(customer?.email);
+    if (!estimateId) return null;
+    // Recipient: the linked customer, else the estimate's own contact (a
+    // phoneless one-time accept commits without a customer row).
+    const customer = customerId
+      ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email')
+      : null;
+    const estimateContact = customer
+      ? null
+      : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
+    const email = clean(customer?.email || estimateContact?.customer_email);
     if (!email || !email.includes('@')) {
-      logger.info(`[estimate-accepted-email] no usable email for customer ${customerId}; skipping onboarding email`);
+      logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
       return null;
     }
+    const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'estimate.accepted_onboarding',
       to: email,
       payload: {
-        first_name: clean(customer.first_name) || 'there',
+        first_name: firstName,
         service_type: clean(serviceLabel) || 'service',
         appointment_line: appointmentLineFor(appointment),
         acceptance_note: await acceptanceNoteFor(estimateId),
@@ -93,7 +99,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
       recipientType: 'customer',
-      recipientId: customerId,
+      recipientId: customerId || null,
       idempotencyKey: `estimate.accepted_onboarding:${estimateId}`,
       triggerEventId: `estimate.accepted_onboarding:${estimateId}`,
       categories: ['estimate_accepted_onboarding'],
