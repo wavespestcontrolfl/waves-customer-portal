@@ -35,7 +35,13 @@ import { deriveIrrigationInchesPerWeek, describeRuntimeBasis, DAY_ALIASES, MAX_R
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
 // too or alias rows lose the pending/failed affordances.
-const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+// FOUR aliases, matching server/services/autopay-eligibility.js
+// isBankMethodType ('bank' / 'bank_account' are the defensive aliases the
+// server already treats as bank) — GH codex #3556 r3.
+const isBankMethod = (t) => {
+  const v = String(t || '').toLowerCase();
+  return v === 'ach' || v === 'us_bank_account' || v === 'bank' || v === 'bank_account';
+};
 
 // Portal glass state, readable from any tab component. Warm #FAF8F3
 // sub-panels turn whisper-white under glass (the report-glass idiom) so

@@ -139,6 +139,16 @@ describe('PUT /billing/autopay — Auto Pay-off notice sent once (GH codex r1 P2
       expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-old' }));
     }));
 
+  test('a NULL autopay_enabled customer turning Auto Pay off IS a transition (only explicit false is off) → notice sent', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = null;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledTimes(1);
+    }));
+
   test('the notice names the method in charge UNDER THE LOCK, not the stale pre-read pointer', () =>
     withServer('/billing/autopay', router(), async (baseUrl) => {
       state.customers[0].autopay_enabled = true;

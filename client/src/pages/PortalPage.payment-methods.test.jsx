@@ -138,6 +138,18 @@ describe('Payment Methods row hierarchy', () => {
     expect(screen.queryByText(/Auto Pay method/)).not.toBeInTheDocument();
   });
 
+  it('removing a verified bank row under ANY bank alias carries the 3-business-day ACH copy', async () => {
+    api.getCards.mockResolvedValue({ cards: [
+      cards[0],
+      { id: 'pm-bank', processor: 'stripe', methodType: 'bank_account', brand: null, lastFour: '9001', bankName: 'Sun Bank', achStatus: 'verified', isDefault: false, autopayEnabled: false },
+    ] });
+    api.getAutopay.mockResolvedValue(autopayPayload());
+    render(<BillingTab customer={customer} />);
+    await screen.findByText(/Auto Pay method/);
+    fireEvent.click(within(rowFor('9001')).getByRole('button', { name: 'Remove' }));
+    await waitFor(() => expect(showCustomerConfirm).toHaveBeenCalledWith(expect.stringMatching(/3 business days/), expect.anything()));
+  });
+
   it('a 409 autopay_method_in_use on Remove surfaces the server message and refreshes', async () => {
     api.getAutopay.mockResolvedValue(autopayPayload({ autopay_selected_method_ids: [] }));
     const err = new Error('This payment method is currently used for Auto Pay. Add another payment method or turn off Auto Pay before removing it.');

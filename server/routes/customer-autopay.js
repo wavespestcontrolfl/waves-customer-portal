@@ -394,7 +394,10 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       // detached webhook — takes the same order, so removal vs replacement
       // can never deadlock).
       const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled', 'autopay_payment_method_id');
-      disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled === true;
+      // Nullable flag: only explicit false is "off" (customerOnAutopay
+      // parity, GH codex r3 P2) — a NULL-flag customer turning Auto Pay off
+      // IS a transition and gets the notice.
+      disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled !== false;
       // The method the notice names = the one in charge immediately before
       // the disable, read under the lock — the pre-lock `current` read can
       // be stale if a switch landed in between (GH codex r2 P2).
