@@ -324,6 +324,74 @@ async function sendPaymentMethodUpdated({
   });
 }
 
+// Negative counterparts of sendAutopayEnabled / sendPaymentMethodUpdated
+// (owner ruling 2026-08-27: a customer hears about every change to the
+// custody of a payment credential — off, removed — from whichever surface
+// caused it). Both are dark behind GATE_PAYMENT_METHOD_CHANGE_EMAILS.
+// Pause is deliberately NOT emailed (reversible, log-only).
+function changeEmailsEnabled() {
+  return require('../config/feature-gates').isEnabled('paymentMethodChangeEmails');
+}
+
+async function sendAutopayDisabled({
+  customerId,
+  paymentMethodId = null,
+  disabledAt = new Date(),
+  idempotencyKey,
+} = {}) {
+  if (!changeEmailsEnabled()) return { ok: false, skipped: true, reason: 'gate_off' };
+  const method = await loadPaymentMethod(paymentMethodId);
+  const payload = {
+    autopay_disabled_date: displayDate(disabledAt),
+  };
+  assignMethodPayload(payload, method || {});
+  return sendLifecycleTemplate({
+    customerId,
+    templateKey: 'payment.autopay_disabled',
+    eventType: 'payment.autopay_disabled',
+    payload,
+    paymentMethodId: paymentMethodId || null,
+    idempotencyKey: idempotencyKey || `payment.autopay_disabled:${customerId}:${paymentMethodId || 'none'}:${stableEventKey(disabledAt)}`,
+  });
+}
+
+/**
+ * The payment_methods row is already DELETED when this fires (portal
+ * DELETE and the detached webhook both remove it first), so the caller
+ * passes the row SNAPSHOT — brand/last4 only ever reach the template as
+ * the label, never a processor id. autopayDisabled=true adds the line
+ * explaining Auto Pay went off with it (only the out-of-band webhook path
+ * can produce that under the removal guard).
+ */
+async function sendPaymentMethodRemoved({
+  customerId,
+  method = {},
+  autopayDisabled = false,
+  removedAt = new Date(),
+  idempotencyKey,
+} = {}) {
+  if (!changeEmailsEnabled()) return { ok: false, skipped: true, reason: 'gate_off' };
+  const payload = {
+    payment_method_removed_date: displayDate(removedAt),
+    autopay_removed_note: autopayDisabled
+      ? 'Auto Pay was turned off because it was using this payment method. Add a payment method and turn Auto Pay back on anytime in your customer portal.'
+      : '',
+  };
+  assignMethodPayload(payload, method || {});
+  return sendLifecycleTemplate({
+    customerId,
+    templateKey: 'payment.method_removed',
+    eventType: 'payment.method_removed',
+    payload,
+    paymentMethodId: method?.id || null,
+    // Keyed on the ROW id, not the time: a portal removal (Stripe detach →
+    // local delete) and the payment_method.detached webhook it triggers can
+    // both reach here for the same row — one notice, whichever lands first
+    // (pre-push r1 P1). A row id is never reused, so no timestamp is needed.
+    idempotencyKey: idempotencyKey || `payment.method_removed:${customerId}:${method?.id || 'none'}`,
+  });
+}
+
 function expiryStageFor(method, now = new Date()) {
   const month = Number(method?.exp_month);
   // Legacy rows store 2-digit expiry years — normalize like the charge
@@ -632,7 +700,9 @@ async function sendCancellationRefundIssued({
 
 module.exports = {
   sendAutopayEnabled,
+  sendAutopayDisabled,
   sendPaymentMethodUpdated,
+  sendPaymentMethodRemoved,
   sendPaymentMethodExpiring,
   sendPaymentRetryNotice,
   sendPaymentFailed,

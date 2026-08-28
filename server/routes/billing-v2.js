@@ -9,7 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
-const { isBankMethodType, isExpiredCardMethod } = require('../services/autopay-eligibility');
+const { isBankMethodType, isExpiredCardMethod, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -778,17 +778,93 @@ router.post('/cards', async (req, res, next) => {
 });
 
 // =========================================================================
-// DELETE /api/billing/cards/:id — Remove a payment method (auto-detect)
+// DELETE /api/billing/cards/:id — Remove a payment method
+//
+// Under GATE_PORTAL_METHOD_REMOVAL_GUARD (owner ruling 2026-08-27) the
+// contract is: the method Auto Pay is USING → 409 autopay_method_in_use;
+// anything else → detach, with NO Auto Pay mutation. "Using" comes from
+// getAutopaySelectedMethodIds — the charge resolver's pick plus the
+// enrollment pointer (expired included, paused included) — so removal,
+// display, and charging can never disagree about which card is Auto Pay's.
+// The legacy path (gate off) removed unconditionally and then disabled
+// Auto Pay best-effort outside any transaction, which could leave
+// autopay_enabled=true with the row gone. The client hides Remove on the
+// in-use row; the server check is the real guard.
 // =========================================================================
 router.delete('/cards/:id', async (req, res, next) => {
   try {
-    const card = await db('payment_methods')
-      .where({ id: req.params.id, customer_id: req.customerId })
-      .first();
+    const removalGuard = isEnabled('portalMethodRemovalGuard');
+    // The guard check and the detach run under ONE transaction holding FOR
+    // UPDATE on the customer row and the card row (pre-push r1 P0): PUT
+    // /billing/autopay, PUT /cards/:id/default and enrollConsentedMethod
+    // all write those rows inside their own transactions, so an Auto Pay
+    // switch onto this card cannot land between "not in use" and the
+    // detach — it waits for this commit and then re-validates the row.
+    // Holding the lock across the Stripe detach is bounded by the Stripe
+    // client timeout and is the price of a guard that cannot be raced.
+    let outcome = null; // { status, body } when the request ends early
+    let removedCard = null;
+    await db.transaction(async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: req.customerId })
+        .forUpdate()
+        .first('id', 'autopay_enabled', 'autopay_payment_method_id', 'autopay_paused_until', 'ach_status');
+      const card = await trx('payment_methods')
+        .where({ id: req.params.id, customer_id: req.customerId })
+        .forUpdate()
+        .first();
 
-    if (!card) return res.status(404).json({ error: 'Payment method not found' });
+      if (!card) {
+        outcome = { status: 404, body: { error: 'Payment method not found' } };
+        return;
+      }
 
-    await StripeService.removeCard(req.customerId, req.params.id);
+      if (removalGuard) {
+        // Fail CLOSED on a broken read: refusing a removal is recoverable
+        // (the customer retries); detaching the in-charge card is not.
+        let selectedIds;
+        try {
+          selectedIds = await getAutopaySelectedMethodIds(customer, trx, { rethrow: true });
+        } catch (readErr) {
+          logger.error(`[billing-v2] removal guard read failed for customer ${req.customerId}: ${readErr.message}`);
+          outcome = { status: 503, body: { error: 'Could not check Auto Pay right now — please try again.' } };
+          return;
+        }
+        if (selectedIds.includes(String(card.id))) {
+          const paused = !!customer?.autopay_paused_until;
+          outcome = {
+            status: 409,
+            body: {
+              code: 'autopay_method_in_use',
+              error: paused
+                ? 'Auto Pay is paused, not off, and it is using this payment method. Add another payment method or turn off Auto Pay before removing it.'
+                : 'This payment method is currently used for Auto Pay. Add another payment method or turn off Auto Pay before removing it.',
+              autopay: { enabled: true, paused, methodId: card.id },
+            },
+          };
+          return;
+        }
+      }
+
+      await StripeService.removeCard(req.customerId, req.params.id, { cascadeAutopay: !removalGuard, db: trx });
+      removedCard = card;
+    });
+
+    if (outcome) return res.status(outcome.status).json(outcome.body);
+
+    // Lifecycle notice (gated inside the sender). The row is gone — pass
+    // the snapshot. Under the guard a removed method was never in charge,
+    // so no autopay note; the legacy cascade case reports honestly. The
+    // sender's idempotency key is the method row id, so the detached
+    // webhook that follows this detach cannot send a second notice.
+    PaymentLifecycleEmail.sendPaymentMethodRemoved({
+      customerId: req.customerId,
+      method: removedCard,
+      autopayDisabled: !removalGuard && !!removedCard.autopay_enabled,
+      removedAt: new Date(),
+    }).catch((emailErr) => {
+      logger.warn(`[billing-v2] payment method removed email failed for customer ${req.customerId}: ${emailErr.message}`);
+    });
 
     res.json({ success: true, message: 'Payment method removed' });
   } catch (err) {
@@ -1075,7 +1151,23 @@ router.put('/cards/:id/default', async (req, res, next) => {
       }
     }
 
+    let targetGone = false;
     await db.transaction(async (trx) => {
+      // Lock order = CUSTOMER first, then the method row — same order as
+      // DELETE /cards/:id, PUT /billing/autopay, enrollment and the
+      // detached webhook (pre-push r2 P1: no deadlock between removal and
+      // replacement).
+      await trx('customers').where({ id: req.customerId }).forUpdate().first('id');
+      // Re-verify under lock: a concurrent portal removal holds this row
+      // FOR UPDATE until its detach commits — if it is gone by the time we
+      // get the lock, carrying Auto Pay onto it would leave a dangling
+      // pointer (pre-push r1 P0 — shared protocol with DELETE /cards/:id).
+      const locked = await trx('payment_methods')
+        .where({ id: req.params.id, customer_id: req.customerId })
+        .forUpdate()
+        .first('id');
+      if (!locked) { targetGone = true; return; }
+
       await trx('payment_methods')
         .where({ customer_id: req.customerId })
         .update({ is_default: false });
@@ -1107,6 +1199,10 @@ router.put('/cards/:id/default', async (req, res, next) => {
         }
       }
     });
+
+    if (targetGone) {
+      return res.status(409).json({ code: 'payment_method_removed', error: 'That payment method was just removed. Refresh and choose another one.' });
+    }
 
     if (carriesAutopay && newCardChargeable) {
       logAutopay(req.customerId, 'autopay_method_changed', {

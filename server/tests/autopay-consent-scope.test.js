@@ -25,7 +25,9 @@ jest.mock('../services/autopay-log', () => ({
 }));
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn().mockResolvedValue(null),
+  sendAutopayDisabled: jest.fn().mockResolvedValue(null),
   sendPaymentMethodUpdated: jest.fn().mockResolvedValue(null),
+  sendPaymentMethodRemoved: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/card-enrollment-email', () => ({
   sendAutopayEnrollmentConfirmation: jest.fn().mockResolvedValue(null),
@@ -53,7 +55,7 @@ function builderFor(table) {
     }
     return b;
   });
-  for (const method of ['select', 'orderBy', 'whereNotNull', 'whereIn']) {
+  for (const method of ['select', 'orderBy', 'whereNotNull', 'whereIn', 'forUpdate']) {
     b[method] = jest.fn(() => b);
   }
   b.first = jest.fn(async () => rows()[0] || null);
@@ -94,6 +96,29 @@ beforeEach(() => {
 });
 
 afterEach(() => jest.clearAllMocks());
+
+describe('PUT /billing/autopay — selected method re-verified under lock (pre-push r1 P0)', () => {
+  const router = () => require('../routes/customer-autopay');
+
+  test('a method deleted between the pre-read and the transaction → 409 payment_method_removed, nothing written', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      ConsentService.hasEnrollmentScopedConsent.mockResolvedValue(true);
+      db.transaction = async (fn) => {
+        // Simulate a concurrent portal removal committing first.
+        state.payment_methods = state.payment_methods.filter((p) => p.id !== 'pm-hold');
+        return fn((table) => builderFor(table));
+      };
+      const res = await fetch(`${baseUrl}/billing/autopay`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autopay_enabled: true, autopay_payment_method_id: 'pm-hold' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('payment_method_removed');
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(state.customers[0].autopay_payment_method_id).toBe(null);
+    }));
+});
 
 describe('PUT /billing/autopay consent scope', () => {
   const router = () => require('../routes/customer-autopay');

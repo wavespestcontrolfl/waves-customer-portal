@@ -13,6 +13,11 @@ jest.mock('../services/email-template-library', () => ({
 jest.mock('../services/customer-contact', () => ({
   getInvoiceEmailRecipients: jest.fn(() => [{ email: 'billing@example.com', name: 'Taylor Morgan', role: 'primary' }]),
 }));
+let mockChangeEmailsGate = true;
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: (name) => (name === 'paymentMethodChangeEmails' ? mockChangeEmailsGate : false),
+  gates: {},
+}));
 
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
@@ -163,6 +168,77 @@ describe('payment lifecycle email sender', () => {
         new_payment_method_label: 'Visa ending in 4242',
       }),
     }));
+  });
+
+  test('sends the Auto Pay turned-off notice naming the method that was in charge', async () => {
+    setDbQueues({
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [chain({ first: null })],
+      customer_interactions: [chain()],
+    });
+
+    await PaymentLifecycleEmail.sendAutopayDisabled({
+      customerId: 'cust-1',
+      paymentMethodId: 'pm-1',
+      disabledAt: '2026-08-28T12:00:00.000Z',
+    });
+
+    expect(EmailTemplates.sendTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      templateKey: 'payment.autopay_disabled',
+      idempotencyKey: 'payment.autopay_disabled:cust-1:pm-1:2026-08-28T12:00:00.000Z',
+      suppressionGroupKey: 'transactional_required',
+      payload: expect.objectContaining({
+        payment_method_label: 'Visa ending in 4242',
+        autopay_disabled_date: expect.stringContaining('2026'),
+      }),
+    }));
+  });
+
+  test('sends the method-removed notice from a row SNAPSHOT (the row is already deleted) with the Auto Pay note only when it went off', async () => {
+    setDbQueues({
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: null }), chain({ first: null })],
+      customer_interactions: [chain(), chain()],
+    });
+
+    await PaymentLifecycleEmail.sendPaymentMethodRemoved({
+      customerId: 'cust-1',
+      method: paymentMethod({ id: 'pm-gone' }),
+      autopayDisabled: false,
+      removedAt: '2026-08-28T12:00:00.000Z',
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      templateKey: 'payment.method_removed',
+      // Row-keyed, NOT time-keyed: the portal removal and the detached webhook
+      // it triggers must dedupe to one notice.
+      idempotencyKey: 'payment.method_removed:cust-1:pm-gone',
+      payload: expect.objectContaining({ payment_method_label: 'Visa ending in 4242', autopay_removed_note: '' }),
+    }));
+
+    await PaymentLifecycleEmail.sendPaymentMethodRemoved({
+      customerId: 'cust-1',
+      method: paymentMethod({ id: 'pm-gone' }),
+      autopayDisabled: true,
+      removedAt: '2026-08-28T12:00:00.000Z',
+    });
+    expect(EmailTemplates.sendTemplate).toHaveBeenLastCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ autopay_removed_note: expect.stringMatching(/Auto Pay was turned off/) }),
+    }));
+  });
+
+  test('both negative notices are no-ops while GATE_PAYMENT_METHOD_CHANGE_EMAILS is off', async () => {
+    mockChangeEmailsGate = false;
+    try {
+      const a = await PaymentLifecycleEmail.sendAutopayDisabled({ customerId: 'cust-1', paymentMethodId: 'pm-1' });
+      const b = await PaymentLifecycleEmail.sendPaymentMethodRemoved({ customerId: 'cust-1', method: paymentMethod() });
+      expect(a).toEqual({ ok: false, skipped: true, reason: 'gate_off' });
+      expect(b).toEqual({ ok: false, skipped: true, reason: 'gate_off' });
+      expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+      expect(db).not.toHaveBeenCalled();
+    } finally {
+      mockChangeEmailsGate = true;
+    }
   });
 
   test('sends expiring-card notice with payment-method stage idempotency', async () => {

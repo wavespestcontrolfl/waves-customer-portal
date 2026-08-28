@@ -11,6 +11,7 @@ import { COLORS as B, TIER, FONTS, BUTTON_BASE } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import NotificationBell from '../components/NotificationBell';
 import { showCustomerAlert, showCustomerConfirm } from '../components/brand/CustomerDialogHost';
+import { cardBrandLabel } from '../lib/cardBrand';
 import AutopayCard from '../components/billing/AutopayCard';
 import SaveCardConsent from '../components/billing/SaveCardConsent';
 import Icon from '../components/Icon';
@@ -5313,6 +5314,8 @@ function BillingTab({ customer }) {
   useLockBodyScroll(showAddCard); // freeze the page behind the add-card modal
   const addCardDialogRef = useModalFocus(showAddCard, () => setShowAddCard(false));
   const [autopayRefreshKey, setAutopayRefreshKey] = useState(0);
+  // "Replace card" on the in-use row → open the AutopayCard method picker.
+  const [autopayOpenRequest, setAutopayOpenRequest] = useState(null);
   const [stripeLoading, setStripeLoading] = useState(false);
   const [stripeError, setStripeError] = useState('');
   const [stripeReady, setStripeReady] = useState(false);
@@ -5581,12 +5584,30 @@ function BillingTab({ customer }) {
     }
   };
 
+  // Row hierarchy (owner ruling 2026-08-27): the rows Auto Pay is USING
+  // come from the server's canonical resolver (autopay_selected_method_ids
+  // — the same set DELETE refuses), never from the per-row autopayEnabled
+  // flag, which can be stale. Those rows get Replace card / Turn off Auto
+  // Pay and no Remove; the server 409 remains the real guard.
+  const removalGuard = autopay?.removal_guard === true;
+  const autopaySelectedIds = removalGuard ? (autopay?.autopay_selected_method_ids || []).map(String) : [];
+  const isAutopayRow = (c) => autopaySelectedIds.includes(String(c.id));
+
   const handleRemoveCard = async (cardId) => {
-    const confirmed = await showCustomerConfirm('Remove this payment method?', {
-      title: 'Remove payment method?',
-      confirmLabel: 'Remove',
-      danger: true,
-    });
+    const target = cards.find((c) => String(c.id) === String(cardId));
+    const verifiedBank = !!target && isBankMethod(target.methodType) && target.achStatus === 'verified';
+    const confirmed = await showCustomerConfirm(
+      verifiedBank
+        // ACH authorization copy: revocation takes up to 3 business days
+        // to stop a scheduled debit (copy only — no enforced delay).
+        ? 'Remove this bank account? Bank authorizations can take up to 3 business days to stop.'
+        : 'Remove this payment method?',
+      {
+        title: 'Remove payment method?',
+        confirmLabel: 'Remove',
+        danger: true,
+      },
+    );
     if (!confirmed) return;
     try {
       await api.removeCard(cardId);
@@ -5595,7 +5616,32 @@ function BillingTab({ customer }) {
       // AutopayCard so it never shows "Active" against a removed card.
       setAutopayRefreshKey((k) => k + 1);
     } catch (err) {
+      // 409 autopay_method_in_use (race — Auto Pay moved in another tab):
+      // the server message says exactly what to do; refresh so the row
+      // hierarchy catches up.
       showCustomerAlert(err.message || 'Failed to remove card');
+      if (err.status === 409) refreshCards();
+    }
+  };
+
+  const handleReplaceCard = () => {
+    setAutopayOpenRequest({ modal: 'card', seq: Date.now() });
+    // Bring the picker into view — it lives in the Auto Pay card above.
+    document.getElementById('billing-autopay')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  };
+
+  const handleTurnOffAutopay = async () => {
+    const confirmed = await showCustomerConfirm(
+      'Turn off Auto Pay? Your saved payment method stays on file, and invoices for completed service will be sent to you to pay.',
+      { title: 'Turn off Auto Pay?', confirmLabel: 'Turn off', danger: true },
+    );
+    if (!confirmed) return;
+    try {
+      await api.updateAutopay({ autopay_enabled: false });
+      await refreshCards();
+      setAutopayRefreshKey((k) => k + 1);
+    } catch (err) {
+      showCustomerAlert(err.message || 'Failed to turn off Auto Pay');
     }
   };
 
@@ -5678,7 +5724,7 @@ function BillingTab({ customer }) {
     if (!method) return 'No method on file';
     const last4 = methodLast4(method);
     if (isBankMethod(method.methodType)) return `${method.bankName || 'Bank account'}${last4 ? ` ending in ${last4}` : ''}`;
-    return `${method.brand || 'Card'}${last4 ? ` ending in ${last4}` : ''}`;
+    return `${cardBrandLabel(method.brand)}${last4 ? ` ending in ${last4}` : ''}`;
   };
 
   if (loading) {
@@ -6212,7 +6258,14 @@ function BillingTab({ customer }) {
       </div>
       )}
 
-      <AutopayCard key={autopayRefreshKey} onStateChange={setAutopay} />
+      <div id="billing-autopay">
+        <AutopayCard
+          key={autopayRefreshKey}
+          onStateChange={setAutopay}
+          openRequest={autopayOpenRequest}
+          onOpenRequestHandled={() => setAutopayOpenRequest(null)}
+        />
+      </div>
 
       <div data-glass="card" style={{
         ...card,
@@ -6321,6 +6374,14 @@ function BillingTab({ customer }) {
             <div style={{ flex: 1, minWidth: 180 }}>
               <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>{methodLabel(c)}</div>
               {c.expMonth && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Expires {c.expMonth}/{c.expYear}</div>}
+              {/* Status reads as text under the label, so the action area
+                  holds ONLY buttons — status chips styled like the buttons
+                  read as four buttons in a row (owner eyeball 2026-08-27). */}
+              {(c.isDefault || isAutopayRow(c)) && (
+                <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 4 }}>
+                  {[c.isDefault ? 'Default' : null, isAutopayRow(c) ? 'Auto Pay method' : null].filter(Boolean).join(' · ')}
+                </div>
+              )}
               {isBankMethod(c.methodType) && c.bankName && <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>{c.bankName}</div>}
               {isBankMethod(c.methodType) && c.achStatus === 'pending_verification' && (
                 <div style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, marginTop: 2 }}>
@@ -6343,7 +6404,10 @@ function BillingTab({ customer }) {
             </div>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexWrap: 'wrap', flex: compact ? '1 1 100%' : '0 0 auto' }}>
               {c.isDefault ? (
-                <span data-glass-accent="" style={{ fontSize: 12, fontWeight: 850, color: B.glassNavy, background: '#FFF7E0', padding: '7px 12px', borderRadius: 10, border: '1px solid #F4C548', position: 'relative' }}>Default</span>
+                null
+              ) : isAutopayRow(c) ? (
+                // The in-use row is replaced or turned off, never re-defaulted.
+                null
               ) : (isBankMethod(c.methodType) && ['pending_verification', 'verification_failed'].includes(c.achStatus)) ? (
                 // Server refuses a pending/failed bank as default
                 // (set-default carries Auto Pay) — don't offer the
@@ -6352,7 +6416,14 @@ function BillingTab({ customer }) {
               ) : (
                 <button type="button" onClick={() => handleSetDefault(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Set default</button>
               )}
-              <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Remove</button>
+              {isAutopayRow(c) ? (
+                <>
+                  <button type="button" onClick={handleReplaceCard} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative', ...(compact ? { flex: 1 } : {}) }}>Replace card</button>
+                  <button type="button" onClick={handleTurnOffAutopay} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative', ...(compact ? { flex: 1 } : {}) }}>Turn off Auto Pay</button>
+                </>
+              ) : (
+                <button type="button" onClick={() => handleRemoveCard(c.id)} data-glass-accent="" style={{ ...secondaryButton, padding: '8px 14px', fontSize: 12, position: 'relative' }}>Remove</button>
+              )}
             </div>
           </div>
         ))}
@@ -6594,7 +6665,7 @@ function BillingTab({ customer }) {
                 {parseDate(p.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 {/* ACH rows store card_brand null — label by methodType so a
                     bank payment never reads "Card ending in …". */}
-                {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : (p.cardBrand || 'Card')} ending in ${p.lastFour}`}
+                {p.lastFour && ` - ${isBankMethod(p.methodType) ? (p.bankName || 'Bank account') : cardBrandLabel(p.cardBrand)} ending in ${p.lastFour}`}
               </div>
               {/* Receipt actions. Waves receipts (invoice-backed) get a View
                   page + a PDF download; recurring autopay rows carry only
