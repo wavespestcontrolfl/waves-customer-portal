@@ -488,6 +488,24 @@ function renderClockBlock(hours, now = new Date()) {
   }
 }
 
+/**
+ * Is the office open at `now` (ET), given a loadOfficeHours() result?
+ * true / false / null (unknown: no hours, or closure state unknown after a
+ * date rollover — `closedUnknown`). Pure; the estimate-promise wording is
+ * decided from this in code (relay-tools), never from the model's reading
+ * of the clock block, so it must never mistake "unknown" for "open".
+ */
+function isOfficeOpenAt(hours, now = new Date()) {
+  if (!hours || !Number.isFinite(hours.startMin) || !Number.isFinite(hours.endMin)) return null;
+  if (hours.closedUnknown === true) return null;
+  if (hours.closedToday === true) return false;
+  const { etParts } = require('../../utils/datetime-et');
+  const et = etParts(now);
+  const minutes = Number(et.hour) * 60 + Number(et.minute);
+  if (!Number.isFinite(minutes)) return null;
+  return minutes >= hours.startMin && minutes < hours.endMin;
+}
+
 /** Load + render in one call (used by tests and any single-shot caller). */
 async function buildClockBlock(now = new Date()) {
   return renderClockBlock(await loadOfficeHours(), now);
@@ -1703,6 +1721,7 @@ async function servicesCatalogText() {
 }
 
 module.exports = {
+  isOfficeOpenAt,
   isContextEnabled,
   requiresAttestation,
   isFullAttestation,

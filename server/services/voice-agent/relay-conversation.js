@@ -913,13 +913,8 @@ class RelayConversation {
       // recorded on the artifact — never left to the model's reading of the
       // clock block.
       officeOpenNow: () => {
-        const h = convo._officeHours;
-        if (!h || !Number.isFinite(h.startMin) || !Number.isFinite(h.endMin)) return null;
-        if (h.closedToday === true) return false;
-        const { etParts } = require('../../utils/datetime-et');
-        const et = etParts(convo._now());
-        const m = Number(et.hour) * 60 + Number(et.minute);
-        return m >= h.startMin && m < h.endMin;
+        const { isOfficeOpenAt } = require('./relay-context');
+        return isOfficeOpenAt(convo._officeHours, new Date());
       },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
       noteEstimateFields: (fields = {}) => {
