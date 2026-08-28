@@ -472,7 +472,15 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **Renewals are separate purchases; a merchant can never charge outside the ledger.** A
   reservation covers exactly one charge, and the instrument enforces it: each purchase is paid
   with a **single-use virtual card number minted at `submitting` with an issuer-enforced
-  per-card spend ceiling equal to `final_cents`** (the merchant cannot authorize or capture
+  per-card spend ceiling equal to `final_cents`** — minted **idempotently**: the issuer
+  request carries the purchase's `idempotency_key` as the issuer-side idempotency key, and
+  the returned `issuer_card_id` is persisted on the purchase row **before** PAN/CVV are
+  fetched (two steps: mint+persist, then fetch). A crash between mint and persist is
+  recoverable by construction: the hourly sweep, for any `submitting` row with a null
+  `issuer_card_id`, asks the issuer for the card created under that idempotency key —
+  found ⇒ persist its id and close it (the row goes `ambiguous` as usual); not found ⇒ no
+  card exists and the row may be re-driven. A retry of the mint with the same key returns
+  the same card, never a second one, so one purchase can never hold two live instruments (the merchant cannot authorize or capture
   more than the ledger approved, whatever the checkout later shows; the issuer's program-wide
   monthly limit is a second ceiling, not the control). If the issuer cannot set a per-card
   ceiling, **no automated purchase is made** — the row is refused (`voided`,
