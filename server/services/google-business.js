@@ -248,21 +248,24 @@ class GoogleBusinessService {
   // =========================================================================
   // REVIEWS
   // =========================================================================
-  async getReviews(locationResourceName, locationId, pageSize = 50, pageToken = null) {
+  async getReviews(locationResourceName, locationId, pageSize = 50, pageToken = null, { signal } = {}) {
     const headers = await this._getHeaders(locationId);
     const params = new URLSearchParams({ pageSize: String(pageSize) });
     if (pageToken) params.set('pageToken', pageToken);
     const url = `https://mybusiness.googleapis.com/v4/${locationResourceName}/reviews?${params.toString()}`;
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, ...(signal ? { signal } : {}) });
     const data = await readJsonOrThrow(res, 'GBP getReviews');
     return data;
   }
 
-  async getAllLocationReviews(locationResourceName, locationId, pageSize = 50) {
+  // `signal` lets a caller with a total deadline cancel the paginated
+  // lookup (codex r56): no orphaned page fetches after the caller times out.
+  async getAllLocationReviews(locationResourceName, locationId, pageSize = 50, { signal } = {}) {
     const reviews = [];
     let pageToken = null;
     do {
-      const page = await this.getReviews(locationResourceName, locationId, pageSize, pageToken);
+      if (signal?.aborted) throw new Error('GBP review lookup aborted (deadline)');
+      const page = await this.getReviews(locationResourceName, locationId, pageSize, pageToken, { signal });
       reviews.push(...(page.reviews || []));
       pageToken = page.nextPageToken || null;
     } while (pageToken);

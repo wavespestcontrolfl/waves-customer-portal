@@ -138,6 +138,10 @@ const BANNED_RE = new RegExp([
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
   // "<protected subject> sailed | breezed | came | got | made it through …" (codex r52).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:sail|breez|cruis|coast|came|come|got|get|made\\s+it|went|go|pull|power|walk)\\w*\\s+(?:right\\s+|straight\\s+)?through\\b', '\\b(?:sailed|breezed|cruised|coasted)\\s+(?:right\\s+)?through\\b',
+  // "a breeze / a walk in the park / no sweat / painless …" (codex r56).
+  '\\b(?:a\\s+breeze|a\\s+walk\\s+in\\s+the\\s+park|no\\s+sweat|a\\s+non[- ]?(?:event|issue)|smooth\\s+sailing|painless\\w*|effortless\\w*|a\\s+piece\\s+of\\s+cake|a\\s+cinch|no\\s+big\\s+deal|nothing\\s+to\\s+it|a\\s+snap|a\\s+doddle|child.s\\s+play)\\b',
+  // "<duration> later / afterwards" is a fixed interval in any position (codex r56).
+  '\\b(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\s+(?:later|afterwards?|on|thereafter|down\\s+the\\s+(?:road|line))\\b',
   // "easy | gentle | light | kind | soft | mild | nice on <protected subject>" (codex r53).
   '\\b(?:easy|easier|easiest|light|lighter|kind|kinder|soft|softer|gentle|gentler|mild|milder|nice|nicer|good|better|fine|ok|okay)\\s+(?:enough\\s+)?on\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|skin|lungs|noses|eyes|paws)\\b',
   // "agreed with / sat well with / suited / got along with <protected

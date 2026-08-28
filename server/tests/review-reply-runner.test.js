@@ -767,6 +767,21 @@ describe('processDueAutoReplies — state machine', () => {
     mockNotify.mockReset().mockResolvedValue({});
   });
 
+  test('a live review mismatch is bounded: after the ceiling the row parks review_changed_stale_sync with a bell (codex r56)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockImplementation(async () => { throw new ReviewReplyError('review_changed', 'The review changed on Google since it was synced — reply not posted.', { status: 409 }); });
+    state.rows = [row({ id: 'rc', auto_reply_attempts: 0 })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_attempts: 1 });
+    state.rows = [row({ id: 'rc2', auto_reply_attempts: Runner.MAX_ATTEMPTS - 1 })];
+    mockNotify.mockClear();
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'review_changed_stale_sync', auto_reply_attempts: Runner.MAX_ATTEMPTS });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'review_changed_stale_sync', needsAction: true });
+    mockPublish.mockReset();
+  });
+
   test('the failed-bell sweep runs even when the gate is off (codex r53)', async () => {
     delete process.env.GATE_REVIEW_AUTO_REPLY;
     mockNotify.mockReset().mockResolvedValue({ id: 'n1' });

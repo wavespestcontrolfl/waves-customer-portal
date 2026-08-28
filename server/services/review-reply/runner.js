@@ -668,10 +668,19 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       // change (Google differs from our row) waits for the next hourly sync
       // to land it locally — redrafting every tick against the stale row
       // would just repeat the mismatch.
+      // Bounded (codex r56): while the authoritative sync stays degraded the
+      // live mismatch would repeat every tick — after the shared ceiling the
+      // row parks for a person instead of redrafting forever.
+      const attemptsNow = (merged.auto_reply_attempts || 0) + 1;
+      if (attemptsNow >= MAX_ATTEMPTS) {
+        await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_changed_stale_sync', auto_reply_attempts: attemptsNow, auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_error: String(err.message || err).slice(0, 1000) });
+        await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — the review changed on Google but the sync has not caught up after ${attemptsNow} attempts. Check the review and reply by hand.`, reason: 'review_changed_stale_sync', action: true });
+        return { outcome: 'parked', reason: 'review_changed_stale_sync' };
+      }
       const dueAt = code === CODES.REVIEW_CHANGED
         ? new Date(Date.now() + IDENTITY_BACKOFF_MIN * 60000).toISOString()
         : new Date().toISOString();
-      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: dueAt, auto_reply_draft: null, auto_reply_drafted_at: null });
+      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: dueAt, auto_reply_attempts: attemptsNow, auto_reply_draft: null, auto_reply_drafted_at: null });
       return { outcome: 'retry', reason: 'review_changed' };
     }
     // A transient account-facts read failure inside the claim is not a

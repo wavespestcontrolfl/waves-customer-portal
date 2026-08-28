@@ -139,6 +139,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r56: "a breeze for your pets" + "<duration> later".
+    expect(verify(good('Hello there, the pest treatment was a breeze for your pets.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed half an hour later following the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r53: "easy on your pets".
     expect(verify(good('Hello there, we are glad the pest treatment was easy on your pets.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the product is gentle enough on the kids.'), gpets)).toBe('banned_phrase');
