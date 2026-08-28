@@ -211,8 +211,23 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     expect(greeting).toContain('Sandy');
     expect(greeting.toLowerCase()).toContain('recorded');
     expect(greeting.toLowerCase()).toContain('automated assistant');
-    expect(greeting).toContain('How can I help you today?');
+    expect(greeting).toMatch(/^Waves, this is Sandy\./);
+    expect(greeting).toMatch(/How can I help you this (morning|afternoon|evening)\?$/);
+    expect(greeting).not.toContain('{dayPart}');
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Sandy');
+  });
+
+  test('the greeting day-part follows the ET clock at render time (owner ruling 2026-08-28)', () => {
+    const { greetingDayPart } = require('../services/voice-agent/relay-protocol');
+    expect(greetingDayPart(new Date('2026-08-28T12:30:00Z'))).toBe('this morning');   // 08:30 ET
+    expect(greetingDayPart(new Date('2026-08-28T15:59:00Z'))).toBe('this morning');   // 11:59 ET
+    expect(greetingDayPart(new Date('2026-08-28T16:00:00Z'))).toBe('this afternoon'); // 12:00 ET
+    expect(greetingDayPart(new Date('2026-08-28T20:59:00Z'))).toBe('this afternoon'); // 16:59 ET
+    expect(greetingDayPart(new Date('2026-08-28T21:00:00Z'))).toBe('this evening');   // 17:00 ET
+    expect(greetingDayPart(new Date('2026-08-29T03:30:00Z'))).toBe('this evening');   // 23:30 ET
+    expect(defaultWelcomeGreeting(new Date('2026-08-28T21:00:00Z'))).toContain('How can I help you this evening?');
+    // Disclosure survives in every day-part.
+    expect(defaultWelcomeGreeting(new Date('2026-08-28T12:30:00Z'))).toMatch(/may be recorded/);
   });
 
   test('VOICE_AGENT_NAME renames her; VOICE_RELAY_GREETING overrides the whole line', () => {
@@ -252,7 +267,8 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     ]) {
       process.env.VOICE_RELAY_GREETING = bad;
       const spoken = defaultWelcomeGreeting();
-      expect(spoken).toBe(DEFAULT_WELCOME_GREETING); // canonical, alone
+      // canonical, alone — rendered (day-part filled), never the override text
+      expect(spoken).toMatch(/^Waves, this is Sandy\. Just so you know, this call may be recorded, and you're speaking with our automated assistant\. How can I help you this (morning|afternoon|evening)\?$/);
       expect(spoken).not.toContain('not recorded'); // the false text is GONE
       expect(spoken).not.toContain('human assistant');
     }

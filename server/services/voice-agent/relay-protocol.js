@@ -212,9 +212,24 @@ function agentName() {
 // on this greeting BEING the §934.03 disclosure (see twilio-voice-webhook.js).
 // VOICE_RELAY_GREETING overrides the whole line verbatim if the owner wants
 // different copy.
+// Owner-ruled opening (2026-08-28): "Waves, this is Sandy, how can I help you
+// this morning / afternoon / evening" — the day-part follows the ET clock at
+// render time. The recorded-line + automated-assistant disclosure sits between
+// the name and the question; it is not optional (see below).
 const DEFAULT_WELCOME_GREETING =
-  "Hi, this is Sandy at Waves Pest Control! Just so you know, this call may be " +
-  "recorded, and you're speaking with our automated assistant. How can I help you today?";
+  "Waves, this is Sandy. Just so you know, this call may be recorded, and you're " +
+  'speaking with our automated assistant. How can I help you {dayPart}?';
+
+// ET day-part for the greeting: morning until noon, afternoon until 5 PM,
+// evening after — the same clock every other spoken-time rule uses.
+function greetingDayPart(now = new Date()) {
+  const { etParts } = require('../../utils/datetime-et');
+  const hour = Number(etParts(now).hour);
+  if (!Number.isFinite(hour)) return 'today';
+  if (hour < 12) return 'this morning';
+  if (hour < 17) return 'this afternoon';
+  return 'this evening';
+}
 
 // ⚠️ THE GREETING *IS* THE FL §934.03 DISCLOSURE. twilio-voice-webhook.js relies
 // on this line carrying the recorded-line notice before the first caller turn —
@@ -271,9 +286,10 @@ function spanishWelcomeGreeting() {
   return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX_ES}`;
 }
 
-function defaultWelcomeGreeting() {
+function defaultWelcomeGreeting(now = new Date()) {
+  const canonical = DEFAULT_WELCOME_GREETING.replace('Sandy', agentName()).replace('{dayPart}', greetingDayPart(now));
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
-  if (!override) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
+  if (!override) return canonical;
   const negated = DISCLOSURE_NEGATION_RE.test(override) || HUMAN_CLAIM_RE.test(override);
   if (!negated
     && RECORDING_DISCLOSURE_RE.test(override)
@@ -285,7 +301,7 @@ function defaultWelcomeGreeting() {
   // canonical greeting speaks alone. Only a merely-INCOMPLETE override (no
   // negation, a half missing) keeps its copy with the missing half appended —
   // absent is fixable, false is not.
-  if (negated) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
+  if (negated) return canonical;
   return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX}`;
 }
 
@@ -407,6 +423,7 @@ module.exports = {
   DEFAULT_WELCOME_GREETING,
   DISCLOSURE_SUFFIX,
   defaultWelcomeGreeting,
+  greetingDayPart,
   SPANISH_LANGUAGE,
   DEFAULT_WELCOME_GREETING_ES,
   DISCLOSURE_SUFFIX_ES,

@@ -32,7 +32,7 @@ test('pricing fallback (gate on): the same capture when get_pricing cannot retur
   const ctx = String(PRICE_LINE_CONTEXT);
   expect(ctx).toMatch(/usually about 15 minutes/);
   expect(ctx).toMatch(/CLOCK DATA says the office is closed/);
-  expect(ctx).toMatch(/first and last name, email address, and full service street address/);
+  expect(ctx).toMatch(/first and last name, email address,\s+and full service street address/);
   expect(ctx).toMatch(/quote ONLY numbers the get_pricing tool returned/);
 });
 
