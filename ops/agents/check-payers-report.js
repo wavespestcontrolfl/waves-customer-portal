@@ -34,25 +34,31 @@ const initials = (r) => `${(r.first_name || '?')[0]}.${(r.last_name || '?')[0]}.
         select i.customer_id,
                count(*) filter (where lower(coalesce(i.payment_method,'')) = 'check') as checks,
                count(*) as paid_invoices,
-               max(i.paid_at) filter (where lower(coalesce(i.payment_method,'')) = 'check') as last_check_at
+               -- ET calendar date (the timestamptz trap): render in Florida time
+               max((i.paid_at at time zone 'America/New_York')::date) filter (where lower(coalesce(i.payment_method,'')) = 'check') as last_check_day
           from invoices i
          where i.status = 'paid'
            and i.paid_at >= now() - ($1 || ' months')::interval
            and i.deleted_at is null
+           -- self-pay only: a third-party payer's check (payer-billed /
+           -- statement invoices) says nothing about how THIS customer pays
+           and i.payer_id is null
+           and i.payer_statement_id is null
          group by i.customer_id
       )
-      select p.customer_id, cu.first_name, cu.last_name, p.checks, p.paid_invoices, p.last_check_at,
+      select p.customer_id, cu.first_name, cu.last_name, p.checks, p.paid_invoices, p.last_check_day,
              exists (select 1 from collections_flags f where f.customer_id = p.customer_id and f.flag = 'pays_by_check' and f.released_at is null) as flagged
         from paid p
         join customers cu on cu.id = p.customer_id and cu.deleted_at is null
        where p.checks >= $2
-       order by p.checks desc, p.last_check_at desc
+       order by p.checks desc, p.last_check_day desc
     `, [String(MONTHS), MIN_CHECKS]);
     console.log(`check payers — last ${MONTHS} months, ≥${MIN_CHECKS} checks: ${rows.length}`);
-    console.log('customer_id                            | who   | checks/paid | share | last check | flagged');
+    console.log('customer_id                            | who   | checks/paid | share | last check (ET) | flagged');
     for (const r of rows) {
       const share = r.paid_invoices ? Math.round((Number(r.checks) / Number(r.paid_invoices)) * 100) : 0;
-      console.log(`${r.customer_id} | ${initials(r).padEnd(5)} | ${String(r.checks).padStart(3)}/${String(r.paid_invoices).padEnd(4)} | ${String(share).padStart(3)}% | ${r.last_check_at ? new Date(r.last_check_at).toISOString().slice(0, 10) : '—'} | ${r.flagged ? 'yes' : 'no'}`);
+      const lastDay = r.last_check_day ? (r.last_check_day instanceof Date ? r.last_check_day.toISOString().slice(0, 10) : String(r.last_check_day).slice(0, 10)) : '—';
+      console.log(`${r.customer_id} | ${initials(r).padEnd(5)} | ${String(r.checks).padStart(3)}/${String(r.paid_invoices).padEnd(4)} | ${String(share).padStart(3)}% | ${lastDay} | ${r.flagged ? 'yes' : 'no'}`);
     }
     const unflagged = rows.filter((r) => !r.flagged);
     if (unflagged.length) {
