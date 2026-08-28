@@ -91,18 +91,28 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
             AND NOT (l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($1::uuid[]) AND twilio_sid IS NOT NULL))
         )`, [[...wouldRead]]);
     console.log(`inbound_sms bells with no remaining unread message (would clear): ${orphanBells.rows.length}`);
-    console.log('dry run — nothing written. Re-run with --execute to apply.');
+    // Exactly what would change (ids only — no bodies, no PII).
+    const dump = (label, ids) => { console.log(`\n${label} (${ids.length}):`); for (const id of ids) console.log(`  ${id}`); };
+    dump('pass 1 — messages to mark read (reaction/courtesy)', closers);
+    if (staleDays) { dump(`pass 3 — stale messages (>${staleDays}d)`, staleMsgs.rows.map((r) => r.id)); dump(`pass 3 — stale inbound_sms bells (>${staleDays}d)`, staleBells.rows.map((r) => r.id)); }
+    dump('pass 2 — inbound_sms bells to mark read', orphanBells.rows.map((r) => r.id));
+    console.log('\ndry run — nothing written. Re-run with --execute to apply.');
     await c.end();
     return;
   }
 
   await c.query('BEGIN');
+  // One batch timestamp for every write, so the rollback can tell "still read
+  // because of this reset" (read_at = batch time) from "read again later by a
+  // human" and leave the latter alone; the rollback also drops its marker.
+  const at = new Date();
+  await c.query(`SELECT set_config('backlog_reset.at', $1, true)`, [at.toISOString()]);
   const stamp = `jsonb_build_object('backlog_reset', $1::text)`;
   // Every read is mirrored into the legacy sms_log row (same twilio_sid) so
   // pass 2's legacy-unread guard and the dry-run preview agree with execution.
   const readMsgs = async (idList, label) => {
     if (!idList.length) return 0;
-    const r = await c.query(`UPDATE messages SET is_read=true, read_at=now(), updated_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE id = ANY($2::uuid[]) AND (is_read IS NOT TRUE)`, [tag, idList]);
+    const r = await c.query(`UPDATE messages SET is_read=true, read_at=current_setting('backlog_reset.at')::timestamptz, updated_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE id = ANY($2::uuid[]) AND (is_read IS NOT TRUE)`, [tag, idList]);
     const rl = await c.query(`UPDATE sms_log l SET is_read=true, metadata = COALESCE(l.metadata,'{}'::jsonb) || ${stamp} WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($2::uuid[]) AND twilio_sid IS NOT NULL)`, [tag, idList]);
     console.log(`${label}: marked ${r.rowCount} messages read (+${rl.rowCount} legacy sms_log mirror)`);
     return r.rowCount;
@@ -110,11 +120,11 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
   await readMsgs(closers, 'pass 1 (reaction/courtesy)');
   if (staleDays) {
     await readMsgs(staleMsgs.rows.map((r) => r.id), `pass 3 (stale >${staleDays}d messages)`);
-    const rb = await c.query(`UPDATE notifications SET read_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE category='inbound_sms' AND read_at IS NULL AND created_at < now() - ($2::int * interval '1 day')`, [tag, staleDays]);
+    const rb = await c.query(`UPDATE notifications SET read_at=current_setting('backlog_reset.at')::timestamptz, metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE category='inbound_sms' AND read_at IS NULL AND created_at < now() - ($2::int * interval '1 day')`, [tag, staleDays]);
     console.log(`pass 3 (stale bells): marked ${rb.rowCount} notifications read`);
   }
   const r2 = await c.query(`
-    UPDATE notifications n SET read_at=now(), metadata = COALESCE(n.metadata,'{}'::jsonb) || ${stamp}
+    UPDATE notifications n SET read_at=current_setting('backlog_reset.at')::timestamptz, metadata = COALESCE(n.metadata,'{}'::jsonb) || ${stamp}
     WHERE n.category='inbound_sms' AND n.read_at IS NULL
       AND NOT EXISTS (
         SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
@@ -125,6 +135,10 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
           AND n.link = '/admin/communications?thread=' || l.customer_id::text)`, [tag]);
   console.log(`pass 2 (bells with no unread message): marked ${r2.rowCount} notifications read`);
   await c.query('COMMIT');
-  console.log(`done. Rollback one batch: UPDATE messages SET is_read=false, read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE notifications SET read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE sms_log SET is_read=false WHERE metadata->>'backlog_reset'='${tag}';`);
+  const ts = at.toISOString();
+  console.log(`done. Rollback THIS batch only (rows a human re-read since are left alone; the marker is removed so a second run is a no-op):
+  UPDATE messages SET is_read=false, read_at=NULL, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz;
+  UPDATE notifications SET read_at=NULL, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz;
+  UPDATE sms_log SET is_read=false, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}';`);
   await c.end();
 })().catch(async (e) => { console.error(e.message); process.exit(1); });

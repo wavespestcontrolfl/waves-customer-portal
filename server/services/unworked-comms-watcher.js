@@ -495,7 +495,10 @@ async function loadUnansweredThreads(cutoff = new Date()) {
     -- for knex, which consumes bare question marks as positional bindings
     -- even alongside named bindings (comments included) and fed pg empty
     -- parameters, failing this whole lane at runtime.
-    WHERE TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
+    -- Closers the webhook already resolved on arrival (context-aware
+    -- isCourtesyOnly, sms_log.metadata.courtesyOnly) are retired too.
+    WHERE COALESCE(l.metadata->>'courtesyOnly', '') <> 'true'
+      AND TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
     -- Answered = a HUMAN outbound after the last inbound. Automated
     -- broadcasts (reminders, receipts, review asks) must not clear a
     -- waiting customer (codex #3232 r1).

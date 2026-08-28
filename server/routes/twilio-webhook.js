@@ -986,25 +986,27 @@ router.post('/sms', async (req, res) => {
         // unknown state still rings.
         const unified = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read').catch(() => null);
         if (unified?.is_read === true) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
-        const bellStartedAt = new Date();
+                const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+          .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
         const stats = await triggerNotification('sms_reply', {
           fromName: `${customer.first_name} ${customer.last_name}`,
           fromPhone: From,
           message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
           twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
+        }, {
+          // Re-checked right before the push leaves (codex P2): a thread
+          // opened while the bell was being written must not also buzz the
+          // phone with a stale badge.
+          beforePush: unifiedStillUnread,
         });
         // Post-check closes the remaining window (hook P1): if the thread was
         // read while the trigger ran, the bell it just wrote would outlive
         // its message — retire exactly that bell (matched on the message SID,
         // never every bell of the customer). Fail open on any lookup error.
         try {
-          const after = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read');
-          if (after?.is_read === true) {
-            await db('notifications').where({ category: 'inbound_sms' }).whereNull('read_at')
-              .where('link', `/admin/communications?thread=${customer.id}`).where('created_at', '>=', bellStartedAt)
-              .whereRaw("metadata->'payload'->>'twilioSid' = ?", [MessageSid])
-              .update({ read_at: new Date() });
+          if (!(await unifiedStillUnread())) {
+            await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
           }
         } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
         // suppressed counts as HANDLED: an internal-test/demo customer's

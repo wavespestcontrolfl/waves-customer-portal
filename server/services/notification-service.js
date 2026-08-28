@@ -338,6 +338,25 @@ const NotificationService = {
     ).whereNull('read_at').update({ read_at: new Date() });
   },
 
+  // Mark a customer's inbound_sms admin bells read — the ONE writer for
+  // thread-scoped bell reads (thread open in Communications, and the webhook's
+  // "thread was read while the bell was being written" post-check). Same
+  // recipient/role scoping as every other admin read. `before` bounds to bells
+  // that existed when the read request entered; `twilioSid` narrows to the
+  // single bell written for one inbound message.
+  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, role } = {}) {
+    if (!customerId) return 0;
+    let q = scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
+      role,
+    )
+      .whereNull('read_at')
+      .where('link', `/admin/communications?thread=${customerId}`)
+      .where('created_at', '<=', before);
+    if (twilioSid) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ?", [twilioSid]);
+    return q.update({ read_at: new Date() });
+  },
+
   // Mark all read for customer
   async markAllReadCustomer(customerId) {
     await db('notifications').where({ recipient_type: 'customer', recipient_id: customerId }).whereNull('read_at').update({ read_at: new Date() });

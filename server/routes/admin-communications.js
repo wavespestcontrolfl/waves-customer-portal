@@ -1016,13 +1016,9 @@ router.post('/messages/read', async (req, res, next) => {
               .andWhere(function unread() { this.where({ 'l.is_read': false }).orWhereNull('l.is_read'); });
           })
           .distinct('cv.customer_id');
+        const NotificationService = require('../services/notification-service');
         for (const t of threads) {
-          notificationsCleared += await db('notifications')
-            .where({ category: 'inbound_sms' })
-            .whereNull('read_at')
-            .where('link', `/admin/communications?thread=${t.customer_id}`)
-            .where('created_at', '<=', now)
-            .update({ read_at: now });
+          notificationsCleared += await NotificationService.markInboundSmsReadAdmin({ customerId: t.customer_id, before: now, role: req.techRole });
         }
       }
     } catch (e) { logger.warn(`[communications] bell cross-clear on thread read failed: ${e.message}`); }

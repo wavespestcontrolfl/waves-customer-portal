@@ -61,7 +61,7 @@ const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|hear
 // "…"` (any emoji, incl. skin-tone + ZWJ sequences). Missed until 2026-08-28:
 // the quoted appointment text then read as prose and tripped the scheduling
 // detector + the full bell/push pipeline.
-const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator}|[0-9#*]\\ufe0f?\\u20e3)+';
+const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator}|[0-9#*]\\ufe0f?\\u20e3|[\\u{E0020}-\\u{E007F}])+';
 const EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+${EMOJI_SEQ_RE}\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
 
