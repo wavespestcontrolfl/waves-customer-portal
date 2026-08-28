@@ -730,6 +730,8 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
 // persist_failed: a PUT may be live) and human drafts are left alone.
 const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED]);
 const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft']);
+// Parks where the pipeline's own PUT may already be live on Google.
+const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 
 /**
  * Fields the sync applies when the REVIEW itself changed (rating / text /
@@ -813,6 +815,23 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
   if (claimLive) return {};
   if (ownerReply) {
     const fields = { review_reply: ownerReply, reply_updated_at: updatedAt };
+    // A reconciliation park (google_uncertain: the PUT timed out; persist_
+    // failed: the PUT landed but the row write failed) whose live reply IS
+    // the pipeline's own draft: our reply landed. Close it as POSTED with
+    // publication metadata so it stays pipeline-owned (Retract keeps
+    // working) instead of being mistaken for an unrelated owner reply.
+    if (existing?.auto_reply_status === STATUS.PARKED
+      && RECONCILE_REASONS.has(existing.auto_reply_reason)
+      && existing.auto_reply_draft && ownerReply === String(existing.auto_reply_draft).trim()) {
+      return {
+        ...fields,
+        auto_reply_status: STATUS.POSTED,
+        auto_reply_reason: null,
+        auto_reply_published_at: existing.auto_reply_published_at || updatedAt,
+        auto_reply_error: null,
+        auto_reply_claimed_until: null,
+      };
+    }
     const pending = [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED];
     if (existing && pending.includes(existing.auto_reply_status)) {
       Object.assign(fields, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });

@@ -583,6 +583,21 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected', auto_reply_attempts: 0 });
   });
 
+  test('syncReplyFields on a reconciliation park: Google showing the pipeline\'s own draft closes it as POSTED (pipeline-owned); a different reply is the owner\'s', () => {
+    const now = new Date('2026-08-27T15:00:00Z');
+    const draft = 'Hi Dana, glad Marcus got the ants. Thanks for having us.';
+    for (const reason of ['google_uncertain', 'persist_failed']) {
+      const parked = { review_reply: '[DRAFT] ' + draft, auto_reply_status: 'parked', auto_reply_reason: reason, auto_reply_draft: draft, auto_reply_published_at: null, publish_claimed_until: null };
+      expect(Runner.syncReplyFields(parked, { owner_reply: draft, owner_reply_updated_at: '2026-08-27T14:30:00Z' }, { now }))
+        .toEqual({ review_reply: draft, reply_updated_at: '2026-08-27T14:30:00Z', auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T14:30:00Z', auto_reply_error: null, auto_reply_claimed_until: null });
+      expect(Runner.syncReplyFields(parked, { owner_reply: 'Something the owner wrote' }, { now }))
+        .toMatchObject({ review_reply: 'Something the owner wrote', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });
+    }
+    // Other parks (low_rating etc.) with the same text on Google are NOT ours.
+    expect(Runner.syncReplyFields({ review_reply: '[DRAFT] ' + draft, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: draft, publish_claimed_until: null }, { owner_reply: draft }, { now }))
+      .toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });
+  });
+
   test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {
     const now = new Date('2026-08-27T15:00:00Z');
     const posted = { review_reply: 'Our auto reply', auto_reply_status: 'posted', publish_claimed_until: null };
