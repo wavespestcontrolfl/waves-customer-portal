@@ -185,14 +185,20 @@ const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)
 // branch: "pest control in mobile homes" is a housing type, not Mobile, AL.
 const AUDIENCE_SUFFIX = 'homes|homeowners|households|residents|neighborhoods|neighbourhoods|communities|properties|yards|lawns|families|businesses|area';
 const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
-// "<Name> pest control" / "<Name> exterminator" — the place-first search
-// form. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
+// "<Name> pest control" / "pest control <Name>" — the place-first and
+// service-first search forms. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
 // activity") are excluded: both read as ordinary words before a service.
 const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile' && n !== 'Sunrise');
+// Service nouns that may sit between the intent word and the place in the
+// service-first form ("termite treatment austin"). Never a preposition —
+// "pests in cocoa mulch" is a topic, and the preposition forms above carry
+// their own boundary rules.
+const SERVICE_FILLER = 'treatment|treatments|service|services|company|companies|control|removal|inspection|inspections|cost|costs|price|prices|pricing|experts|specialists';
 const CONTEXT_PLACE_RE = new RegExp(
   `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
   + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
   + `|\\b(${PLACE_FIRST_NAMES.map(escapeRe).join('|')})\\s+(?:${SERVICE_INTENT})\\b`
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(${PLACE_FIRST_NAMES.map(escapeRe).join('|')})\\b(?![a-z])`
   + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
   'i'
 );

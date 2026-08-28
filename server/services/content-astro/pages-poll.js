@@ -252,6 +252,21 @@ async function pollPost(post, { allowMerge = true } = {}) {
           return { ok: true, url, autoMerged: true };
         } catch (mergeErr) {
           logger.warn(`[pages-poll] auto-merge failed for ${post.slug || post.id}: ${mergeErr.message}`);
+          // The merge-time topic-targeting recheck is deterministic for this
+          // branch + live corpus (another post claimed the entity, or
+          // remediation changed the targeting): retrying every tick can only
+          // reload the corpus and fail again, and mergeAstro's failure stamp
+          // bumps updated_at so the stale-publishing sweep would never park
+          // it. Park the claim at pending_review (claim-guarded, same rule as
+          // the human-merge park above); the PR stays open, the reason is in
+          // astro_publish_error, and an admin edits or merges via merge-astro
+          // (which reruns the same check).
+          if (mergeErr.code === 'BLOG_TOPIC_TARGETING_BLOCKED') {
+            await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
+              .update({ publish_status: 'pending_review', updated_at: new Date() });
+            logger.warn(`[pages-poll] auto-merge PARKED for ${post.slug || post.id} — topic-targeting gate no longer clear; claim moved to pending_review`);
+            return { ok: true, url, topicTargetingBlocked: true };
+          }
           // Codex left findings on the PR → try to auto-fix them so the post
           // can merge without a human. No-op unless AUTONOMOUS_CODEX_REMEDIATION
           // is on; never merges (that still needs a genuine Codex-clean signal).

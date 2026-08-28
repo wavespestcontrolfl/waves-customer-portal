@@ -974,7 +974,11 @@ router.post('/blog/:id/merge-astro', async (req, res, next) => {
     res.json({ success: true, ...result });
   } catch (err) {
     logger.error(`[content] merge-astro failed: ${err.message}`);
-    res.status(500).json({ error: err.message });
+    // The merge-time topic-targeting recheck is an author-correctable policy
+    // rejection (branch targeting or live-corpus ownership changed) — 400 with
+    // the findings, like publish-astro; everything else is a server failure.
+    const isClientErr = err.code === 'BLOG_TOPIC_TARGETING_BLOCKED';
+    res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   }
 });
 

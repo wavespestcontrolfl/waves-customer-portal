@@ -542,3 +542,14 @@ describe('PR codex r4 (2b1bcc9cb)', () => {
     expect((await gate.evaluateBlogPostRow({ ...generic, city: 'Sarasota' }, { index })).ok).toBe(true);
   });
 });
+
+describe('PR codex r5 (ab050983a)', () => {
+  test('service-first place phrases are geographic too; Mobile/Sunrise still ordinary words', () => {
+    for (const t of ['pest control Boston', 'termite treatment Austin', 'exterminator Houston', 'lawn care wellington']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['pest control mobile app', 'mosquito sunrise spraying', 'pest control homesteading tips']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+});

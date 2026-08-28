@@ -2283,6 +2283,34 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(deferred).toHaveLength(1);
   });
 
+  test('a merge-time BLOG_TOPIC_TARGETING_BLOCKED parks the claim at pending_review instead of retrying every tick (PR #3549 codex r5)', async () => {
+    const posts = [{ id: 'post-tg', slug: 'drifted-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'tg-branch', astro_requires_human_merge: false }];
+    const updates = [];
+    db.mockImplementation(() => {
+      const q = {
+        _filters: [],
+        whereIn: jest.fn().mockReturnThis(),
+        whereNotNull: jest.fn().mockReturnThis(),
+        where: jest.fn(function (...args) { q._filters.push(args); return q; }),
+        select: jest.fn(() => Promise.resolve(posts)),
+        update: jest.fn((u) => { updates.push({ filters: q._filters.slice(), updates: u }); return Promise.resolve(1); }),
+      };
+      return q;
+    });
+    mockCloudflareDeploymentList(posts.map((p) => previewDeployment(p.astro_branch_name)));
+    const blocked = new Error('PR #7 cannot merge — topic-targeting gate is no longer clear against the live corpus: P0 TOPIC_CANNIBALIZES_EXISTING — …');
+    blocked.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+    jest.spyOn(AstroPublisher, 'mergeAstro').mockRejectedValue(blocked);
+
+    const result = await PagesPoll.pollPending();
+
+    const parked = result.results.find((r) => r.id === 'post-tg');
+    expect(parked.topicTargetingBlocked).toBe(true);
+    const park = updates.find((u) => u.updates.publish_status === 'pending_review');
+    expect(park).toBeDefined();
+    expect(park.filters).toEqual(expect.arrayContaining([[{ id: 'post-tg', publish_status: 'publishing' }]]));
+  });
+
   test('a post stamped astro_requires_human_merge is parked for admin merge, never auto-merged (audit lane 4b)', async () => {
     const posts = [
       { id: 'post-hr', slug: 'named-competitor-post', astro_status: 'pr_open', publish_status: 'publishing', astro_branch_name: 'hr-branch', astro_requires_human_merge: true },
