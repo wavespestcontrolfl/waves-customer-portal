@@ -24,7 +24,16 @@ function canonicalCatalogName(text) {
 
 async function refreshCatalogNames(conn = require('../models/db')) {
   const rows = await conn('services').select('name', 'short_name');
+  // Names stamped on visits FROM the catalog (service_id set) are catalog
+  // identities too — an in-place rename must not strip historical rows of
+  // their match and drop them onto the lossy regex map (codex P1).
+  const historical = await conn('scheduled_services')
+    .whereNotNull('service_id')
+    .distinct('service_type');
   const next = new Map();
+  for (const row of historical) {
+    if (row.service_type) next.set(row.service_type.trim().toLowerCase(), row.service_type.trim());
+  }
   for (const row of rows) {
     if (row.name) next.set(row.name.trim().toLowerCase(), row.name.trim());
   }

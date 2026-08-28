@@ -68,10 +68,16 @@ describe('refreshCatalogNames aliasing', () => {
       { name: 'Seasonal Mosquito Control Service', short_name: 'Seasonal Mosquito' },
       { name: 'Lawn Care', short_name: null },
     ];
-    const conn = () => ({ select: async () => rows });
+    const history = [{ service_type: 'Core Aeration Service' }];
+    const conn = (table) => (table === 'services'
+      ? { select: async () => rows }
+      : { whereNotNull: () => ({ distinct: async () => history }) });
     await refreshCatalogNames(conn);
     // Ambiguous alias must not pick an arbitrary program.
     expect(normalizeServiceType('lawn care')).toBe('Lawn Care');
     expect(normalizeServiceType('Seasonal Mosquito')).toBe('Seasonal Mosquito Control Service');
+    // A name stamped from the catalog on a historical visit survives an
+    // in-place rename of the catalog row.
+    expect(normalizeServiceType('Core Aeration Service')).toBe('Core Aeration Service');
   });
 });
