@@ -432,9 +432,14 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
   transitions are `charged` (success reported with `merchant_ref`), `voided` (provider
   proves the merchant rejected before capture), or `ambiguous`.
-- **Crash = ambiguous, never re-submit.** A worker that dies after `submitting` leaves the
-  row in `submitting`; the hourly lease-expiry sweep moves any `submitting` row older than the
-  lease TTL to `ambiguous` and marks its attempt `payment_ambiguous`. `claim()` never leases a
+- **Crash = ambiguous, never re-submit; a crash before the card was exposed = voided.** A
+  worker that dies after `submitting` leaves the row in `submitting`; the hourly lease-expiry
+  sweep moves any `submitting` row older than the lease TTL to `ambiguous` (closing the card
+  first, as above) and marks its attempt `payment_ambiguous`. The same sweep moves any
+  `reserved` row whose lease has expired — no card was ever minted or exposed in that state —
+  to `voided` (conditional on `state='reserved'` and the expired lease), releasing its budget
+  and unblocking the placement for a new generation; a stranded reservation can never hold
+  budget or a placement forever. `claim()` never leases a
   placement whose purchase is `submitting` or `ambiguous`, so a reclaimed lease cannot
   re-submit the same checkout. A reported timeout/disconnect after submission →
   `ambiguous` directly.
