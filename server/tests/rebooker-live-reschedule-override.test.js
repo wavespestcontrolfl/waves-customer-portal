@@ -5,6 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+  planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(),

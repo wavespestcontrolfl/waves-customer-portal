@@ -14,6 +14,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/call-booking-catalog', () => ({
   ...jest.requireActual('../services/call-booking-catalog'),
   shiftCallFollowUpsForParentMove: jest.fn().mockResolvedValue(0),
+  planCallFollowUpShift: jest.fn().mockResolvedValue([]),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/tech-status', () => ({
@@ -589,6 +590,18 @@ describe('rescheduleSeries — one recorded operation', () => {
     });
   });
 
+  test('the follow-ups\' destination days join the rung-1 lock set up front, the shift runs with occupancyHeld, and a skipped (booked) follow-up becomes a result warning', async () => {
+    const { planCallFollowUpShift, shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
+    planCallFollowUpShift.mockResolvedValueOnce([{ id: 'kid-1', technician_id: null, day: dayOffset(24), new_day: dayOffset(26) }]);
+    shiftCallFollowUpsForParentMove.mockImplementationOnce(async ({ report }) => { report.skipped = [{ id: 'kid-1', day: dayOffset(24), newDay: dayOffset(26) }]; return 0; });
+    const { trx } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    const lockedDays = trx.raw.mock.calls.filter(([, b]) => Array.isArray(b) && String(b[1]).startsWith('occupancy:')).map(([, b]) => b[1]);
+    expect(lockedDays).toContain(`occupancy:${dayOffset(26)}`);
+    expect(shiftCallFollowUpsForParentMove.mock.calls[0][0]).toMatchObject({ occupancyHeld: true });
+    expect(result.warnings).toEqual(expect.arrayContaining([expect.stringContaining(`follow-up visit on ${dayOffset(24)} kept its date`)]));
+  });
+
   test('the call-booked follow-up shift runs INSIDE the move transaction (non-idempotent — never on a replay)', async () => {
     const { shiftCallFollowUpsForParentMove } = require('../services/call-booking-catalog');
     wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
@@ -937,6 +950,8 @@ describe('caller wiring (source)', () => {
     expect(body).toContain("if (synced === 'stale') {");
     expect(body).toContain('seriesReminderGuards.push(...ownedGuards(occurrenceGuards));');
     expect(body).toContain('const closeIds = ownedOccurrences()');
+    // Conflicted / windowless landings keep their trigger-held preclosed reminders: never closed, never re-armed.
+    expect(body).toContain('&& occurrence.conflicted !== true && !!occurrence.windowStart);');
     // The text and the close are separate recorded steps: customer_notified is written BEFORE the close is attempted, a failed close leaves notified_at NULL, and a retry with the text already out redoes ONLY the close.
     expect(body).toContain('await recordCustomerNotified();\n            await closeSeriesReminders();');
     expect(body).toContain('} else if (notify && markers.customer_notified === true) {');

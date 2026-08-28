@@ -1181,7 +1181,16 @@ describe('extraction plumbing for the new booking fields', () => {
   });
 });
 
+jest.mock('../services/scheduling/occupancy', () => ({
+  ...jest.requireActual('../services/scheduling/occupancy'),
+  acquireOccupancyLocks: jest.fn().mockResolvedValue(undefined),
+  findConflictingVisits: jest.fn().mockResolvedValue([]),
+}));
+const occupancy = require('../services/scheduling/occupancy');
+
 describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () => {
+  beforeEach(() => { occupancy.acquireOccupancyLocks.mockClear(); occupancy.findConflictingVisits.mockClear(); occupancy.findConflictingVisits.mockResolvedValue([]); });
+
   // Chain-recording fake knex conn: captures the where filter, whereIn ids,
   // update payload, raw calls, and advisory-lock keys; the child SELECT
   // resolves to canned kid rows and update() to the canned row count.
@@ -1243,6 +1252,32 @@ describe('shiftCallFollowUpsForParentMove (shared parent-move child shift)', () 
     // by a concurrent writer misses instead of being double-shifted.
     expect(log.wheres).toContainEqual({ id: 'kid-1' });
     expect(log.wheres).toContainEqual(expect.objectContaining({ bindings: ['2026-07-16'] }));
+  });
+
+  test('takes rung-1 date-occupancy locks for every destination day itself (own transaction) — unless the caller holds them', async () => {
+    const { conn } = fakeConn();
+    await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05' });
+    expect(occupancy.acquireOccupancyLocks).toHaveBeenCalledWith(expect.anything(), ['2026-07-19']);
+    occupancy.acquireOccupancyLocks.mockClear();
+    await shiftCallFollowUpsForParentMove({ conn: fakeConn().conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', occupancyHeld: true });
+    expect(occupancy.acquireOccupancyLocks).not.toHaveBeenCalled();
+  });
+
+  test('a child whose destination block is already booked is NOT written onto it — it keeps its date and is reported; a windowless child is not probed', async () => {
+    const kids = [
+      { id: 'kid-1', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: '09:00:00', window_end: null, estimated_duration_minutes: 90 },
+      { id: 'kid-2', technician_id: 't1', day: '2026-07-16', new_day: '2026-07-19', window_start: null, window_end: null, estimated_duration_minutes: null },
+    ];
+    const { conn, log } = fakeConn({ kids, updatedCount: 1 });
+    occupancy.findConflictingVisits.mockResolvedValueOnce([{ id: 'other' }]);
+    const report = {};
+    const shifted = await shiftCallFollowUpsForParentMove({ conn, parentServiceId: 'svc-parent', fromDate: '2026-07-02', toDate: '2026-07-05', report });
+    expect(occupancy.findConflictingVisits).toHaveBeenCalledTimes(1);
+    expect(occupancy.findConflictingVisits.mock.calls[0][0]).toMatchObject({ date: '2026-07-19', windowStart: '09:00', windowEnd: '10:30', excludeServiceIds: ['kid-1'] });
+    expect(report.skipped).toEqual([{ id: 'kid-1', day: '2026-07-16', newDay: '2026-07-19' }]);
+    expect(shifted).toBe(1); // only the windowless child moved
+    expect(log.wheres).toContainEqual({ id: 'kid-2' });
+    expect(log.wheres).not.toContainEqual({ id: 'kid-1' });
   });
 
   test('pg date hydration (JS Date at LOCAL midnight) recovers the calendar date', async () => {

@@ -14169,7 +14169,16 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       }
       return owned;
     };
-    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id)));
+    // Close/re-arm scope: owned occurrences that HAVE a window. A conflicted
+    // (windowless) landing, or any windowless row, carries a placeholder
+    // reminder the DB sync trigger holds preclosed (windows_preclosed);
+    // closing it through markRescheduleNoticeSent would recompute flags
+    // from the synthetic 08:00 time, and re-arming it would clear the held
+    // flags — either way a reminder for a window nobody set (hook r20 P1).
+    // The sync itself still runs for them (handleReschedule keeps the
+    // marker carve-out); only the close and the re-arm skip them.
+    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id))
+      && occurrence.conflicted !== true && !!occurrence.windowStart);
     if (remindersThisPass) {
       for (const occurrence of occurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on

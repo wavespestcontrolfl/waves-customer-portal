@@ -4,7 +4,7 @@ const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
 const { scheduledServiceTrackTokenExpiry } = require('./track-token-expiry');
 const { clearTechCurrentJob } = require('./tech-status');
-const { shiftCallFollowUpsForParentMove } = require('./call-booking-catalog');
+const { shiftCallFollowUpsForParentMove, planCallFollowUpShift } = require('./call-booking-catalog');
 const { findConflictingVisits, acquireOccupancyLock, acquireOccupancyLocks } = require('./scheduling/occupancy');
 const { getIo } = require('../sockets');
 const {
@@ -1629,7 +1629,14 @@ class SmartRebooker {
           // date locks in the same order, so neither the series-vs-single nor
           // the series-vs-series case can deadlock. See the ORDERING CONTRACT
           // in scheduling/occupancy.js.
-          await acquireOccupancyLocks(trx, projectedDates);
+          // The call-created follow-ups this move shifts (inside this trx,
+          // below) land on days of their own — rung 1 must cover those too,
+          // acquired HERE with the sibling dates (sorted, deduped by the
+          // helper), never later behind a row lock (hook r20 P1).
+          const followUpDays = (await planCallFollowUpShift({
+            conn: trx, parentServiceId: serviceId, fromDate: dateOnly(service.scheduled_date), toDate: seriesDateStr,
+          })).map((k) => k.new_day);
+          await acquireOccupancyLocks(trx, [...projectedDates, ...followUpDays]);
           // Rung 1 → the per-parent recurring-series maintenance lock, the
           // order update-details already takes (occupancy, then
           // maintenance, then comms). Byte-identical key to admin-schedule's
@@ -2146,15 +2153,24 @@ class SmartRebooker {
       // idempotent, so it must land exactly once with the move (a replay of
       // a committed move must never re-run it). Tech-day locks it takes are
       // rung-3, after this trx's rung-1 date locks — the ordering contract.
+      // occupancyHeld: rung 1 for the follow-ups' destination days was
+      // taken with the sibling dates above. A child whose shifted slot is
+      // booked keeps its date and becomes a warning on the result.
+      const followUpReport = {};
       const followUpsShifted = await shiftCallFollowUpsForParentMove({
         conn: trx,
         parentServiceId: serviceId,
         fromDate: dateOnly(service.scheduled_date),
         toDate: seriesDateStr,
+        occupancyHeld: true,
+        report: followUpReport,
       });
       if (followUpsShifted > 0) {
         logger.info(`[rebooker] shifted ${followUpsShifted} call-created follow-up visit(s) with series anchor ${serviceId} (-> ${seriesDateStr})`);
       }
+      const followUpWarnings = (followUpReport.skipped || []).map((k) => (
+        `The call-booked follow-up visit on ${k.day} kept its date — its shifted slot on ${k.newDay} is already booked; set it from dispatch`
+      ));
 
       // One operation row per shift — the audit boundary, the idempotency
       // key for every side effect, and the Undo source of truth. Inside the
@@ -2178,7 +2194,7 @@ class SmartRebooker {
       const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
         const { slotOverlapWarning } = require('./scheduling/window-rules');
         return slotOverlapWarning(d);
-      });
+      }).concat(followUpWarnings);
       committedResult = {
         success: true,
         originalDate: dateOnly(service.scheduled_date),

@@ -588,16 +588,57 @@ function callBookingDateOnly(value) {
 // Callers invoke this best-effort outside their transaction: a failed
 // shift leaves the child where it was, and dispatch confirms follow-up
 // dates with the customer before dispatch anyway.
-async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate }) {
+const pendingCallFollowUpFilter = (parentServiceId) => ({
+  parent_service_id: parentServiceId,
+  source_action: 'ai_call_pipeline_followup',
+  status: 'pending',
+  customer_confirmed: false,
+});
+
+// The still-pending, never-confirmed call-created children of a parent and
+// the day each lands on after the parent's delta — what the shift writes
+// from, and the destination days a caller that runs the shift INSIDE its
+// own transaction must cover with rung-1 date-occupancy locks up front,
+// before any row lock (scheduling/occupancy.js ORDERING CONTRACT). [] when
+// nothing is to shift (no parent, bad dates, same date).
+async function planCallFollowUpShift({ conn, parentServiceId, fromDate, toDate }) {
+  const fromStr = callBookingDateOnly(fromDate);
+  const toStr = callBookingDateOnly(toDate);
+  if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return [];
+  return conn('scheduled_services')
+    .where(pendingCallFollowUpFilter(parentServiceId))
+    .select('id', 'technician_id', 'window_start', 'window_end', 'estimated_duration_minutes',
+      conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
+      conn.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
+}
+
+// The block a child occupies on its destination day, for the canonical
+// occupancy probe: stored end, else start + duration (60 default), null
+// when the block would cross midnight (then nothing is probed — the child
+// is skipped like a clash: never written onto an unprobed slot).
+function followUpProbeEnd(windowStart, windowEnd, estimatedDurationMinutes) {
+  if (windowEnd) return String(windowEnd).slice(0, 5);
+  const m = String(windowStart || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return null;
+  const dur = Number(estimatedDurationMinutes) > 0 ? Number(estimatedDurationMinutes) : 60;
+  const endMin = parseInt(m[1], 10) * 60 + parseInt(m[2], 10) + dur;
+  if (endMin > 23 * 60 + 59) return null;
+  return `${String(Math.floor(endMin / 60)).padStart(2, '0')}:${String(endMin % 60).padStart(2, '0')}`;
+}
+
+// options.occupancyHeld: the caller already holds rung-1 date-occupancy
+// locks for every destination day (a series move locks its whole date set
+// up front, BEFORE its row locks — taking them here would invert the
+// order). Otherwise the shift takes them itself at the start of its own
+// transaction. options.report (optional out-param): { skipped: [{ id, day,
+// newDay }] } — children whose destination slot is already booked; they
+// keep their date (best-effort contract) instead of being written onto an
+// occupied slot (AGENTS.md booking conflict-check rule; hook r20 P1).
+async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate, toDate, occupancyHeld = false, report = null }) {
   const fromStr = callBookingDateOnly(fromDate);
   const toStr = callBookingDateOnly(toDate);
   if (!parentServiceId || !fromStr || !toStr || fromStr === toStr) return 0;
-  const filter = {
-    parent_service_id: parentServiceId,
-    source_action: 'ai_call_pipeline_followup',
-    status: 'pending',
-    customer_confirmed: false,
-  };
+  const filter = pendingCallFollowUpFilter(parentServiceId);
   // Tech-day membership fence + route_order clear (uncapped audit r26 P1):
   // a date shift moves the child between tech-days, so it must hold the
   // same 'slot-reserve' fence every other date/tech writer holds — an
@@ -606,12 +647,12 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
   // the new day's run. Every matched row changes day (delta is non-zero by
   // the guard above), so clearing route_order is correct for all of them.
   const run = async (trx) => {
-    const kids = await trx('scheduled_services')
-      .where(filter)
-      .select('id', 'technician_id',
-        trx.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"),
-        trx.raw("to_char(scheduled_date + (?::date - ?::date), 'YYYY-MM-DD') as new_day", [toStr, fromStr]));
+    const kids = await planCallFollowUpShift({ conn: trx, parentServiceId, fromDate, toDate });
     if (!kids.length) return 0;
+    const { acquireOccupancyLocks, findConflictingVisits } = require('./scheduling/occupancy');
+    // Rung 1 for every destination day, before the tech-day fence (rung 3)
+    // and every row lock below.
+    if (!occupancyHeld) await acquireOccupancyLocks(trx, [...new Set(kids.map((k) => k.new_day))]);
     const { lockTechDays } = require('./scheduling/tech-day-lock');
     await lockTechDays(trx, kids.flatMap((k) => [
       { techId: k.technician_id, date: k.day },
@@ -625,6 +666,27 @@ async function shiftCallFollowUpsForParentMove({ conn, parentServiceId, fromDate
     // newer writer put it).
     let shifted = 0;
     for (const k of kids) {
+      // Canonical occupancy check on the destination block (a windowless
+      // child occupies nothing and is not probed): a clash — or a block
+      // that cannot be probed — means the child is NOT written onto that
+      // slot; it keeps its date and is reported.
+      if (k.window_start) {
+        const probeEnd = followUpProbeEnd(k.window_start, k.window_end, k.estimated_duration_minutes);
+        const clash = probeEnd
+          ? await findConflictingVisits({
+            db: trx,
+            date: k.new_day,
+            windowStart: String(k.window_start).slice(0, 5),
+            windowEnd: probeEnd,
+            excludeServiceIds: [String(k.id)],
+            excludeStatuses: ['completed', 'cancelled'],
+          })
+          : [{ unprobed: true }];
+        if (clash.length) {
+          if (report && typeof report === 'object') (report.skipped = report.skipped || []).push({ id: k.id, day: k.day, newDay: k.new_day });
+          continue;
+        }
+      }
       shifted += await trx('scheduled_services')
         .where({ id: k.id })
         .where(filter)
@@ -710,6 +772,7 @@ module.exports = {
   callBookingDateOnly,
   sanitizeQuotedCallPrice,
   shiftCallFollowUpsForParentMove,
+  planCallFollowUpShift,
   cancelCallFollowUpsForParentCancel,
   DEFAULT_FOLLOW_UP_INTERVAL_DAYS,
 };
