@@ -142,6 +142,7 @@ function setupDb({ pending = [], queue, queueFirst, updateResult = 1, briefs = [
       }),
       whereNot: jest.fn(() => q),
       whereNotIn: jest.fn(() => q),
+      forUpdate: jest.fn(() => q),
       whereNull: jest.fn(function (col) {
         q._filters[`null:${col}`] = true;
         return q;

@@ -311,6 +311,11 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
   // FIRST, then the run) so an operator requeue/dismiss racing this tick
   // cannot deadlock against it.
   if (run.opportunity_id) {
+    // Lock the queue row FIRST (FOR UPDATE), validate its exact parked state,
+    // THEN look for a newer sibling — a requeue racing this tick cannot
+    // create + park a replacement between the check and the write.
+    const row = await q('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+    if (!row || row.status !== 'pending_review' || row.skip_reason !== pendingReason) throw lost('queue');
     if (await newerSiblingRun(q, run)) throw lost('newer-sibling');
     const queueRows = await q('opportunity_queue')
       .where('id', run.opportunity_id)
@@ -433,6 +438,10 @@ async function unparkTopicBlockedRun(run, prNumber) {
       // Same lock order as the park and the review-decision path: queue
       // row first, then the run.
       if (run.opportunity_id) {
+        // Same protocol as the park: lock the queue row, validate, then the
+        // newer-sibling check, then the writes.
+        const row = await trx('opportunity_queue').where('id', run.opportunity_id).forUpdate().first('id', 'status', 'skip_reason');
+        if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) throw new Error('queue row left the parked state');
         if (await newerSiblingRun(trx, run)) throw new Error('a newer run owns this opportunity — stale run, queue row left alone');
         const q = await trx('opportunity_queue')
           .where('id', run.opportunity_id)
