@@ -3445,7 +3445,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           .select('terms_version');
         postMergeLatest = rows.map((r) => String(r.terms_version || '')).filter(Boolean).sort().pop() || null;
       } catch (e) {
-        logger.warn(`[customer-dedupe] undo: post-merge acceptance probe failed for ${winnerId}: ${e.message}`);
+        // Fail CLOSED (pre-push Codex P1): continuing into the generic
+        // clear/restore could erase a newer post-merge acceptance.
+        refuse(`Could not verify the kept customer's acceptance history (${e.message}) — undo refused.`);
       }
       if (postMergeLatest) {
         const prior = priorValues.accepted_terms_version ? String(priorValues.accepted_terms_version) : '';

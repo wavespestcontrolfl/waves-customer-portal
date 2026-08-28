@@ -57,14 +57,30 @@ async function acceptanceRecordForEstimate(estimate, { strict = false } = {}) {
 async function attachAcceptanceOwnership(dbh, { estimateId, customerId }) {
   if (!estimateId || !customerId) return false;
   try {
-    const estimate = await dbh('estimates').where({ id: estimateId }).first('id', 'status', 'customer_id', 'terms_version');
-    if (!estimate || estimate.status !== 'accepted' || !estimate.terms_version || estimate.customer_id) return false;
-    await dbh('estimates').where({ id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
-    await dbh('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
-    await dbh('customers').where({ id: customerId })
-      .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', estimate.terms_version))
-      .update({ accepted_terms_version: estimate.terms_version });
-    return true;
+    // ONE transaction, and the claim is the guarded UPDATE itself
+    // (customer_id IS NULL … RETURNING): two concurrent bookings can both
+    // observe an unowned estimate, but only the request whose claim
+    // returns a row fans out — never a split where one customer owns the
+    // estimate and another the acceptance rows (pre-push Codex P1).
+    const run = async (trx) => {
+      const claimed = await trx('estimates')
+        .where({ id: estimateId, status: 'accepted' })
+        .whereNull('customer_id')
+        .whereNotNull('terms_version')
+        .update({ customer_id: customerId })
+        .returning(['id', 'terms_version']);
+      const won = Array.isArray(claimed) ? claimed[0] : null;
+      if (!won) return false;
+      const termsVersion = won.terms_version;
+      await trx('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
+      if (termsVersion) {
+        await trx('customers').where({ id: customerId })
+          .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', termsVersion))
+          .update({ accepted_terms_version: termsVersion });
+      }
+      return true;
+    };
+    return typeof dbh.transaction === 'function' ? await dbh.transaction(run) : await run(dbh);
   } catch (e) {
     logger.warn(`[estimate-acceptance] ownership attach failed for estimate ${estimateId} → customer ${customerId}: ${e.message}`);
     return false;

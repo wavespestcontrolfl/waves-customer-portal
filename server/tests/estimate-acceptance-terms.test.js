@@ -242,42 +242,48 @@ describe('accepted-onboarding email acceptance_note', () => {
 });
 
 describe('attachAcceptanceOwnership (customer-less accept, later /book owner)', () => {
-  function fakeDb(estimateRow) {
+  // The claim is the guarded UPDATE … RETURNING on estimates: `claimRows`
+  // is what that UPDATE returns (a row = this request won; [] = someone
+  // else owns it, or it is not an accepted+recorded estimate).
+  function fakeDb(claimRows) {
     const updates = [];
+    let txCount = 0;
     const dbh = (table) => {
-      const b = { _table: table, _where: [] };
-      b.where = (arg) => { b._where.push(arg); return b; };
+      const b = {};
+      b.where = () => b;
       b.whereNull = () => b;
+      b.whereNotNull = () => b;
       b.orWhere = () => b;
-      b.first = async () => (table === 'estimates' ? estimateRow : undefined);
-      b.update = async (patch) => { updates.push({ table, patch }); return 1; };
+      b.update = (patch) => {
+        updates.push({ table, patch });
+        const res = { returning: async () => (table === 'estimates' ? claimRows : []) };
+        res.then = (resolve, reject) => Promise.resolve(1).then(resolve, reject);
+        return res;
+      };
       return b;
     };
-    return { dbh, updates };
+    dbh.transaction = async (fn) => { txCount += 1; return fn(dbh); };
+    return { dbh, updates, tx: () => txCount };
   }
 
-  test('links estimate + acceptance rows and stamps the customer (max-guarded)', async () => {
+  test('winning the claim fans out in ONE transaction: acceptance rows + max-guarded customer stamp', async () => {
     jest.resetModules();
     jest.doMock('../models/db', () => jest.fn());
     const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
-    const { dbh, updates } = fakeDb({ id: 'e1', status: 'accepted', customer_id: null, terms_version: 'v2026-09' });
+    const { dbh, updates, tx } = fakeDb([{ id: 'e1', terms_version: 'v2026-09' }]);
     expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(true);
+    expect(tx()).toBe(1);
     expect(updates.map((u) => u.table)).toEqual(['estimates', 'estimate_acceptances', 'customers']);
+    expect(updates[0].patch).toEqual({ customer_id: 'c1' });
     expect(updates[2].patch).toEqual({ accepted_terms_version: 'v2026-09' });
   });
 
-  test('no-op when already owned, not accepted, or unrecorded', async () => {
+  test('losing the claim (already owned / not accepted / unrecorded) touches nothing else', async () => {
     jest.resetModules();
     jest.doMock('../models/db', () => jest.fn());
     const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
-    for (const row of [
-      { id: 'e1', status: 'accepted', customer_id: 'other', terms_version: 'v2026-09' },
-      { id: 'e1', status: 'sent', customer_id: null, terms_version: null },
-      { id: 'e1', status: 'accepted', customer_id: null, terms_version: null },
-    ]) {
-      const { dbh, updates } = fakeDb(row);
-      expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(false);
-      expect(updates).toHaveLength(0);
-    }
+    const { dbh, updates } = fakeDb([]);
+    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(false);
+    expect(updates.map((u) => u.table)).toEqual(['estimates']);
   });
 });
