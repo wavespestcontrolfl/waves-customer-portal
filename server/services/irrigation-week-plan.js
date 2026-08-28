@@ -255,7 +255,7 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
   }
   if (plan.conditionalOnForecast) {
     return {
-      title: 'This week: let the rain go first',
+      title: 'This week: check the rain before you water',
       detail: plan.events > 1
         ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on each of your ${plan.events} permitted watering days, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
         : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on your permitted watering day, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,

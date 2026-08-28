@@ -130,7 +130,8 @@ describe('renderWeekPlanReport', () => {
     // The report's override cycle carries the same fallback minutes the email names.
     expect(hold.detail).toContain('run one cycle of about 20 minutes per turf zone on your permitted watering day');
     const cond = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY }));
-    expect(cond.title).toBe('This week: let the rain go first');
+    expect(cond.title).toBe('This week: check the rain before you water');
+    expect(`${cond.title} ${cond.detail}`).not.toMatch(/rain (go|comes) first/i);
     expect(cond.detail).toContain('only if less than ½" has fallen so far this week');
     for (const c of [run, hold, cond]) expect(`${c.title} ${c.detail}`).not.toMatch(WEEKDAY);
   });
