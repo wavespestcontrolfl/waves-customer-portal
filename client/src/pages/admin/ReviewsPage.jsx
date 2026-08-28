@@ -686,7 +686,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             )}
           </div>
         )}
-        {!review.missingSince && autoReply && autoReply.status === "queued" && !review.draftReply && !review.reply && (
+        {!review.missingSince && autoReply && ["queued", "failed"].includes(autoReply.status) && !review.draftReply && !review.reply && (
           <div
             style={{
               fontSize: 14,
@@ -695,11 +695,30 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               marginBottom: 8,
             }}
           >
-            Auto-reply scheduled{autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.{" "}
+            {autoReply.status === "failed" && autoReply.draft && (
+              <div
+                style={{
+                  padding: 10,
+                  border: `1px solid ${D.border}`,
+                  borderRadius: 8,
+                  background: D.bg,
+                  marginBottom: 8,
+                  color: D.text,
+                  whiteSpace: "pre-wrap",
+                  lineHeight: 1.5,
+                }}
+              >
+                <div style={{ color: D.muted, marginBottom: 4 }}>Auto-reply draft (publish retrying)</div>
+                {autoReply.draft}
+              </div>
+            )}
+            {autoReply.status === "failed"
+              ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${autoReply.dueAt ? `, next attempt ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`
+              : `Auto-reply scheduled${autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`}{" "}
             <button
               onClick={() => runAuto("post-now")}
               disabled={autoBusy}
-              title="Draft and post to Google now (skips the delay and shadow mode)"
+              title="Post to Google now (skips the delay and shadow mode)"
               style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif", fontWeight: 500 }}
             >
               {autoBusy ? "Working..." : "Post now"}
@@ -714,7 +733,6 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             </button>
           </div>
         )}
-
         {success && (
           <div
             style={{

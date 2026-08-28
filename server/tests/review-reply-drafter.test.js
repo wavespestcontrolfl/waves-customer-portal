@@ -165,6 +165,16 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nWe will keep the ants out. Marcus says thanks.'))).toBeNull();
   });
+  test('service / treatment claims need provenance from the review or the account categories', () => {
+    const g = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hi Dana, glad our mosquito treatments delivered great service. We look forward to protecting your yard."), g)).toBe('unlisted_service_claim');
+    expect(verify(good('Hi Dana, glad the service hit the mark. Thanks for having us out to the house.'), g)).toBeNull();
+    // An account service category makes its words sourced.
+    const g2 = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['mosquito control'], city: null } });
+    expect(verify(good('Hi Dana, glad the mosquito control is doing its job. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    // Relationship claims need provenance too.
+    expect(verify(good('Hi Dana, thanks for years of trusting us with the service.'), g)).toBe('unlisted_relationship_claim');
+  });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana, glad Marcus got the ants handled before your HOA walk-through.'))).toBeNull();

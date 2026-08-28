@@ -296,6 +296,9 @@ router.get('/', async (req, res, next) => {
           mode: r.auto_reply_mode || null,
           version: r.auto_reply_version || null,
           hasDraft: !!r.auto_reply_draft,
+          // The verified text a failed publish is retrying with (review_reply
+          // stays null on those rows) — surfaced so the page can offer it.
+          draft: r.auto_reply_status === 'failed' ? (r.auto_reply_draft || null) : null,
         } : null,
         reviewCreatedAt: r.review_created_at,
         matchedCustomer: r.cust_first ? { name: `${r.cust_first} ${r.cust_last}`, tier: r.cust_tier, id: r.customer_id } : null,

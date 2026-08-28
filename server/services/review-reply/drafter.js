@@ -125,6 +125,11 @@ const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'c
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
 const DATE_CLAIM_RE = /\b(?:yesterday|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|month|year|weekend)|last (?:week|month|year|weekend|night|time|visit|spring|summer|fall|winter)|next (?:week|month|year|visit)|(?:\d+|a|an|few|couple(?: of)?|several|two|three|four|five|six|seven|eight|nine|ten) (?:days?|weeks?|months?|years?|hours?|minutes?) ago|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|\bmay \d|on the \d{1,2}(?:st|nd|rd|th)|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:19|20)\d{2})\b/i;
+// Service / treatment / relationship claims. Each is a factual assertion
+// about what we did or who the customer is; it must come from the review
+// text or from an allowed account fact, never from the model.
+const SERVICE_CLAIM_RE = /\b(?:mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
+const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit))\b/gi;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
@@ -288,6 +293,33 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
       && !reviewLower.includes(city.toLowerCase())) return 'unlisted_city';
   }
 
+  // Provenance for service / treatment claims: the reviewer's own words, or
+  // one of the account's public-safe service categories ("lawn care" →
+  // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
+  const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
+  const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
+  for (const term of body.match(SERVICE_CLAIM_RE) || []) {
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    const stem = t.replace(/(?:es|s)$/, '');
+    const known = (w) => reviewWords.has(w) || categoryWords.has(w) || genericServiceWords.has(w);
+    if (known(t) || known(stem) || [...reviewWords].some((w) => w.startsWith(stem) && stem.length >= 4)) continue;
+    return 'unlisted_service_claim';
+  }
+  // Provenance for relationship / tenure claims: the reviewer's words or the
+  // account's derived facts (recurring → "again"/"regular"; long_term → "years").
+  const rel = grounding.account?.relationship;
+  const tenure = grounding.account?.tenure;
+  const relAllowed = new Set([
+    ...(rel === 'recurring' ? ['recurring', 'regular', 'ongoing', 'again'] : []),
+    ...(rel === 'first_visit' ? ['first visit', 'first time', 'new customer'] : []),
+    ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'long-time', 'longtime', 'since'] : []),
+  ]);
+  for (const term of body.match(RELATIONSHIP_CLAIM_RE) || []) {
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    if (relAllowed.has(t) || reviewLower.includes(t) || reviewWords.has(t)) continue;
+    return 'unlisted_relationship_claim';
+  }
+
   // Non-repetition against the location's recent posted replies.
   const opening = words.slice(0, 5).join(' ');
   for (const prior of recentReplies) {
@@ -381,6 +413,8 @@ const FEEDBACK_FOR = {
   unlisted_city: 'named a city the reviewer did not mention and that is not this location',
   unlisted_name: 'introduced a name or proper noun that is not in the review',
   date_claim: 'stated a date or time the reviewer did not write',
+  unlisted_service_claim: 'claimed a service, pest, or treatment the reviewer did not mention',
+  unlisted_relationship_claim: 'claimed a relationship or tenure fact that is not in the review or account facts',
   repetitive_opening: 'opened the same way as a recent reply',
   repetitive_body: 'read too much like a recent reply',
   placeholder: 'contained a placeholder or bracket',
