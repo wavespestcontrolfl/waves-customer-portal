@@ -828,3 +828,87 @@ describe('_private.composeClarifyBody', () => {
     }
   });
 });
+
+// ── bedroom_count (GATE_UNIT_BAND_PRICING lane) ─────────────────
+describe('bedroom_count ask (unit-band lane)', () => {
+  test('is askable, with its own one-question copy and a trailing question when combined', () => {
+    expect(_private.ASKABLE_MISSING.has('bedroom_count')).toBe(true);
+    const alone = _private.composeClarifyBody({ missing: ['bedroom_count'], firstName: 'Pat' });
+    expect(alone.startsWith('Hi Pat, ')).toBe(true);
+    expect(alone).toMatch(/how many bedrooms is the unit \(studio, 1, 2, 3 or more\)\?/);
+    const combined = _private.composeClarifyBody({ missing: ['street_address', 'bedroom_count'], firstName: null });
+    expect(combined).toBe(`${_private.composeClarifyBody({ missing: ['street_address'], firstName: null })} Also, how many bedrooms is the unit (studio, 1, 2, 3 or more)? That sets the price for your apartment or condo.`);
+  });
+
+  test('extractBedroomReply reads counts as spoken; studio = 0; a bare number is not an answer', () => {
+    const { extractBedroomReply } = _private;
+    expect(extractBedroomReply("It's a 2 bedroom")).toBe(2);
+    expect(extractBedroomReply('one-bedroom apartment')).toBe(1);
+    expect(extractBedroomReply('3br 2ba')).toBe(3);
+    expect(extractBedroomReply('2 bed 2 bath')).toBe(2);
+    expect(extractBedroomReply('studio')).toBe(0);
+    expect(extractBedroomReply('Efficiency unit')).toBe(0);
+    expect(extractBedroomReply('2')).toBeNull();
+    expect(extractBedroomReply('ok thanks')).toBeNull();
+    expect(extractBedroomReply('')).toBeNull();
+  });
+
+  test('a bedroom reply records onto the draft flags only (no CRM column exists) and resumes the thread draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '+19415550142', body: "It's a 2 bedroom, thanks" });
+    expect(result.handled).toBe(true);
+    expect(mockState.updates.some((u) => u.table === 'leads' || u.table === 'customers')).toBe(false);
+    const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(bookkeeping.payload.flags);
+    expect(flags.answer_recorded).toEqual(['bedroom_count']);
+    expect(flags.bedroom_count_answer).toBe(2);
+    expect(flags.missing).toEqual([]);
+    expect(flags.answered_at).toBeDefined();
+    // The re-draft names the fallback-priced draft it replaces, so the
+    // dedupe transaction retires it and the replacement passes the guard.
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({
+      skipIntentGate: true, skipCooldown: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
+    }));
+  });
+
+  test('an address reply (red-path ask, no linked draft) never asks the re-draft to supersede anything', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['street_address'], lead_id: 'lead-1' }),
+    };
+    await handleClarifyReply({ phone: '+19415550142', body: '123 Main St, Sarasota' });
+    const args = mockStartSmsThreadDraft.mock.calls[0][0];
+    expect(args.supersedeEstimateId).toBeUndefined();
+  });
+
+  test('a reply without a bedroom count leaves the ask open', async () => {
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'ok thanks' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('approval-time staleness never treats bedroom_count as answered by CRM state (an address on the lead is not a bedroom count)', async () => {
+    mockState.firstQueue = [
+      {
+        id: 'draft-1', source_ref: 'clarify:9415550142', customer_id: null, status: 'approved', sent_at: null,
+        draft_response: 'Original question?', final_response: null,
+        flags: JSON.stringify({ missing: ['bedroom_count'], toPhone: '+19415550142', lead_id: 'lead-1' }),
+      },
+      { id: 'lead-1', status: 'new', address: '123 Main St Apt 4', service_interest: 'quarterly pest', first_name: 'Pat' },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: { id: 'draft-1', source_ref: 'clarify:9415550142' } });
+    expect(verdict.outcome).toBe('send');
+    expect(verdict.flags.missing).toEqual(['bedroom_count']);
+  });
+});

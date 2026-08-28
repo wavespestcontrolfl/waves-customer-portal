@@ -201,8 +201,50 @@ async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
   return withAutomatedEstimatePhoneLocks([phone], callback, options);
 }
 
+/**
+ * Retire an automated draft that a replacement is about to supersede —
+ * INSIDE the dedupe transaction, so the guard's open-estimate listing no
+ * longer sees it and the replacement passes. Only an unsent 'draft' that
+ * is not already archived qualifies: a sent/scheduled/terminal row is
+ * never touched (the send flow or the customer owns it). Returns true
+ * when a row was retired. The archive marker + estimator_engine stamp
+ * mirror the linkage-invalidation precedent (estimator-engine/index.js).
+ */
+async function retireSupersededDraftInTx(trx, { estimateId, reason }) {
+  if (!trx || !estimateId) return false;
+  const stale = await trx('estimates')
+    .select('id', 'estimate_data')
+    .where({ id: estimateId, status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .forUpdate()
+    .first();
+  if (!stale) return false;
+  let data = {};
+  try {
+    data = typeof stale.estimate_data === 'string' ? JSON.parse(stale.estimate_data) : (stale.estimate_data || {});
+  } catch { data = {}; }
+  if (!data || typeof data !== 'object') data = {};
+  data.estimatorEngine = {
+    ...(data.estimatorEngine || {}),
+    superseded_at: new Date().toISOString(),
+    superseded_reason: reason || 'superseded',
+  };
+  const changed = await trx('estimates')
+    .where({ id: stale.id, status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .update({
+      archived_at: new Date(),
+      estimate_data: JSON.stringify(data),
+      updated_at: new Date(),
+    });
+  return changed > 0;
+}
+
 module.exports = {
   acquireAutomatedEstimateLocks,
+  retireSupersededDraftInTx,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

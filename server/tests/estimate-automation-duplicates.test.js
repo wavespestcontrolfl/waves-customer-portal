@@ -11,6 +11,7 @@ const {
   withAutomatedEstimateDedupeLocks,
   withAutomatedEstimatePhoneLock,
   withAutomatedEstimatePhoneLocks,
+  retireSupersededDraftInTx,
 } = require('../services/estimate-automation-duplicates');
 
 describe('estimate automation duplicate guard', () => {
@@ -226,5 +227,43 @@ describe('estimate automation duplicate guard', () => {
     expect(database.transaction).not.toHaveBeenCalled();
     expect(result.executor).toBe(database);
     expect(result.values.last10).toBeNull();
+  });
+});
+
+describe('retireSupersededDraftInTx (clarify-reply re-draft)', () => {
+  const fakeTrx = (row, { updateResult = 1 } = {}) => {
+    const updates = [];
+    const wheres = [];
+    const q = {
+      select() { return q; },
+      where(...a) { wheres.push(a); return q; },
+      whereNull(...a) { wheres.push(['whereNull', ...a]); return q; },
+      forUpdate() { return q; },
+      first: async () => row,
+      update: async (payload) => { updates.push(payload); return updateResult; },
+    };
+    return Object.assign(() => q, { updates, wheres });
+  };
+
+  test('archives an unsent draft with a superseded stamp on estimator_engine, keyed off the locked row', async () => {
+    const trx = fakeTrx({ id: 'est-1', estimate_data: JSON.stringify({ engineInputs: {}, estimatorEngine: { lane: 'yellow' } }) });
+    await expect(retireSupersededDraftInTx(trx, { estimateId: 'est-1', reason: 'clarify_bedroom_reply' })).resolves.toBe(true);
+    expect(trx.updates).toHaveLength(1);
+    const payload = trx.updates[0];
+    expect(payload.archived_at).toBeInstanceOf(Date);
+    const data = JSON.parse(payload.estimate_data);
+    expect(data.estimatorEngine.lane).toBe('yellow');
+    expect(data.estimatorEngine.superseded_reason).toBe('clarify_bedroom_reply');
+    expect(data.estimatorEngine.superseded_at).toBeDefined();
+    // Both the read and the write are status/sent/archived-conditional.
+    expect(trx.wheres.some((w) => w[0] && w[0].status === 'draft')).toBe(true);
+    expect(trx.wheres.filter((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toHaveLength(2);
+  });
+
+  test('a sent, scheduled, or already-archived row is never touched', async () => {
+    const trx = fakeTrx(null);
+    await expect(retireSupersededDraftInTx(trx, { estimateId: 'est-1', reason: 'x' })).resolves.toBe(false);
+    expect(trx.updates).toHaveLength(0);
+    await expect(retireSupersededDraftInTx(trx, { estimateId: null })).resolves.toBe(false);
   });
 });

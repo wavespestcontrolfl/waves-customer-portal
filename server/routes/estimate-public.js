@@ -5010,7 +5010,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // version on the card for the commercial turf line only (fuller copy still shows
       // via svc.detail in the no-visits fallback).
       const isCommercialTurf = serviceKey === 'commercial_lawn' || /commercial turf/i.test(String(name));
-      const scopeNote = isCommercialTurf ? 'Does not include mowing, edging, or landscape maintenance' : '';
+      // A row-level scopeNote (bedroom-band unit quotes: interior-only
+      // exclusions) shows on the card the same way — the visits branch
+      // would otherwise drop it with svc.detail.
+      const scopeNote = isCommercialTurf
+        ? 'Does not include mowing, edging, or landscape maintenance'
+        : String(svc?.scopeNote || '');
       const detailHtml = displayCadenceText || visits
         ? [
             displayCadenceText ? escapeHtml(displayCadenceText) : null,

@@ -32,7 +32,13 @@ const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 // The only items an SMS can ask for. 'phone' is structurally unaskable
 // here (no phone = no SMS), and free-text composer uncertainties are not a
 // stable vocabulary — both stay operator-bell territory.
-const ASKABLE_MISSING = new Set(['street_address', 'specific_service']);
+// 'bedroom_count' (GATE_UNIT_BAND_PRICING lane): a residential-unit quote
+// with no unit sqft and no stated bedroom count — the one question that
+// makes the band price real. The answer is not written to any row: the
+// resumed SMS-thread composer reads it from the thread (intent
+// unit_bedroom_count), so approval-time staleness treats it as still
+// missing until the reply handler records it.
+const ASKABLE_MISSING = new Set(['street_address', 'specific_service', 'bedroom_count']);
 
 function clarifyAsksEnabled() {
   return isEnabled('estimateClarifyAsks');
@@ -45,10 +51,21 @@ function firstNameGreeting(firstName) {
 
 // Deterministic, neighborly, compliant: company name in full, one concrete
 // question, no service claims. The owner can revise any of it before send.
+const BEDROOM_ASK = 'how many bedrooms is the unit (studio, 1, 2, 3 or more)? That sets the price for your apartment or condo.';
+
 function composeClarifyBody({ missing, firstName }) {
   const greeting = firstNameGreeting(firstName);
   const wantsAddress = missing.includes('street_address');
   const wantsService = missing.includes('specific_service');
+  const wantsBedrooms = missing.includes('bedroom_count');
+  if (wantsBedrooms && !wantsAddress && !wantsService) {
+    return `${greeting}it's Waves Pest Control — one quick question to finish your quote: ${BEDROOM_ASK}`;
+  }
+  if (wantsBedrooms) {
+    // Bedrooms alongside another gap: the base ask plus one trailing question.
+    const base = composeClarifyBody({ missing: missing.filter((m) => m !== 'bedroom_count'), firstName });
+    return `${base} Also, ${BEDROOM_ASK}`;
+  }
   if (wantsAddress && wantsService) {
     return `${greeting}it's Waves Pest Control — happy to get your quote started. Two quick things: what's the service address (street + city), and which service are you looking for (pest control, lawn care, mosquito, or something else)?`;
   }
@@ -305,6 +322,22 @@ function stripServiceTail(address) {
 
 // Local address heuristics (mirrors lead-intake's leniency; duplicated
 // because lead-intake requires THIS module — importing back would cycle).
+// "studio", "it's a 2 bedroom", "one-bedroom apartment", "3br", "2 bed 2 bath".
+// A bare number is NOT accepted (it could answer anything); the word or
+// abbreviation must be there. Studio/efficiency = 0.
+const BEDROOM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+const BEDROOM_COUNT_RE = /\b(\d{1,2}|one|two|three|four|five|six)\s*[-–]?\s*(?:br|bd|bdr|bdrm|bed|beds|bedroom|bedrooms)\b/i;
+function extractBedroomReply(body) {
+  const text = String(body || '').trim();
+  if (!text) return null;
+  if (/\b(?:studio|efficiency)\b/i.test(text)) return 0;
+  const m = text.match(BEDROOM_COUNT_RE);
+  if (!m) return null;
+  const raw = m[1].toLowerCase();
+  const n = BEDROOM_WORDS[raw] ?? Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 20 ? n : null;
+}
+
 const CLARIFY_STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|trl|trail|hwy|highway|loop)\b/i;
 function extractAddressReply(body) {
   const text = String(body || '').trim();
@@ -415,6 +448,11 @@ async function handleClarifyReply({ phone, body }) {
         }
       }
     }
+    let bedroomCount = null;
+    if (missing.includes('bedroom_count')) {
+      bedroomCount = extractBedroomReply(text);
+      if (bedroomCount !== null) candidates.push('bedroom_count');
+    }
     let serviceText = null;
     if (missing.includes('specific_service') && serviceTailFromAddress) {
       // Vocabulary-matched tail — no classifier round needed.
@@ -483,6 +521,9 @@ async function handleClarifyReply({ phone, body }) {
         await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
           .update({ service_interest: serviceText });
       }
+      // bedroom_count has no row of its own: the resumed SMS-thread draft
+      // reads the answer from the thread. The flag keeps the audit.
+      if (recorded.includes('bedroom_count')) freshFlags.bedroom_count_answer = bedroomCount;
 
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
@@ -528,13 +569,24 @@ async function handleClarifyReply({ phone, body }) {
     // engine's own duplicate guard and bell dedupe absorb re-runs.
     try {
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
+      // A bedroom answer re-prices the draft it was asked FOR: the
+      // fallback-priced yellow draft linked on the ask is superseded by
+      // the re-draft (retired atomically with the replacement insert —
+      // a red/skip outcome leaves it standing). Address/service answers
+      // have no linked draft (red-path asks) and resume as before.
+      const supersedeEstimateId = recorded.includes('bedroom_count') && flags.estimate_id
+        ? String(flags.estimate_id)
+        : null;
       if (smsThreadDraftsEnabled()) {
         await startSmsThreadDraft({
           phone,
           triggerBody: body,
           skipIntentGate: true,
           skipCooldown: true,
+          ...(supersedeEstimateId ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply' } : {}),
         });
+      } else if (supersedeEstimateId) {
+        logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
       }
     } catch (resumeErr) {
       logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
@@ -745,7 +797,10 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       const { hasConcreteServiceInterest } = require('./lead-estimate-automation');
       const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
-        || (item === 'specific_service' && !hasServiceNow));
+        || (item === 'specific_service' && !hasServiceNow)
+        // No row carries a bedroom count — only the reply handler can
+        // retire it (it drops the item from `missing` when answered).
+        || item === 'bedroom_count');
       if (!stillMissing.length) {
         return retire('Clarify draft retired — the customer already provided the missing details.');
       }
@@ -965,5 +1020,5 @@ module.exports = {
   claimClarifyDispatch,
   clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
-  _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
+  _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

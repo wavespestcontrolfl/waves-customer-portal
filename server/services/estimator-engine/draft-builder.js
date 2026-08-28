@@ -24,6 +24,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const {
+  retireSupersededDraftInTx,
   acquireAutomatedEstimateLocks,
   automatedDuplicateBlock,
   listOpenEstimatesByCustomerId,
@@ -32,6 +33,7 @@ const {
   withAutomatedEstimateDedupeLocks,
 } = require('../estimate-automation-duplicates');
 const { FALLBACK_SQFT_SOURCES, SQFT_SOURCES, _private: { pricingSafePropertyType } } = require('./source-arbitration');
+const { PRICING_BASIS: UNIT_BAND_PRICING_BASIS } = require('../pricing-engine/unit-band-pricing');
 const { sameStreetAddress } = require('./address-compare');
 const {
   unitScopeGuardrailsEnabled,
@@ -207,7 +209,7 @@ function storiesSourceForPricing(propertyFacts) {
 function buildEngineInput({
   intent, propertyFacts, context, priorQualifyingServices = [],
   profileDescribesQuotedProperty = false, profileMeasurementUnitExact = false,
-  lookupEnriched = null,
+  lookupEnriched = null, unitBandPricing = null,
 }) {
   // profileDescribesQuotedProperty is POSITIVELY established by the caller
   // (the trusted profile's saved address street-matches the final quoted
@@ -274,6 +276,11 @@ function buildEngineInput({
     commercialRiskType: intent.commercial_risk_type || null,
     commercialSubtype: intent.commercial_subtype || null,
     ...(homeSqFt ? { homeSqFt } : {}),
+    // Residential-unit bedroom band (GATE_UNIT_BAND_PRICING): the resolved
+    // table rows ride INSIDE the input so the stored draft replays exactly
+    // what priced it. Only band-priced keys change behavior in the engine;
+    // the audit fields (missing/parked/unresolved) are read by classifyLane.
+    ...(unitBandPricing ? { unitBandPricing } : {}),
     // Commercial pest/termite/rodent price off the BUILDING footprint; feed
     // the arbitrated value under both names (profile derivation accepts either).
     ...(isCommercial && homeSqFt ? { footprintSqFt: homeSqFt } : {}),
@@ -637,7 +644,12 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // Yellow triggers — draft still lands, with the gaps spelled out. A draft
   // whose ONLY money is provisional (every priced line review-flagged) is
   // still yellow, never green — enforced by the manualLines reason below.
-  const usesHomeSqft = lines.some((l) => l.footprintUsed || l.footprint || !intent.is_commercial);
+  // A bedroom-band line (GATE_UNIT_BAND_PRICING) priced from the
+  // caller's stated unit size, not from any sqft — the unresolved home
+  // area is the EXPECTED state for a rental unit and must not park it.
+  // Every other residential line still keys off the arbitrated home sqft.
+  const bandPriced = (l) => l.pricingBasis === UNIT_BAND_PRICING_BASIS;
+  const usesHomeSqft = lines.some((l) => !bandPriced(l) && (l.footprintUsed || l.footprint || !intent.is_commercial));
   if (usesHomeSqft && FALLBACK_SQFT_SOURCES.has(propertyFacts?.home?.source)) {
     reasons.push(`home/building sqft from fallback source (${propertyFacts.home.source}${propertyFacts.home.sampleCount ? `, n=${propertyFacts.home.sampleCount}` : ''})`);
   }
@@ -681,8 +693,29 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // single_family (propertyTypeUnresolved is stamped off the ACTUAL engine
   // input in index.js, so this can never drift from what priced) —
   // observable and recoverable, but never a green one-click send.
-  if (propertyFacts?.propertyTypeUnresolved) {
+  // A band-priced pest line never read the property type (the band IS the
+  // price), so the unresolved-type stamp only parks when some pest-family
+  // line actually priced off it.
+  const pestFamilyLines = lines.filter((l) => l.service === 'pest_control' || l.service === 'one_time_pest');
+  const typeFedAPestLine = !pestFamilyLines.length || pestFamilyLines.some((l) => !bandPriced(l));
+  if (propertyFacts?.propertyTypeUnresolved && typeFedAPestLine) {
     reasons.push('property type unresolved or not in the pricing vocabulary — classify the property before send (priced at the neutral single-family default)');
+  }
+  // Unit-band audit (GATE_UNIT_BAND_PRICING): a residential unit that
+  // COULD band-price but didn't lands yellow with the exact gap spelled
+  // out — the bedroom ask is the clarify loop's job, the monthly cadence
+  // is a human's (it usually signals an excluded program).
+  const bandAudit = engineInput?.unitBandPricing;
+  if (bandAudit?.eligible) {
+    if ((bandAudit.missing || []).includes('bedroom_count')) {
+      reasons.push('residential unit with no unit sqft and no stated bedroom count — priced on the fallback footprint; ask how many bedrooms before send');
+    }
+    if (bandAudit.parked?.pest === 'monthly_frequency') {
+      reasons.push('monthly cadence on a residential unit — band pricing covers quarterly/bi-monthly only (a monthly apartment ask usually means a German roach or flea program); verify the program before send');
+    }
+    if (bandAudit.unresolved) {
+      reasons.push(`residential unit band rate unavailable (${bandAudit.unresolved}) — priced on the standard ladder; verify before send`);
+    }
   }
   if (manualLines.length) {
     const pricedManual = manualLines.filter((l) => Number(l.monthlyAfterDiscount ?? l.monthly) || Number(l.priceAfterDiscount ?? l.price));
@@ -761,6 +794,19 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
 }
 
 // ── Notes (operator-facing provenance) ────────────────────────
+// Bedroom-band audit lines for the operator notes (ruling #5: the quote's
+// scope exclusions are explicit, never implied).
+function unitBandNoteLines(unitScope) {
+  if (!unitScope || unitScope.sizeBasis !== 'bedroom_band') return [];
+  const lines = [
+    `- Pricing basis: ${unitScope.pricingBasis} · band ${unitScope.pricingBand} (${unitScope.bedroomCount} bedroom${unitScope.bedroomCount === 1 ? '' : 's'}, from ${unitScope.bedroomSource})`,
+  ];
+  if (Array.isArray(unitScope.scopeExclusions) && unitScope.scopeExclusions.length) {
+    lines.push(`- Scope of the unit quote: ${unitScope.scopeExclusions.join('; ')}`);
+  }
+  return lines;
+}
+
 function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, comps, calibration, model, call }) {
   const factLine = (label, fact) => {
     if (!fact) return `- ${label}: (unresolved)`;
@@ -785,6 +831,7 @@ function buildDraftNotes({ intent, propertyFacts, totals, lane, laneReasons, com
     propertyFacts?.unitScope
       ? `- Scope: ${propertyFacts.unitScope.serviceScope} · Use: ${propertyFacts.unitScope.propertyUse} · Relationship: ${propertyFacts.unitScope.customerRelationship} · Size basis: ${propertyFacts.unitScope.sizeBasis}`
       : null,
+    ...unitBandNoteLines(propertyFacts?.unitScope),
     '',
     `Totals: $${totals.monthly}/mo · $${totals.annual}/yr · $${totals.oneTime} one-time`,
     comps && !comps.insufficient
@@ -1135,6 +1182,21 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // transcripts and SMS threading still key on the sender); the address
     // bypass applies across the union. Draft-phone rows stay FIRST so the
     // no-address fallback (newest open estimate blocks) is unchanged.
+    // Bedroom clarify reply (GATE_UNIT_BAND_PRICING lane): the reply
+    // RE-DRAFTS through the SMS thread, and the stale fallback-priced draft
+    // it answers is retired HERE — same transaction, right before the
+    // open-estimate listing — so the replacement passes the guard while a
+    // red/skip outcome (no insert) leaves the original draft standing.
+    const supersedeEstimateId = context?.supersedeEstimateId || null;
+    let supersededEstimateId = null;
+    if (supersedeEstimateId) {
+      const retired = await retireSupersededDraftInTx(trx, {
+        estimateId: supersedeEstimateId,
+        reason: context?.supersedeReason || 'superseded_by_redraft',
+      });
+      if (retired) supersededEstimateId = supersedeEstimateId;
+      else logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
+    }
     const allOpen = [];
     const seenEstimateIds = new Set();
     const absorb = (rows) => {
@@ -1197,6 +1259,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           version: 1,
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
+          ...(supersededEstimateId ? { supersedesEstimateId: supersededEstimateId } : {}),
           // The processing generation whose claim composed this draft —
           // lets any later reconciler prove the draft predates (or
           // matches) the call's current pass without wall clocks or
