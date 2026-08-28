@@ -677,3 +677,28 @@ describe('PR codex r9 (6c1590f89)', () => {
     expect(gate.evaluateDraftTargeting({ frontmatter: { ...draft.frontmatter, service_areas_tag: ['Portland'] } }, { index, service: 'pest' }).ok).toBe(false);
   });
 });
+
+describe('PR codex r10 (7854a3c91)', () => {
+  test('a semantic city must EQUAL a served locality or region — containing one is not enough', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', keyword: 'pest control frequency', slug: 'pest-control-frequency', status: 'draft' };
+    for (const city of ['Venice Beach', 'Sarasota Springs', 'North Sarasota Heights']) {
+      const r = await gate.evaluateBlogPostRow({ ...generic, city }, { index });
+      expect(r.ok).toBe(false);
+      expect(r.findings[0]).toMatchObject({ code: gate.CODES.GEO_OUT_OF_AREA, cities: [city] });
+    }
+    // Out-of-state suffix is caught by the free-text rule first (cities [GA]) — still blocked.
+    expect((await gate.evaluateBlogPostRow({ ...generic, city: 'Bradenton, GA' }, { index })).findings[0].code).toBe(gate.CODES.GEO_OUT_OF_AREA);
+    for (const city of ['Venice', 'Venice, FL', 'venice florida', 'Lakewood Ranch', 'Sun City Center', 'Manatee County', 'Southwest Florida', 'SWFL']) {
+      expect((await gate.evaluateBlogPostRow({ ...generic, city }, { index })).ok).toBe(true);
+    }
+  });
+  test('"or" is Oregon between a locality and service intent, or trailing "<service> <locality>"; never as the conjunction', () => {
+    for (const t of ['Portland OR pest control', 'Salem OR termite treatment', 'pest control Portland OR', 'exterminator services bend or?']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toContain('OR');
+    }
+    for (const t of ['pest control or exterminator', 'termite treatment cost or price', 'ants or termites in the kitchen', 'pest control for ants or roaches', 'mosquito control near me or diy']) {
+      expect(gate.classifyGeoScope(t).out_of_area).not.toContain('OR');
+    }
+  });
+});

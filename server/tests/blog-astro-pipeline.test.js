@@ -3110,13 +3110,20 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
   beforeEach(() => { jest.clearAllMocks(); process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false'; });
   afterEach(() => { delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE; });
 
-  test('branch targeting that drifted out of footprint during review cannot merge, even with a clean Codex round', async () => {
+  test('branch targeting that drifted out of footprint during review cannot merge, even with a clean Codex round — and the row is left retryable', async () => {
+    const stamps = [];
     const queries = [chain({ first: jest.fn().mockResolvedValue(prOpenPost()) })];
-    db.mockImplementation(() => queries.shift() || chain());
+    db.mockImplementation(() => queries.shift() || chain({ update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }) }));
     cleanReview();
     mockBranchFile('Ant Trails in Tampa');
     await expect(AstroPublisher.mergeAstro('post-gate-1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED', message: expect.stringMatching(/TOPIC_GEO_OUT_OF_AREA/) });
     expect(gh.mergePr).not.toHaveBeenCalled();
+    // publish_failed (not pr_open) so the admin Retry / publish-astro path can
+    // rebuild the PR after an edit; the markers stay for cleanupStaleAstroPr.
+    const stamp = stamps.find((p) => p.astro_status === 'publish_failed');
+    expect(stamp).toBeDefined();
+    expect(stamp.astro_publish_error).toMatch(/TOPIC_GEO_OUT_OF_AREA/);
+    expect(stamp).not.toHaveProperty('astro_pr_number');
   });
 
   test('a clear recheck merges; a refresh of a live post skips the recheck', async () => {

@@ -136,6 +136,11 @@ const SERVICE_FILLER = 'treatment|treatments|service|services|company|companies|
 // "<word> <abbr> <service>" ("boulder co pest control"). The pure English
 // words (hi, in, me, oh, ok, or) never do — "pest control or exterminator".
 const STATE_ABBR_SEMI = 'al|ar|co|de|id|la|ma|md|mi|mo|ms|ne|pa|va';
+// Every single word of SERVICE_INTENT + SERVICE_FILLER (plus the geo
+// prepositions) — words that can never be the "locality" of a place phrase.
+// (Pest / lawn nouns too: "ants or termites" is a conjunction, not Oregon.)
+const PEST_NOUNS = 'ant|ants|roach|roaches|cockroach|cockroaches|spider|spiders|flea|fleas|tick|ticks|bee|bees|wasp|wasps|hornet|hornets|rat|rats|mouse|mice|mosquito|mosquitoes|bug|bugs|insect|insects|weed|weeds|grub|grubs|snail|snails|moth|moths|silverfish|earwig|earwigs|scorpion|scorpions|gnat|gnats|fly|flies|beetle|beetles|aphid|aphids|whitefly|whiteflies|chinch|mold|fungus|fungi|grass|sod|lawns|trees|shrubs|palms';
+const SERVICE_TOKENS = [...new Set(`${SERVICE_INTENT}|${SERVICE_FILLER}|${PEST_NOUNS}|in|near|around|serving|across|for|and|vs|versus|with|without|diy|me|you|us`.split('|').flatMap((w) => w.split(/\s+/)).map((w) => w.replace(/[^a-z]/g, '')).filter(Boolean))].join('|');
 const STATE_ABBR_RE = new RegExp(
   `(?:^\\s*|\\b[a-z]+,?\\s+)(${STATE_ABBR_SAFE})\\b(?![a-z])`
   + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
@@ -152,7 +157,14 @@ const STATE_ABBR_RE = new RegExp(
   // "pest control omaha ne" / "termite treatment boulder co" — service, an
   // optional service noun, a locality word, then a non-word ambiguous
   // abbreviation ending the phrase ("pest control near me": me ∉ SEMI).
-  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?[a-z]+\\s+(${STATE_ABBR_SEMI})(?=\\s*(?:$|[,:;|?!–—-]))`,
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?[a-z]+\\s+(${STATE_ABBR_SEMI})(?=\\s*(?:$|[,:;|?!–—-]))`
+  // Oregon: "or" is an English word, so it counts only between a LOCALITY
+  // word (not itself a service/filler word) and service intent — "portland
+  // or pest control", "salem or termite treatment" — or trailing after
+  // "<service> <locality>" ("pest control portland or"). "pest control or
+  // exterminator" and "termite treatment cost or price" stay clear.
+  + `|\\b(?!(?:${SERVICE_TOKENS})\\b)[a-z]+\\s+(or)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?!(?:${SERVICE_TOKENS})\\b)[a-z]+\\s+(or)(?=\\s*(?:$|[,:;|?!–—-]))`,
   'i'
 );
 // Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
@@ -270,6 +282,31 @@ function footprintContextRe() {
     'i'
   );
   return footprintContextCache;
+}
+
+// A SEMANTIC city value (blog_posts.city, brief.city) must BE a served
+// locality or a footprint region — compared exactly after normalization
+// (case, punctuation, a trailing FL / Florida), never by substring:
+// "Venice Beach" and "Sarasota Springs" contain served names and are not
+// served. Regex matching is for free-form targeting text only.
+function normalizeCityValue(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[’'.]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+let servedSetCache = null;
+function isServedCityValue(value) {
+  const v = normalizeCityValue(value);
+  if (!v) return false;
+  // A footprint region is compared whole ("southwest florida" keeps its
+  // "florida"); a locality may carry a trailing FL / Florida ("Venice, FL").
+  const region = REGIONAL_RE.exec(v);
+  if (region && region[0] === v) return true;
+  const locality = v.replace(/\s+(?:fl|florida)$/, '');
+  if (!servedSetCache) servedSetCache = new Set(servedCities().map(normalizeCityValue));
+  return servedSetCache.has(locality);
 }
 
 let footprintCache = null;
@@ -705,8 +742,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
   if (city && !findings.length) {
-    const served = cityRe(servedCities());
-    if (!(served && served.test(city)) && !REGIONAL_RE.test(city)) {
+    if (!isServedCityValue(city)) {
       findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: [city], message: `Row city "${city}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
     }
   }

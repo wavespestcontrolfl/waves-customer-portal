@@ -2352,6 +2352,12 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
     logger.error(`[astro-publisher] merge failed for ${postId}: ${err.message}`);
     await db('blog_posts').where({ id: postId }).update({
       astro_publish_error: err.message.slice(0, 1000),
+      // The merge-time topic-targeting block is deterministic for this branch
+      // + live corpus: leave the row retryable (publish_failed, markers kept
+      // for cleanupStaleAstroPr) instead of pr_open, which neither
+      // publish-astro nor the Retry UI accepts — same transition pages-poll
+      // applies on its auto-merge path.
+      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed' } : {}),
       updated_at: new Date(),
     });
     throw err;
