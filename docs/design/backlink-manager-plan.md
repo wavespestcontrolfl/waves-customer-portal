@@ -409,8 +409,11 @@ CSV rows. Steps, all idempotent:
 **Legacy board backfill (step 1, runs with the migration, idempotent).** Every existing
 `seo_link_prospects` row — including the 56 June drafts — gets a registry domain (canonical
 host; rows are GROUPED by canonical host and the registry's first-touch `source` is taken
-deterministically from the legacy row with the earliest `created_at` (id as tie-break),
-every other row's provenance going to `seo_link_domain_sources`; `source` = that row's legacy
+deterministically from the legacy row with the earliest `created_at` (id as tie-break);
+EVERY legacy row — the first-touch one included — also gets its `seo_link_domain_sources`
+touch with `seen_at` = the legacy row's original `created_at` (never `now()`), so the
+learning table's pre-acquisition rule (`seen_at < first_live_at`) sees historical
+attribution as historical; `source` = that row's legacy
 value **mapped to the §3.5 enum** — `manual` → `owner_seed`,
 `strategy_agent` → `strategy_agent`, `lost_recovery` → `lost_recovery`,
 `competitor_gap` → `competitor_gap`, `local_opportunity_<date>` → `local_opportunity`,
