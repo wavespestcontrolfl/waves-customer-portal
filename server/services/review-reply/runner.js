@@ -564,6 +564,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // "[DRAFT]" reply slot (Use Draft + draftToken on the Reviews page),
     // the same way every other park stores it.
     if (!(await storeDraft(merged, draft, STATUS.PARKED, 'gbp_not_configured', { grounding: snapshot, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+    // Parked rows are never claimed again until a sync revives them — and no
+    // sync runs while the location is disconnected: a person must hear about
+    // it (codex r45).
+    await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google Business Profile is not connected for this location (${attempts} attempts). The draft is saved on the review; reconnect GBP or reply by hand.`, reason: 'gbp_not_configured', action: true });
     return { outcome: 'parked', reason: 'gbp_not_configured' };
   }
 
@@ -1190,6 +1194,24 @@ async function notifyReviewEditedAfterPost(existing, { location_id, star_rating,
   }).catch((e) => logger.warn(`[review-auto-reply] edited-after-post bell failed for ${existing.id}: ${e.message}`));
 }
 
+/**
+ * A landed uncertain write about to be promoted to POSTED by the sync (codex
+ * r45): the draft's grounding snapshot carries the ACCOUNT fingerprint it was
+ * written from; if the facts moved since (city / relationship / categories),
+ * the promotion lands parked/review_edited_after_post for a person instead.
+ * Returns the (possibly adjusted) fields. Read failures park (fail closed).
+ */
+async function validatePromotionAccountFacts(existing, fields, { conn = db } = {}) {
+  if (!fields || fields.auto_reply_status !== STATUS.POSTED || existing?.auto_reply_status !== STATUS.PARKED || !RECONCILE_REASONS.has(existing?.auto_reply_reason)) return fields;
+  const g = existing.auto_reply_grounding;
+  const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+  if (!snap?.accountFingerprint) return fields;
+  let current;
+  try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(existing), conn)); } catch { current = null; }
+  if (current === snap.accountFingerprint) return fields;
+  return { ...fields, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
+}
+
 /** Token for an editor AI draft: the review + account fingerprints it saw. */
 function groundingToken(review, grounding) {
   return `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
@@ -1268,6 +1290,7 @@ module.exports = {
   humanDraftSavedFields,
   HUMAN_DRAFT_STALE,
   notifyReviewEditedAfterPost,
+  validatePromotionAccountFacts,
   classifyReplyMode,
   isDraftReply,
 };

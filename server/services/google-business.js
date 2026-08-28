@@ -872,7 +872,8 @@ class GoogleBusinessService {
         // Conditional on the row STILL being parked for that reason (an admin
         // Skip in the meantime wins).
         await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
-        const liveReplyFields = syncReplyFields(live, normalized, { fnNow: db.fn.now() });
+        const { validatePromotionAccountFacts } = require('./review-reply/runner');
+        const liveReplyFields = await validatePromotionAccountFacts(live, syncReplyFields(live, normalized, { fnNow: db.fn.now() }), { conn: trx });
         const promotedParked = liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post'
           && (await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null })) > 0;
         if (!promotedParked && !(liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post')) {
@@ -1181,8 +1182,9 @@ class GoogleBusinessService {
           if (ownerReply) {
             const after = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || live;
             if (ownerReply.trim() !== String(after.review_reply || '').trim()) {
-              const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
-              await applySyncReplyFields(existing.id, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx, expectedReply: after.review_reply ?? null });
+              const { syncReplyFields, applySyncReplyFields, validatePromotionAccountFacts } = require('./review-reply/runner');
+              const placesFields = await validatePromotionAccountFacts(after, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx });
+              await applySyncReplyFields(existing.id, placesFields, { conn: trx, expectedReply: after.review_reply ?? null });
             }
           }
           const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;

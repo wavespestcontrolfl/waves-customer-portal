@@ -129,6 +129,10 @@ const BANNED_RE = new RegExp([
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:handl|cop|react|respond|adjust|took|take|did|do|were|was|are|is|fared?|felt|feel)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:well|fine|great|ok|okay|nicely|beautifully|normally|comfortabl\\w*|happil\\w*|without)\\b',
   // Spared-harm / trouble-free framing (codex r43): "spared your pets from
   // any trouble", "kept trouble away from the kids", "worry-free".
+  // Post-verbal negation (codex r45): "caused your pets no discomfort",
+  // "left the kids without any irritation", "gave them zero trouble".
+  '\\bdiscomfort\\b',
+  '\\b(?:caus|gave|giv|left|leav|brought|bring|creat|pos|present|produc)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:no|zero|little|minimal|hardly\\s+any|not\\s+(?:a|any)|without\\s+(?:any\\s+)?)\\s*(?:[\\w-]+\\s+){0,1}?(?:discomfort|trouble|harm|problems?|issues?|worry|worries|stress|distress|irritation|reactions?|effects?|side[- ]?effects?|concerns?|pain|upset|fuss|risks?|danger|hazards?|symptoms?)\\b',
   '\\bspar(?:e|es|ed|ing)\\b',
   // "trouble / bother / faze <protected subject>" as a transitive verb (codex r44).
   '\\b(?:troubl|bother|faze|inconvenienc|alarm|scar|spook|startl|stress)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|anybody|everyone)\\b', '\\b(?:trouble|worry|stress|hassle|risk|harm)[- ]free\\b',
@@ -155,6 +159,12 @@ const BANNED_RE = new RegExp([
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
   '\\b(?:wait|stay\\s+off|keep\\s+off|stay\\s+out|keep\\s+out|avoid)\\b[^.]{0,30}\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b',
+  // …and any fixed post-treatment interval in indirect form (codex r45):
+  // "ready after 30 minutes", "back to normal within an hour".
+  // (Timeliness a reviewer wrote — "came out within 2 hours" — stays a
+  // provenance question; only the RE-ENTRY shape is banned outright.)
+  '\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b',
+  '\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*)\\b',
   // Rank claims (claims-ledger rule) and competitor names.
   // Rank / superiority language in ANY grammatical wrapper (claims-ledger rule).
   '\\bbest\\b(?!\\s+(?:regards|wishes))', '\\bnumber\\s*one\\b', '#\\s?1\\b', '\\btop[-\\s]?(?:rated|notch|tier|choice|pick|ranked)\\b', '\\b(?:a|the)\\s+top\\s+(?:pest|lawn|company|team|choice|provider|service)\\b',
@@ -200,7 +210,7 @@ const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out
 // A duration with a number is a specific fact; tenure buckets prove only a
 // floor. "10 years" needs the whole phrase in the review.
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
-const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit))\b/gi;
+const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|loyalty|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit)|continu\w*|keeps? (?:choosing|trusting|counting|relying|coming|calling|using|working|having|letting)|coming back|come back|came back|back again|returning|return customer|repeat|renew\w*|another (?:year|season|visit)|as always|once again|still (?:trust|count|rely|choos|us)\w*|over the years|through the years|all these years|stick\w* with|stuck with|welcome back|have you back)\b/gi;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // Negation scopes: each negation token opens a window that runs to the next
@@ -492,17 +502,21 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   const rel = grounding.account?.relationship;
   const tenure = grounding.account?.tenure;
   const relAllowed = new Set([
-    ...(rel === 'recurring' ? ['recurring', 'regular', 'ongoing', 'again'] : []),
+    ...(rel === 'recurring' ? ['recurring', 'regular', 'ongoing', 'again', 'coming back', 'come back', 'back again', 'returning', 'repeat', 'once again', 'as always', 'welcome back', 'have you back'] : []),
     ...(rel === 'first_visit' ? ['first visit', 'first time', 'new customer'] : []),
-    ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'long-time', 'longtime', 'since'] : []),
+    ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'loyalty', 'long-time', 'longtime', 'since', 'over the years', 'through the years', 'all these years'] : []),
   ]);
+  // Continuing-relationship wrappers ("continuing to count on us", "keep
+  // choosing us", "still trust us", "sticking with us") are licensed only by
+  // a recurring account (codex r45).
+  const relAllowedRe = rel === 'recurring' ? /^(?:continu\w*|keeps? \w+|still \w+|stick\w* with|stuck with|renew\w*|another (?:year|season|visit))$/ : null;
   for (const term of body.match(QUANTIFIED_TENURE_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (!hasPhrase(reviewLower.replace(/\s+/g, ' '), t)) return 'unlisted_relationship_claim';
   }
   for (const term of body.match(RELATIONSHIP_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (relAllowed.has(t) || hasPhrase(reviewLower, t) || reviewWords.has(t)) continue;
+    if (relAllowed.has(t) || (relAllowedRe && relAllowedRe.test(t)) || hasPhrase(reviewLower, t) || reviewWords.has(t)) continue;
     return 'unlisted_relationship_claim';
   }
   // Visit-experience claims: the reviewer's words only (root-matched).

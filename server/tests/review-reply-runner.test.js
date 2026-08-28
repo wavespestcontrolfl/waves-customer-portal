@@ -674,8 +674,11 @@ describe('processDueAutoReplies — state machine', () => {
     // Reviews page offers Use Draft (+ draftToken) when a person takes over.
     state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
     state.rows[0].auto_reply_attempts = Runner.MAX_ATTEMPTS - 1;
+    mockNotify.mockClear();
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: Runner.MAX_ATTEMPTS, review_reply: '[DRAFT] ' + GOOD_DRAFT.text });
+    // codex r45: the terminal credential park rings the action bell.
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'gbp_not_configured', needsAction: true });
     mockGbp.isLocationConfigured.mockResolvedValue(true);
   });
 
@@ -713,6 +716,20 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.syncReplyFields(uncertain, { owner_reply: null }, { now })).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null });
     const persistFailed = { ...uncertain, auto_reply_reason: 'persist_failed' };
     expect(Runner.syncReplyFields(persistFailed, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
+  });
+
+  test('validatePromotionAccountFacts parks a landed uncertain write whose account facts moved (codex r45)', async () => {
+    const existing = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', customer_id: 'c1', auto_reply_grounding: JSON.stringify({ accountFingerprint: 'fp:Venice|new' }) };
+    const promote = { review_reply: 'x', auto_reply_status: 'posted', auto_reply_reason: null };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    expect(await Runner.validatePromotionAccountFacts(existing, promote)).toEqual(promote);
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.validatePromotionAccountFacts(existing, promote)).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
+    expect(await Runner.validatePromotionAccountFacts(existing, promote)).toMatchObject({ auto_reply_status: 'parked' });
+    // Not a promotion / not a reconciliation park → untouched.
+    expect(await Runner.validatePromotionAccountFacts({ ...existing, auto_reply_reason: 'low_rating' }, promote)).toEqual(promote);
+    expect(await Runner.validatePromotionAccountFacts(existing, { review_reply: 'x' })).toEqual({ review_reply: 'x' });
   });
 
   test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {

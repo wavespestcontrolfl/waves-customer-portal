@@ -133,6 +133,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r45: post-verbal negation + indirect fixed intervals.
+    expect(verify(good('Hi Dana, we are glad the pest treatment caused your pets no discomfort.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and left the kids without any irritation.'))).toBe('banned_phrase');
+    const g30 = grounding({ text: 'Marcus was in and out in 30 minutes and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad the yard was ready after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad everything was back to normal within an hour.'), g30)).toBe('banned_phrase');
     // codex r44: "did not trouble your pets".
     expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
@@ -287,6 +293,16 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('continuing-customer claims need recurring provenance (codex r45)', () => {
+    const g = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'], account: null });
+    expect(verify(good('Hello there, thank you for continuing to count on our pest team.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hello there, we appreciate that you keep choosing our pest team.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hello there, thanks for sticking with our pest team.'), g)).toBe('unlisted_relationship_claim');
+    const gr = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'], account: { relationship: 'recurring', tenure: 'new', serviceCategories: ['pest'], city: null } });
+    expect(verify(good('Hello there, thank you for continuing to count on our pest team.'), gr)).toBeNull();
+    expect(verify(good('Hello there, we appreciate that you keep choosing our pest team.'), gr)).toBeNull();
+  });
+
   test('grounded phrases match on token boundaries: "ants" is not inside "plants" (codex r41)', () => {
     const g = grounding({ text: 'Great care for our plants.', mentionedTechNames: [], topics: ['lawn'] });
     expect(verify(good('Hello there, we appreciate you trusting us with the ants.'), g)).toBe('unlisted_service_claim');
