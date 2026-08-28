@@ -154,6 +154,9 @@ router.get('/', async (req, res, next) => {
     const parsedLimit = Math.max(1, Math.min(500, parseInt(limit, 10) || 200));
     const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * parsedLimit;
     const reviews = await query.limit(parsedLimit).offset(offset);
+    // Explicit pagination signal, computed BEFORE a pinned review is added
+    // (the page may then carry limit+1 rows; offset paging is unaffected).
+    const hasMore = reviews.length === parsedLimit;
     // Deep-linked review (?review=<id> from an action bell): pin it into the
     // first page when it is not already there, so a review older than the
     // page size (edited-after-post, removal evidence …) is reached directly.
@@ -293,6 +296,7 @@ router.get('/', async (req, res, next) => {
     const locationStatuses = await getReviewLocationStatuses();
 
     res.json({
+      hasMore,
       reviews: reviews.map(r => ({
         id: r.id, googleReviewId: r.google_review_id, locationId: r.location_id,
         reviewerName: r.reviewer_name, reviewerPhoto: r.reviewer_photo_url,

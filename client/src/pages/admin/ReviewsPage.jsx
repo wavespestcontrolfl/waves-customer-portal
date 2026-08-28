@@ -2073,7 +2073,7 @@ export default function ReviewsPage() {
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
-        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
         setLoading(false);
       })
       .catch((e) => {
@@ -2093,7 +2093,7 @@ export default function ReviewsPage() {
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         pageRef.current = nextPage;
-        setHasMore((d.reviews || []).length === PAGE_SIZE);
+        setHasMore(d.hasMore != null ? !!d.hasMore : (d.reviews || []).length === PAGE_SIZE);
         setLoadingMore(false);
         setData((prev) => {
           if (!prev) return d;
