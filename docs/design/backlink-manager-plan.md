@@ -696,7 +696,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
-  → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, close_pending, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
+  → `month_spend_cents = COALESCE(SUM(COALESCE(final_cents, amount_cents)), 0) WHERE budget_month = <ET month> AND state IN (reserved, submitting, close_pending, charged, ambiguous, reconciled_charged)` (the outer COALESCE matters: SUM over zero rows is NULL, and the first purchase of a month must compare against 0 — empty-ledger test required) — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
   → the budget compared is the one for the purchase's authority: `AUTO_PAID_WITHIN_POLICY`
   reserves against `monthly_paid_budget_cents` over AUTO purchases; `OWNER_*` purchases reserve
   against `owner_monthly_budget_cents` over owner-approved purchases (null ⇒ only the
