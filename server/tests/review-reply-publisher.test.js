@@ -244,14 +244,15 @@ describe('publishReviewReply — post-publish persistence failure', () => {
     // Every caller gets the row parked out of the auto lane (best effort).
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
   });
-  test('a typed post-publish error (RACE) still releases the claim normally', async () => {
+  test('a zero-row local write after Google accepted (RACE) is a persistence failure too: claim abandoned, row parked', async () => {
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
     mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows = [{ ...state.rows[0], missing_since: '2026-08-27T00:00:00Z' }]; return {}; });
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
-      .rejects.toMatchObject({ code: CODES.RACE });
-    expect(out.releaseClaim).toHaveBeenCalled();
-    expect(out.abandonClaim).not.toHaveBeenCalled();
+      .rejects.toMatchObject({ code: CODES.PERSIST_FAILED });
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed' });
   });
 });
 

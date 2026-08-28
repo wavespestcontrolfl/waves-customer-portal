@@ -23,6 +23,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
+const { etCalendarDayOf } = require('../../utils/datetime-et');
 
 const GROUNDING_VERSION = 'grounding-v1';
 
@@ -113,11 +114,17 @@ function serviceCategoriesFrom(serviceTypes) {
   return [...labels];
 }
 
+// Tenure in ET CALENDAR days: member_since is a Postgres DATE (never a UTC
+// instant) and created_at is an instant that must be read on the ET wall
+// clock — etCalendarDayOf handles both shapes.
 function tenureBucket(sinceDate, now = new Date()) {
   if (!sinceDate) return null;
-  const since = new Date(sinceDate);
-  if (Number.isNaN(since.getTime())) return null;
-  const days = (now.getTime() - since.getTime()) / 86400000;
+  let sinceDay; let nowDay;
+  try { sinceDay = etCalendarDayOf(sinceDate); nowDay = etCalendarDayOf(now); } catch { return null; }
+  const toUtcMidnight = (d) => { const [y, m, dd] = String(d).split('-').map(Number); return Date.UTC(y, m - 1, dd); };
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(sinceDay) || !/^\d{4}-\d{2}-\d{2}$/.test(nowDay)) return null;
+  const days = (toUtcMidnight(nowDay) - toUtcMidnight(sinceDay)) / 86400000;
+  if (Number.isNaN(days)) return null;
   if (days < 90) return 'new';
   if (days < 365) return 'established';
   return 'long_term';
@@ -147,7 +154,9 @@ async function loadActiveTechFirstNames(conn = db) {
 // notes, no findings, no comms, no money.
 async function loadAccountFacts(customerId, conn = db) {
   if (!customerId) return null;
-  const customer = await conn('customers').where({ id: customerId }).first('id', 'city', 'member_since', 'created_at');
+  // member_since::text keeps the DATE a calendar date (a JS Date would be
+  // UTC midnight = the previous ET evening).
+  const customer = await conn('customers').where({ id: customerId }).first('id', 'city', 'created_at', conn.raw('member_since::text as member_since'));
   if (!customer) return null;
   const visits = await conn('scheduled_services')
     .where({ customer_id: customerId, status: 'completed' })

@@ -241,8 +241,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     await audit({ googlePosted: true });
     return { googlePosted: true, localOnly: false, reviewId };
   } catch (err) {
-    if (persisted || err instanceof ReviewReplyError) throw err;
-    // Google ACCEPTED the reply but the local record failed. Releasing the
+    if (persisted) throw err;
+    // Google ACCEPTED the reply but the local record failed (a thrown DB
+    // error OR the zero-row RACE — either way the reply is live and
+    // unrecorded). Releasing the
     // claim here would let an automatic retry redraft and PUT a different
     // reply over the live one. Abandon instead: the claim stands until its
     // TTL expires, and the caller parks the row for a person to reconcile.

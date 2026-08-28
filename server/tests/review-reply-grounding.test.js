@@ -16,6 +16,7 @@ const mockState = { customers: [], scheduled_services: [], technicians: [] };
 jest.mock('../models/db', () => {
   const dbFn = (table) => {
     if (!mockAllowedTables.has(table)) throw new Error(`grounding must not read ${table}`);
+    dbFn.raw = (sql) => ({ sql });
     const filters = [];
     const api = {
       where(obj) { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
@@ -68,11 +69,16 @@ describe('account-derived facts', () => {
       ['pest control', 'lawn care', 'mosquito control', 'termite protection'],
     );
   });
-  test('tenure buckets', () => {
+  test('tenure buckets count ET calendar days (DATE strings never shift; instants read on the ET clock)', () => {
     expect(G.tenureBucket('2026-08-01', NOW)).toBe('new');
     expect(G.tenureBucket('2026-01-01', NOW)).toBe('established');
     expect(G.tenureBucket('2024-06-01', NOW)).toBe('long_term');
     expect(G.tenureBucket(null, NOW)).toBeNull();
+    // Anniversary boundary: 2026-08-28 03:00Z is still 08-27 in ET → 364 days.
+    expect(G.tenureBucket('2025-08-28', new Date('2026-08-28T03:00:00Z'))).toBe('established');
+    expect(G.tenureBucket('2025-08-28', new Date('2026-08-28T05:00:00Z'))).toBe('long_term');
+    // A UTC-midnight Date (pg DATE deserialized) is the calendar date, not the prior ET evening.
+    expect(G.tenureBucket(new Date('2025-08-28T00:00:00Z'), new Date('2026-08-28T05:00:00Z'))).toBe('long_term');
   });
   test('only served cities surface', () => {
     expect(G.servedCity('sarasota')).toBe('Sarasota');
