@@ -362,6 +362,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     setAutoBusy(true);
     try {
       await onAutoReplyAction(review.id, action);
+      if (action === "retract") { setReplyText(""); setEditing(false); }
     } catch (e) {
       alert(`${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`);
     } finally {
@@ -370,6 +371,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   };
   const [editing, setEditing] = useState(false);
   const [replyText, setReplyText] = useState(review.reply || "");
+  // The card keeps its key across reloads; when the live reply changes
+  // underneath it (retract, sync, Google-side edit) the editor must follow,
+  // or a retracted reply could be re-posted from stale editor text.
+  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); }, [review.reply]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);

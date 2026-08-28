@@ -194,7 +194,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good("Hello there, glad we could stop by at noon. Thanks for the rating."), g)).toBe('date_claim');
     expect(verify(good("Hello there, glad we could be there at 5 pm. Thanks for the rating."), g)).toBe('date_claim');
     const g2 = grounding({ text: 'They came at noon and handled the ants.', mentionedTechNames: [], topics: [], account: null });
-    expect(verify(good('Hi Dana, glad the noon visit handled the ants for you.'), g2)).toBeNull();
+    expect(verify(good('Hi Dana, glad we came at noon and handled the ants for you.'), g2)).toBeNull();
   });
   test('service-quality adjectives need the reviewer\'s words (rating-only reviews get none)', () => {
     const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
@@ -220,6 +220,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants out at no cost to you.'))).toBe('banned_phrase');
     const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
     expect(verify(good("Hello there, we're glad we respected your home and left everything exactly as we found it. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+  });
+  test('visit-occurrence claims need the reviewer\'s words; grounded multiword outcome phrases pass', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we could stop by. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'They came out and took care of the wasps, everything is under control.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad we could come out and take care of the wasps. Good to hear everything is under control.'), g2)).toBeNull();
   });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');

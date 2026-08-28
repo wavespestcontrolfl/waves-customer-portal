@@ -134,7 +134,7 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 const SERVICE_CLAIM_RE = /\b(?:solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|problems?|issues?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
-const EXPERIENCE_CLAIM_RE = /\b(?:respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|visit(?:ed|s|ing)?|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
 // A duration with a number is a specific fact; tenure buckets prove only a
 // floor. "10 years" needs the whole phrase in the review.
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
@@ -149,6 +149,16 @@ function greetingName(text) {
   if (!m) return null;
   const name = m[1];
   return /^(?:there|again|all|everyone|friend|neighbor)$/i.test(name) ? null : name;
+}
+
+// Irregular verb forms the reviewer may use for the same claim
+// ("took care of" ↔ "take care of", "came out" ↔ "come out").
+const IRREGULAR = { took: 'take', taken: 'take', came: 'come', coming: 'come', dealt: 'deal', got: 'get', gotten: 'get', went: 'go', gone: 'go', did: 'do', done: 'do', was: 'be', were: 'be', been: 'be', made: 'make', sent: 'send', left: 'leave', kept: 'keep', found: 'find', showed: 'show', shown: 'show' };
+// Canonical form of a phrase for provenance matching: irregular forms
+// normalized, then each word stemmed. Never used for output.
+function canonPhrase(p) {
+  return String(p).toLowerCase().replace(/[-\s]+/g, ' ').trim().split(' ')
+    .map((w) => stemOf(IRREGULAR[w] || w)).join(' ');
 }
 
 // Crude stemmer for provenance matching only (never for output).
@@ -311,9 +321,13 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   // one of the account's public-safe service categories ("lawn care" →
   // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
   const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
+  const canonReview = canonPhrase(normalizeWords(grounding.review.text).join(' '));
   const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
   for (const term of body.match(SERVICE_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
+    // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
+    // control") is sourced — canonical-phrase check before token matching.
+    if (reviewLower.replace(/\s+/g, ' ').includes(t) || canonReview.includes(canonPhrase(t))) continue;
     const stem = stemOf(t);
     const known = (w) => reviewWords.has(w) || categoryWords.has(w) || genericServiceWords.has(w);
     if (known(t) || known(stem)) continue;
@@ -344,7 +358,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
-    if (reviewLower.replace(/[- ]+/g, ' ').includes(t.replace(/[- ]+/g, ' '))) continue;
+    if (reviewLower.replace(/[- ]+/g, ' ').includes(t.replace(/[- ]+/g, ' ')) || canonReview.includes(canonPhrase(t))) continue;
     if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) continue;
     return 'unlisted_experience_claim';
   }

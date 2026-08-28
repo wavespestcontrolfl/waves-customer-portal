@@ -26,11 +26,12 @@ jest.mock('../models/db', () => {
     const api = {
       where(obj) {
         if (typeof obj === 'function') {
-          // ownSlot(): review_reply IS NULL OR review_reply = '[DRAFT] <own draft>'
+          // ownSlot() / stateOwned(): OR-branches
           const branches = [];
           const sub = {
             whereNull(col) { branches.push((r) => r[col] == null); return sub; },
             orWhere(col, val) { branches.push((r) => r[col] === val); return sub; },
+            orWhereNotIn(col, vals) { branches.push((r) => r[col] != null && !vals.includes(r[col])); return sub; },
           };
           obj.call(sub);
           filters.push((r) => branches.some((b) => b(r)));
@@ -44,6 +45,7 @@ jest.mock('../models/db', () => {
       },
       modify(fn) { fn(api); return api; },
       whereNotIn(col, vals) { filters.push((r) => !vals.includes(r[col])); return api; },
+      orWhereNotIn() { return api; },
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
@@ -264,6 +266,21 @@ describe('publishReviewReply', () => {
     await assertion;
     jest.useRealTimers();
     expect(out.abandonClaim).toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+  });
+
+  test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].auto_reply_status = null;
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
   });
 

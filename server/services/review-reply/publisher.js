@@ -301,7 +301,9 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // reconciled a newer reply is left alone.
       if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
     } else {
-      q.whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
+      // NULL (never queued — e.g. an IB submission) must match too: SQL
+      // NOT IN never matches NULL.
+      q.where(function stateOwned() { this.whereNull('auto_reply_status').orWhereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted']); })
         .where(function ownSlot() {
           this.whereNull('review_reply');
           if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
