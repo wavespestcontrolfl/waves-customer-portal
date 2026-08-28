@@ -911,7 +911,7 @@ function PropertyScoreCard({ data, compact }) {
   const card = { ...PORTAL_CARD_STYLE, position: 'relative' };
   const muted = PORTAL_SHELL.muted;
   const labelStyle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const TONES = {
     good: { background: GLASS_SUBTLE, border: '#E7E2D7', color: B.glassNavy },
@@ -1103,10 +1103,16 @@ function RecommendationsCard({ data, customer }) {
   // estimator's projection of the tier after adding that service) — never
   // derived from customer.tier, which can be stale or tierless (pre-push
   // P1, AGENTS.md estimator-authority rule). No projection → no claim.
+  const canonTier = (t) => {
+    const raw = String(t || '').trim().toLowerCase();
+    return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : '';
+  };
   const tierLineFor = (card) => {
-    const after = card?.option?.waveguardTier;
+    // The engine emits lowercase tiers ('silver'); TIER_DISCOUNTS is keyed
+    // by display case (pre-push P1 on the first cut).
+    const after = canonTier(card?.option?.waveguardTier);
     const pct = TIER_DISCOUNTS[after];
-    if (!after || !pct || after === customer?.tier) return null;
+    if (!after || !pct || after === canonTier(customer?.tier)) return null;
     return `Adding this moves you to WaveGuard ${after} — ${Math.round(pct * 100)}% off ${after === 'Silver' ? 'both services' : 'every plan service'}.`;
   };
   // Advice cards (irrigation nudges etc.) are out (owner 08-28) — this card
@@ -1117,10 +1123,12 @@ function RecommendationsCard({ data, customer }) {
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
       <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
       }}>
-        <Icon name="sparkles" size={14} strokeWidth={2} />Recommended for your property
+        <Icon name="sparkles" size={14} strokeWidth={2} />Recommended
       </div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>For your property</div>
+      <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>Services that fit this property and your current plan.</div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {visibleCards.map((card) => {
           const chip = RECOMMENDATION_PRIORITY_CHIPS[card.priority] || RECOMMENDATION_PRIORITY_CHIPS.low;
@@ -1639,7 +1647,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
                 {init.cadenceLabel ? (<><div style={{ height: 6 }} />{summaryRow('Visits', init.cadenceLabel)}</>) : null}
               </div>
               <div style={softBox}>
-                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, }}>
+                <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, }}>
                   <Icon name="clipboard" size={14} strokeWidth={2} />Terms
                 </div>
                 <div style={{ marginTop: 8, fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.55, whiteSpace: 'pre-line' }}>
@@ -1827,13 +1835,14 @@ function PropertyAlertsCard({ data }) {
   const muted = PORTAL_SHELL.muted;
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+      <div>
         <div style={{
-          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+          display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
         }}>
-          <Icon name="cloudRain" size={14} strokeWidth={2} />Property alerts
+          <Icon name="cloudRain" size={14} strokeWidth={2} />Property Alerts
         </div>
-        <div style={{ fontSize: 14, color: muted }}>Based on weather and your visit history</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>What to watch this week</div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Based on weather and your visit history.</div>
       </div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {data.alerts.map((alert) => (
@@ -1987,7 +1996,7 @@ function PortalMowingHeight({ mowing }) {
   return (
     <div style={{ marginBottom: 16 }}>
       <div style={{
-        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8,
+        display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
       }}>
         Mowing height
       </div>
@@ -2079,7 +2088,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {photos?.length > 0 && (
         <div style={{ marginBottom: 16 }}>
           <div style={{
-            display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8,
+            display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
           }}>
             Latest Visit — {scores.assessmentDate ? fmtDate(scores.assessmentDate, { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'}
           </div>
@@ -2218,7 +2227,7 @@ function LawnHealthCard({ customerId, scores, initialScores, photos, beforeAfter
       {beforeAfter && (
         <div style={{ marginTop: 18 }}>
           <div style={{
-            padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8,
+            padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8,
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
           }}>
             <span>Before &amp; After</span>
@@ -2844,7 +2853,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
   // read as the old theme on the glass scene (portal is glass-only).
   const subtle = GLASS_SUBTLE;
   const dashboardLabel = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const dashboardActionCard = {
     border: `1px solid ${PORTAL_SHELL.border}`,
@@ -2904,11 +2913,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
     : balanceError
       ? 'Tap to view'
       : hasBalance ? `$${currentBalance.toFixed(2)} due` : (annualPrepayLabel || 'All current');
-  const propertyLine = [
-    (customer.property?.lawnType || '').replace(/\s*(Full Sun|Shade|Sun\/Shade)\s*/gi, '') || null,
-    customer.property?.propertySqFt ? `${customer.property.propertySqFt.toLocaleString()} sq ft` : null,
-    customer.property?.lotSqFt ? `${customer.property.lotSqFt.toLocaleString()} sq ft lot` : null,
-  ].filter(Boolean).join(' · ');
   // Only advertise a reward the server confirms — while loading, on error,
   // or when the program reports zero, a hardcoded $25 would promise money
   // the current offer may not provide.
@@ -2983,12 +2987,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             }}>
               Hello {customer.firstName || 'there'}!
             </h1>
-            <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
-              {customer.address?.line1}
-              {customer.address?.city ? `, ${customer.address.city}` : ''}
-              {customer.address?.state ? `, ${customer.address.state}` : ''} {customer.address?.zip || ''}
-            </div>
-            {propertyLine && <div style={{ marginTop: 4, fontSize: 14, color: muted }}>{propertyLine}</div>}
           </div>
           <button type="button" onClick={() => onSwitchTab?.('billing')} style={{
             minWidth: compact ? '100%' : 180,
@@ -3127,9 +3125,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7', display: 'flex', justifyContent: 'space-between', gap: 16 }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
-              <ShellIconTile icon="calendar" size={38} />
               <div style={{ minWidth: 0 }}>
-                <div style={{ ...dashboardLabel, color: B.glassNavy }}>Next Visit</div>
+                <div style={dashboardLabel}><Icon name="calendar" size={14} strokeWidth={2} />Next Visit</div>
                 <div style={{ marginTop: 8, fontSize: 26, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{nextDateLabel}</div>
                 <div style={{ marginTop: 6, fontSize: 15, fontWeight: 700, color: B.navy }}>
                   {nextService?.serviceType || 'Request service when you need us.'}
@@ -3285,16 +3282,14 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start' }}>
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
-              <ShellIconTile icon="clipboard" tone="success" size={38} />
               <div style={{ minWidth: 0 }}>
                 <div style={dashboardLabel}><Icon name="clock" size={14} strokeWidth={2} />Last Visit</div>
-                <div style={{ marginTop: 7, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{lastService.type || lastService.serviceType}</div>
-                <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
-                  {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
+                <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{lastService.type || lastService.serviceType}</div>
+                <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
+                  {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })}
                 </div>
               </div>
             </div>
-            <span style={{ borderRadius: 8, background: GLASS_SUBTLE, color: B.glassNavy, border: '1px solid #E7E2D7', fontSize: 12, fontWeight: 850, padding: '5px 9px' }}>Completed</span>
           </div>
           {(lastService.notes || lastService.technician_notes) ? (
             <p style={{ margin: '12px 0 0', color: B.grayDark, fontSize: 14, lineHeight: 1.6 }}>
@@ -3543,7 +3538,7 @@ function ServicesTab() {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
 
   if (loading) {
@@ -4287,7 +4282,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -5503,7 +5498,7 @@ function BillingTab({ customer, refreshCustomer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -7209,7 +7204,7 @@ function PropertyTab({ customer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const labelStyle = {
     fontSize: 12,
@@ -8475,7 +8470,7 @@ function LearnTab({ customer }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const secondaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -10159,7 +10154,7 @@ function MyPlanTab({ customer, focusService }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -11696,7 +11691,7 @@ function ServiceTracker() {
           any summary data would describe work that didn't happen */}
       {step === 7 && tracker.state !== 'cancelled' && summary && (
         <div data-glass="soft" style={{ ...subCardBase, background: GLASS_SUBTLE, borderColor: '#E7E2D7' }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -11861,7 +11856,7 @@ function ReferTab({ customer, onSwitchTab }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -12470,7 +12465,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const primaryButton = {
     ...PORTAL_BUTTON_BASE,
@@ -13155,7 +13150,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
   const muted = '#475569';
   const subtle = portalGlass ? GLASS_SUBTLE : '#FAF8F3';
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const actionButton = {
     ...PORTAL_BUTTON_BASE,
@@ -13573,7 +13568,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
     position: 'relative',
   };
   const sectionTitle = {
-    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
+    display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
   };
   const helperText = {
     marginTop: 4,

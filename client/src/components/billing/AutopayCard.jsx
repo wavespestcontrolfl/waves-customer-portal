@@ -110,7 +110,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
             <Icon name="card" size={14} strokeWidth={2} />
             Auto Pay
           </div>
@@ -511,7 +511,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
               <Icon name="card" size={14} strokeWidth={2} />
               Auto Pay / {theme.label}
             </span>
