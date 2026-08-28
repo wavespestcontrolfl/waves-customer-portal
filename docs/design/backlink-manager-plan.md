@@ -129,7 +129,8 @@ t.string('authority');                            // decided authority level (§
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
 t.timestamps(true, true);
-t.unique(['domain_id', 'acquisition_type', 'submission_url']);
+t.text('path_key').notNullable();                 // `${acquisition_type}:${normalized submission_url || '-'}` — non-null, so re-investigation upserts instead of duplicating (Postgres UNIQUE treats NULLs as distinct)
+t.unique(['domain_id', 'path_key']);
 ```
 
 ### 3.3 `seo_link_prospects` — placements (existing; additive columns)
@@ -306,7 +307,8 @@ inferred).** Every paid step, auto or owner-approved, is a row:
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
-t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${YYYY-MM}` — one purchase per placement per month
+t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
+t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}` — one purchase per placement per ET month
 t.decimal('amount', 10, 2).notNullable(); t.string('authority').notNullable();
 t.string('state').notNullable();                    // reserved → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
@@ -314,11 +316,12 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
-  → `month_spend = SUM(amount) WHERE state IN (reserved, charged, ambiguous, reconciled_charged)`
+  → `month_spend = SUM(amount) WHERE budget_month = <ET month> AND state IN (reserved, charged, ambiguous, reconciled_charged)`
   → if `month_spend + amount ≤ monthly_paid_budget` insert the `reserved` row (the unique
   `idempotency_key` makes a concurrent duplicate a no-op) → commit. Only a committed
   reservation unlocks the card details to the provider. Two workers can never both pass the
-  check; the lock is per budget month.
+  check; the lock is per ET budget month (`link_budget:<budget_month>`), so the policy month
+  rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
 - **Ambiguity is a state, not a retry.** A timeout/disconnect after the merchant may have
   taken the card → `ambiguous`. The worker reports `outcome='payment_ambiguous'`; the row is
   never retried by any provider until `reconcile` (card-issuer transaction lookup, or the owner
@@ -336,8 +339,8 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 Auto-send when **all** hold: authority `AUTO_OUTREACH`; score ≥ `auto_outreach_min_score`;
 `comms-lint` clean; recipient is a business inbox (never a customer); the draft contains no
 reciprocal promise, payment, discount, guarantee, or unusual commitment (drafter classifier +
-lint rule); and the day's sends < `auto_outreach_daily_cap`. Anything else → the existing
-approval queue. Sender, idempotency, `send_error` reconciliation and the trailing-24h cap are
+lint rule); the recipient passes the fail-closed customer exclusion (§13); and the day's sends <
+`auto_outreach_daily_cap`. Anything else → the existing approval queue. Sender, idempotency, `send_error` reconciliation and the trailing-24h cap are
 the shipped `link-prospect-outreach.js` unchanged. Follow-ups (one, +10 days, only if no
 reply) go through the same gate.
 
@@ -465,8 +468,12 @@ budget kill = the virtual card's limit.
 
 - **SSRF** — every fetch through `contact-finder.fetchPage()`; providers run in their own
   sandbox and receive URLs, never portal network access.
-- **Comms** — outreach targets are businesses; the customer-comms prohibition is enforced
-  by the recipient check in `link-prospect-outreach` (no customer email/phone ever matches).
+- **Comms** — outreach targets are businesses. Today `link-prospect-outreach` only validates
+  recipient *syntax*; step 4 adds a **fail-closed customer-recipient exclusion** before any
+  auto-send: the recipient email (and its domain, when the domain is a customer's own) is
+  checked against `customers` / `customer_contacts` / lead records inside the send claim, a
+  match or a lookup error routes the draft to the approval queue, and the check is unit-tested.
+  The June drafts are released only through this path.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
 - **Footprint** — daily caps on sends and submissions; one conversation per inbox
