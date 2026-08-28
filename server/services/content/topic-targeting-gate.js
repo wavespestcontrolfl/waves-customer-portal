@@ -220,6 +220,17 @@ const NAME_STATE_RE = new RegExp(
 // State names that are part of a plant / breed / species name, not a market:
 // stripped before the state, abbreviation and context-place matchers.
 const OUT_OF_STATE_EXEMPT_RE = /\b(?:texas\s+(?:sage|lantana|star\s+hibiscus|ranger|red\s+oak|persimmon|mountain\s+laurel|olive|ebony)|maine\s+coons?|california\s+(?:carpenter\s+bees?|poppy|poppies|king\s*snakes?|pepper\s+trees?|sycamores?|laurel|lilac)|kentucky\s+(?:bluegrass|coffee\s*trees?|wisteria)|carolina\s+(?:jasmine|jessamine|wren|cherry\s+laurel|silverbell)|arizona\s+(?:cypress|ash|bark\s+scorpions?)|louisiana\s+iris(?:es)?|mississippi\s+kites?|indiana\s+bats?|tennessee\s+warblers?|georgia\s+peach(?:es)?|alaska\s+cedars?|colorado\s+(?:blue\s+)?spruce|virginia\s+(?:creeper|pine|bluebells?|opossums?)|washington\s+(?:navel|hawthorn)|new\s+england\s+asters?|nevada\s+jointfir|oregon\s+grape)\b/gi;
+// The guardrails own the metro-compound list (both scans must agree); a
+// missing export means nothing is exempted (fail closed).
+let geoCompoundCache;
+function geoCompoundExemptRe() {
+  if (geoCompoundCache !== undefined) return geoCompoundCache;
+  try {
+    const { GEO_COMPOUND_EXEMPT_RE } = require('./content-guardrails');
+    geoCompoundCache = GEO_COMPOUND_EXEMPT_RE instanceof RegExp ? new RegExp(GEO_COMPOUND_EXEMPT_RE.source, 'gi') : /$^/g;
+  } catch { geoCompoundCache = /$^/g; }
+  return geoCompoundCache;
+}
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
@@ -383,8 +394,9 @@ function classifyGeoScope(text) {
     ...findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
     ...findAll(footprintContextRe(), t),
   ];
-  // State-named species / plants ("Texas sage", "Maine Coon") are not markets.
-  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ');
+  // State-named species / plants ("Texas sage", "Maine Coon") and metro-named
+  // compounds ("San Jose scale", "Portland cement") are not markets.
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), tg),
     ...findAll(OUT_OF_STATE_RE, tg),

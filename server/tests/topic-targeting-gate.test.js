@@ -760,3 +760,15 @@ describe('withTopicMergeLock (hook, PR codex r11 push)', () => {
     expect(fn).not.toHaveBeenCalled();
   });
 });
+
+describe('metro-named compounds (hook, PR codex r11 push)', () => {
+  test('"San Jose scale", "Portland cement", "Columbus grass", "Boston fern" are not places; the metros still block as places', () => {
+    expect(gate.classifyGeoScope('San Jose scale on citrus in Sarasota').scope).toBe('footprint');
+    for (const t of ['Portland cement and termites', 'Columbus grass control tips', 'boston fern pests indoors', 'st augustine grass chinch bugs']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+    for (const t of ['pest control San Jose', 'portland pest control', 'termite treatment columbus']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
+});

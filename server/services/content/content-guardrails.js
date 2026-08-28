@@ -2014,6 +2014,11 @@ const PRE_DISCLAIMER_GLUE_RE = /^[\s,;:]*(?:(?:and|or|nor|all|both|are|is|sit|si
 // colon-terminated claim intro ("We serve these cities:") to each item.
 const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
 
+// Metro names inside pest / plant / material compounds are not places —
+// stripped before the prose footprint scan AND the topic-targeting gate's
+// out-of-area matchers (the gate imports this so both scans agree).
+const GEO_COMPOUND_EXEMPT_RE = /\b(?:san\s+jose\s+scales?|portland\s+cement|columbus\s+grass|boston\s+(?:fern|ivy|terrier)s?|baltimore\s+orioles?|nashville\s+warblers?|savannah\s+sparrows?|houston\s+toads?|denver\s+boots?|memphis\s+style|chicago\s+style|new\s+york\s+style|philadelphia\s+cream\s+cheese|buffalo\s+grass|kentucky\s+bluegrass|bermuda\s*grass|st\.?\s*augustine\s*(?:grass|lawns?|sod|turf)|phoenix\s+palms?|jupiter\s+plants?)\b/gi;
+
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a
   // URL is not a rendered claim. Blank them (keeping anchor text) first.
@@ -2033,7 +2038,8 @@ function offFootprintCityFinding(text) {
     .replace(/\s(?:href|src)\s*=\s*\"[^\"]*\"/gi, ' ')
     .replace(/\s(?:href|src)\s*=\s*'[^']*'/gi, ' ')
     .replace(/\]\(\s*[^)]*\)/g, '](#)')
-    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '');
+    .replace(/https?:\/\/[^\s)\]>"'`]+/gi, '')
+    .replace(GEO_COMPOUND_EXEMPT_RE, ' ');
   if (!s) return null;
   const cities = outOfAreaCities();
   const cityRes = cities.map((city) => {
@@ -4034,5 +4040,6 @@ module.exports = {
   // so callers need no pre-scrub of their own.
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
+  GEO_COMPOUND_EXEMPT_RE,
   _internals: { priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, curatedCompetitorSourceHosts, OPERATOR_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE },
 };

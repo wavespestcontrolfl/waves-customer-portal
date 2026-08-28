@@ -4290,3 +4290,11 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 });
+
+describe('offFootprintCityFinding — metro-named compounds (PR #3549 hook)', () => {
+  const guardrails = require('../services/content/content-guardrails');
+  test('pest / material compounds are not footprint claims; a served-city claim about the metro still is', () => {
+    expect(guardrails._internals.offFootprintCityFinding('Our lawn techs treat Columbus grass, San Jose scale on citrus, and Boston ferns on the lanai.')).toBeNull();
+    expect(guardrails._internals.offFootprintCityFinding('We proudly serve Portland homes every week.')).not.toBeNull();
+  });
+});
