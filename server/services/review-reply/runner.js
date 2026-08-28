@@ -292,8 +292,36 @@ function locationName(locationId) {
 }
 
 async function bell(row, { title, body, reason, action = false, extra = {}, link = null }) {
+  // notifyAdmin resolves null on an insert failure: retry, then stamp the
+  // row (bell_failed:<reason>) so retryFailedBells re-rings it every cron
+  // tick — a terminal park must never go unnoticed (codex r48).
+  let ok = false;
+  for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+    ok = await bellOnce(row, { title, body, reason, action, extra, link });
+    if (!ok && attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+  }
+  if (ok) { await clearBellStamp(row.id).catch(() => {}); return true; }
+  logger.error(`[review-auto-reply] bell FAILED for ${row.id} (${reason}) — stamped for the sweep`);
+  await stampBellFailed(row.id, reason, { action }).catch(() => {});
+  return false;
+}
+const BELL_STAMP_RE = /(?:^| \|\| )bell_failed:([^|]*)$/;
+async function stampBellFailed(reviewId, reason, { action = true, conn = db } = {}) {
+  const cur = await conn('google_reviews').where({ id: reviewId }).first('auto_reply_error');
+  const prev = String(cur?.auto_reply_error || '').replace(BELL_STAMP_RE, '');
+  const stamp = `bell_failed:${reason}:${action ? 1 : 0}`;
+  await conn('google_reviews').where({ id: reviewId }).update({ auto_reply_error: prev ? `${prev} || ${stamp}` : stamp });
+}
+async function clearBellStamp(reviewId, { conn = db } = {}) {
+  const cur = await conn('google_reviews').where({ id: reviewId }).first('auto_reply_error');
+  const err = String(cur?.auto_reply_error || '');
+  if (!BELL_STAMP_RE.test(err)) return;
+  const rest = err.replace(BELL_STAMP_RE, '');
+  await conn('google_reviews').where({ id: reviewId }).update({ auto_reply_error: rest || null });
+}
+async function bellOnce(row, { title, body, reason, action = false, extra = {}, link = null }) {
   try {
-    await NotificationService.notifyAdmin('review', title, body, {
+    const res = await NotificationService.notifyAdmin('review', title, body, {
       // Parked/drafted rows live in the default needs-reply view; a posted
       // reply has left it, so those bells deep-link to the responded view
       // and the specific review.
@@ -309,8 +337,10 @@ async function bell(row, { title, body, reason, action = false, extra = {}, link
         ...extra,
       },
     });
+    return !!res;
   } catch (err) {
     logger.warn(`[review-auto-reply] bell failed for ${row.id}: ${err.message}`);
+    return false;
   }
 }
 
@@ -1252,14 +1282,24 @@ const BELL_FAILED_PREFIX = 'bell_failed:review_edited_after_post:';
  */
 async function retryFailedEditedBells({ limit = 20 } = {}) {
   const rows = await db('google_reviews')
-    .where({ auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' })
-    .where('auto_reply_error', 'like', `${BELL_FAILED_PREFIX}%`)
+    .where('auto_reply_error', 'like', `%bell_failed:%`)
     .limit(limit)
-    .select('id', 'location_id', 'star_rating', 'auto_reply_error');
+    .select('id', 'location_id', 'star_rating', 'reviewer_name', 'auto_reply_status', 'auto_reply_reason', 'auto_reply_error');
   let n = 0;
   for (const r of rows || []) {
-    const cause = String(r.auto_reply_error || '').slice(BELL_FAILED_PREFIX.length) || 'edit';
-    if (await notifyReviewEditedAfterPost(r, { location_id: r.location_id, star_rating: r.star_rating, cause })) n++;
+    const err = String(r.auto_reply_error || '');
+    if (err.startsWith(BELL_FAILED_PREFIX) && r.auto_reply_reason === 'review_edited_after_post') {
+      const cause = err.slice(BELL_FAILED_PREFIX.length) || 'edit';
+      if (await notifyReviewEditedAfterPost(r, { location_id: r.location_id, star_rating: r.star_rating, cause })) n++;
+      continue;
+    }
+    const m = err.match(BELL_STAMP_RE);
+    if (!m) continue;
+    const [reason, actionFlag] = String(m[1]).split(':');
+    const action = actionFlag !== '0';
+    // Re-ring with a generic body: the original wording is not stored, the
+    // row state is what the person needs.
+    if (await bell(r, { title: action ? 'Review reply needs you' : 'Auto-reply update', body: `${summarize(r)} — auto-reply ${r.auto_reply_status || 'state'}${reason ? ` (${String(reason).replace(/_/g, ' ')})` : ''}. Open Reviews.`, reason: reason || r.auto_reply_reason || 'unknown', action })) n++;
   }
   return n;
 }
@@ -1391,6 +1431,7 @@ module.exports = {
   AGENT_OPS_DRAFT,
   notifyReviewEditedAfterPost,
   retryFailedEditedBells,
+  __bellForTest: bell,
   validatePromotionAccountFacts,
   classifyReplyMode,
   isDraftReply,

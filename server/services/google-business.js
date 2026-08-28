@@ -873,7 +873,7 @@ class GoogleBusinessService {
         // content as a "reviewer edit" and park a valid reply) — codex r47.
         if (syncStart && live.synced_at && new Date(live.synced_at).getTime() > new Date(syncStart).getTime()) {
           logger.info(`[gbp] existing row ${existing.id}: older runner yielded to a newer sync token`);
-          return null;
+          return 'yielded';
         }
         await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
         // Conditional on the row STILL being parked for that reason (an admin
@@ -896,6 +896,10 @@ class GoogleBusinessService {
         const reconciled = await this._reconcileReviewEdit(basis, normalized, { conn: trx, bell: false });
         return promotedParked ? 'posted_parked' : reconciled;
       });
+      // A yielded (older) runner performs NONE of the side effects below
+      // (attribution marks, thank-you enrollment, reinstatement clear): its
+      // snapshot is stale by definition (codex r48).
+      if (edited === 'yielded') return { id: existing.id, inserted: false, yielded: true };
       // The action bell only after the park is durable.
       if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
       result = { id: existing.id, inserted: false };
@@ -1180,6 +1184,13 @@ class GoogleBusinessService {
         const edited = await db.transaction(async (trx) => {
           // Same live re-read under the lock as the authoritative upsert.
           const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
+          // An older Places sample (its fetch start older than the stored
+          // token) yields before touching content or reply/edit state
+          // (codex r48).
+          if (sampleSyncStart && live.synced_at && new Date(live.synced_at).getTime() > sampleSyncStart.getTime()) {
+            logger.info(`[gbp] Places sample: older runner yielded on row ${existing.id}`);
+            return 'yielded';
+          }
           await trx('google_reviews').where({ id: existing.id }).update(upd);
           // Owner reply first (a landed uncertain write becomes posted), then
           // the reviewer-edit reconciliation on the post-sync row (codex r39).
@@ -1204,6 +1215,7 @@ class GoogleBusinessService {
           const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
           return this._reconcileReviewEdit(basis, placesEdit, { conn: trx, bell: false });
         });
+        if (edited === 'yielded') continue;
         if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
         // Reinstatement clear, mirroring _upsertGbpReview: the main update
         // never touches missing_since; the clear is a separate conditional

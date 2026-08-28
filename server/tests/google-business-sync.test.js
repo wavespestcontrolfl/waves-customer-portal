@@ -1407,6 +1407,32 @@ describe('Google Business review sync', () => {
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
   });
 
+  test('an older overlapping runner YIELDS on an existing row: no content regression, no reviewer-edit park, no attribution side effects (codex r48)', async () => {
+    const newerToken = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'overlap-y', synced_at: newerToken });
+    const rowBefore = { ...db.__state.rows.google_reviews.find(r => r.id === 'overlap-y') };
+    Object.assign(db.__state.rows.google_reviews.find(r => r.id === 'overlap-y'), { review_text: 'Newer text from runner B', star_rating: 5, review_reply: 'Our posted reply', auto_reply_status: 'posted', auto_reply_reason: null });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const olderStart = new Date(Date.now() - 60 * 60 * 1000);
+    const res = await service._upsertGbpReview({
+      google_review_id: rowBefore.google_review_id,
+      gbp_review_name: rowBefore.gbp_review_name,
+      location_id: rowBefore.location_id,
+      reviewer_name: rowBefore.reviewer_name,
+      star_rating: 4,
+      review_text: 'Older text from runner A',
+      owner_reply: null,
+      review_created_at: rowBefore.review_created_at,
+    }, olderStart);
+    expect(res).toMatchObject({ id: 'overlap-y', inserted: false, yielded: true });
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'overlap-y');
+    expect(after).toMatchObject({ review_text: 'Newer text from runner B', star_rating: 5, review_reply: 'Our posted reply', auto_reply_status: 'posted', auto_reply_reason: null });
+    expect(new Date(after.synced_at).toISOString()).toBe(newerToken);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
   test('an older overlapping runner cannot regress a newer synced_at token', async () => {
     // Runner B (newer fetch start) refreshed the row; runner A (older start,
     // slower feed processing) upserts the same review afterwards. A's write

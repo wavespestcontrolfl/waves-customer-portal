@@ -56,7 +56,7 @@ jest.mock('../models/db', () => {
     const api = {
       where(a, b, c) {
         if (typeof a === 'string') {
-          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : b === 'like' ? (r[a] != null && String(r[a]).startsWith(String(c).replace(/%$/, ''))) : r[a] === c)); return api; }
+          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : b === 'like' ? (r[a] != null && new RegExp('^' + String(c).split('%').map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$', 's').test(String(r[a]))) : r[a] === c)); return api; }
           filters.push((r) => r[a] === b); return api;
         }
         if (typeof a === 'function') {
@@ -744,6 +744,26 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.retryFailedEditedBells()).toBe(1);
     expect(state.rows[0].auto_reply_error).toBeNull();
     expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'review_edited_after_post', cause: 'edit', needsAction: true });
+    mockNotify.mockReset().mockResolvedValue({});
+  });
+
+  test('bell() treats a null notifyAdmin result as failure: retries, stamps the row (keeping the existing error text), and the sweep re-rings + clears (codex r48)', async () => {
+    mockNotify.mockReset().mockResolvedValue(null);
+    state.rows = [row({ id: 'bf', auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_error: 'all providers down' })];
+    expect(await Runner.notifyReviewEditedAfterPost({ id: 'nope' }, { location_id: 'sarasota', star_rating: 5 })).toBe(false); // (unrelated row: no crash on absent row)
+    mockNotify.mockClear();
+    const ok = await (async () => { const r = state.rows[0]; return Runner.processDueAutoReplies && (await require('../services/review-reply/runner').retryFailedEditedBells(), true) && r; })();
+    expect(ok).toBeTruthy();
+    // Direct: a terminal-park bell that fails is stamped without losing the provider error.
+    mockNotify.mockReset().mockResolvedValue(null);
+    await Runner.__bellForTest(state.rows[0], { title: 'Review reply needs you', body: 'x', reason: 'provider_down', action: true });
+    expect(mockNotify).toHaveBeenCalledTimes(3);
+    expect(state.rows[0].auto_reply_error).toBe('all providers down || bell_failed:provider_down:1');
+    // Sweep: notifier healthy → re-rung with needsAction, stamp stripped, original error kept.
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    expect(await Runner.retryFailedEditedBells()).toBe(1);
+    expect(state.rows[0].auto_reply_error).toBe('all providers down');
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'provider_down', needsAction: true });
     mockNotify.mockReset().mockResolvedValue({});
   });
 

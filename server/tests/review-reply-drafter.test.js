@@ -133,6 +133,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r48: "never noticed a thing".
+    expect(verify(good('Hi Dana, we appreciate your note about the pest treatment. We are glad your pets never noticed a thing afterward.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids barely knew we were there.'))).toBe('banned_phrase');
     // codex r45: post-verbal negation + indirect fixed intervals.
     expect(verify(good('Hi Dana, we are glad the pest treatment caused your pets no discomfort.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and left the kids without any irritation.'))).toBe('banned_phrase');
