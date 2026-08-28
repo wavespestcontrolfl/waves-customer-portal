@@ -278,7 +278,7 @@ t.text('idempotency_key');            // for irreversible external mutations (`c
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
-                                      //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back (lease expired, or ET-day rollover re-reservation) — terminal, audit-only, NEVER counted by the cap query
+                                      //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back on lease expiry (ET-day rollover re-slots the same row in place, §13) — audit-only, NEVER counted by the cap query; the same row returns to slot_reserved on the instance's next lease
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
@@ -1468,14 +1468,18 @@ unset its gate; budget kill = the issuer program's limit.
   is idempotency-guarded like a purchase:** the slot row carries its ET date
   (`slot_day = etDateString(now)`); immediately before the irreversible call, under the same
   advisory lock, the provider compares `slot_day` with the current ET day — if the day rolled
-  over the old slot is released — the attempt row flips `slot_reserved → slot_released`
-  (conditional on the lease and prior outcome; audit kept, cap freed) — and a NEW attempt row
-  is atomically reserved against the NEW day's cap (no room ⇒ that new row is `skipped`, never
-  submitted) — and only then flips the live attempt `slot_reserved → submitting` (durable,
+  over, the SAME pre-submission attempt row is re-slotted IN PLACE under the new day's
+  `link_submission_cap:<ET day>` lock — `UPDATE … SET slot_day = <new day> WHERE id = ? AND
+  outcome = 'slot_reserved' AND lease_token = ?` after the new day's count shows room (no room
+  ⇒ the row becomes `skipped`, never submitted); no second row is ever inserted for the same
+  action instance, so the §3.4 partial-unique `idempotency_key` (one row per
+  `${prospect_id}:${action}:${generation}`) is never violated and the instance-bound approval
+  stays valid — and only then flips the attempt `slot_reserved → submitting` (durable,
   conditional on the lease). The only edges out of `slot_reserved` are `submitting` (worker,
-  under the lock) and `slot_released` (worker on day rollover, or the sweep on lease expiry —
-  both conditional on `outcome='slot_reserved'`, so a row that already advanced is never
-  released); a `submitting` attempt is never released by the sweep — if the worker dies before
+  under the lock), `skipped` (no room after rollover) and `slot_released` (the sweep on lease
+  expiry only — conditional on `outcome='slot_reserved'`, so a row that already advanced is
+  never released; a released instance's next lease re-reserves by updating that same row back
+  to `slot_reserved` with a fresh `slot_day`, never by inserting); a `submitting` attempt is never released by the sweep — if the worker dies before
   reporting, the sweep parks it as `submit_ambiguous`, the placement is excluded from
   re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
   the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released (→ `slot_released`). The runner's
