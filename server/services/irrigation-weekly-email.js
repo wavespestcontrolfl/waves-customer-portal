@@ -29,6 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan } = require('./irrigation-week-plan');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
@@ -56,6 +57,9 @@ const TEMPLATE_ON_TRACK = 'irrigation.weekly_on_track';
 // just the handful who filled in the portal form).
 const TEMPLATE_SETUP_SCHEDULE = 'irrigation.weekly_setup_schedule';
 const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
+// GATE_IRRIGATION_WEEK_PLAN: one template whose subject/heading/action come
+// from THIS week's legal-first plan (irrigation-week-plan.js).
+const TEMPLATE_WEEK_PLAN = 'irrigation.weekly_plan';
 // Confirm variant — we DO have a usable schedule, but a technician recorded
 // it rather than the customer entering it in the portal. The three advice
 // templates credit "the irrigation schedule you shared in your customer
@@ -333,6 +337,10 @@ function buildWeeklyEmailDecision({
   rainfallInches7d = null,
   et0Inches = null,
   forecastRainInches = null,
+  // GATE_IRRIGATION_WEEK_PLAN, read by the sweep and passed in so this
+  // decision stays pure; `now` pins the restriction policy in tests.
+  weekPlanEnabled = false,
+  now = new Date(),
 } = {}) {
   // Same fallback chain, same precedence, as the lawn report's
   // buildLawnWaterContext (report-data.js): PORTAL ENTRY WINS, then a
@@ -494,7 +502,11 @@ function buildWeeklyEmailDecision({
   // The advice templates would misattribute it and hand a hand-watering
   // customer sprinkler instructions, so the balance is reported in
   // source-neutral copy that asks them to confirm it instead (codex r2 P2).
-  if (scheduleSource !== 'portal') {
+  // In plan mode a DERIVED schedule (the customer's own minutes × days ×
+  // heads) is their entry: it gets the plan, with the derivation named in
+  // the note. Only tech-sourced readings keep the confirm-schedule ask.
+  const derivedGetsPlan = weekPlanEnabled && scheduleSource === 'portal_derived';
+  if (scheduleSource !== 'portal' && !derivedGetsPlan) {
     const scheduleFmt = formatInches(effectiveInches);
     const totalFmt = formatInches(totalDisplayNum);
     const targetFmt = formatInches(advice.recommendedInchesPerWeek);
@@ -582,6 +594,69 @@ function buildWeeklyEmailDecision({
     company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
     company_email: CONTACT_EMAIL,
   };
+
+  if (weekPlanEnabled) {
+    const { plan, restriction } = decideWeekPlan({
+      advice,
+      month: monthFromYmd(weekEnding),
+      forecastRainInches,
+      runMinutes: irrigationRunMinutes,
+      wateringDays,
+      systemType: irrigationSystemType,
+      explicitInchesPerWeek: prefsInches,
+      rainSensor: rainSensor === true || rainSensor === 't',
+      now,
+    });
+    // A derived schedule's provenance sentence (below) already names the
+    // assumed head rate and the Weekly Inches ask — skip the renderer's copy
+    // of it so the note doesn't say it twice.
+    const planCopy = renderWeekPlanEmail(plan, { firstName, grassLabel, runMinutes: runtimeInputs.runMinutes, restriction, omitRateNote: scheduleSource === 'portal_derived' });
+    if (planCopy) {
+      // LAST week's narrative only — the plan owns the week ahead, so the
+      // forecast-rerouted summaries ("your current schedule has it covered")
+      // must not appear beside a plan that may say otherwise. A derived
+      // figure is the customer's OWN schedule expressed in inches — say so.
+      const scheduleClause = scheduleSource === 'portal_derived'
+        ? `your sprinkler schedule as entered in your portal (about ${irrigationFmt}" per week)`
+        : `your irrigation schedule (${irrigationFmt}" per week)`;
+      const lastWeekLine = advice.status === 'surplus'
+        ? `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" more than the ${target}" your ${grassLabel} needs this time of year.`
+        : advice.status === 'deficit'
+          ? `Rain was light near your home last week (${rain}"), so with ${scheduleClause} your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`
+          : `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — right in line with the ${target}" your ${grassLabel} needs this time of year.`;
+      // Provenance of a derived figure (same sentence confirm_schedule uses)
+      // rides the note; the renderer's own rain-sensor line already covers
+      // the sensor, so that clause is dropped here.
+      const provenance = scheduleSource === 'portal_derived'
+        ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: false })
+        : '';
+      const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');
+      const planReason = plan.action === 'hold' ? 'plan_hold' : (plan.conditionalOnForecast ? 'plan_conditional' : 'plan_run');
+      return {
+        shouldSend: true,
+        templateKey: TEMPLATE_WEEK_PLAN,
+        reason: planReason,
+        advice,
+        weekPlan: plan,
+        restriction,
+        payload: {
+          ...payload,
+          summary_line: lastWeekLine,
+          // The conditional plan names the forecast in its own action line.
+          forecast_line: plan.conditionalOnForecast ? '' : forecastLine({
+            forecastRainInches,
+            status: advice.status,
+            targetInches: advice.recommendedInchesPerWeek,
+          }),
+          ...planCopy,
+          plan_note: planNote,
+        },
+      };
+    }
+    // No legal policy in force (or no target): fall through to the pre-plan
+    // template so the customer still hears from us; the sweep counts it.
+    return { shouldSend: true, templateKey, reason, advice, payload, weekPlanUnavailable: plan.reasons[0] || 'unavailable' };
+  }
 
   return { shouldSend: true, templateKey, reason, advice, payload };
 }
@@ -893,7 +968,11 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     blocked: 0,
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
+    // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0 },
   };
+  const weekPlanEnabled = isEnabled('irrigationWeekPlan');
+  const planAsOf = now;
 
   for (const customer of candidates) {
     if (summary.attempted >= maxSendAttempts) {
@@ -928,6 +1007,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
+        weekPlanEnabled,
+        now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
       // optional copy line and never changes shouldSend, so skipped customers
@@ -949,6 +1030,30 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         if (summary.skipped[decision.reason] != null) summary.skipped[decision.reason] += 1;
         else summary.skipped.unknown += 1;
         continue;
+      }
+
+      if (decision.weekPlan) {
+        const p = decision.weekPlan;
+        summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
+        // Snapshot BEFORE the send: the lawn report renders this same plan for
+        // the week whether or not the email reaches the inbox.
+        await persistWeekPlan({
+          customerId: customer.id,
+          weekEnding,
+          planAsOf,
+          weatherInputs: {
+            rainfallInches7d: weekWeather.rainInches,
+            et0Inches: weekWeather.et0Inches,
+            rainSource: weekWeather.rainSource,
+            forecastRainInches,
+            targetInches: decision.advice?.recommendedInchesPerWeek ?? null,
+            appliedInches: decision.advice?.appliedInchesPerWeek ?? null,
+          },
+          restriction: decision.restriction,
+          plan: p,
+        });
+      } else if (decision.weekPlanUnavailable) {
+        summary.plan.unavailable += 1;
       }
 
       // Same bounded per-recipient token as appointment-email so the key fits
@@ -1263,5 +1368,6 @@ module.exports = {
   TEMPLATE_SETUP_SCHEDULE,
   TEMPLATE_SETUP_SYSTEM,
   TEMPLATE_CONFIRM_SCHEDULE,
+  TEMPLATE_WEEK_PLAN,
   _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE },
 };

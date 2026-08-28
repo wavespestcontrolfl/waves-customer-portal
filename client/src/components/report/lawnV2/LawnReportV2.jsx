@@ -695,6 +695,14 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       {water.explanation && !(!irrOnFile && /irrigat|schedul|sprinkler|total|combined/i.test(water.explanation)) ? (
         <p style={{ margin: '12px 0 0', fontSize: 14, color: BODY, lineHeight: 1.55 }}>{water.explanation}</p>
       ) : null}
+      {/* This week's watering plan (server-gated): the same decision the Monday
+          email sent, so the card and the inbox never disagree. */}
+      {water.weekPlan && water.weekPlan.title ? (
+        <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+          <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{water.weekPlan.title}</div>
+          {water.weekPlan.detail ? <div style={{ marginTop: 3 }}>{water.weekPlan.detail}</div> : null}
+        </div>
+      ) : null}
       {/* Amount-adequate but a localized dry/uneven area → coverage, not "water more". */}
       {water.coverageWatch ? (
         <div className="lawn-callout-watch" style={{ marginTop: 10, padding: '9px 12px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14, color: BODY, lineHeight: 1.5 }}>

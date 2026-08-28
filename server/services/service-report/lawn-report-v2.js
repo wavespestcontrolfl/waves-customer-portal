@@ -199,6 +199,7 @@ function mapWater(waterContext, waterSnapshot = null) {
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
       scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
+      weekPlan: null,
     };
   }
   if (!waterContext) return null;
@@ -222,6 +223,9 @@ function mapWater(waterContext, waterSnapshot = null) {
     // `irrigationInchesPerWeek != null` would wrongly count 0 and hide the CTA
     // while the card still shows the "no schedule on file" copy.
     scheduleOnFile: advice.profileMissing === false,
+    // This week's legal-first watering plan (GATE_IRRIGATION_WEEK_PLAN):
+    // { title, detail } or null — rendered as its own callout on the card.
+    weekPlan: waterContext.weekPlan || null,
   };
 }
 

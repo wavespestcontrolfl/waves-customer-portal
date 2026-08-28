@@ -1490,6 +1490,12 @@ const gates = {
   // creds + cronJobs on must NOT email real customers. Until the gate is on,
   // the Monday sweep only shadow-logs candidate counts and never sends.
   irrigationWeeklyEmail: process.env.GATE_IRRIGATION_WEEKLY_EMAIL === 'true',
+  // Monday irrigation email + lawn report: replace the static "ease up / add
+  // a few minutes" callouts with a concrete legal-first watering plan
+  // (minutes per turf zone, hold, conditional-on-rain) from
+  // @waves/irrigation-runtime buildWeekPlan. Off = today's copy exactly.
+  // Kill = unset GATE_IRRIGATION_WEEK_PLAN.
+  irrigationWeekPlan: process.env.GATE_IRRIGATION_WEEK_PLAN === 'true',
 
   // Existing-customer campaign drafts (V1) — the seasonal-reactivation cron and
   // the daily upsell generator write message_drafts status='pending' rows

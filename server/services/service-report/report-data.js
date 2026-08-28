@@ -47,6 +47,8 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
+const { decideWeekPlan, renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
+const { currentRestrictionPolicy } = require('../../config/irrigation-restrictions');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2034,6 +2036,13 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // restore the original stamp while the render read B (TOCTOU) — the
     // timestamp makes every edit sequence change the signature.
     irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
+    // The week plan is a render input too: a new Monday snapshot, a restriction
+    // policy change/expiry, or the gate itself must re-render a cached PDF.
+    if (featureGates.isEnabled('irrigationWeekPlan')) {
+      const snapshot = await loadCurrentWeekPlan(service.customer_id);
+      const policy = currentRestrictionPolicy();
+      irrigationStamp += `:plan=${snapshot?.planAsOf ? new Date(snapshot.planAsOf).toISOString() : 'live'}:${policy ? `${policy.maxDaysPerWeek}@${policy.expiresOn}` : 'nopolicy'}`;
+    }
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
   }
@@ -2571,6 +2580,31 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     completionRainConfidence,
     completionRainSource,
   });
+  // This week's watering plan (GATE_IRRIGATION_WEEK_PLAN). The Monday email
+  // snapshots its decision; the report renders THAT plan for the week so the
+  // two surfaces agree. No snapshot yet (report before Monday's sweep, or a
+  // customer the sweep doesn't reach) → the latest decision from the same
+  // engine, minus the forecast the report doesn't fetch.
+  waterContext.weekPlan = null;
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
+    const runMinutes = propertyPrefs?.irrigation_run_minutes ?? null;
+    const snapshot = await loadCurrentWeekPlan(service.customer_id);
+    if (snapshot?.plan) {
+      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes });
+    } else {
+      const { plan } = decideWeekPlan({
+        advice: waterContext.irrigationAdvice,
+        month: Number(String(assessment.service_date || '').slice(5, 7)) || (new Date().getMonth() + 1),
+        forecastRainInches: null,
+        runMinutes,
+        wateringDays: propertyPrefs?.watering_days ?? null,
+        systemType: propertyPrefs?.irrigation_system_type ?? null,
+        explicitInchesPerWeek: propertyPrefs?.irrigation_inches_per_week ?? null,
+        rainSensor: propertyPrefs?.rain_sensor === true || propertyPrefs?.rain_sensor === 't',
+      });
+      waterContext.weekPlan = renderWeekPlanReport(plan, { runMinutes });
+    }
+  }
 
   return {
     assessmentId: assessment.id,

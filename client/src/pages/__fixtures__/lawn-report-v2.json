@@ -257,7 +257,11 @@
       "explanation": "Between rain (1.2″) and your irrigation schedule (0.75″), your lawn took in about 1.95″ this week. That’s right around the 1.75″ seasonal target — right where we want it.",
       "source": "irrigation_advice",
       "scheduleOnFile": true,
-      "coverageWatch": true
+      "coverageWatch": true,
+      "weekPlan": {
+        "title": "This week: about 30 minutes per turf zone",
+        "detail": "On your permitted watering day, about ¾\" of water per run — 10 minutes more than you run now."
+      }
     },
     "mowing": {
       "measuredHeightInches": 3.2,
