@@ -253,7 +253,33 @@ function cityRe(names) {
   return alts.length ? new RegExp(`\\b(${alts.join('|')})\\b`, 'i') : null;
 }
 
+// Served localities that are also ordinary words: they anchor a topic only
+// with geographic or service context ("in Osprey", "Osprey, FL", "Osprey pest
+// control", "pest control Osprey") — "Osprey Nests and Pest Control in
+// Florida" is a bird, and statewide.
+const FOOTPRINT_CONTEXT_NAMES = Object.freeze(['Osprey']);
+let footprintContextCache;
+function footprintContextRe() {
+  if (footprintContextCache !== undefined) return footprintContextCache;
+  const names = FOOTPRINT_CONTEXT_NAMES.map(escapeRe).join('|');
+  footprintContextCache = new RegExp(
+    `\\b(?:in|near|around|serving|across)\\s+(${names})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|and|or)\\b|\\s+(?:${AUDIENCE_SUFFIX})\\b))`
+    + `|\\b(${names}),?\\s+(?:fl|florida)\\b(?![a-z])`
+    + `|\\b(${names})\\s+(?:${SERVICE_INTENT})\\b`
+    + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(${names})\\b(?![a-z])`,
+    'i'
+  );
+  return footprintContextCache;
+}
+
 let footprintCache = null;
+// Every served locality (the raw list — used to validate a semantic city
+// field, where "Osprey" IS the town).
+function servedCities() {
+  footprintCities();
+  return footprintAllCache;
+}
+let footprintAllCache = null;
 function footprintCities() {
   if (footprintCache) return footprintCache;
   const names = new Set((CITIES || []).map((c) => String(c)));
@@ -263,7 +289,9 @@ function footprintCities() {
       names.add(key.replace(/\b\w/g, (ch) => ch.toUpperCase()));
     }
   } catch { /* scoring-config CITIES is the floor */ }
-  footprintCache = [...names];
+  footprintAllCache = [...names];
+  const contextual = new Set(FOOTPRINT_CONTEXT_NAMES.map((n) => n.toLowerCase()));
+  footprintCache = footprintAllCache.filter((n) => !contextual.has(n.toLowerCase()));
   return footprintCache;
 }
 
@@ -303,7 +331,10 @@ function classifyGeoScope(text) {
   const t = String(text || '');
   // Florida vernacular that contains a served-city name (the same scrub the
   // publisher's inferServiceAreas applies): not a footprint anchor.
-  const footprint = findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' '));
+  const footprint = [
+    ...findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
+    ...findAll(footprintContextRe(), t),
+  ];
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), t),
     ...findAll(OUT_OF_STATE_RE, t),
@@ -388,7 +419,7 @@ function evaluateDraftFraming(draft = {}) {
  * it to equal the brief keyword, so a clean brief can still emit an owned
  * entity). `stage` tells the caller which check failed.
  */
-function evaluateDraftTargeting(draft = {}, { index, category = null, service = null } = {}) {
+function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null } = {}) {
   const framing = evaluateDraftFraming(draft);
   if (!framing.ok) return { ...framing, stage: 'framing' };
   const fm = draft?.frontmatter || {};
@@ -396,7 +427,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, city: city || fm.city || (Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag[0] : null) || null, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -674,8 +705,8 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
   if (city && !findings.length) {
-    const cityGeo = classifyGeoScope(city);
-    if (cityGeo.scope !== 'footprint' && cityGeo.scope !== 'regional') {
+    const served = cityRe(servedCities());
+    if (!(served && served.test(city)) && !REGIONAL_RE.test(city)) {
       findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: [city], message: `Row city "${city}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
     }
   }

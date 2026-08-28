@@ -409,6 +409,10 @@ class AutonomousRunner {
         query: brief.target_keyword || opp.query || null,
         title: ob?.working_title || null,
         slug: ob?.slug || null,
+        // The city the writer is bound to localize to (category seeds carry
+        // one with a generic title/slug) — a semantic field, validated as a
+        // served locality like a blog_posts row's city.
+        city: ob?.city || brief.city || opp.city || null,
         service: brief.service || opp.service || null,
       };
       let topicResult;
@@ -771,7 +775,7 @@ class AutonomousRunner {
             if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
             topicIndex = topicGate.indexCorpus(corpus);
           }
-          framing = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null });
+          framing = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
         } catch (err) {
           framing = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
         }
@@ -2969,7 +2973,7 @@ class AutonomousRunner {
       try {
         const corpus = await this._loadBlogCorpus({ required: true });
         if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), service: brief.service || opp.service || null });
+        topicRecheck = topicGateMod.evaluateDraftTargeting(draft, { index: topicGateMod.indexCorpus(corpus), service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
       } catch (err) {
         const e = new Error(`Topic-targeting gate could not re-validate the stored draft (${err.message}) — retry once the live blog corpus is reachable`);
         e.statusCode = 409;

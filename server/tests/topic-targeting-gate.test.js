@@ -651,3 +651,29 @@ describe('PR codex r8 (864fcd91a)', () => {
     }
   });
 });
+
+describe('PR codex r9 (6c1590f89)', () => {
+  test('Osprey is a served town only with geo/service context; the bird is not a footprint anchor', () => {
+    expect(gate.classifyGeoScope('Osprey Nests and Pest Control in Florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('nesting ospreys near the lanai').scope).toBe('none');
+    for (const t of ['pest control in osprey', 'Osprey, FL termite bond', 'osprey pest control', 'termite treatment Osprey', 'lawn care in Osprey homes']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('footprint');
+    }
+  });
+  test('a row city of Osprey (the town) passes the served-locality check; Boise still does not', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', keyword: 'pest control frequency', slug: 'pest-control-frequency', status: 'draft' };
+    expect((await gate.evaluateBlogPostRow({ ...generic, city: 'Osprey' }, { index })).ok).toBe(true);
+    expect((await gate.evaluateBlogPostRow({ ...generic, city: 'Boise' }, { index })).ok).toBe(false);
+  });
+  test('evaluateDraftTargeting takes the brief/operator city and validates it', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const draft = { frontmatter: { title: 'How Often Should Pest Control Come?', slug: '/pest-control/pest-control-frequency/', primary_keyword: 'pest control frequency' } };
+    const boise = gate.evaluateDraftTargeting(draft, { index, service: 'pest', city: 'Boise' });
+    expect(boise.ok).toBe(false);
+    expect(boise.findings[0]).toMatchObject({ code: gate.CODES.GEO_OUT_OF_AREA, cities: ['Boise'] });
+    expect(gate.evaluateDraftTargeting(draft, { index, service: 'pest', city: 'Sarasota' }).ok).toBe(true);
+    // The emitted service_areas_tag is the fallback city.
+    expect(gate.evaluateDraftTargeting({ frontmatter: { ...draft.frontmatter, service_areas_tag: ['Portland'] } }, { index, service: 'pest' }).ok).toBe(false);
+  });
+});

@@ -44,8 +44,14 @@ const BENIGN = {
 
 const claimedAt = new Date('2026-08-27T13:00:00Z');
 
-function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn() }, corpus = [IN_WALL, BENIGN], corpusError = null, topicGate, dbMock = makeDbMock() }) {
+function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn() }, corpus = [IN_WALL, BENIGN], corpusError = null, topicGate, dbMock = makeDbMock(), factsOk = false }) {
   jest.resetModules();
+  // A brief that carries a city makes the facts-sufficiency gate (step 2b,
+  // before the topic gate) applicable; `factsOk` stubs it sufficient so the
+  // test reaches step 2d.
+  // (doMock survives resetModules — undo it for the next load.)
+  if (factsOk) jest.doMock('../services/content/facts-sufficiency', () => ({ check: jest.fn().mockResolvedValue({ applicable: true, sufficient: true }) }));
+  else jest.dontMock('../services/content/facts-sufficiency');
   jest.doMock('../models/db', () => dbMock);
   jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
   // A pending-review park schedules the owner notification via setImmediate;
@@ -94,6 +100,7 @@ function blogBrief(over = {}) {
       id: 'brief_topic', action_type: 'new_supporting_blog', page_type: 'supporting-blog', human_review_required: false,
       target_keyword: over.query || 'house came with taexx',
       service: over.service || 'pest',
+      city: over.city || null,
       voice_constraints: over.operator_brief ? { operator_brief: over.operator_brief } : {},
     }),
   };
@@ -124,6 +131,18 @@ describe('step 2d — pre-draft topic-targeting gate', () => {
     expect(result.topic_targeting_result.findings[0].code).toBe('TOPIC_GEO_OUT_OF_AREA');
     expect(queue.skip).toHaveBeenCalledWith('opp_tampa', 'topic_targeting:TOPIC_GEO_OUT_OF_AREA', { claimToken: claimedAt });
     expect(queue.pendingReview).not.toHaveBeenCalled();
+    expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
+  });
+
+  test('PR codex r9: a category-seed brief city outside the footprint skips pre-draft even with a generic keyword/title/slug', async () => {
+    const queue = makeQueue({ id: 'opp_boise', action_type: 'new_supporting_blog', query: 'pest control frequency', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn() };
+    const { runner } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'pest control frequency', service: 'pest', city: 'Boise', operator_brief: { working_title: 'How Often Should Pest Control Come?', slug: '/pest-control/pest-control-frequency/' } }), dispatcher, corpusError: 'github_down', factsOk: true });
+
+    const result = await runner.runNext();
+
+    expect(result.skip_reason).toBe('topic_targeting:TOPIC_GEO_OUT_OF_AREA');
+    expect(result.topic_targeting_result.findings[0].cities).toEqual(['Boise']);
     expect(dispatcher.runWithBrief).not.toHaveBeenCalled();
   });
 

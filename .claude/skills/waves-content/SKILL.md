@@ -67,8 +67,14 @@ this skill.
   `generatePost` (block de-queues the row: status → idea, reason in
   `astro_publish_error`), `publishAstro` (`BLOG_TOPIC_TARGETING_BLOCKED`,
   parked as deterministic). Already-live rows are refreshes → exempt.
-  Ownership = a token from the primary keyword that ≤3 live posts carry in
-  their targeting fields and the owner carries ≥3×, same category. Geo
+  Ownership = a proper-noun token from ANY candidate targeting field —
+  primary keyword, title, slug, meta description, secondary keywords, H2/H3
+  headings (the same set the corpus index counts) — that ≤3 live posts carry
+  in their targeting fields and the owner carries ≥3×, same category (unknown
+  category → every category, owners unioned). Moving an owned entity into a
+  "secondary" field does not evade it. A row/brief city must be a served
+  locality or SWFL region. The gate also re-runs on the branch file right
+  before every merge (mergeAstro + the autonomous poller). Geo
   coverage = the canonical content-guardrails blocklist + any other US
   state/postal abbreviation; common-word place names (Homestead, Boston…)
   count only with geo context and stay OUT of the prose blocklist. Persisted
