@@ -196,7 +196,7 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   'Savannah', 'Boston', 'Houston', 'Dallas', 'Cleveland', 'Richmond', 'Charleston',
   // The guardrails' own documented exclusions (person names / common nouns).
   'Brandon', 'Sunrise', 'Plantation', 'Cocoa', 'Mobile', 'Stuart', 'Sebastian',
-  'Orlando', 'Lakeland',
+  'Orlando', 'Lakeland', 'Orange',
   // Major metros that are also names / words (PR #3549 codex r11).
   'Jackson', 'Lincoln', 'Madison', 'Aurora', 'Mesa', 'Buffalo',
   'Arlington', 'Springfield', 'Salem', 'Eugene', 'Tyler', 'Garland', 'Irving',
@@ -220,7 +220,8 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
 const NAME_STATE_RE = new RegExp(
   '\\b(?:in|near|around|across|serving)\\s+(washington|virginia)\\b|\\b(washington|virginia)\\s+state\\b'
   + '|\\b(?!(?:ask|meet|with|from|by|and|contact|call|text|email|thanks|thank|our|the|hi|hello|dear)\\b)[a-z]+,?\\s+(washington|virginia)\\s*$'
-  + `|\\b(washington|virginia)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`,
+  // …or a governed pest noun ("Virginia ant control", "Washington spiders").
+  + `|\\b(washington|virginia)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT}|${PEST_NOUNS})\\b`,
   'i'
 );
 // State names that are part of a plant / breed / species name, not a market:
@@ -317,7 +318,12 @@ const GENERIC_TOKENS = new Set([
 // boundaries on both ends so "Tampa" never matches inside another word.
 function cityRe(names) {
   const alts = names
-    .map((n) => escapeRe(String(n).trim()).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+'))
+    .map((n) => escapeRe(String(n).trim()).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+')
+      // Common abbreviations: "Ft Myers" / "Ft. Lauderdale" for Fort …,
+      // "St Pete" for St. Petersburg (the prose guardrail aliases Fort the
+      // same way).
+      .replace(/^Fort\\s\+/, '(?:Fort|Ft\\.?)\\s+')
+      .replace(/^St\\.\?\\s\+Petersburg$/, 'St\\.?\\s+Pete(?:rsburg)?'))
     .filter(Boolean);
   return alts.length ? new RegExp(`\\b(${alts.join('|')})\\b`, 'i') : null;
 }

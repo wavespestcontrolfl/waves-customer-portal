@@ -2022,7 +2022,7 @@ const LIST_ITEM_MARKER_RE = /^\s*(?:[-*+]|\d+[.)])\s+/;
 // Metro names inside pest / plant / material compounds are not places —
 // stripped before the prose footprint scan AND the topic-targeting gate's
 // out-of-area matchers (the gate imports this so both scans agree).
-const GEO_COMPOUND_EXEMPT_RE = /\b(?:san\s+jose\s+scales?|portland\s+cement|columbus\s+grass|boston\s+(?:fern|ivy|terrier)s?|baltimore\s+orioles?|nashville\s+warblers?|savannah\s+sparrows?|houston\s+toads?|denver\s+boots?|memphis\s+style|chicago\s+style|new\s+york\s+style|philadelphia\s+cream\s+cheese|buffalo\s+grass|kentucky\s+bluegrass|bermuda\s*grass|st\.?\s*augustine\s*(?:grass|lawns?|sod|turf)|phoenix\s+palms?|jupiter\s+plants?)\b/gi;
+const GEO_COMPOUND_EXEMPT_RE = /\b(?:san\s+jose\s+scales?|portland\s+cement|columbus\s+grass|boston\s+(?:fern|ivy|terrier)s?|baltimore\s+orioles?|nashville\s+warblers?|savannah\s+sparrows?|houston\s+toads?|denver\s+boots?|memphis\s+style|chicago\s+style|new\s+york\s+style|philadelphia\s+cream\s+cheese|buffalo\s+grass|kentucky\s+bluegrass|bermuda\s*grass|st\.?\s*augustine\s*(?:grass|lawns?|sod|turf)|phoenix\s+palms?|jupiter\s+plants?|(?:navel|sour|sweet|blood|mandarin|valencia|wild|bitter)\s+oranges?|oranges?\s+(?:(?:pests?|bugs?|insects?)\b(?!\s+(?:control|removal|exterminat\w*|treatments?|services?|compan\w+)\b)|trees?|groves?|oil|peels?|juice|blossoms?|rust\s+mites?))\b/gi;
 
 function offFootprintCityFinding(text) {
   // Link DESTINATIONS are invisible to readers — a blocked city inside a

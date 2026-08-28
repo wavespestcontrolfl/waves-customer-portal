@@ -409,6 +409,7 @@ async function reconcileTopicBlockedPrs(gh) {
   rows = rows.filter((r) => r.skip_reason === TOPIC_BLOCKED_SKIP_REASON && r.outcome === PENDING_OUTCOME && r.astro_pr_url);
   let retired = 0;
   let unparked = 0;
+  let superseded = 0;
   for (const run of rows) {
     const prNumber = prNumberFromUrl(run.astro_pr_url);
     if (!prNumber) continue;
@@ -419,7 +420,27 @@ async function reconcileTopicBlockedPrs(gh) {
       // A human merged it between the durable park and the retire: hand the
       // run back to the pending lifecycle (live-deploy verification,
       // IndexNow, link planning, social) instead of leaving it parked.
-      if (await unparkTopicBlockedRun(run, prNumber)) unparked++;
+      if (await unparkTopicBlockedRun(run, prNumber)) { unparked++; continue; }
+      // The un-park needs the opportunity still parked on THIS run. When the
+      // operator has since followed the park note (requeue / dismiss — a
+      // newer run owns the opportunity, or the queue row left the parked
+      // state), restoring that ownership would resurrect a decision a human
+      // overrode (supersedeRun's rule): the merged PR gets its terminal
+      // bookkeeping and the run leaves this set as superseded. A transient
+      // CAS loss (row still parked on this run) retries next tick.
+      let moved = null;
+      try { moved = await topicBlockedOpportunityMovedOn(run); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked run ${run.id}: could not verify whether its opportunity moved on: ${err.message} (retried next tick)`); continue; }
+      if (moved) {
+        try {
+          const { markPrTerminal } = require('./codex-remediation');
+          await markPrTerminal(prNumber, 'merged');
+        } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal(merged) for superseded topic-blocked run ${run.id} failed: ${err.message}`); }
+        const res = await supersedeRun(run, moved.row, {
+          fromSkipReason: TOPIC_BLOCKED_SKIP_REASON,
+          note: `PR #${prNumber} was merged by a human after the topic-targeting park, but the opportunity has moved on (${moved.reason}) — run retired as superseded by autonomous-pr-poller; the newer lifecycle owns the opportunity.`,
+        });
+        if (res.annotated) superseded++;
+      }
       continue;
     }
     if (pr.state === 'open') {
@@ -438,7 +459,20 @@ async function reconcileTopicBlockedPrs(gh) {
         .update({ poll_pending_reason: TOPIC_BLOCK_PR_RETIRED, updated_at: new Date() });
     } catch (err) { logger.warn(`[autonomous-pr-poller] terminal bookkeeping for closed topic-blocked PR #${prNumber} failed: ${err.message} (retried next tick)`); }
   }
-  return { count: rows.length, retired, unparked };
+  return { count: rows.length, retired, unparked, superseded };
+}
+
+// → null while the opportunity is still parked on this run, else { reason,
+// row } describing how it moved on (operator requeue/dismiss, or a newer
+// sibling run owns it). A run without an opportunity cannot move on.
+async function topicBlockedOpportunityMovedOn(run) {
+  if (!run.opportunity_id) return null;
+  const row = await db('opportunity_queue').where('id', run.opportunity_id).first('id', 'status', 'skip_reason');
+  if (!row || row.status !== 'pending_review' || row.skip_reason !== TOPIC_BLOCKED_SKIP_REASON) {
+    return { reason: row ? `queue row now status='${row.status}'${row.skip_reason ? ` skip_reason='${row.skip_reason}'` : ''}` : 'queue row missing', row };
+  }
+  if (await newerSiblingRun(db, run)) return { reason: 'a newer run owns the opportunity', row };
+  return null;
 }
 
 // Merged after the park: restore the run's pending reason (CAS on the parked
@@ -594,7 +628,10 @@ async function reconcileQueueRow(run, { merged }) {
  * non-pending skip_reason instead. Compare-and-set guarded on the exact
  * parked state so a concurrent finalize/operator write wins.
  */
-async function supersedeRun(run, queueRow) {
+// `fromSkipReason` / `note`: the topic-blocked reconcile supersedes from the
+// PARKED reason (topic_targeting_blocked) with its own note; everything else
+// supersedes from the pending reason.
+async function supersedeRun(run, queueRow, { fromSkipReason = null, note = null } = {}) {
   const pendingReason = pendingSkipReasonForRun(run);
   const queueState = queueRow
     ? `status='${queueRow.status}'${queueRow.skip_reason ? ` skip_reason='${queueRow.skip_reason}'` : ''}`
@@ -603,12 +640,12 @@ async function supersedeRun(run, queueRow) {
     const claimed = await db('autonomous_runs')
       .where('id', run.id)
       .where('outcome', PENDING_OUTCOME)
-      .where('skip_reason', pendingReason)
+      .where('skip_reason', fromSkipReason || pendingReason)
       .update({
         skip_reason: SUPERSEDED_SKIP_REASON,
         reviewer_notes: [
           run.reviewer_notes,
-          `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
+          note || `PR lifecycle reconciliation stopped by autonomous-pr-poller: opportunity_queue row ${queueState} is no longer parked at pending_review/${pendingReason} (operator requeue/dismiss or superseding claim).`,
         ].filter(Boolean).join(' | '),
         // pollPending `continue`s past trackPendingReason on the supersede
         // path, so without this the last pending reason froze onto the row.

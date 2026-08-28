@@ -877,6 +877,30 @@ describe('PR codex r20 (1306d052d)', () => {
   });
 });
 
+describe('PR codex r22 (b4db7a542)', () => {
+  test('Orange (CA) counts with service / preposition context; orange oil stays a topic', () => {
+    for (const t of ['Orange pest control', 'pest control in Orange', 'termite treatment Orange, CA']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['orange oil termite treatment in sarasota', 'orange pests', 'washington navel orange pests', 'orange tree pests in bradenton', 'citrus rust mites on oranges']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+  test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
+    for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
+  test('Virginia / Washington before a pest noun are the states; the person and the plant are not', () => {
+    for (const t of ['Virginia ant control', 'Virginia cockroach control', 'Washington spiders', 'Washington wasp removal']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['ask virginia about ants', 'virginia creeper vine pests in sarasota', 'virginia opossums in bradenton attics']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+});
+
 describe('slug collision scope (hook, PR codex r17 push)', () => {
   test('a category-qualified route with the same leaf under another category is NOT a collision; a leaf-only slug still is', () => {
     const corpus = [{ url: '/termite/foo/', body: '---\ntitle: Foo for termites\nslug: /termite/foo/\nprimary_keyword: foo termite\ncategory: termite\n---\n\ntext\n' }];

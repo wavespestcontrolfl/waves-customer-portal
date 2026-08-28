@@ -780,6 +780,20 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getPr).not.toHaveBeenCalled();
   });
 
+  test('reconcileTopicBlockedPrs: a merged PR whose opportunity was requeued/dismissed meanwhile is retired as SUPERSEDED (terminal merged stamp), never re-owned (r22)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+    // The operator followed the park note: the queue row is back at the pending reason (requeued).
+    const updates = setupDb({ pending: [parked], queueFirst: { id: parked.opportunity_id, status: 'pending_review', skip_reason: 'astro_pr_pending_merge' } });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r).toMatchObject({ count: 1, retired: 0, unparked: 0, superseded: 1 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
+    const sup = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'superseded_by_review_queue_action');
+    expect(sup).toBeDefined();
+    expect(sup.updates.reviewer_notes).toMatch(/merged by a human after the topic-targeting park, but the opportunity has moved on/);
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'merged')).toBeDefined();
+  });
+
   test('reconcileTopicBlockedPrs: a PR merged by a human after the park is UN-PARKED into the merged lifecycle; a closed PR gets its terminal stamp (r15)', async () => {
     const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review' });
     let updates = setupDb({ pending: [parked] });

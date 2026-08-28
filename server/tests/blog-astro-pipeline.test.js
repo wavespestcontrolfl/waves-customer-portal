@@ -3219,6 +3219,23 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
       expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
     });
 
+    test('pages-poll runs the reconcile BEFORE the Cloudflare config check (a Pages outage cannot disable the cleanup) (codex r22)', async () => {
+      const saved = { CF_API_TOKEN: process.env.CF_API_TOKEN, CF_ACCOUNT_ID: process.env.CF_ACCOUNT_ID };
+      delete process.env.CF_API_TOKEN;
+      delete process.env.CF_ACCOUNT_ID;
+      const spy = jest.spyOn(AstroPublisher, 'reconcileTopicBlockedPostPrs').mockResolvedValue({ count: 1, retired: 1, merged: 0 });
+      try {
+        const pagesPoll = require('../services/content-astro/pages-poll');
+        const res = await pagesPoll.pollPending();
+        expect(res).toMatchObject({ skipped: true, topicRetire: { retired: 1 } });
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+        if (saved.CF_API_TOKEN !== undefined) process.env.CF_API_TOKEN = saved.CF_API_TOKEN;
+        if (saved.CF_ACCOUNT_ID !== undefined) process.env.CF_ACCOUNT_ID = saved.CF_ACCOUNT_ID;
+      }
+    });
+
     test('a republished row (fresh PR #44) owes a close for #43 only — #44 and its branch are never touched', async () => {
       const stamps = [];
       reconcileDb([owedRow({ astro_pr_number: 44, astro_branch_name: 'content/blog-ant-trails-v2', astro_status: 'pr_open' })], stamps);
