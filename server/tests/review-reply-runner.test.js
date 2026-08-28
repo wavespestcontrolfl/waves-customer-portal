@@ -1194,6 +1194,18 @@ describe('admin actions', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
   });
 
+  test('postNow of a stored AUTO draft carries its grounding snapshot + expected account fingerprint through the publisher (codex r42)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const stored = { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:Venice|new', review: { rating: 5 } };
+    state.rows = [row({ id: 'ag', auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text, auto_reply_version: GOOD_DRAFT.version, auto_reply_mode: GOOD_DRAFT.mode, auto_reply_grounding: stored })];
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    const r = await Runner.postNow('ag', { type: 'admin' }, { expectedDraft: GOOD_DRAFT.text });
+    expect(r.outcome).toBe('posted');
+    const call = mockPublish.mock.calls[0][0];
+    expect(call.expectedAccountFingerprint).toBe('fp:Venice|new');
+    expect(JSON.parse(call.autoFields.auto_reply_grounding)).toMatchObject({ accountFingerprint: 'fp:Venice|new' });
+  });
+
   test('postNow of a human [DRAFT] stamps human provenance, never the earlier model version / grounding (codex r40)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const human = 'Thanks Dana, the owner here.';

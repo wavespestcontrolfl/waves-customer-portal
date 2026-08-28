@@ -133,6 +133,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r42: inserted ability / permission phrases.
+    expect(verify(good('Hi Dana, we are glad your pets were able to stay outside after our pest treatment.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids managed to keep playing in the yard.'))).toBe('banned_phrase');
     // codex r41: direct tolerance / reaction claims.
     expect(verify(good('Hi Dana, we are glad your pets tolerated our pest treatment well.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and the kids handled it fine.'))).toBe('banned_phrase');

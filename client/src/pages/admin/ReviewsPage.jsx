@@ -717,7 +717,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             )}
           </div>
         )}
-        {!review.missingSince && autoReply && ["queued", "failed"].includes(autoReply.status) && !review.draftReply && !review.reply && (
+        {!review.missingSince && autoReply && (["queued", "failed"].includes(autoReply.status) || (autoReply.status === "parked" && ["google_uncertain", "persist_failed"].includes(autoReply.reason))) && !review.draftReply && !review.reply && (
           <div
             style={{
               fontSize: 14,
@@ -726,7 +726,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               marginBottom: 8,
             }}
           >
-            {autoReply.status === "failed" && autoReply.draft && (
+            {autoReply.draft && (
               <div
                 style={{
                   padding: 10,
@@ -739,13 +739,17 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                   lineHeight: 1.5,
                 }}
               >
-                <div style={{ color: D.muted, marginBottom: 4 }}>Auto-reply draft (publish retrying)</div>
+                <div style={{ color: D.muted, marginBottom: 4 }}>{autoReply.status === "parked" ? "Auto-reply text attempted (needs reconciling)" : "Auto-reply draft (publish retrying)"}</div>
                 {autoReply.draft}
               </div>
             )}
-            {autoReply.status === "failed"
-              ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${autoReply.dueAt ? `, next attempt ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`
-              : `Auto-reply scheduled${autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`}{" "}
+            {autoReply.status === "parked"
+              ? (autoReply.reason === "persist_failed"
+                ? "This reply is LIVE on Google but was not recorded here — confirm it after the next sync, or post / rewrite it."
+                : "Google did not answer in time — this reply MAY be live. Check the review after the next sync, or post / rewrite it.")
+              : autoReply.status === "failed"
+                ? `Auto-reply retrying${autoReply.reason ? ` (${autoReply.reason.replace(/_/g, " ")})` : ""}${autoReply.dueAt ? `, next attempt ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`
+                : `Auto-reply scheduled${autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.`}{" "}
             <button
               onClick={() => runAuto("post-now")}
               disabled={autoBusy}

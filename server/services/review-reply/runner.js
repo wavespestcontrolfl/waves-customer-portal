@@ -795,7 +795,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           // version / mode / grounding snapshot (codex r40).
           ...(humanDraft
             ? { auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: publishedAt }
-            : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt }),
+            : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt, auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
           auto_reply_claimed_until: null,
@@ -804,6 +804,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
         guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
+        // …and the same fingerprint for the publisher's transactional
+        // post-PUT check (codex r42): facts that change while the PUT is in
+        // flight park the reply instead of recording it cleanly posted.
+        expectedAccountFingerprint: humanDraft ? undefined : (storedGrounding?.accountFingerprint || undefined),
         requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };

@@ -119,7 +119,9 @@ const BANNED_RE = new RegExp([
   // Activity-continuation framing (codex r38): "let your pets keep enjoying
   // the yard", "allow the kids to carry on playing", "as usual", "routine".
   '\\b(?:lets?|letting|allow\\w*|leav\\w*|free\\w*|enabl\\w*|permit\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\b',
-  '\\b(?:pets?|dogs?|cats?|kids?|children|babies|family|people|animals|everyone)\\s+(?:can|could|may|will|to|still)?\\s*(?:keep|continue|carry\\s+on|go\\s+on|resume|get\\s+back\\s+to|return\\s+to|stay|remain|enjoy|play|roam|run|romp|relax|use|go\\s+(?:out|outside|back))\\w*\\b',
+  // …including inserted ability / permission phrases (codex r42): "were able
+  // to stay outside", "managed to keep playing", "got to enjoy the yard".
+  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\s+(?:[\\w-]+\\s+){0,3}?(?:keep|continue|carry\\s+on|go\\s+on|resume|get\\s+back\\s+to|return\\s+to|stay|remain|enjoy|play|roam|run|romp|relax|use|sleep|eat|walk|be\\s+(?:out|outside|back|around|inside)|go\\s+(?:out|outside|back))\\w*\\b',
   '\\bas\\s+usual\\b', '\\broutines?\\b', '\\bwithout\\s+(?:changing|interrupt\\w*|disrupt\\w*|missing|skipping|pausing)\\b', '\\bno\\s+(?:change|interruption|disruption)s?\\b', '\\buninterrupted\\b', '\\bundisturbed\\b',
   // Direct tolerance / reaction claims about protected subjects (codex r41):
   // "your pets tolerated the treatment well", "the kids handled it fine".
