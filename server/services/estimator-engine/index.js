@@ -2203,12 +2203,16 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // ask; dedupe is the clarify service's own.
     if (!dryRun && unitBandPricing?.missing?.includes('bedroom_count') && context.phone) {
       try {
-        // The reply re-prices ONLY through the SMS-thread re-draft
-        // (GATE_ESTIMATOR_SMS_DRAFTS): with that gate off, an answered ask
-        // would be consumed with nothing able to act on it — so the ask is
-        // not parked at all; the yellow reason still names the gap.
+        // The reply re-prices through the path that can re-draft THIS
+        // draft: a voice-origin draft re-runs its call (this engine — on,
+        // or we would not be here); an SMS-origin draft re-drafts from the
+        // thread, which needs GATE_ESTIMATOR_SMS_DRAFTS. With that gate off
+        // an SMS-origin ask would be consumed with nothing able to act on
+        // it — so it is not parked; the yellow reason still names the gap.
         const { smsThreadDraftsEnabled } = require('./sms-thread');
-        if (!smsThreadDraftsEnabled()) throw Object.assign(new Error('sms-thread drafts gated off — bedroom ask not parked'), { expected: true });
+        if (origin.channel === 'sms_thread' && !smsThreadDraftsEnabled()) {
+          throw Object.assign(new Error('sms-thread drafts gated off — bedroom ask not parked'), { expected: true });
+        }
         const { parkClarifyAsk } = require('../estimate-clarify-asks');
         await parkClarifyAsk({
           missing: ['bedroom_count'],

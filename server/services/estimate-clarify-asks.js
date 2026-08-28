@@ -308,6 +308,27 @@ async function parkClarifyAsk({
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // is the service answer, not part of the address — bounded vocabulary,
 // deterministic split. Returns { address, serviceTail }.
+// Merge a patch into the ask row's flags (read-modify-write; null values
+// delete the key). Bookkeeping only — never touches status/copy.
+async function stampClarifyFlags(draftId, patch) {
+  try {
+    const row = await db('message_drafts').where({ id: draftId }).first('flags');
+    if (!row) return false;
+    let current = {};
+    try { current = typeof row.flags === 'string' ? JSON.parse(row.flags) : (row.flags || {}); } catch { current = {}; }
+    const next = { ...current };
+    for (const [k, v] of Object.entries(patch || {})) {
+      if (v === null || v === undefined) delete next[k];
+      else next[k] = v;
+    }
+    await db('message_drafts').where({ id: draftId }).update({ flags: JSON.stringify(next) });
+    return true;
+  } catch (err) {
+    logger.warn(`[estimate-clarify] flag stamp failed: ${err.message}`);
+    return false;
+  }
+}
+
 // The call a VOICE-origin estimator draft was composed from, or null for
 // SMS-thread drafts / non-engine estimates / a missing row.
 async function voiceOriginCallLogId(estimateId) {
@@ -587,6 +608,22 @@ async function handleClarifyReply({ phone, body }) {
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
 
+    // A bedroom answer that must RE-PRICE a linked draft is durable state
+    // on the ask row until a replacement is confirmed created: the
+    // re-draft paths report failure by returning { created: false }
+    // (red/blocked/skip), not by throwing, and the answer is already
+    // recorded above — without this stamp a failed re-draft would leave
+    // the fallback-priced draft standing with nothing pointing at it.
+    const repriceTarget = recorded.includes('bedroom_count') && flags.estimate_id
+      ? String(flags.estimate_id)
+      : null;
+    if (repriceTarget) {
+      await stampClarifyFlags(awaiting.id, {
+        reprice_pending: { estimate_id: repriceTarget, bedroom_count: bedroomCount, at: new Date().toISOString() },
+      });
+    }
+    let repriceOutcome = null;
+
     // Resume drafting when the SMS engine lane is armed — the thread now
     // carries the answer, so the composer gets everything in one pass. The
     // engine's own duplicate guard and bell dedupe absorb re-runs.
@@ -608,7 +645,7 @@ async function handleClarifyReply({ phone, body }) {
       if (voiceCallLogId) {
         const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
         if (estimatorEngineEnabled()) {
-          await maybeDraftEstimateForCall({
+          repriceOutcome = await maybeDraftEstimateForCall({
             callLogId: voiceCallLogId,
             quotePromised: true,
             supersedeEstimateId,
@@ -619,7 +656,7 @@ async function handleClarifyReply({ phone, body }) {
           logger.warn('[estimate-clarify] bedroom answer recorded but the estimator engine is gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
         }
       } else if (smsThreadDraftsEnabled()) {
-        await startSmsThreadDraft({
+        const started = await startSmsThreadDraft({
           phone,
           triggerBody: body,
           skipIntentGate: true,
@@ -628,11 +665,43 @@ async function handleClarifyReply({ phone, body }) {
             ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: bedroomCount }
             : {}),
         });
+        // The thread draft is detached — wait for its outcome only when a
+        // re-price depends on it.
+        repriceOutcome = supersedeEstimateId && started?.draftPromise ? await started.draftPromise : started;
       } else if (supersedeEstimateId) {
         logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
       }
     } catch (resumeErr) {
       logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
+    }
+    if (repriceTarget) {
+      if (repriceOutcome?.created === true) {
+        await stampClarifyFlags(awaiting.id, {
+          reprice_pending: null,
+          repriced_at: new Date().toISOString(),
+          repriced_estimate_id: repriceOutcome.estimateId || null,
+        });
+      } else {
+        // Exception-based (CLAUDE.md rule 14): the pending stamp stays on
+        // the ask row and the operator gets the one bell that names the
+        // draft to re-price — the customer's answer is never lost silently.
+        logger.warn('[estimate-clarify] bedroom answer recorded but the draft could not be re-priced automatically', {
+          draftId: awaiting.id, estimateId: repriceTarget, outcome: repriceOutcome?.lane || repriceOutcome?.skipped || repriceOutcome?.reasons || 'no_outcome',
+        });
+        try {
+          await require('./notification-service').notifyAdmin(
+            'lead',
+            'Bedroom count received — re-price the unit draft',
+            `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) but the automated re-draft did not produce a replacement. The draft still carries its fallback price — re-price it before sending.`,
+            {
+              link: `/admin/estimates/${repriceTarget}`,
+              metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: repriceTarget, bedroomCount },
+            },
+          );
+        } catch (bellErr) {
+          logger.warn(`[estimate-clarify] reprice-pending bell failed (stamp stands): ${bellErr.message}`);
+        }
+      }
     }
 
     logger.info('[estimate-clarify] clarify reply recorded', { draftId: awaiting.id, recorded });
