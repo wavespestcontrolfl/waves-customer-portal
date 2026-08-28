@@ -198,9 +198,18 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         if (liveReply) {
-          // Record what Google has so the row leaves the needs-reply queue.
+          // Record what Google has so the row leaves the needs-reply queue,
+          // and close any pending pipeline state (a drafted/parked row would
+          // otherwise sit labeled "Shadow draft / Needs you" beside the
+          // real reply forever — the cron never reclaims those statuses).
           await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
+            .update({
+              review_reply: liveReply,
+              reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(),
+              auto_reply_status: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'skipped' ELSE auto_reply_status END"),
+              auto_reply_reason: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'already_replied' ELSE auto_reply_reason END"),
+              auto_reply_claimed_until: null,
+            })
             .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
           throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }

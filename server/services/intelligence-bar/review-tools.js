@@ -268,6 +268,23 @@ async function submitReviewReply(reviewId, replyText) {
   // This tool used to write review_reply locally and claim the reply would
   // "sync to Google" — it never did. Now it either reaches Google or errors.
   const { publishReviewReply, ReviewReplyError } = require('../review-reply/publisher');
+  // reply_text is a MODEL-proposed tool argument: it may differ from the
+  // verified draft the operator saw. Re-run the canonical verifier against
+  // fresh grounding before anything reaches Google (fail closed).
+  try {
+    const review = await db('google_reviews').where('id', reviewId).first();
+    if (!review || review.reviewer_name === '_stats') return { error: 'Review not found' };
+    if (review.missing_since) return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+    const { buildReplyGrounding } = require('../review-reply/grounding');
+    const Drafter = require('../review-reply/drafter');
+    const grounding = await buildReplyGrounding(review);
+    const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
+    const verdict = Drafter.verifyReplyText(replyText, grounding, { recentReplies });
+    if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply, or post it from the Reviews page editor.`, code: 'verifier_reject', rejection: verdict };
+  } catch (err) {
+    if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
+    return { error: `Could not verify the reply before posting (${err.message}).`, code: 'verify_failed' };
+  }
   try {
     const result = await publishReviewReply({
       reviewId,

@@ -56,6 +56,7 @@ jest.mock('../models/db', () => {
     return api;
   };
   dbFn.fn = { now: () => 'NOW()' };
+  dbFn.raw = (sql) => ({ sql });
   return dbFn;
 });
 
@@ -118,6 +119,9 @@ describe('publishReviewReply', () => {
       .rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBe('Owner replied in Google directly');
+    // Pending pipeline state is closed in the same write (raw CASE — the mock stores the raw object).
+    expect(state.rows[0].auto_reply_status).toBeDefined();
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
     // A read failure fails closed (retry later), never posts.
     state.rows[0].review_reply = null;
     mockGbp.getReview.mockRejectedValueOnce(new Error('GBP 503'));

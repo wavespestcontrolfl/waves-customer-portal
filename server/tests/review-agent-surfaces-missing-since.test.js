@@ -175,7 +175,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     state.afterFirstRead = () => { row.missing_since = '2026-08-07T10:00:00Z'; };
 
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks!',
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team',
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -186,12 +186,23 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     const row = liveReview();
     state.rows.google_reviews = [row];
 
+    const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks so much!',
+      review_id: 'rev-1', reply_text: reply,
     });
 
     expect(result.success).toBe(true);
-    expect(row.review_reply).toBe('Thanks so much!');
+    expect(row.review_reply).toBe(reply);
+  });
+
+  test('a model-proposed reply that fails the public-reply verifier is never posted', async () => {
+    const row = liveReview();
+    state.rows.google_reviews = [row];
+    const result = await executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team',
+    });
+    expect(result.code).toBe('verifier_reject');
+    expect(row.review_reply).toBeNull();
   });
 });
 
