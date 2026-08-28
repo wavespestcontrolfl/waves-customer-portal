@@ -113,6 +113,8 @@ jest.mock('../models/db', () => {
     b.orWhereNull = () => b;
     b.orWhereNot = () => b;
     b.first = async () => {
+      // Simulated read failure for fail-closed assertions (state.failTables).
+      if (state.failTables && state.failTables.has(table)) throw new Error(`simulated db failure: ${table}`);
       const row = matched()[0];
       return row ? { ...row } : undefined;
     };
@@ -1245,6 +1247,30 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(res.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
+  });
+
+  test('acceptanceRecordForEstimate: strict document reads fail on a missing row or a read error; the page is fail-soft', async () => {
+    const { acceptanceRecordForEstimate } = require('../routes/estimate-public');
+    seed({ id: 'est-rec-1', token: 'tok-rec-1-x01234567890', status: 'accepted', terms_version: CURRENT });
+    const accepted = { id: 'est-rec-1', status: 'accepted', terms_version: CURRENT };
+    // Nothing recorded: not applicable.
+    expect(await acceptanceRecordForEstimate({ id: 'x', status: 'accepted', terms_version: null })).toBeNull();
+    // terms_version says a row exists but none does.
+    expect(await acceptanceRecordForEstimate(accepted)).toBeNull();
+    await expect(acceptanceRecordForEstimate(accepted, { strict: true })).rejects.toThrow(/acceptance record missing/);
+    // A row: customer-facing shape.
+    db.__state.tables.estimate_acceptances.push({
+      id: 'abcdef1234567890', estimate_id: 'est-rec-1', terms_version: CURRENT, terms_text: 'Line.', accepted_at: '2026-08-28T10:35:00Z', ip: '203.0.113.9', user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
+    });
+    expect(await acceptanceRecordForEstimate(accepted, { strict: true })).toMatchObject({ recordId: 'ACC-ABCDEF12', termsText: 'Line.', ipMasked: '203.0.x.x', device: 'iPhone · Safari' });
+    // Read failure: page → null, document → throws.
+    db.__state.failTables = new Set(['estimate_acceptances']);
+    try {
+      expect(await acceptanceRecordForEstimate(accepted)).toBeNull();
+      await expect(acceptanceRecordForEstimate(accepted, { strict: true })).rejects.toThrow(/simulated db failure/);
+    } finally {
+      db.__state.failTables = null;
+    }
   });
 
   test('acceptanceTermsApplyTo: cancel-anytime lanes only, fail closed', () => {

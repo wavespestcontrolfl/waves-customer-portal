@@ -319,14 +319,23 @@ function acceptanceTermsApplyTo(estimate) {
  * forward, never evidence already recorded. Masks the IP to two octets and
  * reduces the user-agent to a family label. Null when there is none.
  */
-async function acceptanceRecordForEstimate(estimate) {
+//
+// `strict` (document generation — the browser ?mode=pdf data pass and the
+// pdfkit fallback): a read failure or a MISSING row where terms_version says
+// one exists THROWS, so no accepted document is ever produced without its
+// record (pre-push Codex P1). Non-strict (the ordinary page): fail-soft, the
+// page still renders and the miss is logged.
+async function acceptanceRecordForEstimate(estimate, { strict = false } = {}) {
   if (!estimate || estimate.status !== 'accepted' || !estimate.terms_version) return null;
   try {
     const row = await db('estimate_acceptances')
       .where({ estimate_id: estimate.id })
       .orderBy('accepted_at', 'desc')
       .first();
-    if (!row) return null;
+    if (!row) {
+      if (strict) throw new Error(`acceptance record missing for estimate ${estimate.id} (terms_version ${estimate.terms_version})`);
+      return null;
+    }
     return {
       recordId: `ACC-${String(row.id).slice(0, 8).toUpperCase()}`,
       termsVersion: row.terms_version,
@@ -336,6 +345,7 @@ async function acceptanceRecordForEstimate(estimate) {
       device: acceptanceTerms.deviceLabelFromUserAgent(row.user_agent),
     };
   } catch (e) {
+    if (strict) throw e;
     logger.warn(`[estimate-acceptance] record read failed for estimate ${estimate.id}: ${e.message}`);
     return null;
   }
@@ -22676,7 +22686,7 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
       ...(await resolveProposalBillingContext(estimate)),
       // The recorded acceptance rides the fallback too (pre-push Codex P1):
       // a downloaded accepted document must never omit its record.
-      acceptance: await acceptanceRecordForEstimate(estimate),
+      acceptance: await acceptanceRecordForEstimate(estimate, { strict: true }),
     });
   } catch (err) { next(err); }
 });
@@ -23606,7 +23616,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // telemetry on a PDF.
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
-    const acceptanceRecord = await acceptanceRecordForEstimate(estimate);
+    // Strict on the headless document pass: the rendered PDF must carry the
+    // record or fail the render (which then fails the pdfkit fallback too).
+    const acceptanceRecord = await acceptanceRecordForEstimate(estimate, { strict: isPdfRenderPass });
 
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
@@ -24094,3 +24106,4 @@ module.exports.attachMeasuredBasis = attachMeasuredBasis;
 // Test hook (acceptance-terms lane 2026-08-28): which estimates get the
 // cancel-anytime acceptance line at all.
 module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;
+module.exports.acceptanceRecordForEstimate = acceptanceRecordForEstimate;
