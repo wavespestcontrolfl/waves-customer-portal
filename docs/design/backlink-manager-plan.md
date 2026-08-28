@@ -96,6 +96,11 @@ t.timestamp('enriched_at');
 t.uuid('best_path_id');                           // → seo_link_acquisition_paths
 t.string('agent_state').notNullable().defaultTo('new');
 // new → investigating → qualified → ready_to_acquire → acquiring → acquired → watching | not_reproducible | rejected
+// agent_state is an AGGREGATE over the domain's placements, recomputed by the bridge job / on every placement transition:
+//   ready_to_acquire = ≥1 placement stamped AUTO_* or approved and still 'prospect'   (stays/returns here while ANY authorized placement is pending — e.g. a second GBP location)
+//   acquiring        = ≥1 placement leased and none pending-unleased
+//   acquired         = ≥1 placement live/indexed and no authorized placement pending
+// Claimability is decided per PLACEMENT (§7): the registry must merely not be new/investigating/not_reproducible/rejected/watching.
 t.integer('score');                               // Waves Link Score (§8), recomputed on enrichment/D30
 t.text('score_reasons');                          // human-readable why (shown on the registry row)
 t.timestamp('watch_recheck_at');                  // for agent_state='watching'
@@ -272,7 +277,10 @@ CSV rows. Steps, all idempotent:
    keep the URL as a *submission_url hint*. **Resolvers run first** for URLs that are
    *references to* opportunities rather than opportunities: an X post URL (`x.com`/
    `twitter.com/<user>/status/<id>`) is resolved through the existing `backlink-agent/x-poller`
-   URL extraction (tweet entities → expanded URLs → redirect-resolved final hosts) and each
+   URL extraction (tweet entities → expanded URLs) **with redirect expansion moved behind the
+   SSRF-safe fetcher** — `x-poller.resolveUrl` today does a raw `fetch(redirect:'follow')`
+   and is replaced by `contact-finder.fetchPage`'s pinned resolver (every hop validated
+   against private/metadata ranges, hop count bounded, no body needed) as part of step 2 and each
    resolved host enters as `source='x'`, `source_detail=<post URL>`; the post host itself is
    never a candidate. A competitor backlink URL contributes its host. Hosts on a fixed
    never-a-target list (`x.com`, `twitter.com`, `google.com`, `t.co`, URL shorteners, Waves'
@@ -289,7 +297,12 @@ CSV rows. Steps, all idempotent:
 
 **Legacy board backfill (step 1, runs with the migration, idempotent).** Every existing
 `seo_link_prospects` row — including the 56 June drafts — gets a registry domain (canonical
-host; `source` = the row's existing `source`, `source_detail='legacy_prospect'`) and a path
+host; `source` = the legacy value **mapped to the §3.5 enum** — `manual` → `owner_seed`,
+`strategy_agent` → `strategy_agent`, `lost_recovery` → `lost_recovery`,
+`local_opportunity_<date>` → `local_opportunity`, `deep_harvest_<date>` → `competitor_gap`,
+`signup_agent`/anything else → `existing_backlink`; the verbatim legacy value is kept in
+`source_detail` as `legacy:<value>`; the enum is a CHECK, so the mapping is exhaustive with
+that fallback) and a path
 (`acquisition_type` mapped from `link_type`: outreach lanes → `resource_outreach`/
 `editorial_outreach`, directory/citation/social → `self_service_account`; `submission_url =
 target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
@@ -391,7 +404,8 @@ auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
 owner_price_tolerance_cents  = 0
-monthly_paid_budget_cents    = 0         (0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
+monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
+owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
 max_auto_purchase_cents      = 0
 auto_paid_min_score          = null
 auto_paid_min_d30_confidence = null
@@ -438,7 +452,7 @@ if path.payment_required:
        and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
        and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
     else → OWNER_PAYMENT
-if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
+if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # guest posts / content go through the outreach mandate (draft lint, commitment checks, owner review) — never AUTO_FREE/ACCOUNT
     → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
                       else OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
@@ -512,6 +526,11 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
   → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, close_pending, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
+  → the budget compared is the one for the purchase's authority: `AUTO_PAID_WITHIN_POLICY`
+  reserves against `monthly_paid_budget_cents` over AUTO purchases; `OWNER_*` purchases reserve
+  against `owner_monthly_budget_cents` over owner-approved purchases (null ⇒ only the
+  approval's `max_payable_cents` and the issuer program limit apply) — an owner approval is
+  never blocked by the automatic-spend budget being 0
   → **open/settled-purchase check — all-time, per PLACEMENT, path-independent**: if ANY row
   for `(prospect_id, purchase_kind, renewal_period_key)` — any `path_id`, superseded or not —
   is in `reserved`, `submitting`, `close_pending`, `ambiguous`, `charged` or
@@ -530,13 +549,21 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
 - **Authority is revalidated immediately before the card exists.** The `reserved → submitting`
   transition, under the budget lock and before minting, re-runs the pure §6.3 decision on the
-  *current* inputs and re-checks the approval (`path_revision`, `decision_inputs_hash`,
+  *current* inputs — with `month_spend_cents` computed **excluding this purchase's own
+  reservation** (the decision adds `amount_cents` itself; counting the row twice would void a
+  valid at-the-limit reservation) — and re-checks the approval (`path_revision`, `decision_inputs_hash`,
   not invalidated/consumed), the placement's current non-superseded path, and every relevant
   kill switch (`GATE_LINK_PAYMENTS`; `GATE_LINK_AUTO_PAID` for `AUTO_PAID_WITHIN_POLICY`;
   `GATE_LINK_AUTHORITY` for any `AUTO_*`) — any change since
   reservation ⇒ the row is `voided` (no card was ever minted) and re-parked. A gate flipped
   off, or a domain whose score/spam/confidence moved, between reservation and submission can
   never reach the merchant.
+- **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
+  final total is `0` (waived/discounted fee), the row is `voided` with
+  `outcome='no_payment_required'` BEFORE any mint (no card exists), the placement proceeds
+  through the free-path steps (the worker completes the checkout without a card), and the
+  investigator re-marks the path's `payment_required`/cost on its next pass. `final_cents=0`
+  never enters `submitting`.
 - **Final total is validated before `submitting`.** The provider must read the checkout's
   final total (price + tax + fees + renewal terms as displayed) and report it as
   `final_cents` — a safe non-negative integer, else the transition is refused — BEFORE the
@@ -646,8 +673,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   `voided` in the same report and releases its budget.
 - **Lease safety.** Every purchase transition is conditional on the **purchase row's own
   `lease_token`** (set by the claim that took it — placement claim for an initial purchase,
-  renewal claim for a renewal — expiring with `lease_expires_at`, cleared by the terminal
-  report or the sweep) AND on the exact prior state (`reserved→voided`, `reserved→submitting`, `submitting→reserved` [sweep only,
+  renewal claim for a renewal — expiring with `lease_expires_at`) AND on the exact prior
+  state. **The sweep and the reconciler own their own lease:** under the budget lock they
+  take over any purchase whose worker lease is expired or cleared (`leased_by='reconciler'`,
+  fresh token) and then perform the state-locked transitions the worker can no longer do
+  (`submitting→ambiguous|reserved`, `close_pending→charged|ambiguous`,
+  `ambiguous→reconciled_*`) — a purchase is never stranded for want of a dead worker's token,
+  and a late report from that worker still matches 0 rows (`reserved→voided`, `reserved→submitting`, `submitting→reserved` [sweep only,
   issuer-confirmed no card], `submitting→close_pending|ambiguous`,
   `close_pending→charged` only with `card_closed_at`, `close_pending→ambiguous`,
   `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
@@ -703,14 +735,18 @@ together:
   only on prospect status/type. From step 4 it always joins the registry — no gate turns the
   old predicate back on; `GATE_LINK_AUTHORITY` only controls whether the policy may *grant*
   an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement `status='prospect'`; registry
-  `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
+  `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — claimability is a
+  placement property, so a second location's placement is leasable after the first was
+  acquired; the placement's stamped `authority` is an `AUTO_*` level
   **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row — except
   `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
   `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
   which the investigator re-marks the remainder `agent_completable=true` and the bridge
   re-decides; the path's lane
-  gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
+  gate is on (**`GATE_LINK_AUTHORITY` for ANY `AUTO_*` stamp — the kill switch is checked at
+  claim and again immediately before every irreversible action: submit, send, mint — not
+  only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
   `GATE_LINK_PAYMENTS` for ANY `payment_required` path — the payment-lane kill switch — and
   additionally `GATE_LINK_AUTO_PAID` only when the stamped authority is
   `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` row needs
@@ -886,8 +922,9 @@ Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
 `LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
 New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
-`GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`; **off ⇒ the claim route
-grants no automated lease at all** — every row, pre-existing ones included, is
+`GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`, AND every automated claim
+and every irreversible step re-checks it; **off ⇒ the claim route grants no automated lease
+at all and in-flight `AUTO_*` work stops before its next irreversible action** — every row, pre-existing ones included, is
 `awaiting_owner` and only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
 (separately arms `AUTO_PAID_WITHIN_POLICY` — never required for owner-approved payments),
 `GATE_LINK_PAYMENTS` (the payment-lane kill switch: off ⇒ no purchase of any authority is
