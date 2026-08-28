@@ -2341,7 +2341,10 @@ describe('Pages poll auto-merge per-tick cap', () => {
     expect(parked.topicTargetingBlocked).toBe(true);
     const park = updates.find((u) => u.updates.publish_status === 'pending_review');
     expect(park).toBeDefined();
-    expect(park.filters).toEqual(expect.arrayContaining([[{ id: 'post-tg', publish_status: 'publishing' }]]));
+    // CAS on the park mergeAstro stamped: a row its PR retirement moved to
+    // astro_status='merged' (human merged it meanwhile) is never flipped back
+    // to publish_failed here (hook r24 P1).
+    expect(park.filters).toEqual(expect.arrayContaining([[{ id: 'post-tg', publish_status: 'publishing', astro_status: 'publish_failed' }]]));
     // Recoverable: publish_failed (not pr_open) is the state the admin Retry /
     // publish-astro path may claim; the markers stay for cleanupStaleAstroPr.
     expect(park.updates.astro_status).toBe('publish_failed');
