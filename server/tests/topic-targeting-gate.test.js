@@ -174,9 +174,10 @@ describe('evaluate — entity ownership (the #490 shape)', () => {
     const unknown = gate.evaluate(blog({ query: 'in2care pre-treatment' }), { corpus: CORPUS });
     expect(unknown.ok).toBe(false);
   });
-  test('the owner itself is exempt (pinned slug == owner slug)', () => {
+  test('a NEW action pinned to the owner\'s own slug is NOT exempt — live rows are exempted upstream (isLiveRow / refresh_existing_page), never by URL match', () => {
     const r = gate.evaluate(blog({ query: 'taexx pest control', title: 'In-wall pest control', slug: '/pest-control/in-wall-pest-control/' }), { corpus: CORPUS });
-    expect(r.ok).toBe(true);
+    expect(r.ok).toBe(false);
+    expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.SLUG_COLLIDES_LIVE, gate.CODES.CANNIBALIZES_EXISTING]);
   });
   test('a pre-built index is reused across candidates and reports corpus size', () => {
     const index = gate.indexCorpus(CORPUS);
@@ -317,9 +318,13 @@ describe('PR codex r1: ambiguous place names need geo context; postal abbreviati
     for (const t of ['pest control in Brandon', 'Brandon, FL exterminator', 'lawn care in sunrise', 'termite treatment plantation fl', 'pest control near cocoa', 'exterminator mobile, al', 'Stuart, Florida termite bond']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
     }
-    for (const t of ['brandon asked about ghost ants', 'treat at sunrise before the heat', 'plantation shutters and wasps', 'cocoa mulch and termites', 'mobile app for scheduling', 'stuart little and the mice']) {
+    for (const t of ['brandon asked about ghost ants', 'treat at sunrise before the heat', 'plantation shutters and wasps', 'cocoa mulch and termites', 'mobile app for scheduling', 'stuart little and the mice',
+      // "in/near <Name>" followed by an ordinary noun is a topic, not a place (hook r7)
+      'pest control in mobile homes', 'pests in cocoa mulch', 'ants in plantation shutters', 'termites in homestead lumber']) {
       expect(gate.classifyGeoScope(t).scope).toBe('none');
     }
+    expect(gate.classifyGeoScope('Ants in Cocoa: What to Do').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('Pest Control in Homestead, FL').scope).toBe('out_of_area');
   });
   test('common-word names in the context list are NOT in the shared prose blocklist (except the metros the guardrails already carry)', () => {
     const shared = new Set(gate._internals.outOfAreaCityList().map((c) => c.toLowerCase()));
@@ -356,6 +361,27 @@ describe('evaluateDraftTargeting / evaluateBlogPostRow', () => {
     expect(bySlug.ok).toBe(false);
     // A word one post merely mentions (heading-only "judgment", 1×) is not owned — an owner is BUILT AROUND the token (≥ 3×).
     expect(gate.evaluate(blog({ query: 'no judgment pest control', title: 'No Judgment: Pest Control Basics for New Owners' }), { index }).ok).toBe(true);
+  });
+
+  test('the EMITTED frontmatter.category is authoritative for ownership scope; tree-shrub is its own category', () => {
+    const arborjet = (url, cat) => ({ url, body: `---\ntitle: Arborjet Trunk Injection\nslug: ${url}\nprimary_keyword: arborjet trunk injection\ncategory: ${cat}\n---\nArborists inject Arborjet at the flare. One Arborjet dose protects the canopy for a season.\n## How Arborjet works\n## When Arborjet is worth it\n` });
+    const index = gate.indexCorpus([arborjet('/tree-shrub/arborjet-trunk-injection/', 'tree-shrub')]);
+    const draft = { frontmatter: { title: 'Arborjet Costs for Sarasota Palms', slug: '/tree-shrub/arborjet-costs-sarasota/', primary_keyword: 'arborjet cost', category: 'tree-shrub' } };
+    const r = gate.evaluateDraftTargeting(draft, { index, service: 'tree-shrub' });
+    expect(r.ok).toBe(false);
+    expect(r.category).toBe('tree-shrub');
+    expect(r.findings[0].owners).toEqual(['/tree-shrub/arborjet-trunk-injection/']);
+    // An emitted category that differs from the coarse service wins.
+    const other = gate.evaluateDraftTargeting({ frontmatter: { ...draft.frontmatter, category: 'mosquito' } }, { index, service: 'tree-shrub' });
+    expect(other.category).toBe('mosquito');
+    expect(other.ok).toBe(true);
+    expect(gate._internals.SERVICE_TO_CATEGORY['tree-shrub']).toBe('tree-shrub');
+  });
+
+  test('a NEW blog that reuses a live post URL is blocked (no self-exemption for new actions)', () => {
+    const r = gate.evaluate(blog({ query: 'in wall pest control', title: 'In-Wall Pest Control, Revisited', slug: '/pest-control/in-wall-pest-control/' }), { corpus: CORPUS });
+    expect(r.ok).toBe(false);
+    expect(r.findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
   });
 
   test('framing failures report stage=framing before any ownership work', () => {

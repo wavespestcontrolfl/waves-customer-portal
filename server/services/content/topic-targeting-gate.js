@@ -96,6 +96,7 @@ const CODES = Object.freeze({
   GEO_OUT_OF_AREA: 'TOPIC_GEO_OUT_OF_AREA',
   GEO_STATEWIDE: 'TOPIC_GEO_STATEWIDE',
   CANNIBALIZES_EXISTING: 'TOPIC_CANNIBALIZES_EXISTING',
+  SLUG_COLLIDES_LIVE: 'TOPIC_SLUG_COLLIDES_LIVE',
 });
 
 // Regional phrasings that anchor a topic to the footprint without naming a
@@ -134,8 +135,12 @@ const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|
 // Tokens that are geo qualifiers, not topic entities — excluded from the
 // entity-ownership scan regardless of document frequency.
 const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)" → alternatives
+// "in/near <Name>" counts only at a phrase boundary — end of text, a comma,
+// colon, dash, or a state suffix — so "pest control in mobile homes" and
+// "pests in cocoa mulch" stay topics, while "pest control in Brandon" and
+// "Ants in Cocoa: What to Do" are places.
 const CONTEXT_PLACE_RE = new RegExp(
-  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})\\b`
+  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_NAME_SOURCE})\\b))`
   + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
   'i'
 );
@@ -305,8 +310,11 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   const framing = evaluateDraftFraming(draft);
   if (!framing.ok) return { ...framing, stage: 'framing' };
   const fm = draft?.frontmatter || {};
+  // The EMITTED category is authoritative (the publisher writes it); the
+  // slug and the coarse service are fallbacks inside evaluate().
+  const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category, service },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -402,8 +410,20 @@ function categoryFromSlug(slug) {
 // slug-prefix labeling). Unknown → null → compare against every category.
 const SERVICE_TO_CATEGORY = Object.freeze({
   termite: 'termite', lawn: 'lawn-care', mosquito: 'mosquito', pest: 'pest-control',
-  rodent: 'pest-control', 'tree-shrub': 'lawn-care', irrigation: 'lawn-care',
+  rodent: 'pest-control', 'tree-shrub': 'tree-shrub', irrigation: 'lawn-care',
 });
+
+// The publisher owns the canonical category vocabulary (frontmatter
+// `category`). Lazy — the publisher requires this module.
+function canonicalCategory(category, tag = null) {
+  if (!category && !tag) return null;
+  try {
+    const { normalizeCategory } = require('../content-astro/astro-publisher');
+    return normalizeCategory(category, tag) || null;
+  } catch {
+    return String(category || '').trim().toLowerCase() || null;
+  }
+}
 
 let cityTokenCache = null;
 // Served-city name words ("lakewood", "ranch", "sarasota", "port") are geo
@@ -538,6 +558,13 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     return { ...base, geo, skipped: 'no_corpus' };
   }
   const selfUrl = normalizeSlug(slug);
+  // A NEW blog may not reuse a live post's URL: that would reach the
+  // publisher's update-in-place path without the refresh safeguards. (Rows
+  // already live are exempted upstream by isLiveRow / refresh_existing_page;
+  // nothing that enters evaluate() legitimately owns an existing URL.)
+  if (selfUrl && idx.posts.some((post) => post.url === selfUrl)) {
+    findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: selfUrl, message: `Slug ${selfUrl} is a LIVE post. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
+  }
   // Ownership is judged WITHIN a category: a chemical or species name can
   // legitimately anchor a termite post and a mosquito post. Unknown category
   // → compare against all (conservative).
@@ -557,7 +584,6 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;
     for (const post of pool) {
       if ((post.counts.get(tok) || 0) < OWNER_MIN_OCCURRENCES) continue;
-      if (selfUrl && post.url === selfUrl) continue;
       const key = post.url || post.path || post.title;
       const entry = owners.get(key) || { url: post.url, title: post.title, entities: [] };
       entry.entities.push(tok);
