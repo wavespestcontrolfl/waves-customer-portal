@@ -3952,6 +3952,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
+  // post-call timer is in-memory and the sweep window is 24h, so a Gmail
+  // hang must never be able to starve it (hook P1).
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./missed-call-bell').sweepMissedCalls();
+    } catch (err) {
+      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
   // Runs before the 7:30 digest so the digest reports what actually happened.
   // =========================================================================

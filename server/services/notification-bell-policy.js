@@ -27,21 +27,18 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 
 const TRIGGER_BELL_ALLOWLIST = new Set([
-  'new_lead',
-  'sms_reply',
-  // A reschedule/away text with a visit still armed is time-critical — its
-  // 'schedule' category is silenced-by-default, so the key must ring here.
-  'appointment_reschedule_intent',
-  'customer_voicemail_callback',
-  'payment_failed',
-  'bill_payment_error',
-  'twilio_failure',
-  // Deposit ledger mismatch = money failure: a paid acceptance deposit sat
-  // on the ledger but the first-invoice credit failed — money is in limbo
-  // until a human reconciles it, so it must ring through its 'system'
-  // category's default deny.
-  'estimate_deposit_reconcile_needed',
+  // Owner ruling 2026-08-28: bell, push banner and app badge are for
+  // CUSTOMER COMMUNICATION only — a customer reaching us by any channel.
+  // Everything else (money failures, billing proposals, applications,
+  // internal/system) is silent by default and owner-overridable.
+  'new_lead',                       // a prospect reaching out (form, call, chat, calculator)
+  'sms_reply',                      // a customer texted
+  'customer_email_received',        // a customer emailed
+  'customer_voicemail_callback',    // a customer left a voicemail
+  'customer_missed_call',           // a customer called, nobody answered, no voicemail
+  'appointment_reschedule_intent',  // a customer texted a reschedule / away note
 ]);
+
 
 const TRIGGER_BELL_DENYLIST = new Set([
   'payment_succeeded',
@@ -50,21 +47,15 @@ const TRIGGER_BELL_DENYLIST = new Set([
   'internal_admin_alert',
 ]);
 
+
 const CATEGORY_BELL_ALLOWLIST = new Set([
   'new_lead',
   'inbound_sms',
+  'inbound_email',
   'voicemail_callback',
-  'payment',
-  'billing',
-  'dispute',
-  'estimate_converted',
-  // Customer challenged the lawn measurement on a sent estimate ("does the
-  // lawn size look off?") — same class as new_lead/inbound_sms: customer-
-  // initiated and time-sensitive (the sheet promises a same-day re-check),
-  // and this notification is the ONLY handoff the flow emits (codex #3376
-  // r2 P1: without a bell path the policy suppressed it silently).
-  'estimate_measurement_review',
+  'missed_call',
 ]);
+
 
 // Fixed list of silenced-by-default categories the owner may re-enable via
 // the 'category:<cat>' pseudo-keys in notification_preferences. Also the
@@ -77,6 +68,18 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // notification category, add it to one of the two lists (and to
 // BELL_CATEGORY_LABELS in client PushSettingsV2.jsx if it lands here).
 const OVERRIDABLE_CATEGORIES = [
+  // Owner ruling 2026-08-28: customer communication only. These no longer
+  // ring by default (accepted estimates still ring via their explicit
+  // bell:true site tag — a customer accepting is a customer acting).
+  'payment',
+  'billing',
+  'dispute',
+  // Applicants are not customers: own category (was new_lead) so the owner
+  // can re-enable it without re-enabling job-application bells for staff
+  // via the customer new_lead lane (hook P1).
+  'job_application',
+  'estimate_converted',
+  'estimate_measurement_review',
   'alert',
   'system',
   'service',

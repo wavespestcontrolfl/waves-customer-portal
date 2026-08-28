@@ -6673,6 +6673,10 @@ const CallRecordingProcessor = {
               .whereNull('voicemail_callback_alerted_at')
               .update({ voicemail_callback_alerted_at: new Date() });
             if (claimed) {
+              // The missed-call lane may have rung for this call before the
+              // recording landed (hook P1): the voicemail alert supersedes it.
+              await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id })
+                .catch((err) => logger.warn(`[call-proc] missed-call supersede failed for ${callSid}: ${err.message}`));
               const { triggerNotification } = require('./notification-triggers');
               // Extraction name first (the caller's own words), matched
               // customer's account name as fallback.
@@ -14336,6 +14340,10 @@ const CallRecordingProcessor = {
 
     if (updated === 0) return { success: true, skipped: true, reason: 'already_recovered_by_peer' };
 
+    // Recovered recording ⇒ voicemail lane's call: retire a missed-call
+    // bell rung while the recording was missing (codex r6).
+    await require('./notification-service').supersedeMissedCallAdmin({ callSid })
+      .catch((e) => logger.warn(`[call-proc] missed-call supersede failed for ${maskSid(callSid)}: ${e.message}`));
     logger.info(`[call-proc] Recovered missing recording for ${maskSid(callSid)} → ${maskSid(recording.sid)}`);
     return { success: true, recovered: true, recordingSid: recording.sid };
   },

@@ -61,6 +61,12 @@ const PRIORITY_CLASS = {
 // GET /admin/push/preferences → bellCategories; unknown keys fall back to
 // a title-cased version of the raw category).
 const BELL_CATEGORY_LABELS = {
+  payment: "Payment failures",
+  billing: "Billing follow-ups",
+  dispute: "Payment disputes",
+  job_application: "Job applications",
+  estimate_converted: "Estimate conversion follow-ups",
+  estimate_measurement_review: "Estimate measurement challenges",
   alert: "Operational alerts",
   system: "System events",
   service: "Service events",
@@ -320,12 +326,14 @@ export default function PushSettingsV2() {
           <div className="mb-3">
             {" "}
             <div className="px-3 py-1.5 text-11 uppercase tracking-label text-ink-tertiary font-medium">
-              Bell categories
+              Bell + push categories
             </div>{" "}
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
-              Applies when the admin bell policy is on: these categories are
-              silenced from the bell by default. Toggle one on to ring the
-              bell for it again.
+              The bell, phone banner and app badge ring for customer
+              communication only (texts, emails, calls, voicemails, new
+              leads). These categories are silent by default. Toggle one on
+              to get its bell again — and its phone banner, for events that
+              push.
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (

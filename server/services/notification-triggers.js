@@ -80,6 +80,11 @@ function sanitizeNotificationValue(value, key = '') {
   }
   if (typeof value !== 'string') return value;
 
+  // Opaque row ids (emailId, callLogId, customer_id…) are not contact
+  // details — masking `emailId` to '[email]' broke the reclaim dedupe that
+  // looks the bell up by it (codex r6). Verbatim: the digit redactor would
+  // otherwise mangle a UUID's digit runs like a card number.
+  if (/(?:^|_)id$|Id$/.test(key)) return value;
   if (/phone/i.test(key)) return maskPhone(value);
   if (/email/i.test(key)) return maskEmail(value);
   if (/address/i.test(key)) return '[address]';
@@ -159,7 +164,9 @@ const TRIGGER_REGISTRY = {
   // link, in the admin-only queue.
   new_job_application: {
     label: 'New job application',
-    category: 'new_lead',
+    // Own category: an applicant is not a customer lead. Silent by default
+    // under the bell policy, owner-overridable (Settings → Notifications).
+    category: 'job_application',
     priority: 'high',
     group: 'Leads & Sales',
     // Recruiting is requireAdmin — a technician receiving this bell/push
@@ -244,6 +251,37 @@ const TRIGGER_REGISTRY = {
         link: '/admin/communications#tab=calls',
       };
     },
+  },
+  // Fired by email-sync when a NEW inbound email's sender matches a customer
+  // on file (owner ruling 2026-08-28). Vendor/spam/bulk mail never fires it.
+  customer_email_received: {
+    label: 'Email from a customer',
+    category: 'inbound_email',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => ({
+      title: `Email from ${p.fromName || 'a customer'}`,
+      body: redactSensitiveText(p.subject || '(no subject)').slice(0, 140),
+      link: p.emailId ? `/admin/email?id=${p.emailId}` : '/admin/email',
+    }),
+  },
+  // Fired 2 minutes after an inbound call from a customer on file ends with
+  // no human/AI answer and no voicemail (missed-call-bell.js). Voicemails
+  // ring through customer_voicemail_callback instead.
+  customer_missed_call: {
+    label: 'Missed call from a customer',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    // Same owner ruling as the voicemail bell: the number must be dialable.
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Missed call — ${p.name || 'a customer'}`,
+      body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
+      // Calls live under the hash-routed Calls tab; ?thread= would open the
+      // SMS conversation instead (same destination as the voicemail bell).
+      link: '/admin/communications#tab=calls',
+    }),
   },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
@@ -650,6 +688,14 @@ function pushTagFor(triggerKey, payload = {}) {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
   }
+  if (triggerKey === 'customer_missed_call') {
+    return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'customer_email_received') {
+    // Per-email tag: same-tag pushes replace each other without renotifying,
+    // so two customer emails must not collapse into one banner (hook P1).
+    return `waves-customer_email_received-${payload.emailId || crypto.randomUUID()}`;
+  }
   if (triggerKey === 'customer_voicemail_callback') {
     // Per-call tag: the service worker replaces same-tag pushes with
     // renotify:false, so a static tag would let a second caller's alert
@@ -741,6 +787,26 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    // ONE routing decision per event (owner ruling 2026-08-28 — "some are
+    // banners, some are bells"): the bell policy is evaluated ONCE per event,
+    // independent of any user's bell/push preference, and gates BOTH the
+    // bell row and the phone push. Previously the policy ran only inside the
+    // bell write, so silenced events (dashboard alerts, internal alerts,
+    // silenced categories) still buzzed the phone — and a push-only admin
+    // bypassed it entirely (hook P1). Category overrides re-enable both.
+    let policySilenced = false;
+    try {
+      const bellPolicy = require('./notification-bell-policy');
+      if (bellPolicy.isBellPolicyEnabled()) {
+        policySilenced = !(await bellPolicy.bellAllowed({ category: trigger.category, triggerKey }));
+      }
+    } catch (err) {
+      logger.warn(`[notification-triggers] bell policy check failed: ${err.message}; delivering`);
+    }
+    if (policySilenced) {
+      logger.info('[bell-policy] silenced (bell + push)', { triggerKey, category: trigger.category });
+      return { bellWritten: false, push: { sent: 0, skipped: 'bell_policy' }, policySilenced: true };
+    }
 
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || { bell_enabled: true, push_enabled: true, sound_enabled: true };
