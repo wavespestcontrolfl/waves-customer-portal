@@ -213,6 +213,10 @@ describe('blog SEO contract helpers', () => {
     expect(extractMarkdownLinks('[Pest Control](\n# /pest-control/)')).toEqual([]);
     expect(extractMarkdownLinks('[Pest\n- Control](/pest-control/)')).toEqual([]);
     expect(extractMarkdownLinks('[Pest Control](/pest-control/?a\n\n)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a b)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/#a\tb)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a=(1)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?utm=x#top)')).toEqual(['/pest-control/']);
     expect(extractMarkdownLinks('[Pest Control](\n/pest-control/)')).toEqual(['/pest-control/']);
     expect(extractMarkdownLinks('[Pest\nControl](/pest-control/)')).toEqual(['/pest-control/']);
   });

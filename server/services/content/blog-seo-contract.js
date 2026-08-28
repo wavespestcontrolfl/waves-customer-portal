@@ -557,10 +557,10 @@ function crossesParagraph(fragment) {
 function extractMarkdownLinkItems(markdown = '') {
   const out = [];
   const seen = new Set();
-  // Whitespace inside the syntax may include newlines; the tail after the
-  // destination may not (the closing ")" must sit on the destination's
-  // line or the link is not a link).
-  const re = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\](\(\s*)(\/[^)\s#?]+\/?)(?:[#?][^)\n]*)?\)/g;
+  // Whitespace inside the syntax may include newlines; the query/hash tail
+  // after the destination may contain NO whitespace at all ("(/x/?a b)"
+  // renders as text — CommonMark destinations end at whitespace).
+  const re = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\](\(\s*)(\/[^)\s#?]+\/?)(?:[#?](?:[^()\s]|\([^()\s]*\))*)?\)/g;
   let match;
   while ((match = re.exec(String(markdown || ''))) !== null) {
     // The gap is judged with the destination's line attached — its
