@@ -56,7 +56,7 @@ jest.mock('../models/db', () => {
     const api = {
       where(a, b, c) {
         if (typeof a === 'string') {
-          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : r[a] === c)); return api; }
+          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : b === 'like' ? (r[a] != null && String(r[a]).startsWith(String(c).replace(/%$/, ''))) : r[a] === c)); return api; }
           filters.push((r) => r[a] === b); return api;
         }
         if (typeof a === 'function') {
@@ -70,6 +70,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return api; },
       whereNotNull(col) { filters.push((r) => r[col] != null); return api; },
+      forUpdate() { return api; },
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
@@ -730,6 +731,40 @@ describe('processDueAutoReplies — state machine', () => {
     // Not a promotion / not a reconciliation park → untouched.
     expect(await Runner.validatePromotionAccountFacts({ ...existing, auto_reply_reason: 'low_rating' }, promote)).toEqual(promote);
     expect(await Runner.validatePromotionAccountFacts(existing, { review_reply: 'x' })).toEqual({ review_reply: 'x' });
+  });
+
+  test('notifyReviewEditedAfterPost treats a null notifyAdmin result as failure, retries, stamps the row, and the cron sweep re-rings it (codex r46)', async () => {
+    mockNotify.mockReset().mockResolvedValue(null);
+    state.rows = [row({ id: 'nb', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', review_reply: 'Our reply', auto_reply_error: null })];
+    expect(await Runner.notifyReviewEditedAfterPost(state.rows[0], { location_id: 'sarasota', star_rating: 5, cause: 'edit' })).toBe(false);
+    expect(mockNotify).toHaveBeenCalledTimes(3);
+    expect(state.rows[0].auto_reply_error).toMatch(/^bell_failed:review_edited_after_post:edit/);
+    // Sweep: the insert works again → bell rings, stamp cleared.
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    expect(await Runner.retryFailedEditedBells()).toBe(1);
+    expect(state.rows[0].auto_reply_error).toBeNull();
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'review_edited_after_post', cause: 'edit', needsAction: true });
+    mockNotify.mockReset().mockResolvedValue({});
+  });
+
+  test('an Agent Ops draft is machine-authored: Post now re-verifies it, a failing verdict surfaces a canonical replacement (codex r46)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const agentText = 'I am sorry to hear that. Regards, Waves';
+    const fields = Runner.agentDraftSavedFields(agentText);
+    expect(fields).toMatchObject({ auto_reply_draft: agentText, auto_reply_status: 'parked', auto_reply_reason: 'agent_ops_draft', auto_reply_version: 'agent_ops', auto_reply_grounding: null });
+    state.rows = [row({ id: 'ao', review_reply: '[DRAFT] ' + agentText, ...fields })];
+    mockVerify.mockReturnValueOnce('first_person_singular');
+    const r = await Runner.postNow('ao', { type: 'admin' }, { expectedDraft: agentText });
+    expect(mockVerify).toHaveBeenCalledWith(agentText, expect.anything(), expect.anything());
+    expect(r).toMatchObject({ outcome: 'parked', reason: 'draft_replaced', drafted: true });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0].auto_reply_draft).toBe(GOOD_DRAFT.text);
+    // A conforming agent draft passes the verifier and posts (as the admin).
+    const okText = 'Hi Dana, thanks for the note. The Waves team';
+    state.rows = [row({ id: 'ao2', review_reply: '[DRAFT] ' + okText, ...Runner.agentDraftSavedFields(okText) })];
+    const r2 = await Runner.postNow('ao2', { type: 'admin' }, { expectedDraft: okText });
+    expect(r2.outcome).toBe('posted');
+    expect(mockPublish.mock.calls[0][0].text).toBe(okText);
   });
 
   test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {

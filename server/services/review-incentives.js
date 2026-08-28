@@ -1111,7 +1111,7 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
   });
   if (autoReplyParkedPosted) {
     const { notifyReviewEditedAfterPost } = require('./review-reply/runner');
-    await notifyReviewEditedAfterPost(review, { location_id: review.location_id, star_rating: review.star_rating, cause: 'attribution' });
+    await notifyReviewEditedAfterPost(review, { location_id: review.location_id, star_rating: review.star_rating, cause: 'attribution', conn });
   }
   if (!((Array.isArray(linkedCount) ? linkedCount.length : linkedCount) > 0)) {
     throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');

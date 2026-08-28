@@ -1372,9 +1372,11 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
       .update({
         review_reply: `${DRAFT_REPLY_PREFIX} ${draftResponse}`,
         reply_updated_at: null,
-        // A fresh save is written for the CURRENT review: clear a stale mark
-        // the sync left on an earlier draft (review-reply/runner).
-        ...require('../services/review-reply/runner').humanDraftSavedFields(db),
+        // Machine-authored: mirrored into auto_reply_draft with agent
+        // provenance so Post now re-verifies it through the canonical
+        // verifier instead of publishing it as a person's words
+        // (review-reply/runner, codex r46).
+        ...require('../services/review-reply/runner').agentDraftSavedFields(draftResponse),
       })
       .returning('id');
     if (Array.isArray(updated) ? updated.length === 0 : updated === 0) {

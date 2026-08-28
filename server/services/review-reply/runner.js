@@ -687,6 +687,7 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   const stats = { mode: cfg.mode, enqueued: 0, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
   if (cfg.mode === 'off') return stats;
   stats.enqueued = await enqueueMissedReviews({ cfg }).catch((err) => { logger.warn(`[review-auto-reply] catch-up enqueue failed: ${err.message}`); return 0; });
+  stats.bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
   const rows = await claimDueRows({ limit });
   stats.claimed = rows.length;
   if (!rows.length) return stats;
@@ -753,12 +754,20 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // fresh (never a 409 the admin cannot get past).
   const accountFpNow = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)).catch(() => null));
   const humanDraft = humanDraftOn(row);
+  // An Agent Ops draft is MACHINE-authored (its text is mirrored into
+  // auto_reply_draft, so it is not a human draft): it goes through the same
+  // re-verification as a pipeline draft before Post now publishes it, and a
+  // failing verdict surfaces a canonical replacement (codex r46).
+  const agentDraft = row.auto_reply_reason === AGENT_OPS_DRAFT && row.auto_reply_draft
+    && isDraftReply(row.review_reply) && stripDraftPrefix(row.review_reply).trim() === String(row.auto_reply_draft).trim()
+    ? row.auto_reply_draft : null;
   const hadStoredDraft = !!row.auto_reply_draft && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status);
   if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
   }
   let existing = humanDraft
+    || agentDraft
     || (row.auto_reply_draft
       && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status)
       && storedFp === reviewFingerprint(row)
@@ -887,6 +896,9 @@ const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.
 const DRAFT_HOLDING_STATUSES = [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED, STATUS.SKIPPED];
 // A human "[DRAFT]" the sync found written for an earlier version of the review.
 const HUMAN_DRAFT_STALE = 'human_draft_stale';
+// A draft Agent Ops (its own template writer) saved: machine-authored text
+// that must pass the canonical verifier before it can reach Google.
+const AGENT_OPS_DRAFT = 'agent_ops_draft';
 // review_edited_after_post: a POSTED reply parked for a person after the
 // reviewer's first edit keeps that park (and Retract) through later edits.
 const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'review_edited_after_post']);
@@ -1177,21 +1189,76 @@ function humanDraftSavedFields(conn = db) {
 }
 
 /**
+ * Fields an AGENT-authored draft writer (Agent Ops) merges into its
+ * "[DRAFT]" write: the text is mirrored into auto_reply_draft with machine
+ * provenance and the row parks agent_ops_draft, so Post now re-verifies it
+ * like a pipeline draft (never publishes it as a person's own words) and a
+ * pending automatic post is cancelled.
+ */
+function agentDraftSavedFields(text) {
+  return {
+    auto_reply_draft: String(text || '').trim(),
+    auto_reply_status: STATUS.PARKED,
+    auto_reply_reason: AGENT_OPS_DRAFT,
+    auto_reply_version: 'agent_ops',
+    auto_reply_mode: null,
+    auto_reply_grounding: null,
+    auto_reply_claimed_until: null,
+  };
+}
+
+/**
  * Action bell for a POSTED automatic reply whose review changed underneath
  * it (reviewer edit via sync, or a manual re-attribution): the row is parked
  * review_edited_after_post; a person checks whether the reply still fits.
  */
-async function notifyReviewEditedAfterPost(existing, { location_id, star_rating, cause = 'edit' } = {}) {
+async function notifyReviewEditedAfterPost(existing, { location_id, star_rating, cause = 'edit', conn = db } = {}) {
   const locName = locationName(location_id);
   const what = cause === 'attribution'
     ? `${star_rating}★ review on ${locName} was re-attributed to a different customer after our automatic reply posted — the reply used the previous customer's facts; check whether it still fits (edit or retract).`
     : `${star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`;
-  await NotificationService.notifyAdmin('review', cause === 'attribution' ? 'Review re-attributed after auto-reply' : 'Review edited after auto-reply', what, {
+  const send = () => NotificationService.notifyAdmin('review', cause === 'attribution' ? 'Review re-attributed after auto-reply' : 'Review edited after auto-reply', what, {
     link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
     bell: true,
     dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
     metadata: { reason: 'review_edited_after_post', cause, reviewId: existing.id, locationId: location_id, needsAction: true },
-  }).catch((e) => logger.warn(`[review-auto-reply] edited-after-post bell failed for ${existing.id}: ${e.message}`));
+  });
+  // notifyAdmin resolves null on an insert failure (it never throws): treat
+  // null as failure, retry briefly, and when it still fails stamp the row
+  // so the cron's sweep re-rings it — the park must never go unnoticed
+  // (codex r46).
+  let ok = false;
+  for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+    try { ok = !!(await send()); } catch (e) { logger.warn(`[review-auto-reply] edited-after-post bell attempt ${attempt + 1} failed for ${existing.id}: ${e.message}`); }
+    if (!ok && attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)));
+  }
+  if (ok) {
+    await conn('google_reviews').where({ id: existing.id }).where('auto_reply_error', 'like', `${BELL_FAILED_PREFIX}%`).update({ auto_reply_error: null }).catch(() => {});
+    return true;
+  }
+  logger.error(`[review-auto-reply] edited-after-post bell FAILED for ${existing.id} — stamped for the sweep`);
+  await conn('google_reviews').where({ id: existing.id }).update({ auto_reply_error: `${BELL_FAILED_PREFIX}${cause}` }).catch(() => {});
+  return false;
+}
+const BELL_FAILED_PREFIX = 'bell_failed:review_edited_after_post:';
+
+/**
+ * Cron sweep: re-ring edited-after-post bells whose insert failed (rows
+ * stamped by notifyReviewEditedAfterPost). Bounded; a success clears the
+ * stamp.
+ */
+async function retryFailedEditedBells({ limit = 20 } = {}) {
+  const rows = await db('google_reviews')
+    .where({ auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' })
+    .where('auto_reply_error', 'like', `${BELL_FAILED_PREFIX}%`)
+    .limit(limit)
+    .select('id', 'location_id', 'star_rating', 'auto_reply_error');
+  let n = 0;
+  for (const r of rows || []) {
+    const cause = String(r.auto_reply_error || '').slice(BELL_FAILED_PREFIX.length) || 'edit';
+    if (await notifyReviewEditedAfterPost(r, { location_id: r.location_id, star_rating: r.star_rating, cause })) n++;
+  }
+  return n;
 }
 
 /**
@@ -1207,7 +1274,17 @@ async function validatePromotionAccountFacts(existing, fields, { conn = db } = {
   const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
   if (!snap?.accountFingerprint) return fields;
   let current;
-  try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(existing), conn)); } catch { current = null; }
+  try {
+    // Lock the rows the facts derive from (customer + their service rows)
+    // inside the caller's transaction, so a concurrent correction cannot
+    // commit between this read and applySyncReplyFields (codex r46).
+    const customerId = groundingCustomerId(existing);
+    if (customerId) {
+      await conn('customers').where({ id: customerId }).forUpdate().first('id');
+      await conn('scheduled_services').where({ customer_id: customerId }).forUpdate().select('id');
+    }
+    current = accountFingerprint(await loadAccountFacts(customerId, conn));
+  } catch { current = null; }
   if (current === snap.accountFingerprint) return fields;
   return { ...fields, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
 }
@@ -1288,8 +1365,11 @@ module.exports = {
   pipelineDraftGuard,
   groundingToken,
   humanDraftSavedFields,
+  agentDraftSavedFields,
   HUMAN_DRAFT_STALE,
+  AGENT_OPS_DRAFT,
   notifyReviewEditedAfterPost,
+  retryFailedEditedBells,
   validatePromotionAccountFacts,
   classifyReplyMode,
   isDraftReply,

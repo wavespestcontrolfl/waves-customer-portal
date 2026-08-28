@@ -335,7 +335,7 @@ function autoReplyLabel(a) {
     case "queued": return "Auto-reply queued";
     case "drafted": return "Shadow draft";
     case "posted": return "Auto-replied";
-    case "parked": return a.reason === "low_rating" ? "Needs you (low rating)" : a.reason === "unrated" ? "Needs you (unrated)" : a.reason === "below_threshold" ? "Needs you (below auto-post threshold)" : "Needs you";
+    case "parked": return a.reason === "low_rating" ? "Needs you (low rating)" : a.reason === "unrated" ? "Needs you (unrated)" : a.reason === "below_threshold" ? "Needs you (below auto-post threshold)" : a.reason === "agent_ops_draft" ? "Needs you (Agent Ops draft — Post now re-checks it)" : "Needs you";
     case "failed": return "Auto-reply retrying";
     case "skipped": return "Auto-reply skipped";
     case "retracted": return "Reply retracted";
