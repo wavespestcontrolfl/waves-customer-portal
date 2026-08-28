@@ -606,6 +606,30 @@ describe('manual_call — call-shaped checks apply (codex 2026-08-14)', () => {
     const result = await evalManual(SAT_11AM_EDT);
     expect(result.denialReasons).toContain('outside_call_window');
   });
+
+  describe('COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL (owner shakedown override)', () => {
+    afterEach(() => { delete process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL; });
+
+    test('a live override (≤24h ahead) opens the window after hours and on weekends', async () => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(WED_1800_EDT.getTime() + 2 * HOUR).toISOString();
+      armAllowedBaseline();
+      expect((await evalManual(WED_1800_EDT)).denialReasons).not.toContain('outside_call_window');
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = new Date(SAT_11AM_EDT.getTime() + 2 * HOUR).toISOString();
+      armAllowedBaseline();
+      expect((await evalManual(SAT_11AM_EDT)).denialReasons).not.toContain('outside_call_window');
+    });
+
+    test.each([
+      [() => new Date(WED_1800_EDT.getTime() - 1000).toISOString(), 'already expired'],
+      [() => new Date(WED_1800_EDT.getTime() + 25 * HOUR).toISOString(), 'more than 24h ahead'],
+      [() => 'tomorrow-ish', 'unparseable'],
+      [() => '', 'empty'],
+    ])('override value that is %s is ignored — window stays closed (fail closed)', async (value) => {
+      process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL = value();
+      armAllowedBaseline();
+      expect((await evalManual(WED_1800_EDT)).denialReasons).toContain('outside_call_window');
+    });
+  });
 });
 
 describe('consent provenance + reassigned-number staleness', () => {
