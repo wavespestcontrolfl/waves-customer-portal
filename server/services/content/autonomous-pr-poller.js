@@ -962,11 +962,17 @@ async function maybeAutoMerge(run, pr) {
   //    the post file on the PR branch is re-validated here, and a miss
   //    WITHHOLDS the merge for a human (the same posture as the pin/
   //    eligibility withholds above). Off → no-op.
-  if (run.action_type === 'new_supporting_blog' && typeof publisher.assertBodyImagesAtHead === 'function') {
+  if (['new_supporting_blog', 'refresh_existing_page'].includes(run.action_type) && typeof publisher.assertBodyImagesAtHead === 'function') {
     let bodyImages;
     try {
       const draftForImages = parseDraftPayload(run.draft_payload);
-      bodyImages = await publisher.assertBodyImagesAtHead({ frontmatter: draftForImages?.frontmatter || {}, branch });
+      bodyImages = await publisher.assertBodyImagesAtHead({
+        frontmatter: draftForImages?.frontmatter || {},
+        branch,
+        actionType: run.action_type,
+        targetUrl: targetForRun(run).url,
+        filePath: draftForImages?.file_path || null,
+      });
     } catch (err) {
       bodyImages = { ok: false, reason: `body-image check failed: ${err.message}` };
     }

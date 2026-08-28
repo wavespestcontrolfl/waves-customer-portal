@@ -1281,14 +1281,14 @@ async function publishAstro(postId) {
 // and hand-authored posts may still be .md. Given a path or base (with or
 // without extension), try .mdx first, then .md. Returns { path, file } (file =
 // github-client getFile result: { sha, path, content, raw }) or null.
-async function resolveExistingAstroFile(pathOrBase) {
+async function resolveExistingAstroFile(pathOrBase, { ref = null } = {}) {
   if (!pathOrBase) return null;
   const base = String(pathOrBase).replace(/\.mdx?$/, '');
   // Only blog posts migrate to .mdx (so they can use MDX components); service
   // and location pages stay .md, so don't waste a lookup or change their path.
   const exts = isBlogTarget(`${base}.md`) ? ['.mdx', '.md'] : ['.md'];
   for (const ext of exts) {
-    const file = await gh.getFile(`${base}${ext}`);
+    const file = ref ? await gh.getFile(`${base}${ext}`, ref) : await gh.getFile(`${base}${ext}`);
     if (file) return { path: `${base}${ext}`, file };
   }
   return null;
@@ -1311,13 +1311,13 @@ function blogRouteKey(value) {
 // clobber it; a candidate with no readable slug is adopted (it occupies the path
 // we resolved it from). Lets publishOrUpdatePage update/migrate an existing post
 // in place whether it lives at the flat or the category path.
-async function firstExistingRouteFile(basePaths, routeSlug) {
+async function firstExistingRouteFile(basePaths, routeSlug, { ref = null } = {}) {
   const want = blogRouteKey(routeSlug);
   const seen = new Set();
   for (const base of basePaths) {
     if (!base || seen.has(base)) continue;
     seen.add(base);
-    const found = await resolveExistingAstroFile(base);
+    const found = await resolveExistingAstroFile(base, { ref });
     if (!found) continue;
     let existingSlug = '';
     try {
@@ -1729,34 +1729,54 @@ async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
 // valid, ≥ minimum distinct, distinct pictures) — a PR opened while the gate
 // was OFF must not auto-merge hero-only the moment the gate flips.
 // Returns { ok, reason }; anything unreadable fails closed.
-async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch }) {
+async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionType = 'new_supporting_blog', targetUrl = null, filePath = null }) {
   if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
   if (!branch) return { ok: false, reason: 'PR head branch unknown' };
-  let slug;
-  try {
-    slug = categoryRouteSlug(slugPathFromFrontmatter(frontmatter || {}), normalizeAutonomousCategory(frontmatter || {}, brief || {}));
-  } catch (err) {
-    return { ok: false, reason: `post slug unresolved: ${err.message}` };
-  }
   const getFile = (path) => gh.getFile(path, branch);
-  let file = null;
-  for (const base of [`${ASTRO_BLOG_DIR}/${slug}`, `${ASTRO_BLOG_DIR}/${slugLeafOf(slug)}`]) {
-    for (const ext of ['.mdx', '.md']) {
-      file = await getFile(`${base}${ext}`);  
-      if (file?.content) break;
+  let found = null;
+  let label = '';
+  let ignoreHero = false;
+  if (actionType === 'refresh_existing_page') {
+    // Same target resolution as publishRefresh; non-blog targets carry no
+    // body-image contract.
+    const target = filePath || urlToAstroPath(targetUrl);
+    if (!target) return { ok: false, reason: `refresh target unresolved (${targetUrl || 'no url'})` };
+    if (!isBlogTarget(target)) return { ok: true, reason: 'non_blog_target' };
+    found = await resolveExistingAstroFile(target, { ref: branch });
+    label = target;
+    // Grandfather: the post on MAIN already embeds its hero in the body.
+    const live = await resolveExistingAstroFile(target);
+    if (live?.file?.content) {
+      try { const lp = fm.parse(live.file.content); ignoreHero = bodyEmbedsHero(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { ignoreHero = false; }
     }
-    if (file?.content) break;
+  } else {
+    // EXACTLY the file publishOrUpdatePage wrote: the route-matched existing
+    // file (category or flat path, .mdx or legacy .md), else the new
+    // category-route .mdx.
+    let slug;
+    try {
+      slug = categoryRouteSlug(slugPathFromFrontmatter(frontmatter || {}), normalizeAutonomousCategory(frontmatter || {}, brief || {}));
+    } catch (err) {
+      return { ok: false, reason: `post slug unresolved: ${err.message}` };
+    }
+    found = await firstExistingRouteFile([`${ASTRO_BLOG_DIR}/${slug}`, `${ASTRO_BLOG_DIR}/${slugLeafOf(slug)}`], slug, { ref: branch });
+    if (!found) {
+      const path = `${ASTRO_BLOG_DIR}/${slug}.mdx`;
+      const file = await getFile(path);
+      if (file) found = { path, file };
+    }
+    label = slug;
   }
-  if (!file?.content) return { ok: false, reason: `post file for ${slug} not found on ${branch}` };
+  if (!found?.file?.content) return { ok: false, reason: `post file for ${label} not found on ${branch}` };
   let parsed;
-  try { parsed = fm.parse(file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
+  try { parsed = fm.parse(found.file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
   const body = String(parsed?.content || '');
   const heroSrc = String(parsed?.data?.hero_image?.src || '');
   try {
-    const valid = await validateBodyImageRefs({ body, heroSrc, getFile });
+    const valid = await validateBodyImageRefs({ body, heroSrc, getFile, ignoreHero });
     if (!valid.ok) return { ok: false, reason: valid.reason };
     if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
-    const pictures = await assertDistinctPictures({ srcs: [...new Set(bodyImageRefs(body).map((r) => r.src))], heroSrc, getFile });
+    const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
     if (!pictures.ok) return { ok: false, reason: pictures.reason };
   } catch (err) {
     return { ok: false, reason: err.message };
@@ -1991,7 +2011,10 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
 // a file committed at `getFile` (an invented path or remote URL would ship
 // as a broken image). Returns { ok, reason, distinct } — distinct = number
 // of distinct verified sources.
-async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
+// `ignoreHero`: a LIVE legacy post that already repeats its hero in the body
+// (the pre-2026 convention) is grandfathered on refresh — the hero ref is
+// excluded from the count and the checks instead of parking the refresh.
+async function validateBodyImageRefs({ body, heroSrc = '', getFile, ignoreHero = false }) {
   // A raw <img> is outside the writer's plain-Markdown subset: it renders a
   // picture the Markdown scan cannot see, so it can neither count toward the
   // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
@@ -2002,11 +2025,12 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
       return { ok: false, reason: `body contains a raw <img> tag (${stripped.slice(tag.start, Math.min(tag.end + 1, tag.start + 80))}) — body images must be plain Markdown images`, distinct: 0 };
     }
   }
-  const refs = bodyImageRefs(body);
   const hero = String(heroSrc || '');
+  const isHeroRef = (src) => (hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src);
+  const refs = bodyImageRefs(body).filter((r) => !(ignoreHero && isHeroRef(String(r.src || ''))));
   for (const ref of refs) {
     const src = String(ref.src || '');
-    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) {
+    if (isHeroRef(src)) {
       return { ok: false, reason: `body embeds the hero image (${src}) — the layout renders the hero; body images must be distinct illustrations`, distinct: 0 };
     }
     const committed = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
@@ -2015,23 +2039,28 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
       return { ok: false, reason: `body references an image that is not committed in the Astro repo (${src || 'empty src'})`, distinct: 0 };
     }
   }
-  return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size };
+  return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size, refs };
+}
+
+// The live body embeds its own hero (legacy convention) → refresh grandfathers it.
+function bodyEmbedsHero(body, heroSrc) {
+  const hero = String(heroSrc || '');
+  return bodyImageRefs(body).some((r) => (hero && r.src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(String(r.src || '')));
 }
 
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
-async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [] }) {
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], ignoreHero = false }) {
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
-  const draftRefs = bodyImageRefs(body);
-  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path) });
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), ignoreHero });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
   // Distinct pictures, not references — two links to one file is one image.
-  const draftSrcs = new Set(draftRefs.map((r) => r.src));
+  const draftSrcs = new Set(valid.refs.map((r) => r.src));
 
   // Every picture the body images must differ from — the hero (fresh bytes,
   // or a REUSED hero fetched from the repo) and the draft's own committed
@@ -2724,23 +2753,61 @@ async function publishRefresh(draft, brief = {}) {
     tag: nextFrontmatter.category,
   }, filePath);
 
-  const markdown = fm.stringify(nextFrontmatter, `${newBody}\n`);
+  // Body images on refresh (owner rule: ≥3 images per post — a refresh is
+  // how the image-poor legacy posts gain theirs). Same resolver as the new-
+  // post lane: images the live body already carries are reused when their
+  // section context is unchanged, the rest are generated and committed
+  // beside the post; a live post that repeats its hero in the body (legacy
+  // convention) is grandfathered rather than parked. Blog targets only.
+  let refreshImages = { body: newBody, files: [], newAlts: [] };
+  if (refreshBlogTarget) {
+    const heroSrc = String(nextFrontmatter?.hero_image?.src || '');
+    refreshImages = await resolveBodyImages({
+      frontmatter: nextFrontmatter,
+      slug: filePath.replace(/^src\/content\/blog\//, '').replace(/\.mdx?$/, ''),
+      body: newBody,
+      existingFile: { path: filePath, file: existing },
+      brief,
+      siblings: heroSrc.startsWith('/') ? [{ label: 'hero', repoPath: `public${heroSrc}` }] : [],
+      ignoreHero: bodyEmbedsHero(oldBody, heroSrc),
+    });
+    if (refreshImages.newAlts.length) {
+      await assertComplianceClear({
+        title: nextFrontmatter.title,
+        body: '',
+        meta: refreshImages.newAlts,
+        city: brief.city || (Array.isArray(nextFrontmatter.service_areas_tag) ? nextFrontmatter.service_areas_tag[0] : ''),
+        keyword: nextFrontmatter.primary_keyword,
+        tag: nextFrontmatter.category,
+      }, `${filePath} (generated body image alts)`);
+    }
+  }
+  const finalBody = refreshImages.body;
+  const markdown = fm.stringify(nextFrontmatter, `${finalBody}\n`);
 
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
   await gh.createBranch(branch);
-  const fileCommit = await gh.putFile({
-    path: filePath,
-    content: markdown,
-    message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
-    branch,
-    sha: existing.sha,
-  });
+  // New image bytes ride the SAME commit as the post (atomic, like the
+  // autonomous lane); with nothing to add the single-file put stays.
+  const fileCommit = refreshImages.files.length
+    ? await gh.commitFiles({
+      branch,
+      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+      files: [...refreshImages.files, { path: filePath, content: markdown }],
+    })
+    : await gh.putFile({
+      path: filePath,
+      content: markdown,
+      message: `feat(content): refresh ${publicPathFromAstroFile(filePath)}`,
+      branch,
+      sha: existing.sha,
+    });
 
   const pr = await gh.createPr({
     head: branch,
     title: `Refresh: ${nextFrontmatter.title || nextFrontmatter.metaTitle || publicPathFromAstroFile(filePath)}`.slice(0, 72),
-    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody, brief, backfilledFields }),
+    body: buildRefreshPrBody({ filePath, targetUrl, branch, before: currentFrontmatter, after: nextFrontmatter, oldBody, newBody: finalBody, brief, backfilledFields }),
   });
   await requestCodexReview({
     pr,
@@ -3814,6 +3881,7 @@ module.exports = {
     scanBodySections,
     renderedBodyView,
     assertBodyImagesAtHead,
+    bodyEmbedsHero,
     imageDHash,
     hammingDistance,
     committedImageBuffer,

@@ -3842,6 +3842,64 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: null })).toEqual({ ok: true, reason: 'gate_off' });
   });
 
+  test('refresh lane: a blog refresh under the gate gains its body images in ONE commit; a live legacy post that repeats its hero in the body is grandfathered (hook r14)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    // Legacy convention: hero repeated as the first body image.
+    const liveBody = `![shrub diseases](${heroSrc})\n\n## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n`;
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    // Hero bytes distinct from the rotating generator's first pictures (else the near-duplicate guard regenerates — correct, but not what this test measures).
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed with new guidance.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    // Hero-in-body grandfathered (no park), two images generated and committed with the post.
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    expect(gh.putFile).not.toHaveBeenCalled();
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
+    const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[2].content).content;
+    expect(written).toContain(`![shrub diseases](${heroSrc})`);
+    expect(AstroPublisher._internals.countBodyImages(written)).toBe(3);
+  });
+
+  test('assertBodyImagesAtHead: refresh targets resolve like publishRefresh; non-blog targets are exempt; a route-matched flat legacy file is what gets checked (hook r14)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const mainMd = fmModule.stringify(liveFm, `![h](${heroSrc})\n\n## A\n\nProse.\n`);
+    const headMd = fmModule.stringify(liveFm, `![h](${heroSrc})\n\n## A\n\nProse.\n\n![a](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## B\n\n![b](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n`);
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? headMd : mainMd, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toEqual({ ok: true, reason: null });
+    expect(await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).toEqual({ ok: true, reason: 'non_blog_target' });
+    // New-post lane: a FLAT legacy .md that renders the same route is the file publication updated → it is what gets checked.
+    const flatFm = validFrontmatter({ slug: '/pest-control/drywood-frass-venice/', title: 'Drywood', canonical: 'https://www.wavespestcontrol.com/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/drywood-frass-venice/hero.webp', alt: 'h' }, og_image: '/images/blog/drywood-frass-venice/hero.webp' });
+    const flatMd = fmModule.stringify(flatFm, 'Body without pictures.\n');
+    gh.getFile.mockImplementation(async (path, ref) => (ref === 'content/autonomous-y' && path === 'src/content/blog/drywood-frass-venice.md' ? { content: flatMd, sha: 'flat' } : null));
+    const res = await assertBodyImagesAtHead({ frontmatter: draft().frontmatter, branch: 'content/autonomous-y' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\)/);
+  });
+
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);
