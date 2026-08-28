@@ -966,6 +966,9 @@ describe('caller wiring (source)', () => {
     expect(rec).toContain("await require('../services/rebooker').replaySeriesMoveCleanup(row);");
     const fx = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(fx).toContain("const cardOnly = markers.status === 'superseded';");
+    // A customer SMS-reply series move keeps the quiet-hours window; staff surfaces are exempt — decided by the row's recorded source on every pass.
+    expect(fx).toContain("operatorInitiated: markers.source_surface !== 'sms_reply',");
+    expect(fx).not.toContain('operatorInitiated: true');
     expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
     const reb = read('../services/rebooker.js');
     const preview = reb.slice(reb.indexOf('async previewSeriesMove('), reb.indexOf('module.exports = new SmartRebooker()'));

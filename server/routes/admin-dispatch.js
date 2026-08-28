@@ -14067,7 +14067,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status', 'source_surface')) || markers;
     } catch (err) {
       // Without a held lease no marker write can land (they are fenced on
       // the owner), so effects run here would be unrecorded and repeated by
@@ -14341,10 +14341,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           }, 'reschedule_series_confirmation', 'appointment', { scheduled_service_id: serviceId, series_move_id: seriesMoveId, reasonText }, {
             // Authenticated staff explicitly asked to notify the customer of
             // the series move — exempt from the 8AM-8PM send window like the
-            // neighboring rain-out and quick-move actions (nothing re-enqueues
-            // this exact message; a held night send would silently drop the
-            // notice for a next-morning move).
-            operatorInitiated: true,
+            // neighboring rain-out and quick-move actions. A CUSTOMER-driven
+            // move (an SMS reply) is not staff action: it stays inside the
+            // quiet-hours window like the single-visit reply path, and a
+            // held send is a deferral (notified_at stays NULL) the
+            // reconciler retries once the window opens (hook r19 P1). The
+            // row's recorded source decides — the same on a live pass and
+            // on reconciliation.
+            operatorInitiated: markers.source_surface !== 'sms_reply',
             sendOutcome,
             preDispatchCheck: async () => {
               const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
