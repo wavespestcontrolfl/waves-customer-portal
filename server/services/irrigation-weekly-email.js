@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, markAnyUnsentWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory } = require('./irrigation-week-plan');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -1057,11 +1057,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // nothing. Otherwise write THIS decision (replacing only an unsent
         // row) and stamp it after the provider accepts.
         snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey };
-        const priorDelivery = await weekPlanDeliveryState(idempotencyKey);
-        if (priorDelivery === 'sent') {
-          await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
+        const prior = await weekPlanDeliveryState(idempotencyKey);
+        if (prior.state === 'sent') {
+          // Delivered by an earlier run: stamp exactly the row its record
+          // names (none named → the report stays without a plan).
+          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
           snapshotArgs.reconciled = true;
-        } else if (priorDelivery !== 'pending') {
+        } else if (prior.state !== 'pending') {
           snapshotArgs.decisionHash = await persistWeekPlan(snapshotArgs);
         }
       } else if (decision.weekPlanUnavailable) {
@@ -1078,7 +1080,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         recipientId: customer.id,
         triggerEventId: `irrigation.weekly:${customer.id}:${weekEnding}`,
         idempotencyKey,
-        categories: ['irrigation', 'irrigation_weekly', decision.reason],
+        // "plan:<hash>" binds the durable message record to the snapshot it
+        // was built from — reconciliation stamps only that row.
+        categories: ['irrigation', 'irrigation_weekly', decision.reason, ...(snapshotArgs?.decisionHash ? [planCategory(snapshotArgs.decisionHash)] : [])],
         suppressionGroupKey: SUPPRESSION_GROUP,
         // sendOne must not log the raw SendGrid body (it can echo the
         // recipient address) — this sweep logs sanitizeFailureReason instead.
@@ -1102,9 +1106,11 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           const hash = snapshotArgs.decisionHash || await persistWeekPlan(snapshotArgs);
           await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
         } else if (result.deduped) {
-          // Deduped without a provider attempt: the durable record decides.
-          if ((await weekPlanDeliveryState(idempotencyKey)) === 'sent') {
-            await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
+          // Deduped without a provider attempt: the durable record decides,
+          // and only the row it names is stamped.
+          const prior = await weekPlanDeliveryState(idempotencyKey);
+          if (prior.state === 'sent' && prior.decisionHash) {
+            await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
           }
         } else {
           // Blocked / not sent: this decision was never delivered.
@@ -1143,9 +1149,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // the one both sent and stored; in flight/unknown → leave it for the
       // next run to reconcile.
       if (snapshotArgs && !snapshotArgs.reconciled) {
-        const state = await weekPlanDeliveryState(snapshotArgs.idempotencyKey);
-        if (state === 'sent') await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
-        else if (state === null || state === 'failed' || state === 'blocked') await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+        const prior = await weekPlanDeliveryState(snapshotArgs.idempotencyKey);
+        if (prior.state === 'sent') {
+          if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
+        } else if (prior.state === null || prior.state === 'failed' || prior.state === 'blocked') {
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+        }
       }
       summary.failed += 1;
       const reason = sanitizeFailureReason(err);

@@ -170,7 +170,7 @@ describe('decideWeekPlan (server glue)', () => {
 
 describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
-  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, markAnyUnsentWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState } = require('../services/irrigation-week-plan');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
   const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', county: 'Manatee' };
   const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
@@ -231,30 +231,32 @@ describe('snapshot lifecycle — exactness contract', () => {
   });
 });
 
-describe('weekPlanDeliveryState — the durable record decides', () => {
+describe('weekPlanDeliveryState — the durable record decides, and names the snapshot', () => {
   const db = require('../models/db');
-  const { weekPlanDeliveryState, markAnyUnsentWeekPlanSent } = require('../services/irrigation-week-plan');
-  const withStatus = (status) => db.mockImplementation(() => ({ where() { return this; }, first: async () => (status === undefined ? undefined : { status }) }));
+  const { weekPlanDeliveryState, planCategory, _private } = require('../services/irrigation-week-plan');
+  const withRow = (status, categories) => db.mockImplementation(() => ({ where() { return this; }, first: async () => (status === undefined ? undefined : { status, categories }) }));
 
   test.each([
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
     ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'], [undefined, null],
   ])('status %s → %s', async (status, expected) => {
-    withStatus(status);
-    expect(await weekPlanDeliveryState('k')).toBe(expected);
+    withRow(status, JSON.stringify(['irrigation', 'plan:abc123']));
+    const r = await weekPlanDeliveryState('k');
+    expect(r.state).toBe(expected);
+    if (status !== undefined) expect(r.decisionHash).toBe('abc123');
+  });
+
+  test('a record without a plan category names no snapshot (report stays absent)', async () => {
+    withRow('sent', JSON.stringify(['irrigation', 'irrigation_weekly', 'cut_back']));
+    expect(await weekPlanDeliveryState('k')).toEqual({ state: 'sent', decisionHash: null });
+    withRow('sent', ['irrigation', planCategory('deadbeef')]); // array form
+    expect((await weekPlanDeliveryState('k')).decisionHash).toBe('deadbeef');
+    expect(_private.hashFromCategories('not json')).toBeNull();
   });
 
   test('lookup failure → pending (never replace, never delete); no key → null', async () => {
     db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
-    expect(await weekPlanDeliveryState('k')).toBe('pending');
-    expect(await weekPlanDeliveryState(null)).toBeNull();
-  });
-
-  test('markAnyUnsentWeekPlanSent stamps only the unsent row for the week', async () => {
-    const calls = {};
-    db.mockImplementation(() => ({ where(w) { calls.where = w; return this; }, whereNull(c) { calls.whereNull = c; return this; }, update: async (p) => { calls.update = p; return 1; } }));
-    expect(await markAnyUnsentWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
-    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
-    expect(calls.whereNull).toBe('sent_at');
+    expect(await weekPlanDeliveryState('k')).toEqual({ state: 'pending', decisionHash: null });
+    expect(await weekPlanDeliveryState(null)).toEqual({ state: null, decisionHash: null });
   });
 });

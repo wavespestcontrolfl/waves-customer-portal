@@ -264,12 +264,14 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  *                           row so the next run's plan is the one both sent
  *                           and stored.
  *   weekPlanDeliveryState() the sweep's source of truth for "did a prior
- *                           run deliver?" — email_messages by idempotency
- *                           key. A rerun that finds 'sent' stamps the unsent
- *                           row (markAnyUnsentWeekPlanSent) and never
- *                           replaces it; 'pending' (in flight / unknown)
- *                           leaves everything untouched; a post-provider
- *                           throw is reconciled the same way.
+ *                           run deliver, and which decision?" —
+ *                           email_messages by idempotency key, whose
+ *                           categories carry "plan:<hash>". A rerun that
+ *                           finds 'sent' stamps ONLY the row with that hash
+ *                           and never replaces it; a record with no hash
+ *                           leaves the report plan absent; 'pending' (in
+ *                           flight / unknown) touches nothing; a
+ *                           post-provider throw is reconciled the same way.
  * A deduped rerun with no row (both inserts failed on the original run) is
  * left absent — the report shows no plan rather than one that was never
  * emailed. None of these throw — a snapshot problem must never block a send.
@@ -319,45 +321,42 @@ async function markWeekPlanSent({ customerId, weekEnding, decisionHash: hash, se
   }
 }
 
-/**
- * A prior run's delivery, from the durable email_messages record the library
- * keys by idempotency key: 'sent' (provider accepted — sent/delivered/
- * opened/clicked), 'blocked' (suppressed), 'failed', 'pending' (queued /
- * in flight), or null (no attempt). The sweep reconciles the snapshot from
- * THIS, never from a return shape or an exception.
- */
-async function weekPlanDeliveryState(idempotencyKey) {
-  if (!idempotencyKey) return null;
-  try {
-    const row = await db('email_messages').where({ idempotency_key: idempotencyKey }).first('status');
-    if (!row) return null;
-    const status = String(row.status || '').toLowerCase();
-    if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
-    if (status === 'blocked') return 'blocked';
-    if (status === 'failed') return 'failed';
-    return 'pending';
-  } catch (err) {
-    logger.warn(`[irrigation-week-plan] delivery state lookup failed for ${idempotencyKey}: ${err.message}`);
-    return 'pending'; // unknown → treat as in flight: never replace, never delete
-  }
+// The decision hash rides the email record as a category ("plan:<sha1>") so
+// the durable message row names the exact snapshot it was built from.
+const PLAN_CATEGORY_PREFIX = 'plan:';
+function planCategory(hash) { return hash ? `${PLAN_CATEGORY_PREFIX}${hash}` : null; }
+function hashFromCategories(raw) {
+  let list = raw;
+  if (typeof raw === 'string') { try { list = JSON.parse(raw); } catch { list = []; } }
+  if (!Array.isArray(list)) return null;
+  const hit = list.find((c) => typeof c === 'string' && c.startsWith(PLAN_CATEGORY_PREFIX));
+  return hit ? hit.slice(PLAN_CATEGORY_PREFIX.length) : null;
 }
 
 /**
- * Stamp the week's UNSENT row regardless of hash — used only when the
- * durable message record proves a prior run delivered the email built from
- * that row (the pre-send write of a run that goes on to send is the only
- * writer, so the unsent row IS that run's decision).
+ * A prior run's delivery, from the durable email_messages record the library
+ * keys by idempotency key: { state, decisionHash } — state 'sent' (provider
+ * accepted — sent/delivered/opened/clicked), 'blocked' (suppressed),
+ * 'failed', 'pending' (queued / in flight / lookup failed), or null (no
+ * attempt); decisionHash = the snapshot the delivered email was built from
+ * (null on a record that carries none). The sweep reconciles from THIS,
+ * never from a return shape or an exception, and stamps only the row whose
+ * hash the record names.
  */
-async function markAnyUnsentWeekPlanSent({ customerId, weekEnding, sentAt = new Date() } = {}) {
+async function weekPlanDeliveryState(idempotencyKey) {
+  if (!idempotencyKey) return { state: null, decisionHash: null };
   try {
-    const n = await db('irrigation_week_plans')
-      .where({ customer_id: customerId, week_ending: weekEnding })
-      .whereNull('sent_at')
-      .update({ sent_at: sentAt, updated_at: db.fn.now() });
-    return n > 0;
+    const row = await db('email_messages').where({ idempotency_key: idempotencyKey }).first('status', 'categories');
+    if (!row) return { state: null, decisionHash: null };
+    const status = String(row.status || '').toLowerCase();
+    const decisionHash = hashFromCategories(row.categories);
+    if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return { state: 'sent', decisionHash };
+    if (status === 'blocked') return { state: 'blocked', decisionHash };
+    if (status === 'failed') return { state: 'failed', decisionHash };
+    return { state: 'pending', decisionHash };
   } catch (err) {
-    logger.warn(`[irrigation-week-plan] reconcile mark-sent failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return false;
+    logger.warn(`[irrigation-week-plan] delivery state lookup failed for ${idempotencyKey}: ${err.message}`);
+    return { state: 'pending', decisionHash: null }; // unknown → treat as in flight: never replace, never delete
   }
 }
 
@@ -422,9 +421,9 @@ module.exports = {
   renderWeekPlanReport,
   persistWeekPlan,
   markWeekPlanSent,
-  markAnyUnsentWeekPlanSent,
   discardUnsentWeekPlan,
   weekPlanDeliveryState,
+  planCategory,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories },
 };
