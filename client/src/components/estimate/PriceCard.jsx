@@ -698,6 +698,14 @@ export default function PriceCard({ frequency, waveGuardTier, waveGuardDiscountP
                   {subLabelParts.join(glass ? ' · ' : ' - ')}
                 </div>
               ) : null}
+              {/* Scope line the server attaches to a residential-unit
+                  (bedroom-band) row: the quote is interior-only and says so
+                  before accept — never implied by the inclusions list. */}
+              {row.scopeNote ? (
+                <div data-testid="row-scope-note" style={{ marginTop: 6, fontSize: 12, color: W.textCaption, lineHeight: 1.4 }}>
+                  {row.scopeNote}
+                </div>
+              ) : null}
               <RowInclusions
                 // Glass classifies via glassServiceSlug, not serviceKey():
                 // lawn_pest_* rows are PEST (server recurringServiceKey

@@ -11,6 +11,8 @@ const {
   withAutomatedEstimateDedupeLocks,
   withAutomatedEstimatePhoneLock,
   withAutomatedEstimatePhoneLocks,
+  lockSupersededDraftInTx,
+  archiveSupersededDraftInTx,
 } = require('../services/estimate-automation-duplicates');
 
 describe('estimate automation duplicate guard', () => {
@@ -226,5 +228,57 @@ describe('estimate automation duplicate guard', () => {
     expect(database.transaction).not.toHaveBeenCalled();
     expect(result.executor).toBe(database);
     expect(result.values.last10).toBeNull();
+  });
+});
+
+describe('supersede support (clarify-reply re-draft): lock, then archive AFTER the replacement insert', () => {
+  const fakeTrx = (row, { updateResult = 1 } = {}) => {
+    const updates = [];
+    const wheres = [];
+    const q = {
+      select() { return q; },
+      where(...a) { wheres.push(a); return q; },
+      whereIn(...a) { wheres.push(['whereIn', ...a]); return q; },
+      whereNull(...a) { wheres.push(['whereNull', ...a]); return q; },
+      whereRaw(...a) { wheres.push(['whereRaw', ...a]); return q; },
+      modify(fn) { fn(q); return q; },
+      forUpdate() { return q; },
+      first: async () => row,
+      update: async (payload) => { updates.push(payload); return updateResult; },
+    };
+    return Object.assign(() => q, { updates, wheres });
+  };
+
+  test('lock returns only an unsent, unarchived draft (FOR UPDATE) and writes nothing', async () => {
+    const trx = fakeTrx({ id: 'est-1', estimate_data: '{}' });
+    await expect(lockSupersededDraftInTx(trx, { estimateId: 'est-1' })).resolves.toMatchObject({ id: 'est-1' });
+    expect(trx.updates).toHaveLength(0);
+    expect(trx.wheres.some((w) => w[0] === 'whereIn' && w[1] === 'status' && w[2].includes('scheduled'))).toBe(true);
+    expect(trx.wheres.some((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toBe(true);
+    await expect(lockSupersededDraftInTx(fakeTrx(null), { estimateId: 'est-1' })).resolves.toBeNull();
+    // With an attempt token the lock is scoped to the row THIS attempt stamped.
+    const scoped = fakeTrx({ id: 'est-1', estimate_data: '{}' });
+    await lockSupersededDraftInTx(scoped, { estimateId: 'est-1', attempt: 'att-1' });
+    expect(scoped.wheres.some((w) => w[0] === 'whereRaw' && /reprice_attempt/.test(w[1]) && w[2][0] === 'att-1')).toBe(true);
+    await expect(lockSupersededDraftInTx(trx, { estimateId: null })).resolves.toBeNull();
+  });
+
+  test('archive stamps superseded_at/reason on estimator_engine and archives, keyed off the locked row and re-checked', async () => {
+    const trx = fakeTrx(null);
+    const stale = { id: 'est-1', estimate_data: JSON.stringify({ engineInputs: {}, estimatorEngine: { lane: 'yellow' } }) };
+    await expect(archiveSupersededDraftInTx(trx, stale, { reason: 'clarify_bedroom_reply' })).resolves.toBe(true);
+    const payload = trx.updates[0];
+    expect(payload.archived_at).toBeInstanceOf(Date);
+    const data = JSON.parse(payload.estimate_data);
+    expect(data.estimatorEngine.lane).toBe('yellow');
+    expect(data.estimatorEngine.superseded_reason).toBe('clarify_bedroom_reply');
+    expect(data.estimatorEngine.superseded_at).toBeDefined();
+    // A scheduled row returns to an inert draft with no due time.
+    expect(payload.status).toBe('draft');
+    expect(payload.scheduled_at).toBeNull();
+    expect(trx.wheres.some((w) => w[0] === 'whereIn' && w[1] === 'status' && w[2].includes('scheduled'))).toBe(true);
+    expect(trx.wheres.some((w) => w[0] === 'whereNull' && w[1] === 'sent_at')).toBe(true);
+    await expect(archiveSupersededDraftInTx(trx, null, { reason: 'x' })).resolves.toBe(false);
+    await expect(archiveSupersededDraftInTx(fakeTrx(null, { updateResult: 0 }), stale, { reason: 'x' })).resolves.toBe(false);
   });
 });

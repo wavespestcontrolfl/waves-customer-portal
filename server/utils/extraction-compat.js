@@ -49,6 +49,9 @@ function flatView(extraction) {
     service_address_is_primary_residence: typeof property.service_address_is_primary_residence === 'boolean'
       ? property.service_address_is_primary_residence
       : null,
+    // Caller-stated unit bedroom count (schema 1.10.0) — the bedroom-band
+    // pricing basis; replay variance watches it (FIELD_GROUPS medium).
+    bedroom_count: Number.isInteger(property.bedroom_count) ? property.bedroom_count : null,
     secondary_contact: mapSecondaryContactToLegacy(extraction.secondary_contact),
     secondary_contacts: mapSecondaryContactsToLegacy(extraction.secondary_contacts),
 

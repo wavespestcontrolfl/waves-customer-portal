@@ -21,7 +21,7 @@ jest.mock('../models/db', () => {
       orWhere() { return builder; },
       orderBy() { return builder; },
       orderByRaw() { return builder; },
-      whereRaw() { return builder; },
+      whereRaw(sql, params) { mockState.raws.push({ sql: String(sql), params }); return builder; },
       first: async () => (mockState.firstQueue.length ? mockState.firstQueue.shift() : mockState.existingDraft),
       update: async (payload) => {
         mockState.updates.push({ table, payload });
@@ -40,9 +40,15 @@ jest.mock('../models/db', () => {
   const dbMock = jest.fn((table) => makeBuilder(table));
   // withClarifyLock: transaction executor doubles as the query builder; the
   // advisory-lock raw() is a no-op here.
-  const trx = Object.assign((table) => makeBuilder(table), { raw: async () => ({}) });
+  const trx = Object.assign((table) => makeBuilder(table), {
+    raw: (sql, params) => {
+      mockState.raws.push({ sql: String(sql), params });
+      if (/pg_advisory_xact_lock/.test(String(sql))) { mockState.locks.push(params); return Promise.resolve({}); }
+      return { __raw: String(sql), params };
+    },
+  });
   dbMock.transaction = async (callback) => callback(trx);
-  dbMock.raw = async () => ({});
+  dbMock.raw = (sql, params) => { mockState.raws.push({ sql: String(sql), params }); return { __raw: String(sql), params }; };
   return dbMock;
 });
 jest.mock('../services/logger', () => ({
@@ -64,6 +70,12 @@ jest.mock('../services/notification-service', () => ({
 
 const mockStartSmsThreadDraft = jest.fn();
 const mockSmsThreadDraftsEnabled = jest.fn();
+const mockMaybeDraftEstimateForCall = jest.fn();
+const mockEstimatorEngineEnabled = jest.fn(() => true);
+jest.mock('../services/estimator-engine', () => ({
+  estimatorEngineEnabled: (...a) => mockEstimatorEngineEnabled(...a),
+  maybeDraftEstimateForCall: (...a) => mockMaybeDraftEstimateForCall(...a),
+}));
 jest.mock('../services/estimator-engine/sms-thread', () => ({
   smsThreadDraftsEnabled: () => mockSmsThreadDraftsEnabled(),
   startSmsThreadDraft: (...args) => mockStartSmsThreadDraft(...args),
@@ -96,7 +108,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [], locks: [], raws: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -826,5 +838,362 @@ describe('_private.composeClarifyBody', () => {
     for (const missing of [['street_address'], ['specific_service'], ['street_address', 'specific_service']]) {
       expect(_private.composeClarifyBody({ missing, firstName: 'A' })).toContain('Waves Pest Control');
     }
+  });
+});
+
+// ── bedroom_count (GATE_UNIT_BAND_PRICING lane) ─────────────────
+// The attempt token the guard stamp wrote (second jsonb_build_object param).
+function guardStampAttempt(state) {
+  const stamp = state.updates.find((u) => u.table === 'estimates' && /reprice_attempt/.test(String(u.payload.estimate_data?.__raw || '')));
+  return stamp ? stamp.payload.estimate_data.params[1] : null;
+}
+
+describe('bedroom_count ask (unit-band lane)', () => {
+  test('is askable, with its own one-question copy and a trailing question when combined', () => {
+    expect(_private.ASKABLE_MISSING.has('bedroom_count')).toBe(true);
+    const alone = _private.composeClarifyBody({ missing: ['bedroom_count'], firstName: 'Pat' });
+    expect(alone.startsWith('Hi Pat, ')).toBe(true);
+    expect(alone).toMatch(/how many bedrooms is the unit \(studio, 1, 2, 3, or 4\+\)\?/);
+    const combined = _private.composeClarifyBody({ missing: ['street_address', 'bedroom_count'], firstName: null });
+    expect(combined).toBe(`${_private.composeClarifyBody({ missing: ['street_address'], firstName: null })} Also, how many bedrooms is the unit (studio, 1, 2, 3, or 4+)? That sets the price for your apartment or condo.`);
+  });
+
+  test('extractBedroomReply reads counts as spoken; studio = 0; a bare number is not an answer', () => {
+    const { extractBedroomReply } = _private;
+    expect(extractBedroomReply("It's a 2 bedroom")).toBe(2);
+    expect(extractBedroomReply('one-bedroom apartment')).toBe(1);
+    expect(extractBedroomReply('3br 2ba')).toBe(3);
+    expect(extractBedroomReply('2 bed 2 bath')).toBe(2);
+    expect(extractBedroomReply('studio')).toBe(0);
+    expect(extractBedroomReply('Efficiency unit')).toBe(0);
+    // An explicit count beats the studio word; a negated studio is not zero.
+    expect(extractBedroomReply("not a studio, it's a 2 bedroom")).toBe(2);
+    expect(extractBedroomReply("It isn't a studio")).toBeNull();
+    expect(extractBedroomReply('no studio here')).toBeNull();
+    expect(extractBedroomReply('2')).toBeNull();
+    // A bedroom-ONLY ask accepts the natural bare answer, bounded.
+    expect(extractBedroomReply('2', { bareNumberOk: true })).toBe(2);
+    // Lower-bound replies below 4 straddle two bands ($99 vs $109) — not an answer;
+    // "4+" collapses into the four_plus band exactly.
+    expect(extractBedroomReply(' 3+ ', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('3 or more', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('4+', { bareNumberOk: true })).toBe(4);
+    expect(extractBedroomReply('3+ bedrooms')).toBeNull();
+    expect(extractBedroomReply('4 plus bedrooms')).toBe(4);
+    expect(extractBedroomReply('One.', { bareNumberOk: true })).toBe(1);
+    expect(extractBedroomReply('0', { bareNumberOk: true })).toBe(0);
+    expect(extractBedroomReply('99', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('2 people', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('ok thanks')).toBeNull();
+    expect(extractBedroomReply('')).toBeNull();
+  });
+
+  test('a bedroom reply records onto the draft flags only (no CRM column exists) and resumes the thread draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '+19415550142', body: "It's a 2 bedroom, thanks" });
+    expect(result.handled).toBe(true);
+    await result.repricePromise;
+    expect(mockState.updates.some((u) => u.table === 'leads' || u.table === 'customers')).toBe(false);
+    const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
+    const flags = JSON.parse(bookkeeping.payload.flags);
+    expect(flags.answer_recorded).toEqual(['bedroom_count']);
+    expect(flags.bedroom_count_answer).toBe(2);
+    expect(flags.missing).toEqual([]);
+    expect(flags.answered_at).toBeDefined();
+    // The re-draft names the fallback-priced draft it replaces, so the
+    // dedupe transaction retires it and the replacement passes the guard.
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({
+      skipIntentGate: true, skipCooldown: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 2,
+    }));
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('flag patches take the phone-scoped clarify lock (advisory xact lock) — never an unlocked read-modify-write; the webhook returns before the re-draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    let releaseDraft;
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: new Promise((resolve) => { releaseDraft = resolve; }) });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    // Returned while the re-draft is still running (detached from the webhook).
+    expect(result.handled).toBe(true);
+    releaseDraft({ created: true, estimateId: 'x' });
+    await result.repricePromise;
+    // one lock for the reply record + one per flag stamp (pending, then cleared)
+    expect(mockState.locks.filter((l) => l[1] === '9415550142')).toHaveLength(3);
+  });
+
+  test('a VOICE-origin draft re-runs from its original call with the answer applied (the SMS thread has no quote evidence)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    // first() order: awaiting (unlocked), fresh (locked), ask (reprice_pending
+    // stamp), estimate (origin), ask (cleared). The estimate guard is an
+    // atomic UPDATE with no read.
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const result = await handleClarifyReply({ phone: '+19415550142', body: 'one bedroom' });
+    expect(result.handled).toBe(true);
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
+      callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
+      supersedeAttempt: expect.stringMatching(/^[0-9a-f-]{36}$/), bedroomCountOverride: 1,
+    });
+    // The same attempt token is what the guard stamp wrote on the estimate.
+    const guardStamp = mockState.updates.find((u) => u.table === 'estimates').payload.estimate_data;
+    expect(guardStamp.__raw).toMatch(/'reprice_attempt', \?::text/);
+    expect(guardStamp.params[1]).toBe(mockMaybeDraftEstimateForCall.mock.calls[0][0].supersedeAttempt);
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+    // Durable reprice state: pending BEFORE the attempt, cleared with the replacement id AFTER.
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
+    expect(stamps.some((f) => f.reprice_pending?.estimate_id === 'est-1' && f.reprice_pending?.bedroom_count === 1)).toBe(true);
+    const last = stamps[stamps.length - 1];
+    expect(last.reprice_pending).toBeUndefined();
+    expect(last.repriced_estimate_id).toBe('est-new');
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a re-draft that produces NO replacement keeps reprice_pending on the ask row and bells the operator (never silently consumed)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-2' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red', reasons: ['composer skipped'] });
+    const failed = await handleClarifyReply({ phone: '+19415550142', body: '2 bedroom' });
+    await failed.repricePromise;
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
+    expect(stamps[stamps.length - 1].reprice_pending).toMatchObject({ estimate_id: 'est-1', bedroom_count: 2 });
+    expect(stamps.some((f) => f.repriced_estimate_id)).toBe(false);
+    expect(mockNotifyAdmin).toHaveBeenCalledWith(
+      'lead',
+      expect.stringMatching(/re-price the unit draft/i),
+      expect.stringMatching(/2 bedrooms/),
+      expect.objectContaining({ link: '/admin/estimates/est-1', metadata: expect.objectContaining({ reprice_pending: true, estimateId: 'est-1' }) }),
+    );
+  });
+
+  test('an SMS-origin draft (estimator_engine.origin = sms_thread) re-drafts from the thread, not the call', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-2', bedroom_estimate_id: 'est-2' }),
+    };
+    const estimateRow = { id: 'est-2', estimate_data: JSON.stringify({ estimatorEngine: { origin: 'sms_thread', callLogId: null } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
+    // Detached thread draft: the re-price waits on its outcome.
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: Promise.resolve({ created: true, estimateId: 'est-2b' }) });
+    const smsResult = await handleClarifyReply({ phone: '+19415550142', body: 'studio' });
+    await smsResult.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-2', bedroomCountOverride: 0 }));
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
+    expect(stamps[stamps.length - 1].repriced_estimate_id).toBe('est-2b');
+  });
+
+  test('an address reply (red-path ask, no linked draft) never asks the re-draft to supersede anything', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['street_address'], lead_id: 'lead-1' }),
+    };
+    await handleClarifyReply({ phone: '+19415550142', body: '123 Main St, Sarasota' });
+    const args = mockStartSmsThreadDraft.mock.calls[0][0];
+    expect(args.supersedeEstimateId).toBeUndefined();
+  });
+
+  test('repricePendingActive never lapses on its own — only a replacement or an explicit operator re-price clears it', async () => {
+    const { repricePendingActive, clearEstimateRepricePending } = require('../services/estimate-clarify-asks');
+    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:50:00Z' })).toBe(true);
+    expect(repricePendingActive({ reprice_pending_at: '2020-01-01T00:00:00Z' })).toBe(true);
+    expect(repricePendingActive({})).toBe(false);
+    expect(repricePendingActive(null)).toBe(false);
+    // The explicit correction is an atomic one-key JSONB delete.
+    await clearEstimateRepricePending('est-1');
+    const upd = mockState.updates.find((u) => u.table === 'estimates');
+    expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at' - 'reprice_attempt'\)/);
+  });
+
+  test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-3' });
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
+    // first() order: awaiting, fresh(locked), ask (pending stamp), estimate (origin)
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    // ATOMIC JSONB path updates only — never a whole-blob rewrite that
+    // could erase a concurrent linkage marker.
+    // guard stamp → (failure) unschedule only — the guard STAYS (known-stale dollars)
+    const estimateUpdates = mockState.updates.filter((u) => u.table === 'estimates');
+    expect(estimateUpdates).toHaveLength(2);
+    expect(estimateUpdates[0].payload.estimate_data.__raw).toMatch(/jsonb_set\(estimate_data, '\{estimatorEngine\}'.*jsonb_build_object\('reprice_pending_at'/);
+    expect(estimateUpdates[0].payload.estimate_data.params[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(estimateUpdates[1].payload).toMatchObject({ status: 'draft', scheduled_at: null });
+    // …and the unschedule is attempt-scoped (an operator revision that deleted the token makes it a no-op).
+    expect(mockState.raws.some((r) => /reprice_attempt' = \?/.test(r.sql) && r.params?.[0] === guardStampAttempt(mockState))).toBe(true);
+    expect(estimateUpdates.some((u) => /- 'reprice_pending_at'/.test(String(u.payload.estimate_data?.__raw || '')))).toBe(false);
+    expect(mockNotifyAdmin).toHaveBeenCalled();
+  });
+
+  test('the bedroom re-price binds to bedroom_estimate_id — a merged ask that re-pointed the generic estimate_id never archives the wrong draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      // generic linkage moved to an unrelated lawn draft by a later merged ask
+      flags: JSON.stringify({ missing: ['bedroom_count', 'specific_service'], lead_id: 'lead-1', estimate_id: 'est-LAWN', bedroom_estimate_id: 'est-UNIT' }),
+    };
+    const unitRow = { id: 'est-UNIT', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, unitRow, awaiting];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '2 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-UNIT' }));
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-LAWN' }));
+  });
+
+  test('parking and merging a bedroom ask record bedroom_estimate_id; a merge for another item keeps it', async () => {
+    mockState.existingDraft = null;
+    await parkClarifyAsk({ missing: ['bedroom_count'], phone: '+19415550142', estimateId: 'est-UNIT', source: 'estimator_engine_unit_band', channelProvenance: 'voice' });
+    const parked = JSON.parse(mockState.inserts[0].flags);
+    expect(parked.bedroom_estimate_id).toBe('est-UNIT');
+    expect(parked.estimate_id).toBe('est-UNIT');
+    // A later street_address ask for the same phone merges in with ITS linkage…
+    mockState.existingDraft = { id: 'draft-1', status: 'pending', flags: mockState.inserts[0].flags };
+    await parkClarifyAsk({ missing: ['street_address'], phone: '+19415550142', estimateId: 'est-LAWN', leadId: 'lead-2', source: 'estimator_engine_red', channelProvenance: 'voice' });
+    const merged = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(merged.missing).toEqual(['bedroom_count', 'street_address']);
+    expect(merged.estimate_id).toBe('est-LAWN');
+    // …but the bedroom item stays bound to the unit draft.
+    expect(merged.bedroom_estimate_id).toBe('est-UNIT');
+  });
+
+  test('a failed re-price on a SCHEDULED draft cancels the schedule (inert draft, no due time) before lifting the guard', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-5' });
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    const estimateUpdates = mockState.updates.filter((u) => u.table === 'estimates').map((u) => u.payload);
+    // guard stamp, then (failure) unschedule — never a guard release
+    expect(estimateUpdates.some((p) => p.status === 'draft' && p.scheduled_at === null)).toBe(true);
+    expect(estimateUpdates.some((p) => /- 'reprice_pending_at'\)/.test(String(p.estimate_data?.__raw || '')))).toBe(false);
+  });
+
+  test('a guard that stamps ZERO rows (draft already sent/moved on) fails closed: answer recorded, no re-draft, operator bell', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-4' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    mockState.firstQueue = [awaiting, awaiting, awaiting];
+    // update results: ask row bookkeeping (1), estimate guard (0 rows), pending stamp (1)…
+    mockState.updateResults = [0, 1];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+    expect(mockNotifyAdmin).toHaveBeenCalledWith('lead', expect.stringMatching(/re-price the unit draft/i), expect.any(String), expect.objectContaining({ link: '/admin/estimates/est-1' }));
+  });
+
+  test('a bare number answers only a DELIVERED bedroom-only prompt — an unsent draft leaves an unrelated "2" alone', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockState.existingDraft = {
+      id: 'pend-1', customer_id: null, sent_at: null, status: 'pending',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('a bare "2" answers a bedroom-ONLY ask but not a combined ask', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: Promise.resolve({ created: true, estimateId: 'x' }) });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const only = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(only.handled).toBe(true);
+    await only.repricePromise;
+    mockState.updates.length = 0;
+    mockState.existingDraft = {
+      id: 'sent-2', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['street_address', 'bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const combined = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(combined.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('the re-price target is the LOCKED row\'s estimate_id, not the pre-lock snapshot (a concurrent merge may have re-pointed it)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const unlocked = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-OLD', bedroom_estimate_id: 'est-OLD' }),
+    };
+    const lockedRow = { ...unlocked, flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-FRESH', bedroom_estimate_id: 'est-FRESH' }) };
+    const estimateRow = { id: 'est-FRESH', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) };
+    mockState.firstQueue = [unlocked, lockedRow, lockedRow, estimateRow, lockedRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-FRESH' }));
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
+    expect(stamps.some((f) => f.reprice_pending?.estimate_id === 'est-FRESH')).toBe(true);
+    expect(stamps.some((f) => f.reprice_pending?.estimate_id === 'est-OLD')).toBe(false);
+  });
+
+  test('a reply without a bedroom count leaves the ask open', async () => {
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '9415550142', body: 'ok thanks' });
+    expect(result.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('approval-time staleness never treats bedroom_count as answered by CRM state (an address on the lead is not a bedroom count)', async () => {
+    mockState.firstQueue = [
+      {
+        id: 'draft-1', source_ref: 'clarify:9415550142', customer_id: null, status: 'approved', sent_at: null,
+        draft_response: 'Original question?', final_response: null,
+        flags: JSON.stringify({ missing: ['bedroom_count'], toPhone: '+19415550142', lead_id: 'lead-1' }),
+      },
+      { id: 'lead-1', status: 'new', address: '123 Main St Apt 4', service_interest: 'quarterly pest', first_name: 'Pat' },
+    ];
+    const verdict = await claimClarifyDispatch({ draft: { id: 'draft-1', source_ref: 'clarify:9415550142' } });
+    expect(verdict.outcome).toBe('send');
+    expect(verdict.flags.missing).toEqual(['bedroom_count']);
   });
 });

@@ -5085,7 +5085,12 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
       // version on the card for the commercial turf line only (fuller copy still shows
       // via svc.detail in the no-visits fallback).
       const isCommercialTurf = serviceKey === 'commercial_lawn' || /commercial turf/i.test(String(name));
-      const scopeNote = isCommercialTurf ? 'Does not include mowing, edging, or landscape maintenance' : '';
+      // A row-level scopeNote (bedroom-band unit quotes: interior-only
+      // exclusions) shows on the card the same way — the visits branch
+      // would otherwise drop it with svc.detail.
+      const scopeNote = isCommercialTurf
+        ? 'Does not include mowing, edging, or landscape maintenance'
+        : String(svc?.scopeNote || '');
       const detailHtml = displayCadenceText || visits
         ? [
             displayCadenceText ? escapeHtml(displayCadenceText) : null,
@@ -10127,6 +10132,14 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           err.status = 409;
           throw err;
         }
+        // A bedroom re-price in flight (estimate-clarify-asks): the
+        // fallback dollars on this draft are being replaced — refuse the
+        // accept until the replacement lands (or the marker lapses).
+        if (require('../services/estimate-clarify-asks').repricePendingActive(eng)) {
+          const err = new Error('This estimate is being re-priced — please try again in a few minutes');
+          err.status = 409;
+          throw err;
+        }
         // The call row is locked FOR UPDATE and HELD through the
         // acceptance write (codex P1, PR #3304 GH r6): an ordinary
         // SELECT would not serialize against the processor's concurrent
@@ -14629,6 +14642,8 @@ const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
 // Cadence pills carry their visit count in parens (owner 2026-07-23,
 // matching the mosquito "Seasonal (9 visits)" style — recurring services
 // only, never one-time labels).
+const { bandFrequencyForIntent } = require('../services/pricing-engine/unit-band-pricing');
+
 const FREQUENCY_LADDER = [
   { key: 'quarterly',  label: 'Quarterly (4 visits)',   engineFrequency: 'quarterly' },
   { key: 'bi_monthly', label: 'Bi-monthly (6 visits)',  engineFrequency: 'bimonthly' },
@@ -14934,6 +14949,10 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         cadence: li.cadence || null,
         frequencyKey: li.cadence || li.frequencyKey || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
+        // Bedroom-band unit quote: the interior-only scope line is customer
+        // copy (owner ruling 2026-08-11 #5) — the React card renders it
+        // under the treatment row, same as renderPage's card note.
+        ...(li.scopeNote ? { scopeNote: String(li.scopeNote) } : {}),
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
@@ -22446,7 +22465,16 @@ async function buildPricingBundleInner(estimate) {
     // price. Defaulting the same way here keeps the flag on that cadence
     // instead of stripping it everywhere and re-clamping the confirmed price.
     const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || 'quarterly';
+    // A bedroom-band unit quote (GATE_UNIT_BAND_PRICING) carries a signed
+    // row per cadence the rate table has (quarterly, bi-monthly — never
+    // monthly): only those cadences are offered; the engine would fail
+    // closed on any other and a $0 "Monthly" entry must not render.
+    const bandCadences = engineInputs?.unitBandPricing?.pestCadences;
     for (const ladder of FREQUENCY_LADDER) {
+      if (bandCadences && typeof bandCadences === 'object'
+        && !bandCadences[bandFrequencyForIntent(ladder.engineFrequency)]) {
+        continue;
+      }
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
       inputsForFrequency.services.pest = {

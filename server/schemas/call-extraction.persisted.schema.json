@@ -47,9 +47,10 @@
             "1.6.0",
             "1.7.0",
             "1.8.0",
-            "1.9.0"
+            "1.9.0",
+            "1.10.0"
           ],
-          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking) — older payloads remain valid."
+          "description": "Schema version for format detection. Server-owned. 1.1.0 is additive (multi-property, quote signals); 1.2.0 is additive (secondary_contact); 1.3.0 is additive (other_parties_mentioned, existing_appointment_coordination flag, enum widenings); 1.8.0 is additive (scheduling.agent_committed_booking); 1.10.0 is additive (property.bedroom_count) — older payloads remain valid."
         },
         "extracted_at": {
           "type": "string",
@@ -531,6 +532,14 @@
             "null"
           ],
           "minimum": 0
+        },
+        "bedroom_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 20
         },
         "pets_on_property": {
           "type": "object",

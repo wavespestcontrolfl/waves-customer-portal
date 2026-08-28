@@ -199,6 +199,7 @@ async function runThreadDraft({
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
   groundedMultiScope = false, groundedOvercap = false,
   groundedUnverifiableLocality = false,
+  supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
 }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
@@ -233,6 +234,14 @@ async function runThreadDraft({
       return result;
     }
     context.origin = origin;
+    // A clarify reply re-draft names the stale draft it replaces; the
+    // draft builder retires it atomically with the replacement insert.
+    if (supersedeEstimateId) {
+      context.supersedeEstimateId = supersedeEstimateId;
+      context.supersedeReason = supersedeReason || null;
+      context.supersedeAttempt = supersedeAttempt || null;
+    }
+    if (bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
     return await runDraftPipeline({
       context,
       origin,
@@ -260,6 +269,9 @@ async function runThreadDraft({
 async function startSmsThreadDraft({
   phone, triggerBody = '', skipIntentGate = false, skipCooldown = false, dryRun = false,
   scopeCheckOnly = false, precomputedTriage,
+  // Clarify-reply re-draft: the unsent automated draft this thread draft
+  // replaces (retired inside the dedupe transaction, only on a real insert).
+  supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
 }) {
   const digits = last10(phone);
   const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
@@ -443,6 +455,10 @@ async function startSmsThreadDraft({
       groundedMultiScope: triage?.groundedMultiScope === true,
       groundedOvercap: triage?.groundedOvercap === true,
       groundedUnverifiableLocality: triage?.groundedUnverifiableLocality === true,
+      supersedeEstimateId,
+      supersedeReason,
+      supersedeAttempt,
+      bedroomCountOverride,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);

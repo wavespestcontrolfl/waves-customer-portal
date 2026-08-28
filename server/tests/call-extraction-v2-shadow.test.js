@@ -184,7 +184,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.9.0');
+    expect(SCHEMA_VERSION).toBe('1.10.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

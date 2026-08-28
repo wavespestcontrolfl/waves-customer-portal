@@ -32,7 +32,13 @@ const RECENT_SENT_WINDOW_MS = 7 * 86400000;
 // The only items an SMS can ask for. 'phone' is structurally unaskable
 // here (no phone = no SMS), and free-text composer uncertainties are not a
 // stable vocabulary — both stay operator-bell territory.
-const ASKABLE_MISSING = new Set(['street_address', 'specific_service']);
+// 'bedroom_count' (GATE_UNIT_BAND_PRICING lane): a residential-unit quote
+// with no unit sqft and no stated bedroom count — the one question that
+// makes the band price real. The answer is not written to any row: the
+// resumed SMS-thread composer reads it from the thread (intent
+// unit_bedroom_count), so approval-time staleness treats it as still
+// missing until the reply handler records it.
+const ASKABLE_MISSING = new Set(['street_address', 'specific_service', 'bedroom_count']);
 
 function clarifyAsksEnabled() {
   return isEnabled('estimateClarifyAsks');
@@ -45,10 +51,21 @@ function firstNameGreeting(firstName) {
 
 // Deterministic, neighborly, compliant: company name in full, one concrete
 // question, no service claims. The owner can revise any of it before send.
+const BEDROOM_ASK = 'how many bedrooms is the unit (studio, 1, 2, 3, or 4+)? That sets the price for your apartment or condo.';
+
 function composeClarifyBody({ missing, firstName }) {
   const greeting = firstNameGreeting(firstName);
   const wantsAddress = missing.includes('street_address');
   const wantsService = missing.includes('specific_service');
+  const wantsBedrooms = missing.includes('bedroom_count');
+  if (wantsBedrooms && !wantsAddress && !wantsService) {
+    return `${greeting}it's Waves Pest Control — one quick question to finish your quote: ${BEDROOM_ASK}`;
+  }
+  if (wantsBedrooms) {
+    // Bedrooms alongside another gap: the base ask plus one trailing question.
+    const base = composeClarifyBody({ missing: missing.filter((m) => m !== 'bedroom_count'), firstName });
+    return `${base} Also, ${BEDROOM_ASK}`;
+  }
   if (wantsAddress && wantsService) {
     return `${greeting}it's Waves Pest Control — happy to get your quote started. Two quick things: what's the service address (street + city), and which service are you looking for (pest control, lawn care, mosquito, or something else)?`;
   }
@@ -97,6 +114,9 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         missing: merged,
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
+        // The bedroom item binds to ITS unit draft, independent of the
+        // generic linkage a later merged ask may re-point.
+        ...(askable.includes('bedroom_count') && linkage.estimateId ? { bedroom_estimate_id: String(linkage.estimateId) } : {}),
         source: linkage.source,
         channel_provenance: linkage.channelProvenance || null,
       }),
@@ -255,6 +275,8 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
+          // Item-specific target for the bedroom re-price (see mergePendingClarify).
+          ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
           source,
           channel_provenance: channelProvenance || null,
         }),
@@ -291,6 +313,132 @@ async function parkClarifyAsk({
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // is the service answer, not part of the address — bounded vocabulary,
 // deterministic split. Returns { address, serviceTail }.
+/**
+ * True while an estimator draft carries the re-price marker. The marker
+ * never lapses on its own: a draft whose dollars are KNOWN stale stays
+ * unsendable until either the replacement lands (the row is archived by
+ * the supersede) or the operator explicitly re-prices it (admin PUT /:id
+ * → clearEstimateRepricePending). A crash mid-re-draft therefore leaves
+ * the draft blocked with the bell/409 pointing at it — never sendable at
+ * the old price.
+ */
+function repricePendingActive(engineData) {
+  const at = engineData && typeof engineData === 'object' ? engineData.reprice_pending_at : null;
+  return typeof at === 'string' && at.length > 0;
+}
+
+/**
+ * Explicit operator price correction (admin PUT /:id ran the full server
+ * re-price): the stale-price block is lifted. Atomic JSONB path delete —
+ * no other key is touched.
+ */
+async function clearEstimateRepricePending(estimateId, database = db) {
+  const changed = await database('estimates')
+    .where({ id: estimateId })
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') <> ''")
+    .update({
+      estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')"),
+      updated_at: new Date(),
+    });
+  return Number(changed) > 0;
+}
+
+// A failed re-price on a SCHEDULED draft: lifting the guard alone would
+// let the scheduler claim the due row and send the stale fallback price
+// — so the schedule is cancelled (inert draft, no due time) and the bell
+// hands it to the operator.
+async function unscheduleForOperatorReprice(trx, estimateId, attempt) {
+  const changed = await trx('estimates')
+    .where({ id: estimateId, status: 'scheduled' })
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    // Only while THIS attempt still owns the row — an operator's revision
+    // (which may have re-scheduled a corrected price) deletes the token.
+    .whereRaw("estimate_data->'estimatorEngine'->>'reprice_attempt' = ?", [String(attempt || '')])
+    .update({ status: 'draft', scheduled_at: null, updated_at: new Date() });
+  return Number(changed) > 0;
+}
+
+// Stamp (or clear, at=null) estimator_engine.reprice_pending_at on an
+// UNSENT, LIVE draft — inside the caller's transaction, as an ATOMIC
+// JSONB path update: only this one key changes, so a concurrent linkage
+// reconciliation's markers (linkage_invalidated_at / invalidation_pending_at)
+// can never be overwritten by a stale blob, and the predicate refuses an
+// archived or invalidated row outright (codex pre-push P0).
+async function setEstimateRepricePending(trx, estimateId, at, attempt = null) {
+  // 'scheduled' rows are unsent drafts with a due time — the cron would
+  // otherwise deliver the stale fallback price; the supersede path returns
+  // them to an inert draft when the replacement lands. A row already in
+  // 'sending' gets the marker too: the delivery verdict holds the row FOR
+  // UPDATE so this write lands right after the claim, and the pre-handoff
+  // check (estimateInvalidatedJustBeforeHandoff) then aborts delivery.
+  const changed = await trx('estimates')
+    .where({ id: estimateId })
+    .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sending'])
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'invalidation_pending_at', '') = ''")
+    .update({
+      // The attempt token ties THIS answer's detached re-draft to the row:
+      // supersede/archive and unschedule require it, and the operator's
+      // revision deletes it, so a stale attempt can never touch a draft
+      // that was corrected while composition ran.
+      estimate_data: at
+        ? trx.raw(
+          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) || jsonb_build_object('reprice_pending_at', ?::text, 'reprice_attempt', ?::text))",
+          [at, attempt || ''],
+        )
+        : trx.raw(
+          "jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at' - 'reprice_attempt')",
+        ),
+      updated_at: new Date(),
+    });
+  return Number(changed) > 0;
+}
+
+// Merge a patch into the ask row's flags (read-modify-write; null values
+// delete the key). Bookkeeping only — never touches status/copy.
+async function stampClarifyFlags(digits, draftId, patch) {
+  // UNDER the phone-scoped clarify lock every other flags mutation takes —
+  // an unlocked read-modify-write could overwrite a concurrent reply's
+  // committed missing/answered_at/linkage state.
+  try {
+    return await withClarifyLock(digits, async (trx) => {
+      const row = await trx('message_drafts').where({ id: draftId }).first('flags');
+      if (!row) return false;
+      let current = {};
+      try { current = typeof row.flags === 'string' ? JSON.parse(row.flags) : (row.flags || {}); } catch { current = {}; }
+      const next = { ...current };
+      for (const [k, v] of Object.entries(patch || {})) {
+        if (v === null || v === undefined) delete next[k];
+        else next[k] = v;
+      }
+      await trx('message_drafts').where({ id: draftId }).update({ flags: JSON.stringify(next) });
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[estimate-clarify] flag stamp failed: ${err.message}`);
+    return false;
+  }
+}
+
+// The call a VOICE-origin estimator draft was composed from, or null for
+// SMS-thread drafts / non-engine estimates / a missing row.
+async function voiceOriginCallLogId(estimateId) {
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first('estimate_data');
+    if (!row) return null;
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    const engine = data?.estimatorEngine || {};
+    if (engine.origin && engine.origin !== 'call') return null;
+    return engine.callLogId ? String(engine.callLogId) : null;
+  } catch (err) {
+    logger.warn(`[estimate-clarify] draft origin lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
 const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
 function stripServiceTail(address) {
   let out = String(address || '').trim();
@@ -305,6 +453,44 @@ function stripServiceTail(address) {
 
 // Local address heuristics (mirrors lead-intake's leniency; duplicated
 // because lead-intake requires THIS module — importing back would cycle).
+// "studio", "it's a 2 bedroom", "one-bedroom apartment", "3br", "2 bed 2 bath".
+// A bare number is NOT accepted (it could answer anything); the word or
+// abbreviation must be there. Studio/efficiency = 0.
+const BEDROOM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
+const BEDROOM_COUNT_RE = /\b(\d{1,2}|one|two|three|four|five|six)\s*(\+|plus|or more)?\s*[-–]?\s*(?:br|bd|bdr|bdrm|bed|beds|bedroom|bedrooms)\b/i;
+// "not a studio" / "isn't an efficiency" / "no studio" — the studio word
+// under a negation is not an answer of zero.
+const NEGATED_STUDIO_RE = /\b(?:not|no|isn'?t|ain'?t|wasn'?t|never)\s+(?:a\s+|an\s+|the\s+)?(?:studio|efficiency)\b/i;
+const BARE_BEDROOM_NUMBER_RE = /^\s*(\d{1,2}|one|two|three|four|five|six)\s*(\+|or more|plus)?\s*[.!]?\s*$/i;
+// Bands differ at every step up to 4 (3 = $99, 4+ = $109), so a
+// lower-bound reply ("3+", "2 or more") is ambiguous BELOW 4 and rejected;
+// "4+" collapses into the four_plus band exactly.
+function boundedBedroomCount(rawToken, lowerBound) {
+  const raw = String(rawToken).toLowerCase();
+  const n = BEDROOM_WORDS[raw] ?? Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 20) return null;
+  if (lowerBound && n < 4) return null;
+  return n;
+}
+function extractBedroomReply(body, { bareNumberOk = false } = {}) {
+  const text = String(body || '').trim();
+  if (!text) return null;
+  // A bare number answers ONLY a bedroom-only ask (combined asks keep the
+  // stricter rule — "2" could answer anything there).
+  if (bareNumberOk) {
+    const bare = text.match(BARE_BEDROOM_NUMBER_RE);
+    if (bare) return boundedBedroomCount(bare[1], !!bare[2]);
+  }
+  // An explicit count always wins ("not a studio, it's a 2 bedroom");
+  // a lower-bound phrasing below 4 ("3+ bedrooms", "3 or more bedrooms")
+  // is ambiguous across bands and is not an answer.
+  const m = text.match(BEDROOM_COUNT_RE);
+  if (m) return boundedBedroomCount(m[1], !!m[2]);
+  if (NEGATED_STUDIO_RE.test(text)) return null;
+  if (/\b(?:studio|efficiency)\b/i.test(text)) return 0;
+  return null;
+}
+
 const CLARIFY_STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|trl|trail|hwy|highway|loop)\b/i;
 function extractAddressReply(body) {
   const text = String(body || '').trim();
@@ -415,6 +601,16 @@ async function handleClarifyReply({ phone, body }) {
         }
       }
     }
+    let bedroomCount = null;
+    if (missing.includes('bedroom_count')) {
+      // The one-question ask offers "studio, 1, 2, 3 or more" — a bare
+      // bounded number IS the natural answer when nothing else was asked.
+      // …and only once the prompt was actually DELIVERED: an unsent
+      // bedroom draft must not swallow an unrelated "2" from another
+      // conversation.
+      bedroomCount = extractBedroomReply(text, { bareNumberOk: missing.length === 1 && !!awaiting.sent_at });
+      if (bedroomCount !== null) candidates.push('bedroom_count');
+    }
     let serviceText = null;
     if (missing.includes('specific_service') && serviceTailFromAddress) {
       // Vocabulary-matched tail — no classifier round needed.
@@ -483,7 +679,26 @@ async function handleClarifyReply({ phone, body }) {
         await trx('leads').where({ id: freshFlags.lead_id }).whereNull('deleted_at')
           .update({ service_interest: serviceText });
       }
+      // bedroom_count has no row of its own: the resumed SMS-thread draft
+      // reads the answer from the thread. The flag keeps the audit.
+      if (recorded.includes('bedroom_count')) freshFlags.bedroom_count_answer = bedroomCount;
 
+      // The bedroom re-price targets the unit draft the ASK was parked for
+      // (bedroom_estimate_id) — never the generic estimate_id, which a
+      // merged later ask may have re-pointed at an unrelated draft.
+      const lockedEstimateId = freshFlags.bedroom_estimate_id ? String(freshFlags.bedroom_estimate_id) : null;
+      // Estimate-level send guard, stamped in the SAME locked phase that
+      // records the answer: the linked draft's dollars are about to be
+      // replaced, so admin send / schedule / public accept refuse it
+      // until the replacement lands (repricePendingActive — time-boxed so
+      // a process restart can never strand a draft).
+      let repriceGuarded = false;
+      const repriceAttempt = recorded.includes('bedroom_count') && lockedEstimateId
+        ? require('crypto').randomUUID()
+        : null;
+      if (repriceAttempt) {
+        repriceGuarded = await setEstimateRepricePending(trx, lockedEstimateId, new Date().toISOString(), repriceAttempt);
+      }
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
         ...freshFlags,
@@ -518,30 +733,131 @@ async function handleClarifyReply({ phone, body }) {
       } else {
         await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
       }
-      return { recorded };
+      // The LOCKED row's linkage is authoritative — a concurrent
+      // mergePendingClarify may have re-pointed estimate_id since the
+      // unlocked read above.
+      return { recorded, estimateId: lockedEstimateId, repriceGuarded, repriceAttempt };
     });
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
 
-    // Resume drafting when the SMS engine lane is armed — the thread now
-    // carries the answer, so the composer gets everything in one pass. The
-    // engine's own duplicate guard and bell dedupe absorb re-runs.
-    try {
-      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
-      if (smsThreadDraftsEnabled()) {
-        await startSmsThreadDraft({
-          phone,
-          triggerBody: body,
-          skipIntentGate: true,
-          skipCooldown: true,
-        });
-      }
-    } catch (resumeErr) {
-      logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
+    // A bedroom answer that must RE-PRICE a linked draft is durable state
+    // on the ask row until a replacement is confirmed created: the
+    // re-draft paths report failure by returning { created: false }
+    // (red/blocked/skip), not by throwing, and the answer is already
+    // recorded above — without this stamp a failed re-draft would leave
+    // the fallback-priced draft standing with nothing pointing at it.
+    const repriceTarget = recorded.includes('bedroom_count') && locked.estimateId
+      ? locked.estimateId
+      : null;
+    if (repriceTarget) {
+      await stampClarifyFlags(digits, awaiting.id, {
+        reprice_pending: { estimate_id: repriceTarget, bedroom_count: bedroomCount, at: new Date().toISOString() },
+      });
     }
 
+    // The re-draft runs DETACHED: this handler sits on the Twilio inbound
+    // webhook, and a voice re-run does property gathering plus a full
+    // composition — awaiting it would hold the response open past
+    // Twilio's timeout (the SMS path detaches for the same reason). The
+    // answer and the reprice_pending stamp are already durable above.
+    const repricePromise = (async () => {
+      let repriceOutcome = null;
+      // FAIL CLOSED when the guard could not be stamped (the draft already
+      // sent / archived / invalidated / moved on): no re-draft — the bell
+      // below hands it to the operator with the answer on the ask row.
+      const guardMissing = !!repriceTarget && !locked.repriceGuarded;
+      try {
+        if (guardMissing) throw Object.assign(new Error('linked draft is no longer an unsent draft — bedroom re-price handed to the operator'), { expected: true });
+        const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
+        // A bedroom answer re-prices the draft it was asked FOR: the
+        // fallback-priced yellow draft linked on the ask is superseded by
+        // a re-draft (retired atomically with the replacement insert — a
+        // red/skip outcome leaves it standing). A VOICE-origin draft re-runs
+        // from its original call (the quote evidence — enriched extraction
+        // + transcript — lives there; the SMS thread holds only the
+        // question and the answer, so its composer would skip); an
+        // SMS-origin draft re-drafts from the thread. Address/service
+        // answers have no linked draft (red-path asks) and resume as before.
+        const supersedeEstimateId = repriceTarget;
+        const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
+        if (voiceCallLogId) {
+          const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
+          if (estimatorEngineEnabled()) {
+            repriceOutcome = await maybeDraftEstimateForCall({
+              callLogId: voiceCallLogId,
+              quotePromised: true,
+              supersedeEstimateId,
+              supersedeReason: 'clarify_bedroom_reply',
+              supersedeAttempt: locked.repriceAttempt,
+              bedroomCountOverride: bedroomCount,
+            });
+          } else {
+            logger.warn('[estimate-clarify] bedroom answer recorded but the estimator engine is gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+          }
+        } else if (smsThreadDraftsEnabled()) {
+          const started = await startSmsThreadDraft({
+            phone,
+            triggerBody: body,
+            skipIntentGate: true,
+            skipCooldown: true,
+            ...(supersedeEstimateId
+              ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', supersedeAttempt: locked.repriceAttempt, bedroomCountOverride: bedroomCount }
+              : {}),
+          });
+          // The thread draft is itself detached — wait for its outcome only
+          // when a re-price depends on it.
+          repriceOutcome = supersedeEstimateId && started?.draftPromise ? await started.draftPromise : started;
+        } else if (supersedeEstimateId) {
+          logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+        }
+      } catch (resumeErr) {
+        if (resumeErr.expected) logger.info(`[estimate-clarify] ${resumeErr.message}`);
+        else logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
+      }
+      if (!repriceTarget) return repriceOutcome;
+      if (repriceOutcome?.created === true) {
+        // The superseded draft is archived by the replacement insert; its
+        // guard is moot. The ask row records the outcome.
+        await stampClarifyFlags(digits, awaiting.id, {
+          reprice_pending: null,
+          repriced_at: new Date().toISOString(),
+          repriced_estimate_id: repriceOutcome.estimateId || null,
+        });
+      } else {
+        // No replacement: the draft's dollars are KNOWN stale, so the send
+        // guard STAYS (only the operator's explicit re-price clears it);
+        // a scheduled row is pulled off the cron so it cannot auto-send.
+        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, repriceTarget, locked.repriceAttempt))
+          .catch((err) => logger.warn(`[estimate-clarify] unschedule for operator re-price failed: ${err.message}`));
+        // Exception-based (CLAUDE.md rule 14): the pending stamp stays on
+        // the ask row and the operator gets the one bell that names the
+        // draft to re-price — the customer's answer is never lost silently.
+        logger.warn('[estimate-clarify] bedroom answer recorded but the draft could not be re-priced automatically', {
+          draftId: awaiting.id, estimateId: repriceTarget, outcome: repriceOutcome?.lane || repriceOutcome?.skipped || repriceOutcome?.reasons || 'no_outcome',
+        });
+        try {
+          await require('./notification-service').notifyAdmin(
+            'lead',
+            'Bedroom count received — re-price the unit draft',
+            `The customer answered the bedroom question (${bedroomCount === 0 ? 'studio' : `${bedroomCount} bedroom${bedroomCount === 1 ? '' : 's'}`}) but the automated re-draft did not produce a replacement. The draft still carries its fallback price — re-price it before sending.`,
+            {
+              link: `/admin/estimates/${repriceTarget}`,
+              metadata: { estimate_clarify: true, reprice_pending: true, draftId: awaiting.id, estimateId: repriceTarget, bedroomCount },
+            },
+          );
+        } catch (bellErr) {
+          logger.warn(`[estimate-clarify] reprice-pending bell failed (stamp stands): ${bellErr.message}`);
+        }
+      }
+      return repriceOutcome;
+    })();
+    repricePromise.catch((err) => logger.warn(`[estimate-clarify] detached re-draft failed: ${err.message}`));
+
     logger.info('[estimate-clarify] clarify reply recorded', { draftId: awaiting.id, recorded });
-    return { handled: true };
+    // repricePromise is exposed for callers/tests that must observe the
+    // detached outcome; the webhook never awaits it.
+    return { handled: true, repricePromise };
   } catch (err) {
     logger.warn(`[estimate-clarify] reply handling failed: ${err.message}`);
     return { handled: false };
@@ -745,7 +1061,10 @@ async function claimClarifyDispatch({ draft, isRevision = false, releaseFields =
       const { hasConcreteServiceInterest } = require('./lead-estimate-automation');
       const hasServiceNow = hasConcreteServiceInterest(lead?.service_interest);
       const stillMissing = missing.filter((item) => (item === 'street_address' && !hasAddressNow)
-        || (item === 'specific_service' && !hasServiceNow));
+        || (item === 'specific_service' && !hasServiceNow)
+        // No row carries a bedroom count — only the reply handler can
+        // retire it (it drops the item from `missing` when answered).
+        || item === 'bedroom_count');
       if (!stillMissing.length) {
         return retire('Clarify draft retired — the customer already provided the missing details.');
       }
@@ -965,5 +1284,7 @@ module.exports = {
   claimClarifyDispatch,
   clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
-  _private: { composeClarifyBody, extractAddressReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
+  repricePendingActive,
+  clearEstimateRepricePending,
+  _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

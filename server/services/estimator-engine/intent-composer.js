@@ -93,9 +93,21 @@ ADDITIONAL SKIP RULE: skip when the sender is coordinating logistics for service
 
 SKIP CATEGORY: whenever decision="skip", also set "skip_category" to exactly one of: "out_of_scope" (the work maps to no vocabulary key / Waves doesn't offer it), "not_a_quote" (wrong number, vendor, complaint, reschedule), "existing_job" (the additional skip rule above), "ambiguous" (cannot tell what service is wanted), "needs_human_scoping" (mixed-use/multi-parcel or other human scoping). When decision="draft", use null or omit it.`;
 
+// Gated prompt addendum (GATE_UNIT_BAND_PRICING): the caller-stated
+// bedroom count of an apartment/condo unit as a structured field. Kept
+// OUT of SYSTEM_PROMPT for the same reason as the scope-guards addendum —
+// gate-off prompts stay byte-identical.
+const UNIT_BAND_ADDENDUM = `
+
+UNIT BEDROOMS: when the customer states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "it's a 2 bed 2 bath", "studio"), also set "unit_bedroom_count" to that integer (studio = 0). Only what was actually said — never infer it from square footage, rent, or the property type. Omit or use null otherwise. Whole-house bedroom counts are irrelevant; this is for a dwelling unit inside a larger building.`;
+
 function buildSystemPrompt() {
   const { scopeGuardsEnabled } = require('./scope-guards');
-  return scopeGuardsEnabled() ? SYSTEM_PROMPT + SCOPE_GUARDS_ADDENDUM : SYSTEM_PROMPT;
+  const { unitBandPricingEnabled } = require('../pricing-engine/unit-band-pricing');
+  let prompt = SYSTEM_PROMPT;
+  if (scopeGuardsEnabled()) prompt += SCOPE_GUARDS_ADDENDUM;
+  if (unitBandPricingEnabled()) prompt += UNIT_BAND_ADDENDUM;
+  return prompt;
 }
 
 function compactExtraction(extraction) {
@@ -257,5 +269,5 @@ async function composeIntent(context, propertyFacts) {
 
 module.exports = {
   composeIntent,
-  _private: { buildUserContent, parseIntentText, SYSTEM_PROMPT, SCOPE_GUARDS_ADDENDUM, buildSystemPrompt },
+  _private: { buildUserContent, parseIntentText, SYSTEM_PROMPT, SCOPE_GUARDS_ADDENDUM, UNIT_BAND_ADDENDUM, buildSystemPrompt },
 };
