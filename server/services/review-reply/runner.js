@@ -29,7 +29,7 @@ const logger = require('../logger');
 const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
+const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields, whereNeedsRealReply } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
@@ -145,13 +145,22 @@ function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review
 async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 200 } = {}) {
   if (cfg.mode === 'off') return 0;
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
-  const candidates = await db('google_reviews')
+  // Every eligibility predicate is applied in SQL, and the batch is ordered
+  // oldest-first, so a run of ineligible rows (replied / dismissed / out of
+  // scope) can never occupy the batch and starve eligible rows behind it.
+  const q = db('google_reviews')
     .whereNull('auto_reply_status')
     .whereNull('missing_since')
+    .where('reviewer_name', '!=', '_stats')
+    .whereRaw('COALESCE(dismissed, false) = false')
     .where('review_created_at', '>=', cutoff)
-    .select('id', 'location_id', 'reviewer_name', 'review_reply', 'review_created_at', 'dismissed');
+    .modify(whereNeedsRealReply)
+    .orderBy('review_created_at', 'asc')
+    .limit(limit);
+  if (cfg.locations.length) q.whereRaw('lower(location_id) = ANY(?)', [cfg.locations]);
+  const candidates = await q.select('id', 'location_id', 'reviewer_name', 'review_reply', 'review_created_at', 'dismissed');
   let n = 0;
-  for (const c of (candidates || []).slice(0, limit)) {
+  for (const c of (candidates || [])) {
     const fields = autoReplyInsertFields({ ...c, owner_reply: c.review_reply }, { now, cfg });
     if (!Object.keys(fields).length) continue;
     const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status').update(fields);
@@ -414,19 +423,6 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'location_disabled' });
     return { outcome: 'parked', reason: 'location_disabled' };
   }
-  if (!(await gbp.isLocationConfigured(merged.location_id))) {
-    // Credentials can arrive (OAuth connect, token-store recovery): retry on
-    // the identity backoff, park after the ceiling. The authoritative GBP
-    // sync also revives a parked row for that location (requeueFieldsOnIdentity).
-    const attempts = (merged.auto_reply_attempts || 0) + 1;
-    if (attempts < MAX_ATTEMPTS) {
-      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts, auto_reply_due_at: new Date(Date.now() + IDENTITY_BACKOFF_MIN * attempts * 60000).toISOString() });
-      return { outcome: 'retry', reason: 'gbp_not_configured' };
-    }
-    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts });
-    return { outcome: 'parked', reason: 'gbp_not_configured' };
-  }
-
   const rating = Number(merged.star_rating) || 0;
   // Hard invariant, independent of config: unrated and 1-3★ never auto-post.
   const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
@@ -436,7 +432,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -503,6 +499,23 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'drafted', reason: 'shadow', mode: draft.mode };
   }
 
+  // Google write access is required only HERE: shadow drafts and the 1-3★
+  // human-only parks above need no credentials (a Places-fallback location
+  // still gets its drafts and action bells). Credentials can arrive (OAuth
+  // connect, token-store recovery): retry on the identity backoff with the
+  // draft kept for reuse, park after the ceiling. The authoritative GBP sync
+  // also revives a parked row for that location (requeueFieldsOnIdentity).
+  if (!(await gbp.isLocationConfigured(merged.location_id))) {
+    const attempts = (merged.auto_reply_attempts || 0) + 1;
+    const keep = { auto_reply_draft: draft.text, auto_reply_drafted_at: merged.auto_reply_drafted_at || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) };
+    if (attempts < MAX_ATTEMPTS) {
+      await releaseClaim(row, { ...keep, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts, auto_reply_due_at: new Date(Date.now() + IDENTITY_BACKOFF_MIN * attempts * 60000).toISOString() });
+      return { outcome: 'retry', reason: 'gbp_not_configured' };
+    }
+    await releaseClaim(row, { ...keep, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts });
+    return { outcome: 'parked', reason: 'gbp_not_configured' };
+  }
+
   // Publish.
   try {
     const publishedAt = new Date().toISOString();
@@ -546,7 +559,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     if (code === CODES.GOOGLE_UNCERTAIN) {
       // The PUT timed out: it may have landed. Publisher already parked the
       // row; keep the draft for the reconciler and ring an action bell.
-      await db('google_reviews').where({ id: merged.id }).update({ auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode }).catch(() => {});
+      await db('google_reviews').where({ id: merged.id }).update({
+        auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode,
+        // Nothing landed through autoFields (the PUT never returned): keep
+        // the draft timestamp + grounding evidence so a sync that later
+        // confirms the reply as posted has full metadata (shadow metrics,
+        // Post-now reuse, audit).
+        auto_reply_drafted_at: merged.auto_reply_drafted_at || new Date().toISOString(),
+        auto_reply_grounding: JSON.stringify(snapshot),
+      }).catch(() => {});
       await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — Google did not answer in time; the reply MAY be live. Check the review after the next sync.`, reason: 'google_uncertain', action: true, link: `/admin/reviews?responded=all&review=${encodeURIComponent(merged.id)}` });
       return { outcome: 'parked', reason: 'google_uncertain' };
     }

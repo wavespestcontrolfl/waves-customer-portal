@@ -154,6 +154,10 @@ const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
 const SERVICE_CLAIM_RE = /\b(?:solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|problems?|issues?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
+// Outcome / result phrases within SERVICE_CLAIM_RE — the ones a negation
+// in the review flips ("did not get rid of", "never eliminated", "not under
+// control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
+const OUTCOME_TERM_RE = /^(?:solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
 const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|visit(?:ed|s|ing)?|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
@@ -162,6 +166,55 @@ const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out
 const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
 const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit))\b/gi;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
+
+// Negation scopes: each negation token opens a window that runs to the next
+// clause boundary (. ! ? ; , but / however / although / though / yet) or
+// at most eight words. An occurrence whose start index falls inside a
+// window is negated. Returns the windows as [start, end) char ranges.
+const NEGATION_RE = /\b(?:not|no|never|none|nothing|nobody|neither|nor|cannot|can't|couldn't|could\s+not|didn't|did\s+not|doesn't|does\s+not|don't|do\s+not|won't|will\s+not|wouldn't|would\s+not|haven't|hasn't|hadn't|have\s+not|has\s+not|had\s+not|isn't|is\s+not|aren't|are\s+not|wasn't|was\s+not|weren't|were\s+not|failed\s+to|fail\s+to|unable\s+to|without|hardly|barely|far\s+from|instead\s+of|rather\s+than|unfortunately)\b/gi;
+const CLAUSE_BREAK_RE = /[.!?;,]|\b(?:but|however|although|though|yet|except)\b/i;
+function negationIndex(text) {
+  const t = String(text || '');
+  const windows = [];
+  for (const m of t.matchAll(NEGATION_RE)) {
+    const start = m.index + m[0].length;
+    const rest = t.slice(start);
+    const brk = rest.search(CLAUSE_BREAK_RE);
+    let end = brk >= 0 ? start + brk : t.length;
+    // Cap at eight words.
+    let words = 0; let i = start; let inWord = false;
+    while (i < end) { const ch = t[i]; if (/\S/.test(ch)) { if (!inWord) { inWord = true; words++; if (words > 8) { end = i; break; } } } else inWord = false; i++; }
+    windows.push([start, end]);
+  }
+  return windows;
+}
+function isNegatedAt(idx, windows) {
+  return windows.some(([s, e]) => idx >= s && idx < e);
+}
+// null = phrase absent; true = every occurrence negated; false = at least
+// one un-negated occurrence.
+function allOccurrencesNegated(text, phrase, windows) {
+  if (!phrase) return null;
+  let idx = text.indexOf(phrase); let found = false;
+  while (idx >= 0) {
+    found = true;
+    if (!isNegatedAt(idx, windows)) return false;
+    idx = text.indexOf(phrase, idx + phrase.length);
+  }
+  return found ? true : null;
+}
+// Root-matched provenance ("eliminate" ↔ "eliminated"): find the reviewer's
+// words sharing the root and check their occurrences the same way.
+function rootSupported(reviewLower, reviewWords, stem, term, windows) {
+  const roots = [...reviewWords].filter((w) => { const ws = stemOf(w); return w === term || ws === stem || ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); });
+  let anyFound = false;
+  for (const w of roots) {
+    const r = allOccurrencesNegated(reviewLower, w, windows);
+    if (r === false) return true;
+    if (r === true) anyFound = true;
+  }
+  return anyFound ? 'negated' : false;
+}
 
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
 // (?!…) instead of \b: JS word boundaries are ASCII-only and would split "José".
@@ -344,18 +397,50 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   // lawn, care). Generic identity words (pest, lawn, bugs, home) are fine.
   const categoryWords = new Set((grounding.account?.serviceCategories || []).flatMap((c) => normalizeWords(c)));
   const canonReview = canonPhrase(normalizeWords(grounding.review.text).join(' '));
+  // Negation-aware provenance (codex r26): "they did not get rid of the
+  // ants" must not license "glad we got rid of the ants". A phrase counts
+  // as sourced only if the review carries at least one occurrence that is
+  // NOT under a nearby negation — unless the reply negates it too.
+  const bodyLower = body.toLowerCase();
+  const reviewNeg = negationIndex(reviewLower);
+  const canonNeg = negationIndex(canonReview);
+  const bodyNeg = negationIndex(bodyLower);
+  const bodyNegates = (phrase) => allOccurrencesNegated(bodyLower, phrase, bodyNeg) === true;
+  // true = sourced (an un-negated occurrence exists); 'negated' = every
+  // occurrence is negated; false = absent.
+  const reviewSupports = (phrase, canon) => {
+    const lit = allOccurrencesNegated(reviewLower.replace(/\s+/g, ' '), phrase, reviewNeg);
+    const can = canon ? allOccurrencesNegated(canonReview, canon, canonNeg) : null;
+    if (lit === false || can === false) return true;
+    if (lit === true || can === true) return 'negated';
+    return false;
+  };
   const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
   for (const term of body.match(SERVICE_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     // A phrase the reviewer wrote ("took care of" ↔ "take care of", "under
     // control") is sourced — canonical-phrase check before token matching.
-    if (reviewLower.replace(/\s+/g, ' ').includes(t) || canonReview.includes(canonPhrase(t))) continue;
+    const support = reviewSupports(t, canonPhrase(t));
+    if (support === true) continue;
+    // Negation matters for OUTCOME phrases (got rid of, gone, solved …):
+    // "did not get rid of the ants" must not license "we got rid of the
+    // ants". A bare topic noun ("ants", "treatment") inside a negated clause
+    // is still a fine thing to name in the reply.
+    const outcome = OUTCOME_TERM_RE.test(t);
+    if (support === 'negated' && outcome && !bodyNegates(t)) return 'negated_review_claim';
+    if (support === 'negated') continue;
     const stem = stemOf(t);
-    const known = (w) => reviewWords.has(w) || categoryWords.has(w) || genericServiceWords.has(w);
-    if (known(t) || known(stem)) continue;
+    if (categoryWords.has(t) || categoryWords.has(stem) || genericServiceWords.has(t) || genericServiceWords.has(stem)) continue;
     // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
-    // "infestation" ↔ "infested").
-    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) continue;
+    // "infestation" ↔ "infested") — an un-negated occurrence of that root.
+    const rooted = reviewWords.has(t) || reviewWords.has(stem)
+      || (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); }));
+    if (rooted) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, t, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && outcome && !bodyNegates(t)) return 'negated_review_claim';
+      continue;
+    }
     return 'unlisted_service_claim';
   }
   // Provenance for relationship / tenure claims: the reviewer's words or the
@@ -380,8 +465,23 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     const stem = stemOf(t.replace(/[- ]/g, ' '));
-    if (reviewLower.replace(/[- ]+/g, ' ').includes(t.replace(/[- ]+/g, ' ')) || canonReview.includes(canonPhrase(t))) continue;
-    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) continue;
+    const flat = t.replace(/[- ]+/g, ' ');
+    const support = (() => {
+      const lit = allOccurrencesNegated(reviewLower.replace(/[- ]+/g, ' '), flat, negationIndex(reviewLower.replace(/[- ]+/g, ' ')));
+      const can = allOccurrencesNegated(canonReview, canonPhrase(t), canonNeg);
+      if (lit === false || can === false) return true;
+      if (lit === true || can === true) return 'negated';
+      return false;
+    })();
+    if (support === true) continue;
+    if (support === 'negated' && !bodyNegates(flat)) return 'negated_review_claim';
+    if (support === 'negated') continue;
+    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) {
+      const rootSupport = rootSupported(reviewLower, reviewWords, stem, flat, reviewNeg);
+      if (rootSupport === true) continue;
+      if (rootSupport === 'negated' && !bodyNegates(flat)) return 'negated_review_claim';
+      continue;
+    }
     return 'unlisted_experience_claim';
   }
 

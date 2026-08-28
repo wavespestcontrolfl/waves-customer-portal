@@ -41,7 +41,7 @@ jest.mock('../services/review-reply/publisher', () => {
 jest.mock('../models/db', () => {
   const dbFn = (table) => {
     const filters = [];
-    let agg = null; let groupCol = null;
+    let agg = null; let groupCol = null; let order = null; let limitN = null;
     const hits = () => state.rows.filter((r) => filters.every((f) => f(r)));
     const aggregate = (rows) => {
       const as = agg.as;
@@ -52,7 +52,7 @@ jest.mock('../models/db', () => {
     const api = {
       where(a, b, c) {
         if (typeof a === 'string') {
-          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : r[a] === c)); return api; }
+          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : (b === '!=' || b === '<>') ? r[a] !== c : r[a] === c)); return api; }
           filters.push((r) => r[a] === b); return api;
         }
         if (typeof a === 'function') {
@@ -69,9 +69,14 @@ jest.mock('../models/db', () => {
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
+        if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
+        if (/lower\(location_id\) = ANY/.test(sql)) filters.push((r) => params[0].includes(String(r.location_id).toLowerCase()));
         return api;
       },
       orWhere() { return api; },
+      modify(fn, ...args) { fn(api, ...args); return api; },
+      orderBy(col, dir) { order = { col, dir: dir || 'asc' }; return api; },
+      limit(n) { limitN = n; return api; },
       select() { return api; },
       groupBy(col) { groupCol = col; return api; },
       count(expr) { agg = { kind: 'count', as: (/as (\w+)/.exec(String(expr)) || [])[1] || 'n' }; return api; },
@@ -88,7 +93,10 @@ jest.mock('../models/db', () => {
           for (const r of hits()) groups.set(r[groupCol], [...(groups.get(r[groupCol]) || []), r]);
           return Promise.resolve([...groups].map(([k, rows]) => ({ [groupCol]: k, ...aggregate(rows) }))).then(res);
         }
-        return Promise.resolve(hits()).then(res);
+        let out = hits();
+        if (order) out = [...out].sort((x, y) => (x[order.col] < y[order.col] ? -1 : x[order.col] > y[order.col] ? 1 : 0) * (order.dir === 'desc' ? -1 : 1));
+        if (limitN != null) out = out.slice(0, limitN);
+        return Promise.resolve(out).then(res);
       },
     };
     return api;
@@ -244,6 +252,16 @@ describe('enqueueMissedReviews — catch-up for rows the insert-time gate skippe
     expect(await Runner.enqueueMissedReviews({ now })).toBe(1);
     expect(by.venice.auto_reply_status).toBe('queued');
   });
+  test('eligibility is applied in SQL before the batch limit: a wall of replied rows cannot starve an eligible one (codex r26)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    const now = new Date('2026-08-27T16:00:00Z');
+    state.rows = Array.from({ length: 30 }, (_, i) => row({ id: `replied-${i}`, auto_reply_status: null, auto_reply_due_at: null, review_created_at: `2026-08-27T10:${String(i).padStart(2, '0')}:00Z`, review_reply: 'Owner replied' }));
+    state.rows.push(row({ id: 'eligible', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:30:00Z' }));
+    expect(await Runner.enqueueMissedReviews({ now, limit: 5 })).toBe(1);
+    expect(state.rows.find((r) => r.id === 'eligible').auto_reply_status).toBe('queued');
+    expect(state.rows.filter((r) => r.id !== 'eligible').every((r) => r.auto_reply_status == null)).toBe(true);
+  });
+
   test('the cron runs the catch-up before claiming', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     state.rows = [row({ id: 'fresh', auto_reply_status: null, auto_reply_due_at: null, review_created_at: new Date(Date.now() - 3600000).toISOString() })];
@@ -622,6 +640,25 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected', auto_reply_attempts: 0 });
   });
 
+  test('GBP access is required only to publish: shadow drafts and 1-3★ human parks happen at a Places-fallback location; the retry keeps the draft (codex r26)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    mockGbp.isLocationConfigured.mockResolvedValue(false);
+    state.rows = [row({ id: 's', location_id: 'venice' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text });
+    state.rows = [row({ id: 'low', location_id: 'venice', star_rating: 2 })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(state.rows[0].auto_reply_draft).toBeTruthy();
+    // auto mode: the draft is produced, then the missing credentials retry with the draft kept for reuse.
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ id: 'a', location_id: 'venice' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text });
+    expect(state.rows[0].auto_reply_grounding).toBeTruthy();
+    mockGbp.isLocationConfigured.mockResolvedValue(true);
+  });
+
   test('syncReplyFields on a reconciliation park: Google showing the pipeline\'s own draft closes it as POSTED (pipeline-owned); a different reply is the owner\'s', () => {
     const now = new Date('2026-08-27T15:00:00Z');
     const draft = 'Hi Dana, glad Marcus got the ants. Thanks for having us.';
@@ -762,6 +799,10 @@ describe('processDueAutoReplies — state machine', () => {
     const stats = await Runner.processDueAutoReplies();
     expect(stats.parked).toBe(1);
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: GOOD_DRAFT.text });
+    // codex r26: drafted_at + grounding evidence persist too, so a sync that
+    // later confirms the reply as posted leaves full metadata behind.
+    expect(state.rows[0].auto_reply_drafted_at).toBeTruthy();
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toMatchObject({ version: 'grounding-v1' });
     expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'google_uncertain', needsAction: true });
     await Runner.processDueAutoReplies();
     expect(mockPublish).toHaveBeenCalledTimes(1);
@@ -878,13 +919,14 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied' });
   });
 
-  test('location without GBP credentials defers without drafting', async () => {
+  test('location without GBP credentials: the draft is produced (shadow value, human parks), publishing defers with the draft kept', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
-    state.rows = [row({ location_id: 'venice' })];
+    state.rows = [row()];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured' });
-    expect(mockDraft).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured', auto_reply_draft: GOOD_DRAFT.text });
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(mockPublish).not.toHaveBeenCalled();
   });
 
   test('a second runner cannot claim a row the first one holds', async () => {

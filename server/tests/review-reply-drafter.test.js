@@ -230,6 +230,24 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('a result the reviewer NEGATED does not license the claim (codex r26)', () => {
+    const g = grounding({ text: 'Great staff, but they did not get rid of the ants.', topics: ['technician', 'pest'] });
+    expect(verify(good("Hi Dana, we're glad we got rid of the ants for you."), g)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, glad the ants are gone now.'), g)).toBe('unlisted_service_claim');
+    // The reply that negates it too is honest and passes this rule.
+    expect(verify(good("Hi Dana, sorry we did not get rid of the ants yet. Thanks for the note about the staff."), g)).toBeNull();
+    // An un-negated occurrence elsewhere still sources it.
+    const g2 = grounding({ text: 'At first they did not get rid of the ants, but the second visit got rid of the ants for good.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, glad we got rid of the ants in the end.'), g2)).toBeNull();
+    // Experience claims too: "they were not on time" cannot become "glad we were on time".
+    const g3 = grounding({ text: 'Marcus was friendly but he was not on time.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus was on time and friendly.'), g3)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, glad Marcus was friendly, and we hear you that he was not on time.'), g3)).toBeNull();
+    // Root matches respect negation as well: "never eliminated" ≠ "eliminate".
+    const g4 = grounding({ text: 'Nice people, but they never eliminated the roaches.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, glad we could eliminate the roaches.'), g4)).toBe('negated_review_claim');
+  });
+
   test('outcome verbs and clock times need the reviewer\'s words', () => {
     const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
     expect(verify(good("Hello there, we're glad we solved it and got everything handled for you."), g)).toBe('unlisted_service_claim');
