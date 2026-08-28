@@ -278,3 +278,22 @@ describe('triggerNotification preference lookup failure', () => {
     expect(sendToAdminUsers).not.toHaveBeenCalled();
   });
 });
+
+describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
+  const db = require('../models/db');
+  beforeEach(() => {
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
+    ));
+  });
+  test('an event the bell policy silences does not push either', async () => {
+    const NotificationService = require('../services/notification-service');
+    const PushService = require('../services/push-notifications');
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'bell_policy' });
+    PushService.sendToAdminUsers.mockClear();
+    const stats = await triggerNotification('dashboard_alert', { title: 'x', body: 'y' });
+    expect(stats.policySilenced).toBe(true);
+    expect(stats.push).toEqual({ sent: 0, skipped: 'bell_policy' });
+    expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+  });
+});

@@ -754,6 +754,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       })
       .map((u) => u.id);
     let bellWritten = false;
+    // ONE routing decision per event (owner ruling 2026-08-28 — "some are
+    // banners, some are bells"): when the bell policy silences an event, the
+    // phone push banner is silenced with it. Previously the policy gated only
+    // the bell row, so denylisted/silenced events (dashboard alerts, internal
+    // alerts, silenced categories) still buzzed the phone. Category overrides
+    // re-enable both surfaces together.
+    let policySilenced = false;
 
     for (const user of activeAdmins) {
       const userPref = prefsByUser.get(user.id) || { bell_enabled: true, push_enabled: true, sound_enabled: true };
@@ -773,6 +780,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload } }
           );
           if (created && !created.suppressed) bellWritten = true;
+          if (created?.suppressed && created?.reason === 'bell_policy') policySilenced = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);
         }
@@ -785,6 +793,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     // callers (bell replay) stop retrying forever (codex #3232 r25).
     if (activeAdmins.length > 0 && !anyBellEnabled && pushEnabledIds.length === 0) {
       stats.suppressed = true;
+    }
+    if (policySilenced) {
+      stats.policySilenced = true;
+      stats.push = { sent: 0, skipped: 'bell_policy' };
+      return stats;
     }
 
     // Push: send to all admin/technician subscriptions whose user has push enabled.
