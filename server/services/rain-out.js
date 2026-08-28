@@ -1523,7 +1523,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
   // r2 P1). Scoped to the rain-out's own anchor: route SIBLINGS keep
   // their existing windows on a day move, and rounding a legacy
   // half-hour window would silently shift that customer's time.
-  if (process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true'
+  // Either gate can route this move into rescheduleSeries (the older one
+  // here, the collective one through the rebooker's choke point), so the
+  // on-the-hour normalization applies under both.
+  if ((process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' || process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true')
     && !!service.is_recurring
     && String(target.date) !== anchorDateStr
     && (hhmmToMinutes(target.window.start) ?? 0) % 60 !== 0) {
@@ -1917,8 +1920,9 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
       } catch (err) {
         logger.error(`[rain-out] board broadcast unavailable: ${err.message}`);
       }
-      // Kept-tech double-books were committed UNASSIGNED by the rebooker —
-      // park them for reassignment, same as the public series path.
+      // Far-out siblings whose projected window held a seeded placeholder
+      // were committed at their cadence date WITHOUT a window (tech kept) —
+      // park them for retiming, same as the public and dispatch series paths.
       const conflicted = shiftedOccurrences
         .filter((occ) => occ.conflicted)
         .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
@@ -1928,11 +1932,11 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           const card = await NotificationService.notifyAdmin(
             'schedule_conflict',
             'Rain-out series shift needs a look',
-            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and were left UNASSIGNED (${conflicted.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+            `A rain-out shifted a recurring series; ${conflicted.length} future visit(s) landed on already-booked windows and kept their date and technician but have NO time window (${conflicted.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
             { metadata: { scheduledServiceId: job.id, conflicts: conflicted, reasonCode } }
           );
           if (!card) {
-            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — unassigned siblings with no admin card: ${JSON.stringify(conflicted)}`);
+            logger.error(`[rain-out] schedule_conflict card insert FAILED for ${job.id} — windowless siblings with no admin card: ${JSON.stringify(conflicted)}`);
           }
         } catch (err) {
           logger.error(`[rain-out] schedule_conflict notification failed for ${job.id}: ${err.message}`);

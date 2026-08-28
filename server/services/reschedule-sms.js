@@ -177,21 +177,13 @@ class RescheduleSMS {
     }
 
     let smsMoveResult = null;
-    // Future siblings the collective choke point shifted with this reply
-    // (empty for a single-visit move): the timed ones get reminder sync +
-    // the failed-send re-arm below, the windowless ones an operator card.
-    let shiftedSiblings = [];
-    let shiftedTimedSiblings = [];
     if (selectedOption && !alreadyOnSlot) {
       try {
         smsMoveResult = await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
           selectedOption.window, pending.reason_code, 'customer_sms',
-          { sourceSurface: 'sms_reply' },
+          { sourceSurface: 'sms_reply', notifyRequested: false },
         );
-        shiftedSiblings = (Array.isArray(smsMoveResult?.rescheduledOccurrences) ? smsMoveResult.rescheduledOccurrences : [])
-          .filter((occ) => String(occ.id) !== String(pending.scheduled_service_id));
-        shiftedTimedSiblings = shiftedSiblings.filter((occ) => !occ.conflicted && occ.windowStart);
       } catch (err) {
         // The offer was computed without a route check — rebooker can now
         // refuse it (tech conflict, window elapsed). The pending offer is
@@ -228,47 +220,29 @@ class RescheduleSMS {
           logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
         }
         // A date reply on a cadence visit shifted the future series through
-        // the collective choke point: sync each shifted sibling's reminder
-        // to its own new date/kept window. NOT coverDueWindows — the
-        // confirmation below describes the anchor visit only, so a sibling
-        // inside a due window must still get its ordinary reminder (same
-        // contract as the Quick Move sibling sync); expectSchedule keeps the
-        // sync off a sibling that moved again meanwhile. Windowless
-        // occurrences had their reminder pre-closed in the move trx.
-        for (const occ of shiftedTimedSiblings) {
+        // the collective choke point: the sibling effects (per-occurrence
+        // reminder sync — no due-window cover, the confirmation below
+        // describes the anchor only — the windowless-sibling operator card,
+        // board broadcasts) run through the shared, DURABLE effects pass
+        // keyed on the series_moves row: a worker that dies here leaves
+        // unstamped markers that the 15-minute reconciler finishes, instead
+        // of an in-memory effects path the next webhook can never recover
+        // (the pending offer is already marked responded above). notify
+        // stays false: this reply's own confirmation is the customer text.
+        if (smsMoveResult?.seriesMoveId) {
           try {
-            const AppointmentReminders = require('./appointment-reminders');
-            const occDate = String(occ.date).split('T')[0];
-            const occStart = String(occ.windowStart).slice(0, 5);
-            await AppointmentReminders.handleReschedule(
-              occ.id,
-              `${occDate}T${occStart}`,
-              { sendNotification: false, expectSchedule: { date: occDate, windowStart: occStart } },
-            );
+            const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+            await applySeriesMoveEffects({
+              result: smsMoveResult,
+              serviceId: pending.scheduled_service_id,
+              newDate: selectedOption.date,
+              newWindow: selectedOption.window,
+              notify: false,
+              actorId: null,
+              reasonText: null,
+            });
           } catch (err) {
-            logger.warn(`[reschedule-sms] series reminder sync failed for ${occ.id}: ${err.message}`);
-          }
-        }
-        // Shifted siblings that went WINDOWLESS (projected window held a
-        // seeded placeholder beyond the clash horizon) need an operator to
-        // set a time — the same schedule_conflict card the web and dispatch
-        // series paths park; an SMS reply must not leave them untimed
-        // silently.
-        const siblingConflicts = shiftedSiblings
-          .filter((occ) => occ.conflicted)
-          .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-        if (siblingConflicts.length) {
-          try {
-            const NotificationService = require('./notification-service');
-            const notif = await NotificationService.notifyAdmin(
-              'schedule_conflict',
-              'Series re-anchor needs a look',
-              `A customer's text reply moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) projected onto a window already holding another plan's placeholder (${siblingConflicts.map((c) => c.date).join(', ')}). They kept their dates but have NO time window — set a time from dispatch as those dates approach.`,
-              { metadata: { customerId, scheduledServiceId: pending.scheduled_service_id, seriesMoveId: smsMoveResult?.seriesMoveId || null, conflicts: siblingConflicts } },
-            );
-            if (!notif) logger.error(`[reschedule-sms] schedule_conflict notification insert FAILED for ${pending.scheduled_service_id}: ${JSON.stringify(siblingConflicts)}`);
-          } catch (err) {
-            logger.error(`[reschedule-sms] schedule_conflict notification failed for ${pending.scheduled_service_id}: ${err.message}`);
+            logger.error(`[reschedule-sms] series effects failed for ${pending.scheduled_service_id} (reconciler will retry): ${err.message}`);
           }
         }
       }

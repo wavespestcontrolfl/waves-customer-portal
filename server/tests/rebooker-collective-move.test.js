@@ -211,16 +211,17 @@ describe('reschedule() choke point', () => {
     expect(priorLookup.where).toHaveBeenCalledWith('created_at', '>', expect.any(Date));
   });
 
-  test('a derived-key replay also requires the anchor to still sit where the committed move left it', async () => {
+  test('a derived-key retry whose anchor has changed since is STALE — 409, never applied as a single edit', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
-    // Same request key as the committed move, but the anchor's end was edited since → not a retry.
+    // Same request key as the committed move, but the anchor's end was corrected since.
     wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '16:00:00' }), {
       priorMove: { id: 'sm-prior', new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
       priorKey: `svc-1:${TARGET}:13:00:15:00`,
     });
     db.transaction = jest.fn(async () => { throw Object.assign(new Error('single-path-reached'), { single: true }); });
     await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', ADMIN_OPTS))
-      .rejects.toMatchObject({ single: true });
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_MOVE_STALE' });
+    expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('an end-only correction right after a series move is a DIFFERENT request — no replay, the single same-date edit proceeds', async () => {
@@ -571,8 +572,35 @@ describe('previewSeriesMove', () => {
   });
 });
 
+describe('migration backfill — cadence deviations (modal-moved exceptions with no reschedule_log)', () => {
+  const { planCadenceExceptions } = require('../models/migrations/20260828000030_series_moves_and_date_exception.js');
+  const parent = { id: 'p', recurring_pattern: 'weekly', recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, skip_weekends: false };
+
+  test('an occurrence off its projected cadence date is planned with the projected date as its position; on-cadence and already-flagged rows are not', () => {
+    const rows = [
+      { id: 'a', scheduled_date: BASE },
+      { id: 'b', scheduled_date: SIB1 },
+      { id: 'c', scheduled_date: dayOffset(26), date_exception: false },          // cadence SIB2 = dayOffset(24) → deviates by +2
+      { id: 'd', scheduled_date: dayOffset(33), date_exception: true, date_exception_cadence_date: SIB3 }, // already flagged
+      { id: 'e', scheduled_date: dayOffset(38) },                                  // cadence dayOffset(38) = on time
+    ];
+    expect(planCadenceExceptions(parent, rows)).toEqual([{ id: 'c', expected: SIB2 }]);
+  });
+
+  test('a series with no pattern or a single live row plans nothing', () => {
+    expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }])).toEqual([]);
+    expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }])).toEqual([]);
+  });
+});
+
 describe('caller wiring (source)', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('Quick Move normalizes an off-hour target under EITHER gate; SMS-reply effects run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
+    expect(read('../services/rain-out.js')).toContain("(process.env.GATE_COLLECTIVE_SERIES_ANCHOR === 'true' || process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true')");
+    expect(read('../services/reschedule-sms.js')).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
+    expect(read('../index.js')).toContain("runExclusive('series-move-effects-reconcile'");
+  });
 
   test('auto-dispatch hard-codes seriesPolicy single on its own move — never a caller convention', () => {
     const src = read('../services/auto-dispatch/apply.js');

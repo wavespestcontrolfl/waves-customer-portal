@@ -243,12 +243,20 @@ function priorStillCurrent(prior, service, derived) {
     && hm(after.start) === hm(service.window_start)
     && hm(after.end) === hm(service.window_end);
 }
+// A derived-key match whose anchor has since changed is a STALE retry: it
+// must never fall through and apply its old window as a single edit.
 async function findPriorSeriesMove(conn, serviceId, { key, derived }, service = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
   if (!prior) return null;
-  if (service && !priorStillCurrent(prior, service, derived)) return null;
+  if (service && !priorStillCurrent(prior, service, derived)) {
+    throw Object.assign(new Error('This move was already applied and the visit has changed since — reload and check the schedule before moving it again'), {
+      statusCode: 409,
+      isOperational: true,
+      code: 'SERIES_MOVE_STALE',
+    });
+  }
   return prior;
 }
 
@@ -1306,6 +1314,7 @@ class SmartRebooker {
       original_date: dateOnly(service.scheduled_date),
       new_date: seriesDateStr,
       delta_days: deltaDays,
+      notify_requested: options.notifyRequested === true,
     };
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
@@ -2201,4 +2210,6 @@ module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
 module.exports.dateExceptionStamp = dateExceptionStamp;
+module.exports.nextRecurringDate = nextRecurringDate;
+module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;

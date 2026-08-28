@@ -1253,6 +1253,23 @@ httpServer.listen(PORT, () => {
           }
         }, { timezone: 'America/New_York' });
 
+        // Collective series moves: finish the post-commit effects of any
+        // series_moves row whose pass died after the commit (reminder sync,
+        // conflict card, board broadcast, the requested customer text) —
+        // idempotent via the row's markers + lease; no-op when nothing is
+        // pending. Safe with the gate off (no rows appear).
+        cron.schedule('*/15 * * * *', async () => {
+          try {
+            await runExclusive('series-move-effects-reconcile', async () => {
+              const { reconcileSeriesMoveEffects } = require('./routes/admin-dispatch');
+              const out = await reconcileSeriesMoveEffects();
+              if (out.candidates) logger.info(`[cron] series move effects reconcile: ${out.finished}/${out.candidates} finished`);
+            });
+          } catch (err) {
+            logger.error(`[cron] series move effects reconcile failed: ${err.message}`);
+          }
+        }, { timezone: 'America/New_York' });
+
         cron.schedule('0 4 * * 0', async () => {
           try {
             await runExclusive('assessment-analytics-weekly', async () => {

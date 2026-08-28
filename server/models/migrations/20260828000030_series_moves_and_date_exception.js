@@ -34,8 +34,81 @@
  * as an exception with its earliest logged original_date as its cadence
  * position, so the first collective move shifts it instead of regenerating
  * it. Moves made from the Edit appointment modal before this lane wrote no
- * reschedule_log row and cannot be recovered here (stated in the PR).
+ * reschedule_log row — for those, a second pass walks every live series and
+ * marks any occurrence whose date deviates from the cadence projected off
+ * the series' first live occurrence (same projector rescheduleSeries uses),
+ * with that projected date as its cadence position. A false positive costs
+ * nothing (the row shifts by the delta instead of being re-projected); a
+ * miss would erase a customer's exception — so deviation wins.
  */
+const { nextRecurringDate, recurrenceOrdinalOptions, isMonthBasedRecurrence } = require('../../services/rebooker');
+const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
+
+const dateOnly = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
+
+// Pure: which live occurrences of one series sit off their projected cadence
+// date. `rows` = the series' live occurrences (parent included when live)
+// ordered by series position (cadence date, else date). Exported for tests.
+function planCadenceExceptions(parent, rows) {
+  if (!parent?.recurring_pattern || !rows.length) return [];
+  const anchorDate = dateOnly(rows[0].date_exception ? rows[0].date_exception_cadence_date || rows[0].scheduled_date : rows[0].scheduled_date);
+  const opts = {
+    ...(isMonthBasedRecurrence(parent.recurring_pattern)
+      ? recurrenceOrdinalOptions(anchorDate)
+      : { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  const shiftWeekend = (out) => {
+    if (!parent.skip_weekends) return out;
+    const at = parseETDateTime(`${out}T12:00`);
+    const { dayOfWeek } = etParts(at);
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) return out;
+    const back = parent.weekend_shift === 'back';
+    return etDateString(addETDays(at, back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1)));
+  };
+  const planned = [];
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (row.date_exception === true) continue;
+    const expected = shiftWeekend(nextRecurringDate(anchorDate, parent.recurring_pattern, i, opts));
+    if (expected && dateOnly(row.scheduled_date) !== expected) planned.push({ id: row.id, expected });
+  }
+  return planned;
+}
+exports.planCadenceExceptions = planCadenceExceptions;
+
+async function backfillCadenceDeviations(knex) {
+  const parents = await knex('scheduled_services as p')
+    .whereExists(function liveChild() {
+      this.select(1).from('scheduled_services as c')
+        .whereRaw('c.recurring_parent_id = p.id')
+        .where('c.is_recurring', true)
+        .whereNotIn('c.status', ['completed', 'cancelled'])
+        .whereRaw("c.scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date");
+    })
+    .whereNotNull('p.recurring_pattern')
+    .select('p.*');
+  let stamped = 0;
+  for (const parent of parents) {
+    const rows = await knex('scheduled_services')
+      .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parent.id, parent.id])
+      .whereNotIn('status', ['completed', 'cancelled'])
+      .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
+      .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
+      .select('id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date');
+    for (const plan of planCadenceExceptions(parent, rows)) {
+      stamped += await knex('scheduled_services')
+        .where({ id: plan.id, date_exception: false })
+        .update({
+          date_exception: true,
+          date_exception_source: 'backfill_cadence',
+          date_exception_at: knex.fn.now(),
+          date_exception_cadence_date: plan.expected,
+        });
+    }
+  }
+  return stamped;
+}
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('series_moves'))) {
     await knex.schema.createTable('series_moves', (t) => {
@@ -59,6 +132,9 @@ exports.up = async function up(knex) {
       t.jsonb('rows').notNullable().defaultTo('[]');
       t.jsonb('result');
       t.boolean('customer_notified').notNullable().defaultTo(false);
+      // Whether the initiating surface asked for the customer text — read
+      // by the effects reconciler when it finishes a pass that died.
+      t.boolean('notify_requested').notNullable().defaultTo(false);
       t.timestamp('notified_at', { useTz: true });
       t.timestamp('conflict_card_at', { useTz: true });
       t.timestamp('reminders_synced_at', { useTz: true });
@@ -140,6 +216,9 @@ exports.up = async function up(knex) {
     `);
      
     console.log(`[20260828000030] backfilled ${backfilled.rowCount ?? '?'} pre-existing manual date exception(s) from reschedule_log`);
+    const deviations = await backfillCadenceDeviations(knex);
+     
+    console.log(`[20260828000030] backfilled ${deviations} cadence deviation(s) (modal-moved and other unlogged exceptions)`);
   }
 };
 

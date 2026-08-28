@@ -220,6 +220,7 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
       allowLive: true,
       adminWindowRules: true,
       sourceSurface: 'dispatch_board',
+      notifyRequested: false,
       // Staff surface — occupancy clashes commit with a warning (owner
       // ruling 2026-08-25, rebooker.overlapAdvisory).
       overlapAdvisory: true,

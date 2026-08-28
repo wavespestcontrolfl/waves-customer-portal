@@ -14129,18 +14129,21 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           seriesGuardSnapshotFailed = true;
         }
       }
+      let allBroadcast = true;
       for (const occurrence of occurrences) {
         try {
           await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
         } catch (err) {
+          allBroadcast = false;
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
         }
       }
-      // Completion means EVERY occurrence's reminder synced — a swallowed
-      // failure must leave the marker unstamped so the next retry re-runs
-      // the sync (handleReschedule is idempotent for already-synced rows).
-      if (allRemindersSynced) await stampMarker('reminders_synced_at');
-      else logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: one or more reminder syncs failed — reminders_synced_at left unstamped for retry`);
+      // Completion means EVERY occurrence's reminder synced AND every board
+      // broadcast went out — a swallowed failure of either leaves the marker
+      // unstamped so the next pass re-runs both (the sync is idempotent for
+      // already-synced rows; a re-emit is harmless).
+      if (allRemindersSynced && allBroadcast) await stampMarker('reminders_synced_at');
+      else logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder sync or board broadcast incomplete — reminders_synced_at left unstamped for retry`);
     }
 
     let notificationSent = false;
@@ -14238,6 +14241,45 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   }
 }
 
+// Durable recovery for the post-commit effects: a pass that died after the
+// series committed (process exit between the trx and the effects, a webhook
+// worker restart) leaves a committed series_moves row with unstamped
+// markers. The 15-minute cron calls this to finish exactly the incomplete
+// effects of every such row from the operation's own recorded result —
+// only for surfaces whose effects run through applySeriesMoveEffects (the
+// customer web page and Quick Move keep their own effect paths).
+const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply'];
+async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
+  const rows = await db('series_moves')
+    .where({ status: 'committed' })
+    .whereIn('source_surface', RECONCILE_SURFACES)
+    .where('created_at', '<', new Date(Date.now() - olderThanMs))
+    .where((q) => q.whereNull('reminders_synced_at').orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at')))
+    .orderBy('created_at', 'asc')
+    .limit(limit)
+    .select('id', 'anchor_service_id', 'new_date', 'result', 'notify_requested');
+  let finished = 0;
+  for (const row of rows) {
+    const stored = row.result && typeof row.result === 'object' ? row.result : null;
+    if (!stored) continue;
+    try {
+      const out = await applySeriesMoveEffects({
+        result: { ...stored, seriesMoveId: row.id },
+        serviceId: row.anchor_service_id,
+        newDate: row.new_date instanceof Date ? row.new_date.toISOString().slice(0, 10) : String(row.new_date).slice(0, 10),
+        newWindow: null,
+        notify: row.notify_requested === true,
+        actorId: null,
+        reasonText: null,
+      });
+      if (!out.inProgress) finished += 1;
+    } catch (err) {
+      logger.error(`[dispatch] series move effects reconcile failed for ${row.id}: ${err.message}`);
+    }
+  }
+  return { candidates: rows.length, finished };
+}
+
 // GET /api/admin/dispatch/:serviceId/series-move-preview?newDate=YYYY-MM-DD
 // The server contract a surface renders before a collective move ("Move
 // visit + N future visits") — counts come from the rebooker's own sibling
@@ -14304,6 +14346,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         allowLive: true,
         adminWindowRules: true,
         sourceSurface: 'dispatch_board',
+        notifyRequested: notifyCustomer !== false,
         ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
@@ -14378,6 +14421,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
     rescheduleOptions.sourceSurface = 'dispatch_board';
+    rescheduleOptions.notifyRequested = notifyCustomer !== false;
     if (operationKey) rescheduleOptions.operationKey = operationKey;
     // Disclosure contract (PR2 wires it): the collective choke point would
     // widen this singular move to the whole series. A surface that sent
@@ -15663,6 +15707,7 @@ module.exports = router;
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
 module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
+module.exports.reconcileSeriesMoveEffects = reconcileSeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,

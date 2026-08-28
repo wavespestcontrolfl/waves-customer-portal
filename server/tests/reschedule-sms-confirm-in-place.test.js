@@ -211,7 +211,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-06', { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
-      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply' },
+      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply', notifyRequested: false },
     );
     // The re-book moved the visit, so the reminder row must be re-armed onto
     // the new slot — otherwise the promised day-before reminder never fires.
@@ -248,7 +248,7 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-04', { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
-      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply' },
+      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply', notifyRequested: false },
     );
   });
 

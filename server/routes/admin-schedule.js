@@ -6637,6 +6637,7 @@ async function planCollectiveEditDateMove(req) {
         adminWindowRules: true,
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
+        notifyRequested: notifyCustomer === true,
         ...(operationKey ? { operationKey } : {}),
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.
