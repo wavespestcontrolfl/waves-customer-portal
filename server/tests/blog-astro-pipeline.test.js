@@ -3464,6 +3464,12 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(countBodyImages(out)).toBe(2);
   });
 
+  test('insertBodyImages: blank lines inside fenced code are preserved; blanks added only where neighbours lack them (hook r4)', () => {
+    const body = 'Prose.\n\n```js\nline1\n\n\n\nline2\n```\n\n## B\nThree.';
+    const out = insertBodyImages(body, [{ insertAt: 2, src: '/i.webp', alt: 'A' }, { insertAt: 12, src: '/j.webp', alt: 'B' }]);
+    expect(out).toBe('Prose.\n\n![A](/i.webp)\n\n```js\nline1\n\n\n\nline2\n```\n\n## B\nThree.\n\n![B](/j.webp)');
+  });
+
   test('gate ON, new post: generates BODY_IMAGE_MIN blog-body images from section context, commits them beside the hero in ONE commit, inserts refs with vetted alts', async () => {
     gh.getFile.mockResolvedValue(null);
     mockHeroGeneration();

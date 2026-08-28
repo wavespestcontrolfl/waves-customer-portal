@@ -1777,9 +1777,13 @@ function insertBodyImages(body, placements) {
   const ordered = [...placements].sort((a, b) => b.insertAt - a.insertAt);
   for (const { insertAt, src, alt } of ordered) {
     const label = String(alt || '').replace(/[\[\]]/g, '').replace(/\s+/g, ' ').trim();
-    lines.splice(insertAt, 0, '', `![${label}](${src})`, '');
+    // Blank lines only where the neighbours don't already provide them —
+    // never a global whitespace rewrite (fenced code keeps its blank lines).
+    const before = insertAt > 0 && lines[insertAt - 1].trim() !== '' ? [''] : [];
+    const after = insertAt < lines.length && lines[insertAt].trim() !== '' ? [''] : [];
+    lines.splice(insertAt, 0, ...before, `![${label}](${src})`, ...after);
   }
-  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  return lines.join('\n').trim();
 }
 
 // A committed body image is reusable for a NEW slot only when the live body
