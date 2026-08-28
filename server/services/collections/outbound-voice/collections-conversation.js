@@ -53,7 +53,7 @@ const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 const { invoiceAmountDue } = require('../../invoice-helpers');
 const { etCalendarDayOf } = require('../../../utils/datetime-et');
-const { anchorInvoiceOf, orderByDue, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
+const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
 // CLAIMS its SEND_CLAIMABLE_STATUSES (the one sendability authority). The
@@ -1200,18 +1200,18 @@ class CollectionsConversation {
     const ordered = orderByDue(b.invoices || []);
     const nameOf = (inv) => {
       const label = inv.title || inv.service_type || 'service';
-      const when = inv.service_date || dueValueOf(inv); // due_date, else created_at — the clock's own fallback
-      // DATE columns pass through; a timestamp fallback renders as its ET
-      // calendar day (hook r5) — never String(Date) in the box's UTC.
-      return `${label}${when ? ` on ${etCalendarDayOf(when)}` : ''}`;
+      // service_date / due_date are DATE columns (literal); the created_at
+      // fallback is a timestamp rendered as its ET day (hook r5/r6).
+      const when = inv.service_date ? etCalendarDayOf(inv.service_date) : dueDayOf(inv);
+      return `${label}${when ? ` on ${when}` : ''}`;
     };
     const lines = ordered.map((inv) => {
-      const days = daysOverdueOn(now, dueValueOf(inv));
+      const days = invoiceDaysOverdue(now, inv);
       const age = days > 0 ? `${days} day${days === 1 ? '' : 's'} past due` : 'not yet due';
       return `${nameOf(inv)}: $${Number(invoiceAmountDue(inv)).toFixed(2)} (${age})`;
     });
     const anchor = anchorInvoiceOf(ordered);
-    const anchorDays = anchor ? daysOverdueOn(now, dueValueOf(anchor)) : 0;
+    const anchorDays = anchor ? invoiceDaysOverdue(now, anchor) : 0;
     // Consequence lines — spoken ONLY on true state (never asserted):
     const ctx = this._ctx || {};
     let consequence = '';

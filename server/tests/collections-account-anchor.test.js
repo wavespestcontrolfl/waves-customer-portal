@@ -2,7 +2,7 @@
  * account-anchor — ONE dunning clock per customer, anchored to the
  * OLDEST-due open invoice (owner ruling 2026-08-28).
  */
-const { anchorInvoiceOf, orderByDue, accountDaysOverdue, daysOverdueOn, dunningTierForOverdue, registerForTier, dueValueOf } = require('../services/collections/account-anchor');
+const { anchorInvoiceOf, orderByDue, accountDaysOverdue, daysOverdueOn, invoiceDaysOverdue, dunningTierForOverdue, registerForTier, dueDayOf } = require('../services/collections/account-anchor');
 
 const NOW = new Date('2026-08-28T15:00:00Z'); // 11:00 ET Fri Aug 28
 
@@ -10,10 +10,19 @@ test('anchor = oldest due_date (ties broken by created_at); created_at is the fa
   const a = { id: 'a', due_date: '2026-08-24', created_at: '2026-08-10T00:00:00Z' };
   const b = { id: 'b', due_date: '2026-07-29', created_at: '2026-07-15T00:00:00Z' };
   const c = { id: 'c', due_date: null, created_at: '2026-07-20T00:00:00Z' };
-  expect(anchorInvoiceOf([a, b, c]).id).toBe('c'); // created_at 07-20 < due 07-29
+  expect(anchorInvoiceOf([a, b, c]).id).toBe('c'); // created_at 07-20T00Z = 07-19 ET < due 07-29
   expect(anchorInvoiceOf([a, b]).id).toBe('b');
   expect(anchorInvoiceOf([])).toBeNull();
-  expect(dueValueOf(c)).toBe('2026-07-20T00:00:00Z');
+  expect(dueDayOf(c)).toBe('2026-07-19'); // a UTC-midnight timestamp is the PREVIOUS day in ET — never read as date-only
+  expect(dueDayOf({ id: 'd', due_date: '2026-07-20', created_at: '2026-07-01T00:00:00Z' })).toBe('2026-07-20'); // DATE column literal
+  expect(dueDayOf({ id: 'e' })).toBeNull();
+});
+
+test('the created_at fallback ages by its ET day, the due_date literal by its own', () => {
+  expect(invoiceDaysOverdue(NOW, { created_at: new Date('2026-07-20T00:00:00Z') })).toBe(40); // 07-19 ET → 08-28
+  expect(invoiceDaysOverdue(NOW, { due_date: '2026-07-20' })).toBe(39);
+  expect(invoiceDaysOverdue(NOW, { created_at: '2026-07-20T12:00:00Z' })).toBe(39); // 08:00 ET, same day
+  expect(invoiceDaysOverdue(NOW, {})).toBe(0);
 });
 
 test('equal due dates tie-break on created_at as INSTANTS (Postgres returns Date objects)', () => {

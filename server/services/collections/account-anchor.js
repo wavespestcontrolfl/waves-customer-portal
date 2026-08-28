@@ -9,15 +9,27 @@ const { etCalendarDayOf, etDateString } = require('../../utils/datetime-et');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** Due reference for an invoice: due_date, else created_at (the rails' rule). */
-function dueValueOf(invoice) {
-  return invoice ? (invoice.due_date || invoice.created_at || null) : null;
+/**
+ * The ET due DAY of an invoice ('YYYY-MM-DD'): due_date (a DATE column —
+ * literal), else created_at (a timestamptz — its America/New_York calendar
+ * day; a UTC-midnight instant is the PREVIOUS day in ET, so it is never
+ * read as date-only). Field-aware on purpose (hook r6): the rails' fallback
+ * rule, with the timezone discipline applied per column type.
+ */
+function dueDayOf(invoice) {
+  if (!invoice) return null;
+  if (invoice.due_date) return etCalendarDayOf(invoice.due_date);
+  if (invoice.created_at) {
+    const t = new Date(invoice.created_at);
+    return Number.isNaN(t.getTime()) ? null : etDateString(t);
+  }
+  return null;
 }
 
-/** Whole ET calendar days between the due value and `now` (negative = not yet due). */
-function daysOverdueOn(now, dueValue) {
-  if (!dueValue) return 0;
-  const dueStr = etCalendarDayOf(dueValue);
+/** Whole ET calendar days between a due DAY ('YYYY-MM-DD' / DATE) and `now` (negative = not yet due). */
+function daysOverdueOn(now, dueDay) {
+  if (!dueDay) return 0;
+  const dueStr = etCalendarDayOf(dueDay);
   const nowStr = etDateString(now);
   const [dy, dm, dd] = dueStr.split('-').map(Number);
   const [ny, nm, nd] = nowStr.split('-').map(Number);
@@ -30,10 +42,10 @@ function epochOf(value) {
   return Number.isFinite(t) ? t : Number.POSITIVE_INFINITY;
 }
 
-/** ET due day of an invoice ('YYYY-MM-DD'); missing sorts last. */
-function dueDayOf(invoice) {
-  const v = dueValueOf(invoice);
-  return v ? String(etCalendarDayOf(v)) : '9999-99-99';
+/** Days overdue of ONE invoice by its field-aware due day. */
+function invoiceDaysOverdue(now, invoice) {
+  const day = dueDayOf(invoice);
+  return day ? daysOverdueOn(now, day) : 0;
 }
 
 /**
@@ -43,8 +55,8 @@ function dueDayOf(invoice) {
  */
 function orderByDue(invoices = []) {
   return invoices.filter(Boolean).slice().sort((x, y) => {
-    const a = dueDayOf(x);
-    const b = dueDayOf(y);
+    const a = dueDayOf(x) || '9999-99-99'; // missing sorts last
+    const b = dueDayOf(y) || '9999-99-99';
     if (a !== b) return a < b ? -1 : 1;
     return epochOf(x.created_at) - epochOf(y.created_at);
   });
@@ -58,7 +70,7 @@ function anchorInvoiceOf(invoices = []) {
 /** Days overdue of the ACCOUNT = of its anchor invoice. */
 function accountDaysOverdue(now, invoices = []) {
   const anchor = anchorInvoiceOf(invoices);
-  return anchor ? daysOverdueOn(now, dueValueOf(anchor)) : 0;
+  return anchor ? invoiceDaysOverdue(now, anchor) : 0;
 }
 
 // Same escalation boundaries as the late-payment tiers (7/14/30/60/90); the
@@ -79,4 +91,4 @@ function registerForTier(tier) {
   return 'friendly';
 }
 
-module.exports = { dueValueOf, daysOverdueOn, orderByDue, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };
+module.exports = { dueDayOf, daysOverdueOn, invoiceDaysOverdue, orderByDue, anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, registerForTier };

@@ -21,7 +21,7 @@ const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { orderByDue, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('./account-anchor');
+const { orderByDue, dueDayOf, daysOverdueOn, invoiceDaysOverdue, dunningTierForOverdue } = require('./account-anchor');
 const { withCaseLock } = require('./case-lock');
 
 function shadowGateEnabled() {
@@ -102,7 +102,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoice
     ? [
         `Invoices (${invoices.length}) - $${amountDollars} open balance; the oldest is ${daysOverdue} days past due:`,
         ...invoices.map((inv) => {
-          const days = daysOverdueOn(now, dueValueOf(inv));
+          const days = invoiceDaysOverdue(now, inv);
           // Amount from the approved snapshot, never the display reload.
           const cents = verdict.eligibleInvoiceCents?.[String(inv.id)];
           const dollars = (Number.isFinite(Number(cents)) && cents != null ? Number(cents) / 100 : Number(invoiceAmountDue(inv))).toFixed(2);
@@ -187,7 +187,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
         continue;
       }
       const invoice = invoiceRows[0];
-      const dueValue = verdict.eligibleAnchorDueDate || dueValueOf(invoice);
+      const dueValue = verdict.eligibleAnchorDueDate || dueDayOf(invoice);
       const daysOverdue = daysOverdueOn(now, dueValue);
       const tier = verdict.eligibleAccountTier ?? dunningTierForOverdue(daysOverdue);
 

@@ -28,9 +28,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { openBalanceInvoices } = require('../open-balance');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { etParts, etCalendarDayOf } = require('../../utils/datetime-et');
+const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
-const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueValueOf } = require('./account-anchor');
+const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
 
 const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
 
@@ -308,7 +308,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     if (eligible.length) {
       const anchor = anchorInvoiceOf(eligible);
       result.eligibleAccountTier = dunningTierForOverdue(accountDaysOverdue(now, eligible));
-      result.eligibleAnchorDueDate = etCalendarDayOf(dueValueOf(anchor));
+      result.eligibleAnchorDueDate = dueDayOf(anchor);
     }
     // Dues-only carve-out (codex 2026-08-14 P1): the previsit rail
     // legitimately reminds about late MONTHLY-MEMBERSHIP DUES with zero
