@@ -2109,7 +2109,15 @@ export default function ReviewsPage() {
       ...prev,
       reviews: prev.reviews.map((r) =>
         r.id === reviewId
-          ? { ...r, reply: replyText, replyUpdatedAt: new Date().toISOString() }
+          ? {
+            ...r,
+            reply: replyText,
+            replyUpdatedAt: new Date().toISOString(),
+            // A manual post closes out the auto-reply state server-side
+            // (skipped/manual_reply); mirror it so Retract — which deletes
+            // whatever reply is live — is not offered on a human's reply.
+            autoReply: r.autoReply ? { ...r.autoReply, status: "skipped", reason: "manual_reply" } : null,
+          }
           : r,
       ),
     }));

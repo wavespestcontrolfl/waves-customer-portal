@@ -166,6 +166,26 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       }
       const staleReason = guard ? await guard(fresh) : null;
       if (staleReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${staleReason}`, { status: 409 });
+      if (!allowOverwrite) {
+        // Non-overwriting callers (automation) also check Google's LIVE
+        // resource: an owner reply written in Google after the last sync is
+        // invisible locally, and the PUT would replace it. Fail closed on a
+        // read error — the row retries later.
+        let live;
+        try {
+          live = await gbp.getReview(resourceName, review.location_id);
+        } catch (e) {
+          throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
+        }
+        const liveReply = String(live?.reviewReply?.comment || '').trim();
+        if (liveReply) {
+          // Record what Google has so the row leaves the needs-reply queue.
+          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
+            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
+            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+          throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
+        }
+      }
       await gbp.replyToReview(resourceName, replyText, review.location_id);
       return true;
     });
@@ -208,6 +228,12 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     outcome.abandonClaim();
     abandoned = true;
     logger.error(`[review-reply] Google accepted the reply for ${reviewId} but local persistence failed: ${err.message}`);
+    // Best effort for EVERY caller (manual route, IB, runner): take the row
+    // out of the automatic lane so an expired claim cannot let the cron
+    // reclaim it and replace the live reply. The runner adds its bell.
+    await db('google_reviews').where({ id: reviewId })
+      .update({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_error: String(err.message || '').slice(0, 1000), auto_reply_claimed_until: null })
+      .catch((e2) => logger.error(`[review-reply] persist_failed park also failed for ${reviewId}: ${e2.message}`));
     throw new ReviewReplyError(CODES.PERSIST_FAILED, `Reply is live on Google but was not recorded locally (${err.message}) — reconcile by hand.`, { status: 500, cause: err });
   } finally {
     if (!abandoned) await outcome.releaseClaim();

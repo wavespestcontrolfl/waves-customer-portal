@@ -5,6 +5,7 @@
 // that automation never fakes a local-only post.
 const mockGbp = {
   configured: true,
+  getReview: jest.fn(async () => ({ reviewReply: null })),
   isLocationConfigured: jest.fn(async () => true),
   getAllLocationReviews: jest.fn(async () => []),
   replyToReview: jest.fn(async () => ({ comment: 'ok' })),
@@ -91,6 +92,23 @@ describe('publishReviewReply', () => {
     state.rows[0].auto_reply_claimed_until = 'tok-1';
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' }, guard });
     expect(r.googlePosted).toBe(true);
+  });
+
+  test('automation checks Google\'s LIVE owner reply inside the claim and yields to it', async () => {
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner replied in Google directly', updateTime: '2026-08-27T10:00:00Z' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.HAS_REPLY });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Owner replied in Google directly');
+    // A read failure fails closed (retry later), never posts.
+    state.rows[0].review_reply = null;
+    mockGbp.getReview.mockRejectedValueOnce(new Error('GBP 503'));
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // Human overwrite paths do not consult the live resource.
+    await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true });
+    expect(mockGbp.getReview).toHaveBeenCalledTimes(2);
   });
 
   test('activity_log never carries the reviewer name', async () => {
@@ -200,6 +218,8 @@ describe('publishReviewReply — post-publish persistence failure', () => {
     expect(out.releaseClaim).not.toHaveBeenCalled();
     expect(state.activity).toHaveLength(0);
     expect(state.rows[0].review_reply).toBeNull();
+    // Every caller gets the row parked out of the auto lane (best effort).
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
   });
   test('a typed post-publish error (RACE) still releases the claim normally', async () => {
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };

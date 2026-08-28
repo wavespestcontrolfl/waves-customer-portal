@@ -41,6 +41,8 @@ describe('review-derived facts', () => {
   test('reviewer first name: real names pass, handles and initials do not', () => {
     expect(G.reviewerFirstName('Dana Whitfield')).toBe('Dana');
     expect(G.reviewerFirstName('dana w.')).toBe('Dana');
+    expect(G.reviewerFirstName('José Alvarez')).toBe('José');
+    expect(G.reviewerFirstName('Zoë')).toBe('Zoë');
     expect(G.reviewerFirstName('A Google User')).toBeNull();
     expect(G.reviewerFirstName('J.')).toBeNull();
     expect(G.reviewerFirstName('XXBLAZE99')).toBeNull();

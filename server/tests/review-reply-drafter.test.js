@@ -149,6 +149,18 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad Marcus got the ants at 123 main st handled.'), g)).toBe('address');
     expect(verify(good('Hi Dana, glad Marcus got the ants at 123 4th St handled.'), g)).toBe('address');
   });
+  test('date and relative-time claims are rejected unless the reviewer wrote them', () => {
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled on Tuesday.'))).toBe('date_claim');
+    const g = grounding({ text: 'Marcus came out last week and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'), g)).toBeNull();
+  });
+  test('Unicode names survive normalization and the name allowlist', () => {
+    const g = grounding({ firstName: 'José' });
+    g.allow.names = ['José', 'Marcus'];
+    expect(verify(good('Hi José, glad Marcus got the ants out of your kitchen so fast.'), g)).toBeNull();
+    expect(Drafter.greetingName('Hi José, thanks')).toBe('José');
+  });
   test('drying / curing / wait-before language is banned even when the number came from the review', () => {
     const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
     expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');
@@ -199,7 +211,7 @@ describe('draftReviewReply — fallback ladder', () => {
     mockDispatch
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') })
       .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, call 941-555-1212 about the ants Marcus treated.') })
-      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants last week.') });
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants for you.') });
     const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
     expect(r.ok).toBe(false);
     expect(r.reason).toBe('verifier_reject');

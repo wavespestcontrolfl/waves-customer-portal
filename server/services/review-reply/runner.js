@@ -171,9 +171,15 @@ function claimGuard(row) {
     if (fresh.dismissed) return 'review was dismissed';
     const held = fresh.auto_reply_claimed_until ? new Date(fresh.auto_reply_claimed_until).toISOString() : null;
     if (held !== row._claimToken) return 'auto-reply claim was lost';
+    // The draft was written for THIS rating and text. A reviewer edit the
+    // sync applied meanwhile (a 5★ turned 2★, a rewritten body) makes the
+    // draft stale — and may move the review under the human-only rule.
+    if (Number(fresh.star_rating) !== Number(row.star_rating)
+      || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()) return REVIEW_CHANGED;
     return null;
   };
 }
+const REVIEW_CHANGED = 'review changed while drafting';
 
 // A "[DRAFT]" on review_reply that the pipeline did NOT write (Agent Ops
 // template, an operator's saved draft) is a human intervention: the cron
@@ -416,6 +422,12 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await parkPersistFailed(merged, draft, err);
       return { outcome: 'parked', reason: 'persist_failed' };
     }
+    if (code === CODES.STALE && err.message.includes(REVIEW_CHANGED)) {
+      // Not lost to a person — the review itself changed. Back to the queue
+      // for a fresh draft against the current rating/text.
+      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: new Date().toISOString(), auto_reply_draft: null, auto_reply_drafted_at: null });
+      return { outcome: 'retry', reason: 'review_changed' };
+    }
     if (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE) {
       // Not ours any more (a human replied / skipped / dismissed, or Google
       // removed it) — record and stop; never retry over a person's action.
@@ -435,7 +447,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : 'google_failed';
-    await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot });
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
     logger.error(`[review-auto-reply] publish failed for ${merged.id}: ${code} (${err.message})`);
     return { outcome: 'parked', reason: code };

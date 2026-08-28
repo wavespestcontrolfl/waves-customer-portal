@@ -68,7 +68,10 @@ const TOPIC_MATCHERS = [
 function reviewerFirstName(reviewerName) {
   const raw = String(reviewerName || '').trim();
   if (!raw) return null;
-  const first = raw.split(/\s+/)[0].replace(/[^A-Za-z'\-]/g, '');
+  // Keep Unicode letters (José, Zoë); strip only punctuation/digits. A name
+  // that is not representable as letters yields no greeting rather than a
+  // truncated one.
+  const first = raw.split(/\s+/)[0].replace(/[^\p{L}'\-]/gu, '');
   // "A Google User", single initials, ALL-CAPS handles, and non-alphabetic
   // handles get no greeting-by-name.
   if (first.length < 2 || first.length > 14) return null;

@@ -298,6 +298,22 @@ class GoogleBusinessService {
     return readJsonOrThrow(res, 'GBP replyToReview');
   }
 
+  // Single-review read (v4 GET {name}) — used by the reply publisher to see
+  // Google's CURRENT owner reply inside its publish claim, since the hourly
+  // sync cannot close the "owner replied in Google after the last sync" gap.
+  async getReview(reviewResourceName, locationId) {
+    if (!locationId) {
+      const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
+      if (match) {
+        const loc = WAVES_LOCATIONS.find(l => l.googleAccountId === match[1]);
+        locationId = loc?.id || 'bradenton';
+      }
+    }
+    const headers = await this._getHeaders(locationId);
+    const res = await fetch(`https://mybusiness.googleapis.com/v4/${reviewResourceName}`, { headers });
+    return readJsonOrThrow(res, 'GBP getReview');
+  }
+
   async deleteReply(reviewResourceName, locationId) {
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);

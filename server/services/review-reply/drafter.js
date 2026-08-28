@@ -120,10 +120,14 @@ these they this those though to too up us very was we we'll we're we've welcome 
 what when where whether which while who why will wish with would yes you your you're yours
 `.split(/\s+/).filter(Boolean));
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast']);
+// Any date / relative-time expression. The reply may not state when we were
+// there; a phrase is allowed only if the reviewer wrote it themselves.
+const DATE_CLAIM_RE = /\b(?:yesterday|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|month|year|weekend)|last (?:week|month|year|weekend|night|time|visit|spring|summer|fall|winter)|next (?:week|month|year|visit)|(?:\d+|a|an|few|couple(?: of)?|several|two|three|four|five|six|seven|eight|nine|ten) (?:days?|weeks?|months?|years?|hours?|minutes?) ago|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|\bmay \d|on the \d{1,2}(?:st|nd|rd|th)|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:19|20)\d{2})\b/i;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
-const GREETING_RE = /^\s*(?:hi|hello|hey|dear)\s+([A-Za-z][A-Za-z'-]{1,20})\b/i;
+// (?!…) instead of \b: JS word boundaries are ASCII-only and would split "José".
+const GREETING_RE = /^\s*(?:hi|hello|hey|dear)\s+(\p{L}[\p{L}'-]{1,20})(?![\p{L}'-])/iu;
 function greetingName(text) {
   const m = String(text || '').match(GREETING_RE);
   if (!m) return null;
@@ -132,7 +136,7 @@ function greetingName(text) {
 }
 
 function normalizeWords(s) {
-  return String(s || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean);
+  return String(s || '').toLowerCase().replace(/[^\p{L}\p{N}'\s]/gu, ' ').split(/\s+/).filter(Boolean);
 }
 
 function jaccard(a, b) {
@@ -206,6 +210,9 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   if (BANNED_RE.test(body)) return 'banned_phrase';
   if (DISPUTE_RE.test(body)) return 'dispute_words';
   if (STOCK_PHRASE_RE.test(body)) return 'stock_phrase';
+  for (const phrase of body.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
+    if (!grounding.review.text.toLowerCase().includes(phrase.toLowerCase())) return 'date_claim';
+  }
 
   // Private-channel phrasing is allowed only when the reviewer used the same
   // phrase themselves (then it is public by their choice).
@@ -248,7 +255,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
   }
   const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
-  const properNounRe = /(^|[^A-Za-z'])([A-Z][a-z'-]+)/g;
+  const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+)/gu;
   let pn;
   while ((pn = properNounRe.exec(body)) !== null) {
     if (inCitySpan(pn.index + pn[1].length)) continue;
@@ -370,6 +377,7 @@ const FEEDBACK_FOR = {
   unlisted_digits: 'included a number the reviewer did not write',
   unlisted_city: 'named a city the reviewer did not mention and that is not this location',
   unlisted_name: 'introduced a name or proper noun that is not in the review',
+  date_claim: 'stated a date or time the reviewer did not write',
   repetitive_opening: 'opened the same way as a recent reply',
   repetitive_body: 'read too much like a recent reply',
   placeholder: 'contained a placeholder or bracket',

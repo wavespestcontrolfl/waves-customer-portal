@@ -408,6 +408,21 @@ describe('processDueAutoReplies — state machine', () => {
     mockGbp.isLocationConfigured.mockResolvedValue(true);
   });
 
+  test('a review edited while drafting (rating/text changed) is re-queued for a fresh draft, never posted stale', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].star_rating = 2; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ retry: 1, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_claimed_until: null });
+    expect(state.rows[0].review_reply).toBeNull();
+    // Next tick sees the 2★ and parks it for a human.
+    mockDraft.mockResolvedValueOnce({ ...GOOD_DRAFT, mode: 'low_rating' });
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
