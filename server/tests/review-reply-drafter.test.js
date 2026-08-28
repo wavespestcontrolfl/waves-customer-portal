@@ -1,0 +1,192 @@
+// Review reply drafter: mode classification, the deterministic verifier
+// (every rule the model is told is re-checked here), and the fallback ladder.
+// Replies are PUBLIC — the verifier is the last line between a bad draft and
+// Google; each rule gets a test.
+const mockDispatch = jest.fn();
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { customerCopy: { name: 'customerCopy' } } }));
+
+const Drafter = require('../services/review-reply/drafter');
+
+const LOCATION = 'Sarasota';
+const SIGN_OFF = Drafter.signOffFor(LOCATION);
+
+function grounding(over = {}) {
+  const text = over.text ?? 'Marcus came out fast and the ants in the kitchen are gone. Great service.';
+  return {
+    version: 'grounding-v1',
+    reviewId: 'rev-1',
+    locationId: 'sarasota',
+    locationName: LOCATION,
+    review: {
+      firstName: over.firstName ?? 'Dana',
+      rating: over.rating ?? 5,
+      text,
+      hasText: text.length > 0,
+      wordCount: text ? text.split(/\s+/).length : 0,
+      mentionedTechNames: over.mentionedTechNames ?? ['Marcus'],
+      topics: over.topics ?? ['technician', 'responsiveness', 'results', 'pest'],
+    },
+    account: over.account === undefined ? { relationship: 'recurring', tenure: 'established', serviceCategories: ['pest control'], city: 'Sarasota' } : over.account,
+    provenance: {},
+    allow: {
+      names: ['Dana', 'Marcus'],
+      forbiddenNames: over.forbiddenNames ?? ['Bob', 'Tyler'],
+      cities: ['Sarasota', 'Southwest Florida', 'Florida'],
+      digits: text.match(/\d+/g) || [],
+    },
+  };
+}
+
+const good = (body) => `${body}\n\n${SIGN_OFF}`;
+const CLEAN = good('Hi Dana,\n\nGlad Marcus got out quickly and the ants are staying out of your kitchen. We will pass that along to him.');
+
+beforeEach(() => { mockDispatch.mockReset(); });
+
+describe('classifyReplyMode', () => {
+  test('low rating wins over everything', () => {
+    expect(Drafter.classifyReplyMode(grounding({ rating: 2 }))).toBe('low_rating');
+  });
+  test('no text → no_text', () => {
+    expect(Drafter.classifyReplyMode(grounding({ text: '', mentionedTechNames: [], topics: [] }))).toBe('no_text');
+  });
+  test('named technician → tech_praise', () => {
+    expect(Drafter.classifyReplyMode(grounding())).toBe('tech_praise');
+  });
+  test('long review → detailed_testimonial', () => {
+    const text = Array.from({ length: 70 }, (_, i) => `word${i}`).join(' ');
+    expect(Drafter.classifyReplyMode(grounding({ text, mentionedTechNames: [], topics: [] }))).toBe('detailed_testimonial');
+  });
+  test('results / responsiveness / loyalty / default', () => {
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['results'] }))).toBe('results');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['responsiveness'] }))).toBe('responsiveness');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['loyalty'] }))).toBe('loyalty');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: [] }))).toBe('service_quality');
+  });
+});
+
+describe('verifyReplyText — public-surface safety net', () => {
+  const verify = (text, g = grounding(), opts = {}) => Drafter.verifyReplyText(text, g, opts);
+
+  test('a clean reply passes', () => {
+    expect(verify(CLEAN)).toBeNull();
+  });
+  test('requires the exact sign-off as the last line', () => {
+    expect(verify('Hi Dana, thanks for having us out to handle the ants.')).toBe('missing_sign_off');
+    expect(verify(`Hi Dana, thanks for having us out.\n\nThe Waves Team`)).toBe('missing_sign_off');
+    expect(verify(good(`Hi Dana, thanks. ${SIGN_OFF}`))).toBe('duplicate_sign_off');
+  });
+  test('length bounds per mode', () => {
+    expect(verify(good('Hi Dana, thanks.'))).toBe('too_short');
+    const long = Array.from({ length: 95 }, () => 'word').join(' ');
+    expect(verify(good(`Hi Dana, ${long}`))).toBe('too_long');
+    // no_text mode is tighter
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [] });
+    const fortyFive = Array.from({ length: 45 }, () => 'word').join(' ');
+    expect(verify(good(`Hello there, ${fortyFive}`), g)).toBe('too_long');
+  });
+  test('style rules: emoji, em dash, first person singular, stock phrases', () => {
+    expect(verify(good('Hi Dana, thanks for the note about Marcus 🎉 we will tell him.'))).toBe('emoji');
+    expect(verify(good('Hi Dana, Marcus was glad to help — the ants are gone for good now.'))).toBe('em_dash');
+    expect(verify(good('Hi Dana, I am so glad Marcus could get the ants out of your kitchen.'))).toBe('first_person_singular');
+    expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
+  });
+  test('never a link, email, phone, money, or street address', () => {
+    expect(verify(good('Hi Dana, see wavespestcontrol.com/ants for more on what Marcus did.'))).toBe('url');
+    expect(verify(good('Hi Dana, email us at help@waves.com about the ants Marcus treated.'))).toBe('email');
+    expect(verify(good('Hi Dana, call 941-555-1212 any time about the ants Marcus treated.'))).toBe('phone');
+    expect(verify(good('Hi Dana, Marcus treated the ants and the $89 visit was worth it.'))).toBe('money');
+    expect(verify(good('Hi Dana, Marcus treated the ants at 123 Palm Ave and they are gone.'))).toBe('address');
+  });
+  test('banned phrases: incentives, rating asks, safety claims, guarantees, rank, competitors', () => {
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Enjoy a free visit on us.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Please give us five stars.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus used a safe product and the ants are gone.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants. We are the best in Sarasota.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, unlike Orkin, Marcus actually got the ants out.'))).toBe('banned_phrase');
+  });
+  test('dispute vocabulary and private-channel references are rejected', () => {
+    expect(verify(good('Hi Dana, Marcus got the ants. Sorry about the refund delay.'))).toBe('dispute_words');
+    expect(verify(good('Hi Dana, when you called about the ants Marcus got right out.'))).toBe('private_channel');
+    expect(verify(good('Hi Dana, our records show Marcus treated the ants on his visit.'))).toBe('private_channel');
+  });
+  test('private-channel phrasing is allowed when the reviewer wrote it themselves', () => {
+    const g = grounding({ text: 'I called about ants and Marcus came out the same day. When you called back it was fast.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus got out the same day when you called about the ants.'), g)).toBeNull();
+  });
+  test('provenance: technician names the reviewer did not write are forbidden', () => {
+    expect(verify(good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.'))).toBe('forbidden_name');
+  });
+  test('provenance: digits the reviewer did not type are rejected; the star rating is allowed', () => {
+    expect(verify(good('Hi Dana, Marcus got the ants on his 2nd visit and they are gone.'))).toBe('unlisted_digits');
+    expect(verify(good('Hi Dana, thanks for the 5 star note. Marcus is glad the ants are gone.'))).toBeNull();
+    const g = grounding({ text: 'Marcus came out within 2 hours and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got there within 2 hours and the ants are gone.'), g)).toBeNull();
+  });
+  test('provenance: served cities the reviewer did not mention are rejected unless they are the location/account city', () => {
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Venice kitchen.'))).toBe('unlisted_city');
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Sarasota kitchen.'))).toBeNull();
+  });
+  test('non-repetition against recent posted replies', () => {
+    const recent = [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')];
+    expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBe('repetitive_opening');
+    const recent2 = [good('Hello there, glad Marcus got out quickly and the ants are staying out of your kitchen. We will pass that along to him.')];
+    expect(verify(CLEAN, grounding(), { recentReplies: recent2 })).toBe('repetitive_body');
+  });
+  test('placeholders are rejected', () => {
+    expect(verify(good('Hi {first name}, Marcus is glad the ants are gone from your kitchen.'))).toBe('placeholder');
+  });
+});
+
+describe('draftReviewReply — fallback ladder', () => {
+  test('accepts a clean first draft and reports mode/version', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: CLEAN });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.text).toBe(CLEAN);
+    expect(r.mode).toBe('tech_praise');
+    expect(r.version).toBe(Drafter.REPLY_VERSION);
+    expect(r.attempts).toBe(1);
+    // Rules ride the system channel; the review rides the user channel.
+    const payload = mockDispatch.mock.calls[0][1];
+    expect(payload.system).toContain('HARD RULES');
+    expect(payload.text).toContain('Review text:');
+    expect(payload.system).not.toContain('ants in the kitchen');
+  });
+  test('retries with the violation named, then falls back to review-only, then gives up', async () => {
+    mockDispatch
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') })
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, call 941-555-1212 about the ants Marcus treated.') })
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants last week.') });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('verifier_reject');
+    expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel']);
+    expect(r.attempts).toBe(3);
+    expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPT WAS REJECTED');
+    // third attempt is review-only: no account facts in the user text
+    expect(mockDispatch.mock.calls[2][1].text).toContain('ACCOUNT FACTS: none available');
+  });
+  test('no review-only step when there were no account facts (2 attempts max)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') });
+    const r = await Drafter.draftReviewReply({ grounding: grounding({ account: null }), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.attempts).toBe(2);
+  });
+  test('provider outage surfaces as provider_unavailable', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('provider_unavailable');
+  });
+  test('a quoted draft is normalized before verification', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: `"${CLEAN}"` });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.text).toBe(CLEAN);
+  });
+});

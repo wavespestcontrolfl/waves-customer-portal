@@ -1104,6 +1104,12 @@ const gates = {
   // Google review attributed to a customer (4-5 stars) → the matching
   // location's Review Thank You sequence. Once per customer ever.
   reviewThankYouEnroll: process.env.GATE_REVIEW_THANKYOU_ENROLL === 'true',
+  // Automatic Google review replies. The gate is a MODE, not a boolean:
+  // GATE_REVIEW_AUTO_REPLY = off (unset) | shadow (drafts only) | auto
+  // (4-5★ post to Google; 1-3★ + unrated always park for a human). This
+  // boolean is the "lane is on at all" view for status surfaces; the runner
+  // reads the mode itself (services/review-reply/runner.js). Kill = unset.
+  reviewAutoReply: ['shadow', 'auto'].includes(String(process.env.GATE_REVIEW_AUTO_REPLY || '').trim().toLowerCase()),
   // Autopay charge failure → payment_failed sequence, REPLACING the
   // transactional retry-notice email (owner rule: one email; the failure SMS
   // with the card-update link is unchanged). 14-day dedupe = one enrollment

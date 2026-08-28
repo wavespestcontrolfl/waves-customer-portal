@@ -8,28 +8,9 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const MODELS = require('../../config/models');
 const { etDateString, addETDays, startOfETMonth, etMonthStart, parseETDateTime } = require('../../utils/datetime-et');
 
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function isDraftReply(reply) {
-  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
-}
-
-function hasRealReply(reply) {
-  return Boolean(reply) && !isDraftReply(reply);
-}
-
-function whereNeedsRealReply(qb, column = 'review_reply') {
-  qb.where(function needsRealReply() {
-    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
-  });
-}
-
-function whereHasRealReply(qb, column = 'review_reply') {
-  qb.whereNotNull(column).where(column, 'not like', `${DRAFT_REPLY_PREFIX}%`);
-}
+const { DRAFT_REPLY_PREFIX, isDraftReply, hasRealReply, whereNeedsRealReply, whereHasRealReply } = require('../review-reply/draft-prefix');
 
 const REVIEW_TOOLS = [
   {
@@ -250,98 +231,66 @@ async function getUnrespondedReviews(input) {
 
 async function draftReviewReply(reviewId) {
   const review = await db('google_reviews').where('id', reviewId).first();
-  if (!review) return { error: 'Review not found' };
+  if (!review || review.reviewer_name === '_stats') return { error: 'Review not found' };
   if (review.missing_since) {
     return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
   }
-
-  // Get location name
-  let locationName = 'Southwest Florida';
-  try {
-    const { WAVES_LOCATIONS } = require('../../config/locations');
-    const loc = WAVES_LOCATIONS.find(l => l.id === review.location_id);
-    if (loc) locationName = loc.name;
-  } catch {}
-
-  // Get customer city if matched
-  let customerCity = '';
-  if (review.customer_id) {
-    const cust = await db('customers').where('id', review.customer_id).first();
-    if (cust) customerCity = cust.city || '';
+  // ONE drafter for every path (admin button, this tool, the auto-reply
+  // runner): public-safe grounding + deterministic verifier, via the shared
+  // cross-provider dispatcher. No raw SDK client, no second prompt.
+  const { buildReplyGrounding } = require('../review-reply/grounding');
+  const Drafter = require('../review-reply/drafter');
+  const grounding = await buildReplyGrounding(review);
+  const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
+  const draft = await Drafter.draftReviewReply({ grounding, recentReplies });
+  if (!draft.ok) {
+    return {
+      error: draft.reason === 'provider_unavailable'
+        ? 'Reply providers are unavailable right now.'
+        : `No draft passed the safety checks (${(draft.rejections || []).join(', ')}) — this one needs a human-written reply.`,
+    };
   }
-
-  const Anthropic = require('@anthropic-ai/sdk');
-  if (!process.env.ANTHROPIC_API_KEY) return { error: 'ANTHROPIC_API_KEY not set' };
-
-  const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-  const msg = await client.messages.create({
-    model: MODELS.FLAGSHIP,
-    max_tokens: 500,
-    messages: [{
-      role: 'user',
-      content: `Write a Google review reply for Waves Pest Control ${locationName}.
-
-Review by: ${review.reviewer_name}
-Rating: ${review.star_rating}/5
-Text: ${review.review_text || '(No comment — just a star rating)'}
-Customer city: ${customerCity || 'unknown'}
-
-Rules:
-- Max 2 paragraphs, warm and genuine
-- Use "we" and "our" (first person plural)
-- For low ratings: acknowledge concern, offer to make it right
-- For high ratings: thank specifically, mention local connection
-- Naturally include 1-2 service keywords (pest control, lawn care)
-- End with: The 🌊 Waves Pest Control ${locationName} Team`
-    }],
-  });
-
-  const draft = msg.content[0]?.text || '';
-
   return {
     draft: true,
     review_id: reviewId,
     reviewer: review.reviewer_name,
     rating: review.star_rating,
     review_text: review.review_text,
-    reply_draft: draft,
+    reply_draft: draft.text,
+    reply_mode: draft.mode,
     note: 'This is a DRAFT. Say "post it" or "send it" to submit, or "revise it" to regenerate.',
   };
 }
 
 
 async function submitReviewReply(reviewId, replyText) {
-  const review = await db('google_reviews').where('id', reviewId).first();
-  if (!review) return { error: 'Review not found' };
-  // Same lockout as POST /api/admin/reviews/:id/reply: a stamped review has
-  // no live GBP resource, so recording a local reply here would falsely
-  // report it as "visible on Google once synced".
-  if (review.missing_since) {
-    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
-  }
-
-  // Guards the read-then-write race: the hourly sync can stamp the row
-  // between the check above and this update.
-  const updated = await db('google_reviews')
-    .where('id', reviewId)
-    .whereNull('missing_since')
-    .update({
-      review_reply: replyText,
-      reply_updated_at: new Date(),
+  // Posts to Google through the canonical publisher (liveness lock + audit).
+  // This tool used to write review_reply locally and claim the reply would
+  // "sync to Google" — it never did. Now it either reaches Google or errors.
+  const { publishReviewReply, ReviewReplyError } = require('../review-reply/publisher');
+  try {
+    const result = await publishReviewReply({
+      reviewId,
+      text: replyText,
+      actor: { type: 'ib', adminUserId: null },
+      allowOverwrite: true,
+      autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_claimed_until: null },
     });
-  if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-    return { error: 'This review has been removed from Google — replies are disabled. The row is retained as evidence for a missing-reviews support case.' };
+    const review = await db('google_reviews').where('id', reviewId).first();
+    logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId}`);
+    return {
+      success: true,
+      review_id: reviewId,
+      reviewer: review?.reviewer_name || null,
+      google_posted: result.googlePosted,
+      note: result.googlePosted
+        ? 'Reply posted to Google.'
+        : 'Google Business Profile is not configured in this environment — the reply was saved locally only.',
+    };
+  } catch (err) {
+    if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
+    throw err;
   }
-
-  logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId} by ${review.reviewer_name}`);
-
-  return {
-    success: true,
-    review_id: reviewId,
-    reviewer: review.reviewer_name,
-    note: 'Reply saved. It will be visible on Google once synced via the GBP API.',
-  };
 }
 
 

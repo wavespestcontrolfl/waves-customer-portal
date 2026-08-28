@@ -5460,6 +5460,28 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 5 MIN — Automatic Google review replies. Rows the GBP sync queued
+  // (jittered due time) are claimed atomically and drafted; 4-5★ post to
+  // Google in `auto` mode, everything else parks for a human. Mode gate
+  // GATE_REVIEW_AUTO_REPLY (off|shadow|auto) is read inside the runner so
+  // an unset gate is a no-op tick.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('reviewAutoReply')) return;
+    try {
+      await runExclusive('review-auto-reply', async () => {
+        const { processDueAutoReplies } = require('./review-reply/runner');
+        const stats = await processDueAutoReplies();
+        if (stats.claimed > 0) {
+          logger.info(`Review auto-reply (${stats.mode}): ${stats.claimed} claimed, ${stats.posted} posted, ${stats.drafted} drafted, ${stats.parked} parked, ${stats.skipped} skipped, ${stats.retry} retry, ${stats.errors} errors`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Review auto-reply processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:10AM — Agronomic Wiki refresh (stale pages + seasonal), weekly
   // cadence enforced by weeklyRefreshIfDue's "ran in the last 6 days" guard,
   // then the trusted wiki→KB sync chained after it (own weekly guard).

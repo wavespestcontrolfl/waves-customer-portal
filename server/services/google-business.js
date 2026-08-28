@@ -10,11 +10,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
 const { runExclusive } = require('../utils/cron-lock');
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function isDraftReply(reply) {
-  return typeof reply === 'string' && reply.trim().startsWith(DRAFT_REPLY_PREFIX);
-}
+const { DRAFT_REPLY_PREFIX, isDraftReply } = require('./review-reply/draft-prefix');
 
 function starRatingToNumber(value) {
   if (typeof value === 'number') return value;
@@ -806,7 +802,20 @@ class GoogleBusinessService {
       result = { id: existing.id, inserted: false };
     } else {
       try {
-        const [insertedReview] = await db('google_reviews').insert(row).returning('id');
+        // Auto-reply lane: a review the sync sees for the FIRST time enters
+        // the jittered reply queue in the SAME insert (atomic — a separate
+        // post-insert hook that failed would leave the row unqueued forever,
+        // since later syncs take the update path). Deploy-forward only: rows
+        // that existed before the lane shipped never gain these columns.
+        // Lazy require: the runner depends on this service.
+        const { autoReplyInsertFields } = require('./review-reply/runner');
+        const autoReply = autoReplyInsertFields({
+          location_id: normalized.location_id,
+          reviewer_name: normalized.reviewer_name,
+          owner_reply: normalized.owner_reply,
+          review_created_at: normalized.review_created_at,
+        });
+        const [insertedReview] = await db('google_reviews').insert({ ...row, ...autoReply }).returning('id');
         result = { id: insertedReview?.id || insertedReview, inserted: true };
       } catch (err) {
         // Overlapping runners (hourly job vs manual sync vs deploy instance)

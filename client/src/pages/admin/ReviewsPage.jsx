@@ -319,8 +319,55 @@ function LocationCard({ loc, breakdown, onRequestReview }) {
   );
 }
 
+// --- Auto-reply pipeline chip (review.autoReply from the list API) ---
+const AUTO_REPLY_COLORS = {
+  queued: "#475569",
+  drafted: "#0F766E",
+  posted: "#15803D",
+  parked: "#A16207",
+  failed: "#A16207",
+  skipped: "#71717A",
+  retracted: "#71717A",
+};
+
+function autoReplyLabel(a) {
+  switch (a.status) {
+    case "queued": return "Auto-reply queued";
+    case "drafted": return "Shadow draft";
+    case "posted": return "Auto-replied";
+    case "parked": return a.reason === "low_rating" ? "Needs you (low rating)" : a.reason === "unrated" ? "Needs you (unrated)" : "Needs you";
+    case "failed": return "Auto-reply retrying";
+    case "skipped": return "Auto-reply skipped";
+    case "retracted": return "Reply retracted";
+    default: return `Auto-reply: ${a.status}`;
+  }
+}
+
+function autoReplyTitle(a) {
+  const bits = [];
+  if (a.reason) bits.push(`reason: ${a.reason.replace(/_/g, " ")}`);
+  if (a.mode) bits.push(`mode: ${a.mode.replace(/_/g, " ")}`);
+  if (a.dueAt && a.status === "queued") bits.push(`due ${new Date(a.dueAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  if (a.publishedAt) bits.push(`posted ${new Date(a.publishedAt).toLocaleString("en-US", { timeZone: "America/New_York" })} ET`);
+  return bits.join(" · ") || "Automatic reply pipeline";
+}
+
 // --- Review Card ---
-function ReviewCard({ review, onReplySubmit, onDismiss }) {
+function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
+  const [autoBusy, setAutoBusy] = useState(false);
+  const autoReply = review.autoReply || null;
+  const runAuto = async (action) => {
+    if (!onAutoReplyAction) return;
+    if (action === "retract" && !window.confirm("Delete this reply on Google?")) return;
+    setAutoBusy(true);
+    try {
+      await onAutoReplyAction(review.id, action);
+    } catch (e) {
+      alert(`${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`);
+    } finally {
+      setAutoBusy(false);
+    }
+  };
   const [editing, setEditing] = useState(false);
   const [replyText, setReplyText] = useState(review.reply || "");
   const [submitting, setSubmitting] = useState(false);
@@ -463,6 +510,22 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
                   Removed from Google
                 </span>
               )}{" "}
+              {autoReply && !review.missingSince && (
+                <span
+                  title={autoReplyTitle(autoReply)}
+                  style={{
+                    fontSize: 11,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    fontWeight: 500,
+                    color: D.white,
+                    background: AUTO_REPLY_COLORS[autoReply.status] || D.muted,
+                    padding: "2px 8px",
+                    borderRadius: 99,
+                  }}
+                >
+                  {autoReplyLabel(autoReply)}
+                </span>
+              )}{" "}
             </div>{" "}
           </div>{" "}
         </div>{" "}
@@ -577,6 +640,68 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
             >
               Use Draft
             </button>{" "}
+            {autoReply && ["drafted", "parked", "failed", "queued"].includes(autoReply.status) && (
+              <>
+                <button
+                  onClick={() => runAuto("post-now")}
+                  disabled={autoBusy}
+                  title="Post this draft to Google now (skips the delay and shadow mode)"
+                  style={{
+                    marginTop: 8,
+                    marginLeft: 8,
+                    padding: "6px 12px",
+                    background: D.teal,
+                    border: `1px solid ${D.teal}`,
+                    color: "#fff",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                    opacity: autoBusy ? 0.5 : 1,
+                  }}
+                >
+                  {autoBusy ? "Working..." : "Post now"}
+                </button>{" "}
+                <button
+                  onClick={() => runAuto("skip")}
+                  disabled={autoBusy}
+                  title="Take this review out of the automatic reply pipeline"
+                  style={{
+                    marginTop: 8,
+                    marginLeft: 4,
+                    padding: "6px 12px",
+                    background: "transparent",
+                    border: `1px solid ${D.border}`,
+                    color: D.muted,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                  }}
+                >
+                  Skip auto
+                </button>
+              </>
+            )}
+          </div>
+        )}
+        {!review.missingSince && autoReply && autoReply.status === "queued" && !review.draftReply && !review.reply && (
+          <div
+            style={{
+              fontSize: 12,
+              color: D.muted,
+              fontFamily: "Roboto, Arial, sans-serif",
+              marginBottom: 8,
+            }}
+          >
+            Auto-reply scheduled{autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.{" "}
+            <button
+              onClick={() => runAuto("skip")}
+              disabled={autoBusy}
+              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "Roboto, Arial, sans-serif" }}
+            >
+              Skip auto
+            </button>
           </div>
         )}
 
@@ -659,6 +784,26 @@ function ReviewCard({ review, onReplySubmit, onDismiss }) {
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
               </button>{" "}
+              {autoReply && autoReply.status === "posted" && (
+                <button
+                  onClick={() => runAuto("retract")}
+                  disabled={autoBusy}
+                  title="Delete this automatically posted reply on Google"
+                  style={{
+                    padding: "6px 14px",
+                    background: "transparent",
+                    border: `1px solid ${D.red}`,
+                    color: D.red,
+                    borderRadius: 6,
+                    fontSize: 13,
+                    fontFamily: "Roboto, Arial, sans-serif",
+                    cursor: "pointer",
+                    opacity: autoBusy ? 0.5 : 1,
+                  }}
+                >
+                  {autoBusy ? "Working..." : "Retract"}
+                </button>
+              )}
             </div>
             )}{" "}
           </div>
@@ -1905,6 +2050,17 @@ export default function ReviewsPage() {
     return () => clearTimeout(t);
   }, [loadData, search]);
 
+  // Auto-reply pipeline actions: retract (delete on Google), post-now
+  // (publish the pending draft immediately), skip (leave the pipeline). The
+  // row's reply / autoReply state changes server-side, so reload the list.
+  const handleAutoReplyAction = async (reviewId, action) => {
+    const path = action === "retract"
+      ? `/admin/reviews/${reviewId}/retract-reply`
+      : `/admin/reviews/${reviewId}/auto-reply/${action}`;
+    await adminFetch(path, { method: "POST" });
+    loadData();
+  };
+
   const handleReply = async (reviewId, replyText) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
@@ -2378,6 +2534,7 @@ export default function ReviewsPage() {
                     review={r}
                     onReplySubmit={handleReply}
                     onDismiss={handleDismiss}
+                    onAutoReplyAction={handleAutoReplyAction}
                   />
                 ))
               )}

@@ -65,7 +65,7 @@ const PRIORITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
 const ACTIVE_LEAD_STATUSES = ['new', 'contacted', 'estimate_sent', 'estimate_viewed'];
 const CLOSED_LEAD_STATUSES = ['won', 'lost', 'unresponsive', 'disqualified', 'duplicate'];
 const TASK_LIFECYCLE_STATUSES = new Set(['done', 'dismissed']);
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
+const { DRAFT_REPLY_PREFIX } = require('../services/review-reply/draft-prefix');
 
 async function tableExists(table) {
   return db.schema.hasTable(table).catch(() => false);
