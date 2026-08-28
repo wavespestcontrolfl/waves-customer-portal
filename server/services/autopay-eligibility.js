@@ -258,7 +258,8 @@ function isBankMethodType(methodType) {
  * must Replace or Turn off first, no special-case escape hatch — so the
  * set is: the charge resolver's pick (what charge() would bill), PLUS the
  * enrollment pointer, PLUS (no pointer) the default+enabled row. Empty when
- * Auto Pay is off. Paused counts as on — pausing is temporary and removing
+ * Auto Pay is explicitly off (autopay_enabled === false; NULL reads as on,
+ * matching customerOnAutopay). Paused counts as on — pausing is temporary and removing
  * the card underneath it would strand the resume.
  *
  * Read-only. Without rethrow a broken resolver read still reports the
@@ -278,7 +279,10 @@ async function getAutopaySelectedMethodIds(customer, knex = defaultDb, { rethrow
         if (cust[key] === undefined) cust[key] = row ? row[key] : null;
       }
     }
-    if (!cust.autopay_enabled) return [];
+    // Nullable column: only explicit false is "off" — same rule as
+    // customerOnAutopay and autopayActivePredicate (GH codex r2 P1), or a
+    // NULL-flag customer collection still charges could detach the method.
+    if (cust.autopay_enabled === false) return [];
 
     const ids = new Set();
     const chargeable = await getChargeableAutopayMethod(cust, knex, { rethrow, now });

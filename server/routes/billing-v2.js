@@ -869,7 +869,7 @@ router.delete('/cards/:id', async (req, res, next) => {
     // so no autopay note; the legacy cascade case reports what committed.
     // The sender's idempotency key is the method row id, so the detached
     // webhook that follows this detach cannot send a second notice.
-    PaymentLifecycleEmail.sendPaymentMethodRemoved({
+    void PaymentLifecycleEmail.sendPaymentMethodRemoved({
       customerId: req.customerId,
       method: removedCard,
       autopayDisabled,

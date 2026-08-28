@@ -139,6 +139,20 @@ describe('PUT /billing/autopay — Auto Pay-off notice sent once (GH codex r1 P2
       expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-old' }));
     }));
 
+  test('the notice names the method in charge UNDER THE LOCK, not the stale pre-read pointer', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      db.transaction = async (fn) => {
+        // A concurrent switch moved Auto Pay to pm-hold between pre-read and lock.
+        state.customers[0].autopay_payment_method_id = 'pm-hold';
+        return fn((table) => builderFor(table));
+      };
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-hold' }));
+    }));
+
   test('an overlapping disable that finds the flag already off under the lock does NOT send a second notice', () =>
     withServer('/billing/autopay', router(), async (baseUrl) => {
       state.customers[0].autopay_enabled = true;

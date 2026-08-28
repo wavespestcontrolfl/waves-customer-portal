@@ -35,6 +35,12 @@ test('Auto Pay off → empty, regardless of flags', async () => {
   expect(ids).toEqual([]);
 });
 
+test('NULL autopay_enabled reads as ON (only explicit false is off — customerOnAutopay parity)', async () => {
+  const state = { payment_methods: [pm({ id: 'a', stripe_payment_method_id: 'pm_a', is_default: true, autopay_enabled: true })] };
+  const ids = await getAutopaySelectedMethodIds({ id: 'c1', autopay_enabled: null, autopay_payment_method_id: 'a', ach_status: null }, knexFor(state));
+  expect(ids).toEqual(['a']);
+});
+
 test('pointer method that is chargeable → exactly that id', async () => {
   const state = { payment_methods: [
     pm({ id: 'a', stripe_payment_method_id: 'pm_a', is_default: true, autopay_enabled: true }),

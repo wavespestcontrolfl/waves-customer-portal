@@ -149,5 +149,8 @@ describe('Payment Methods row hierarchy', () => {
     fireEvent.click(within(rowFor('4242')).getByRole('button', { name: 'Remove' }));
     await waitFor(() => expect(showCustomerAlert).toHaveBeenCalledWith(expect.stringMatching(/turn off Auto Pay before removing/)));
     await waitFor(() => expect(api.getCards).toHaveBeenCalledTimes(2));
+    // The AutopayCard remounts too (it owns its own state): mount load +
+    // refreshCards' getAutopay + the remounted card's load.
+    await waitFor(() => expect(api.getAutopay.mock.calls.length).toBeGreaterThanOrEqual(3));
   });
 });

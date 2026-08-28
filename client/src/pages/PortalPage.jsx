@@ -5620,7 +5620,12 @@ function BillingTab({ customer }) {
       // the server message says exactly what to do; refresh so the row
       // hierarchy catches up.
       showCustomerAlert(err.message || 'Failed to remove card');
-      if (err.status === 409) refreshCards();
+      if (err.status === 409) {
+        // Auto Pay moved in another tab: refresh the rows AND remount the
+        // AutopayCard (it owns its own state) so both agree again.
+        refreshCards();
+        setAutopayRefreshKey((k) => k + 1);
+      }
     }
   };
 

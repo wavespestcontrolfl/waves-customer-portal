@@ -387,13 +387,18 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
     // "enabled" before either locks, and the second must not send a
     // second Auto Pay-off email (GH codex r1 P2).
     let disabledTransition = false;
+    let disabledMethodId = null;
     await db.transaction(async (trx) => {
       // Lock order = CUSTOMER first, then the method row (pre-push r2 P1:
       // every Auto Pay mutation — enrollment, removal, set-default, the
       // detached webhook — takes the same order, so removal vs replacement
       // can never deadlock).
-      const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled');
+      const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled', 'autopay_payment_method_id');
       disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled === true;
+      // The method the notice names = the one in charge immediately before
+      // the disable, read under the lock — the pre-lock `current` read can
+      // be stale if a switch landed in between (GH codex r2 P2).
+      disabledMethodId = locked?.autopay_payment_method_id || null;
       // Re-verify the method under lock (pre-push r1 P0 — shared protocol
       // with DELETE /cards/:id, which holds the row FOR UPDATE across its
       // detach): pointing Auto Pay at a row a concurrent removal just
@@ -459,9 +464,9 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       // Negative counterpart of the enabled notice (gated inside the
       // sender); the pointer that was in charge names the method. Only the
       // request that actually flipped the flag under the lock sends.
-      if (disabledTransition) PaymentLifecycleEmail.sendAutopayDisabled({
+      if (disabledTransition) void PaymentLifecycleEmail.sendAutopayDisabled({
         customerId: req.customerId,
-        paymentMethodId: current.autopay_payment_method_id || null,
+        paymentMethodId: disabledMethodId,
         disabledAt: new Date(),
       }).catch((emailErr) => {
         logger.warn(`[customer-autopay] autopay disabled email failed for customer ${req.customerId}: ${emailErr.message}`);

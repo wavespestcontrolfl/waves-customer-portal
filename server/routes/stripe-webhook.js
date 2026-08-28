@@ -4428,7 +4428,7 @@ async function handlePaymentMethodDetached(paymentMethod) {
   // commit, fire-and-forget, gated inside the sender.
   for (const row of removedRows) {
     const autopayDisabled = disabledCustomers.some((d) => d.id === row.id);
-    require('../services/payment-lifecycle-email').sendPaymentMethodRemoved({
+    void require('../services/payment-lifecycle-email').sendPaymentMethodRemoved({
       customerId: row.customer_id,
       method: row,
       autopayDisabled,
