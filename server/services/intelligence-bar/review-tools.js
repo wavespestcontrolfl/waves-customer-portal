@@ -56,7 +56,7 @@ Use for: "post that reply", "send the response I just approved"`,
       properties: {
         review_id: { type: 'string' },
         reply_text: { type: 'string', description: 'The reply to post' },
-        grounding_token: { type: 'string', description: 'The grounding_token returned by draft_review_reply for this exact draft (required — binds the reply to the review it was written for)' },
+        grounding_token: { type: 'string', description: 'The grounding_token returned by draft_review_reply for this exact draft (required — binds the reply to the review it was written for AND to the exact reply_draft text; submit that text unchanged)' },
       },
       required: ['review_id', 'reply_text', 'grounding_token'],
     },
@@ -261,7 +261,7 @@ async function draftReviewReply(reviewId) {
     reply_mode: draft.mode,
     // Binds this draft to the review + account facts it was written from;
     // submit_review_reply requires it (validated inside the publish claim).
-    grounding_token: require('../review-reply/runner').groundingToken(review, grounding),
+    grounding_token: require('../review-reply/runner').groundingToken(review, grounding, draft.text),
     note: 'This is a DRAFT. Say "post it" or "send it" to submit (pass grounding_token back), or "revise it" to regenerate.',
   };
 }
@@ -293,8 +293,15 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
     // between must refuse a draft written for the old review. Same shared
     // guard as the editor's AI drafts, validated inside the publish claim.
     const { pipelineDraftGuard } = require('../review-reply/runner');
-    if (!parseGroundingToken(groundingToken)) {
+    const parsedToken = parseGroundingToken(groundingToken);
+    if (!parsedToken) {
       return { error: 'Draft it first with draft_review_reply and pass its grounding_token back unchanged — the token binds the reply to the review it was written for.', code: 'grounding_token_required' };
+    }
+    // Conversational confirmation approves ONE text: the reply_draft the
+    // operator read. A different verifier-valid variant is not approved.
+    const { replyTextFingerprint } = require('../review-reply/runner');
+    if (!parsedToken.text || parsedToken.text !== replyTextFingerprint(replyText)) {
+      return { error: 'reply_text must be exactly the reply_draft that was approved. Re-run draft_review_reply if a different wording is wanted.', code: 'draft_text_mismatch' };
     }
     submitGuard = pipelineDraftGuard(replyText, { groundingToken });
   } catch (err) {

@@ -23,6 +23,7 @@
  * review; the publisher's liveness lock covers the Google side.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gbp = require('../google-business');
@@ -928,6 +929,11 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
 async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
   const row = await db('google_reviews').where({ id: reviewId }).first();
   if (!row) return false;
+  // A reconciliation park (google_uncertain / persist_failed) may have a
+  // reply LIVE on Google that the next sync must recognise as ours; a skip
+  // would rewrite the state that branch keys on and lose pipeline ownership
+  // of a landed reply (codex r67). Retract / wait for the sync instead.
+  if (row.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(row.auto_reply_reason)) return false;
   // A FAILED publish-retry row keeps its verified draft only in
   // auto_reply_draft (the slot stays empty while retrying): copy it into the
   // visible "[DRAFT]" slot on skip so the person still sees it (codex r51).
@@ -1209,9 +1215,12 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
   const tokenInvalid = groundingToken != null && groundingToken !== '' && !parsedToken;
   const gReview = parsedToken?.review || null;
   const gAccount = parsedToken?.account || null;
+  const gText = parsedToken?.text || null;
   return async (fresh) => {
     if (!fresh) return null;
     if (tokenInvalid) return 'the grounding token is malformed — draft again';
+    // A text-bound token (Intelligence Bar) accepts ONLY the approved draft.
+    if (gText && gText !== replyTextFingerprint(submitted)) return 'the reply text differs from the draft that was approved — draft again and submit it unchanged';
     // An Agent Ops draft has no grounding snapshot (its writer is not the
     // canonical drafter). Posting it VERBATIM through Use Draft runs the
     // canonical verifier here (codex r46/r58); text the admin edited is
@@ -1375,19 +1384,42 @@ async function validatePromotionAccountFacts(existing, fields, { conn = db } = {
 const FINGERPRINT_RE = /^[0-9a-f]{40}$/i;
 function parseGroundingToken(token) {
   if (typeof token !== 'string') return null;
-  const i = token.indexOf('|');
+  // Optional trailing "#<sha1>" (codex r67): the exact draft text the
+  // operator approved (Intelligence Bar conversational confirmation). The
+  // account half is opaque and may itself contain '|', so the text segment
+  // uses its own separator.
+  let text = null;
+  let rest = token;
+  const h = token.indexOf('#');
+  if (h >= 0) {
+    text = token.slice(h + 1);
+    rest = token.slice(0, h);
+    if (!FINGERPRINT_RE.test(text)) return null;
+  }
+  const i = rest.indexOf('|');
   if (i <= 0) return null;
-  const review = token.slice(0, i);
-  const account = token.slice(i + 1);
+  const review = rest.slice(0, i);
+  const account = rest.slice(i + 1);
   // The review half is a canonical sha1 (reviewFingerprint); the account
   // half is opaque (accountFingerprint) but must be present.
   if (!FINGERPRINT_RE.test(review) || !account.trim()) return null;
-  return { review, account };
+  return text ? { review, account, text } : { review, account };
 }
 
-/** Token for an editor AI draft: the review + account fingerprints it saw. */
-function groundingToken(review, grounding) {
-  return `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
+/** sha1 of the trimmed reply text — the identity of an approved draft. */
+function replyTextFingerprint(text) {
+  return crypto.createHash('sha1').update(String(text || '').trim()).digest('hex');
+}
+
+/**
+ * Token for an editor AI draft: the review + account fingerprints it saw.
+ * With `text`, the token also binds the exact draft the operator approved
+ * (the Intelligence Bar has no editor — the model's later tool call must
+ * submit that text, not a fresh verifier-valid variant; codex r67).
+ */
+function groundingToken(review, grounding, text = null) {
+  const base = `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
+  return text == null ? base : `${base}#${replyTextFingerprint(text)}`;
 }
 
 /**
@@ -1464,6 +1496,7 @@ module.exports = {
   autoReplyStatus,
   pipelineDraftGuard,
   groundingToken,
+  replyTextFingerprint,
   parseGroundingToken,
   agentDraftSavedFields,
   HUMAN_DRAFT_STALE,

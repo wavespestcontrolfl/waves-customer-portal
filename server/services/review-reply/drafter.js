@@ -155,7 +155,7 @@ const BANNED_RE = new RegExp([
   // "<subject> acted | behaved | carried on | went about … normally | as usual | like themselves" (codex r64).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:act|behav|respond|react|carr(?:y|ied|ies)\\s+on|went\\s+about|go(?:es|ing)?\\s+about|play|eat|ate|sleep|slept|run|ran|mov|romp|roam|function|operat)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:normal\\w*|as\\s+usual|as\\s+always|as\\s+ever|as\\s+before|like\\s+(?:themselves|nothing|normal|usual|always|before)|the\\s+same|fine|okay|ok|well|great|happily|unchanged|no\\s+differently|without\\s+(?:a\\s+)?(?:care|worry|concern|issue|problem)s?)\\b',
   // "didn't miss a beat / skip a beat / bat an eye / blink", "no worse for wear" (codex r63).
-  '\\b(?:miss(?:ed|es|ing)?|skip(?:ped|s|ping)?|los(?:e|t|ing)|drop(?:ped|s)?)\\s+a\\s+(?:single\\s+)?beat\\b', '\\bbat(?:ted|s|ting)?\\s+an\\s+eye(?:lid|lash)?\\b', '\\bworse\\s+for\\s+(?:the\\s+)?wear\\b',
+  '\\b(?:miss(?:ed|es|ing)?|skip(?:ped|s|ping)?|los(?:e|t|ing)|drop(?:ped|s)?|br(?:eak|oke|eaking|eaks))\\s+(?:a\\s+(?:single\\s+)?|their\\s+|its\\s+|his\\s+|her\\s+)?(?:beat|step|stride|steps)\\b', '\\bbat(?:ted|s|ting)?\\s+an\\s+eye(?:lid|lash)?\\b', '\\bworse\\s+for\\s+(?:the\\s+)?wear\\b',
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:never|didn.t|did\\s+not|barely|hardly|not)\\s+(?:even\\s+)?(?:blink|flinch|stir|budge)\\w*\\b',
   // "<subject> weathered | withstood | endured | survived | took | handled … the treatment" and
   // "in stride / like champs / without a fuss" (codex r60).

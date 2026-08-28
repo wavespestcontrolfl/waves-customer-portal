@@ -1182,6 +1182,11 @@ describe('processDueAutoReplies — state machine', () => {
     const gt = Runner.groundingToken(plain, { account: { city: 'Venice', tenure: 'new' } });
     expect(gt).toBe(`${Runner.reviewFingerprint(plain)}|fp:Venice|new`);
     expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toBeNull();
+    // codex r67: a text-bound token accepts only the approved draft.
+    const gtText = Runner.groundingToken(plain, { account: { city: 'Venice', tenure: 'new' } }, 'AI text');
+    expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gtText })(plain)).toBeNull();
+    expect(await Runner.pipelineDraftGuard('  AI text \n', { groundingToken: gtText })(plain)).toBeNull();
+    expect(await Runner.pipelineDraftGuard('AI text B', { groundingToken: gtText })(plain)).toMatch(/differs from the draft that was approved/);
     expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })({ ...plain, customer_id: 'c2' })).toMatch(/changed since this draft was generated/);
     mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toMatch(/customer facts changed since this draft was generated/);
@@ -1371,6 +1376,11 @@ describe('admin actions', () => {
   test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {
     const fp = Runner.reviewFingerprint(row());
     expect(Runner.parseGroundingToken(`${fp}|${'a'.repeat(40)}`)).toEqual({ review: fp, account: 'a'.repeat(40) });
+    // codex r67: optional text segment binds the approved draft.
+    const tfp = Runner.replyTextFingerprint('Hi Dana, thanks.');
+    expect(Runner.parseGroundingToken(`${fp}|${'a'.repeat(40)}#${tfp}`)).toEqual({ review: fp, account: 'a'.repeat(40), text: tfp });
+    expect(Runner.parseGroundingToken(`${fp}|fp:Venice|new#${tfp}`)).toEqual({ review: fp, account: 'fp:Venice|new', text: tfp });
+    expect(Runner.parseGroundingToken(`${fp}|${'a'.repeat(40)}#nothex`)).toBeNull();
     expect(Runner.parseGroundingToken(`|${'a'.repeat(40)}`)).toBeNull();
     expect(Runner.parseGroundingToken('|')).toBeNull();
     expect(Runner.parseGroundingToken(`${fp}|`)).toBeNull();
@@ -1443,5 +1453,11 @@ describe('admin actions', () => {
     expect(await Runner.skipAutoReply('p')).toBe(false);
     expect(await Runner.skipAutoReply('inflight')).toBe(false);
     expect(state.rows[2].auto_reply_status).toBe('queued');
+    // codex r67: reconciliation parks (a PUT may be live) cannot be skipped.
+    state.rows.push(row({ id: 'gu', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }), row({ id: 'pf', auto_reply_status: 'parked', auto_reply_reason: 'persist_failed' }), row({ id: 'lr', auto_reply_status: 'parked', auto_reply_reason: 'low_rating' }));
+    expect(await Runner.skipAutoReply('gu')).toBe(false);
+    expect(await Runner.skipAutoReply('pf')).toBe(false);
+    expect(state.rows.find((r) => r.id === 'gu')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    expect(await Runner.skipAutoReply('lr')).toBe(true);
   });
 });

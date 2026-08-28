@@ -98,23 +98,6 @@ router.get('/', async (req, res, next) => {
       .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
       .where('google_reviews.reviewer_name', '!=', '_stats')
       .whereIn('google_reviews.location_id', activeLocationIds)
-      // The removed-from-Google filter promises EVERY stamped review is
-      // reachable (it backs the removal-alert support workflow), so it must
-      // not be narrowed by the dismissed exclusion — a review dismissed
-      // before (or after) Google removed it is still removal evidence.
-      .modify(qb => {
-        if (!showDismissed && missing !== 'true') {
-          qb.where(function () {
-            this.where('google_reviews.dismissed', false)
-              .orWhereNull('google_reviews.dismissed')
-              // Stamped rows pass regardless of dismissal: the removal
-              // alert links to the DEFAULT view, and a review dismissed
-              // before Google removed it is still removal evidence — the
-              // dismissed exclusion must not hide it there.
-              .orWhereNotNull('google_reviews.missing_since');
-          });
-        }
-      })
       .select(
         'google_reviews.*',
         'customers.first_name as cust_first', 'customers.last_name as cust_last',
@@ -127,29 +110,52 @@ router.get('/', async (req, res, next) => {
       // requests is silently skipped by Load More.
       .orderBy('google_reviews.id', 'desc');
 
-    if (location && location !== 'all') query = query.where('google_reviews.location_id', location);
-    if (rating) query = query.where('google_reviews.star_rating', parseInt(rating));
-    // Dedicated removed-from-Google filter — makes every stamped review
-    // reachable regardless of the result cap on the default view (a large
-    // profile wipe stays fully inspectable).
-    if (missing === 'true') query = query.whereNotNull('google_reviews.missing_since');
-    if (responded === 'true') query = query.modify(whereHasRealReply);
-    if (responded === 'false') {
-      // The default "Needs Reply" view must still surface reviews Google has
-      // removed (missing_since stamped) even when they were already replied
-      // to — the removal notification links here, and a replied-to removed
-      // review would otherwise be invisible in the default list.
-      query = query.where(function () {
-        this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+    // Every list predicate lives here so the deep-link pin below is filtered
+    // by the SAME rules as the page (codex r67): a pinned review must not
+    // contradict the rating / location / response-state / removed / search
+    // filters the operator has since selected.
+    const withFilters = (q) => {
+      // The removed-from-Google filter promises EVERY stamped review is
+      // reachable (it backs the removal-alert support workflow), so it must
+      // not be narrowed by the dismissed exclusion — a review dismissed
+      // before (or after) Google removed it is still removal evidence.
+      if (!showDismissed && missing !== 'true') {
+        q = q.where(function () {
+          this.where('google_reviews.dismissed', false)
+            .orWhereNull('google_reviews.dismissed')
+            // Stamped rows pass regardless of dismissal: the removal
+            // alert links to the DEFAULT view, and a review dismissed
+            // before Google removed it is still removal evidence — the
+            // dismissed exclusion must not hide it there.
+            .orWhereNotNull('google_reviews.missing_since');
+        });
+      }
+      if (location && location !== 'all') q = q.where('google_reviews.location_id', location);
+      if (rating) q = q.where('google_reviews.star_rating', parseInt(rating));
+      // Dedicated removed-from-Google filter — makes every stamped review
+      // reachable regardless of the result cap on the default view (a large
+      // profile wipe stays fully inspectable).
+      if (missing === 'true') q = q.whereNotNull('google_reviews.missing_since');
+      if (responded === 'true') q = q.modify(whereHasRealReply);
+      if (responded === 'false') {
+        // The default "Needs Reply" view must still surface reviews Google has
+        // removed (missing_since stamped) even when they were already replied
+        // to — the removal notification links here, and a replied-to removed
+        // review would otherwise be invisible in the default list.
+        q = q.where(function () {
+          this.modify(whereNeedsRealReply).orWhereNotNull('google_reviews.missing_since');
+        });
+      }
+      if (search) q = q.where(function () {
+        this.whereILike('google_reviews.reviewer_name', `%${search}%`)
+          .orWhereILike('google_reviews.review_text', `%${search}%`)
+          .orWhereILike('customers.first_name', `%${search}%`)
+          .orWhereILike('customers.last_name', `%${search}%`)
+          .orWhereRaw("LOWER(customers.first_name || ' ' || COALESCE(customers.last_name, '')) LIKE LOWER(?)", [`%${search}%`]);
       });
-    }
-    if (search) query = query.where(function () {
-      this.whereILike('google_reviews.reviewer_name', `%${search}%`)
-        .orWhereILike('google_reviews.review_text', `%${search}%`)
-        .orWhereILike('customers.first_name', `%${search}%`)
-        .orWhereILike('customers.last_name', `%${search}%`)
-        .orWhereRaw("LOWER(customers.first_name || ' ' || COALESCE(customers.last_name, '')) LIKE LOWER(?)", [`%${search}%`]);
-    });
+      return q;
+    };
+    query = withFilters(query);
 
     const parsedLimit = Math.max(1, Math.min(500, parseInt(limit, 10) || 200));
     const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * parsedLimit;
@@ -162,12 +168,12 @@ router.get('/', async (req, res, next) => {
     // page size (edited-after-post, removal evidence …) is reached directly.
     const pin = typeof req.query.review === 'string' && req.query.review.trim() ? req.query.review.trim() : null;
     if (pin && offset === 0 && !reviews.some((r) => String(r.id) === pin)) {
-      const pinned = await db('google_reviews')
+      const pinned = await withFilters(db('google_reviews')
         .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
         .where('google_reviews.id', pin)
         .where('google_reviews.reviewer_name', '!=', '_stats')
         .whereIn('google_reviews.location_id', activeLocationIds)
-        .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier as cust_tier')
+        .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier as cust_tier'))
         .first();
       if (pinned) reviews.unshift(pinned);
     }
@@ -469,7 +475,7 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
 router.post('/:id/auto-reply/skip', requireAdmin, async (req, res, next) => {
   try {
     const skipped = await AutoReply.skipAutoReply(req.params.id);
-    if (!skipped) return res.status(409).json({ error: 'This review is not waiting on the auto-reply pipeline (or a reply is being posted right now — try again in a moment)' });
+    if (!skipped) return res.status(409).json({ error: 'This review is not waiting on the auto-reply pipeline (a reply is being posted right now, or a Google result is still being reconciled — try again after the next sync)' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });

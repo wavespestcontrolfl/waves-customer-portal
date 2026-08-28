@@ -148,6 +148,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
     expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r67: "did not skip a step" / "never broke stride".
+    expect(verify(good('Hello there, your pets did not skip a step after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids never broke stride after the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the kids never batted an eye at the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, your pets were no worse for wear after the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad access resumed after one-half hour following the pest treatment.'), gpets)).toBe('banned_phrase');

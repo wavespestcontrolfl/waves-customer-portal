@@ -123,7 +123,8 @@ const { executeBITool } = require('../services/bi-agent-tools');
 const { reviewFingerprint } = require('../services/review-reply/fingerprint');
 const { accountFingerprint } = require('../services/review-reply/grounding');
 // The token draft_review_reply hands back: review + (review-only) account facts.
-const tokenFor = (row) => `${reviewFingerprint(row)}|${accountFingerprint(null)}`;
+// codex r67: the IB token also binds the exact approved reply text.
+const tokenFor = (row, text) => `${reviewFingerprint(row)}|${accountFingerprint(null)}${text == null ? '' : `#${require('crypto').createHash('sha1').update(String(text).trim()).digest('hex')}`}`;
 
 // Rolling-window fixtures derive from the clock (AGENTS.md: no hardcoded
 // dates that rot past a cutoff); historical rows stay fixed — they are
@@ -168,7 +169,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
 
     const row = state.rows.google_reviews[0];
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks!', grounding_token: tokenFor(row),
+      review_id: 'rev-1', reply_text: 'Thanks!', grounding_token: tokenFor(row, 'Thanks!'),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -182,7 +183,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     state.afterFirstRead = () => { row.missing_since = '2026-08-07T10:00:00Z'; };
 
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row),
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row, 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team'),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -195,11 +196,22 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
 
     const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row),
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row, reply),
     });
 
     expect(result.success).toBe(true);
     expect(row.review_reply).toBe(reply);
+  });
+
+  test('submit_review_reply refuses reply_text that differs from the approved draft bound in the token (codex r67)', async () => {
+    const row = liveReview();
+    state.rows.google_reviews = [row];
+    const approved = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    const result = await executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: approved.replace('Glad', 'So glad'), grounding_token: tokenFor(row, approved),
+    });
+    expect(result.code).toBe('draft_text_mismatch');
+    expect(row.review_reply).toBeNull();
   });
 
   test('a click_auto-linked review submits through the same review-only grounding the draft used (codex r22)', async () => {
@@ -232,7 +244,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
       tools = require('../services/intelligence-bar/review-tools');
     });
     const result = await tools.executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row),
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row, reply),
     });
     expect(result.success).toBe(true);
     expect(row.review_reply).toBe(reply);
@@ -248,7 +260,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     const row = liveReview();
     state.rows.google_reviews = [row];
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row),
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row, 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team'),
     });
     expect(result.code).toBe('verifier_reject');
     expect(row.review_reply).toBeNull();
