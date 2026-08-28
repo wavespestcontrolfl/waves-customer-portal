@@ -517,6 +517,16 @@ describe('rescheduleSeries — one recorded operation', () => {
     });
   });
 
+  test('the LOSER of two concurrent identical operations (CAS 409 before the unique insert) replays the winner instead of failing', async () => {
+    const winner = { id: 'sm-winner', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [] } };
+    // Prior lookup: nothing BEFORE the trx, the winner's row AFTER the CAS miss.
+    const { seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], { updateResults: [[{ updated_at: 's' }], []] });
+    seriesMovesDb.first.mockResolvedValueOnce(undefined).mockResolvedValueOnce(winner);
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-winner', occurrencesRescheduled: 2 });
+    expect(seriesMovesDb.insert).not.toHaveBeenCalled();
+  });
+
   test('a rolled-back sweep records a failed series_moves row outside the transaction and rethrows', async () => {
     const { seriesMovesDb, seriesMovesInsert } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], { updateResults: [[{ updated_at: 's' }], []] });
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))

@@ -1949,7 +1949,14 @@ class SmartRebooker {
 
       return touched;
     }).catch(async (err) => {
-      if (err?.code === '23505') {
+      // Two concurrent identical operations: the loser usually fails an
+      // appointment CAS (SLOT_TAKEN) before it ever reaches the unique
+      // series_moves insert (23505). On ANY transactional conflict, look for
+      // the winner's committed row under this key and replay it — the
+      // caller's action did happen — instead of reporting a failure for a
+      // move that committed. The still-current check is skipped on purpose:
+      // this pass's pre-move snapshot is stale by definition here.
+      if (err?.code === '23505' || err?.statusCode === 409) {
         const prior = await findPriorSeriesMove(db, serviceId, opKey).catch(() => null);
         if (prior) return { replayedFrom: prior };
       }

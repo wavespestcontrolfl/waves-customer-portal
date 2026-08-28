@@ -131,6 +131,8 @@ exports.up = async function up(knex) {
       t.text('error');
       t.jsonb('rows').notNullable().defaultTo('[]');
       t.jsonb('result');
+      // notified_at = the notification attempt concluded (sent, or a
+      // definitive non-send); customer_notified = a text actually went out.
       t.boolean('customer_notified').notNullable().defaultTo(false);
       // Whether the initiating surface asked for the customer text — read
       // by the effects reconciler when it finishes a pass that died.

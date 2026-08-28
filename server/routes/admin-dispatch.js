@@ -14047,7 +14047,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified')) || markers;
     } catch (err) {
       logger.warn(`[dispatch] series_moves lease failed for ${seriesMoveId}: ${err.message}`);
     }
@@ -14148,8 +14148,18 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 
     let notificationSent = false;
     let notificationError = null;
+    // notified_at = the notification attempt CONCLUDED (sent, or a definitive
+    // non-send: no customer, opted out / no eligible recipient, appointment
+    // terminal or moved again, anchor superseded); customer_notified says
+    // whether a text actually went out. Only transient failures (provider
+    // deferral, thrown error) leave it NULL for the reconciler to retry —
+    // otherwise a permanent non-send would be re-attempted forever, starve
+    // newer rows, and could send a stale notice months later if eligibility
+    // ever changed.
+    let definitiveNonSend = false;
     if (notify && markers.notified_at) {
-      notificationSent = true;
+      notificationSent = markers.customer_notified === true;
+      if (!notificationSent) notificationError = 'notification concluded earlier without a send';
     } else if (notify) {
       // Recipient routing, opt-in/opt-out and service-contact delivery come
       // from the shared appointment sender (AppointmentReminders.
@@ -14161,11 +14171,13 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
       if (!customer) {
         notificationError = 'Customer not found';
+        definitiveNonSend = true;
       } else if (String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || '').slice(0, 10) !== String(newDate).split('T')[0]) {
         // A replayed/retried pass: the anchor was moved again after this
         // series move committed — the recorded text would announce a
         // superseded date. The later move's own notice covers the customer.
         notificationError = 'anchor_changed';
+        definitiveNonSend = true;
       } else {
         const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
           .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
@@ -14180,6 +14192,9 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           const AppointmentReminders = require('../services/appointment-reminders');
           const { PREFS_UNAVAILABLE } = require('../services/customer-contact');
           const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first().catch(() => PREFS_UNAVAILABLE);
+          // sendOutcome: the sender reports a DEFERRED send (send window,
+          // provider hold) separately from a definitive non-send.
+          const sendOutcome = {};
           notificationSent = await AppointmentReminders.safeSendAppointment(customer, prefs || {}, async (contact) => {
             const firstName = String(contact?.name || '').trim().split(/\s+/)[0] || customer.first_name || 'there';
             return renderRequiredTemplate('appointment_series_rescheduled', {
@@ -14198,6 +14213,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             // this exact message; a held night send would silently drop the
             // notice for a next-morning move).
             operatorInitiated: true,
+            sendOutcome,
             preDispatchCheck: async () => {
               const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'status');
               if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
@@ -14208,7 +14224,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               return stillDate ? { ok: true } : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
             },
           });
-          if (!notificationSent) notificationError = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+          if (!notificationSent) {
+            notificationError = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
+            definitiveNonSend = sendOutcome.lastDeferred !== true;
+          }
           if (notificationSent) {
             await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
             await stampMarker('notified_at', { customer_notified: true });
@@ -14218,6 +14237,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
         }
       }
+      if (!notificationSent && definitiveNonSend) await stampMarker('notified_at', { customer_notified: false });
       if (!notificationSent) {
         // Nothing went out, so the due windows the sync covered above (this
         // pass, or an earlier pass that died before texting) must be handed
@@ -14254,7 +14274,10 @@ async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit 
     .where({ status: 'committed' })
     .whereIn('source_surface', RECONCILE_SURFACES)
     .where('created_at', '<', new Date(Date.now() - olderThanMs))
-    .where((q) => q.whereNull('reminders_synced_at').orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at')))
+    .where((q) => q
+      .whereNull('reminders_synced_at')
+      .orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at'))
+      .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at')))
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('id', 'anchor_service_id', 'new_date', 'result', 'notify_requested');
