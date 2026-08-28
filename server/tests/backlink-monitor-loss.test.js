@@ -1,9 +1,11 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/seo/dataforseo', () => ({ getBacklinks: jest.fn() }));
+jest.mock('../services/notification-service', () => ({ create: jest.fn(async (o) => ({ id: 'n-1', ...o })) }));
 
 const db = require('../models/db');
 const dataforseo = require('../services/seo/dataforseo');
+const NotificationService = require('../services/notification-service');
 const BacklinkMonitor = require('../services/seo/backlink-monitor');
 
 // Minimal chainable knex stand-in: every builder method returns the builder,
@@ -88,7 +90,7 @@ function scanWith({ items = [], total = items.length, active = [], existingByUrl
 }
 
 describe('BacklinkMonitor verified loss detection', () => {
-  beforeEach(() => { db.mockReset(); dataforseo.getBacklinks.mockReset(); });
+  beforeEach(() => { db.mockReset(); dataforseo.getBacklinks.mockReset(); NotificationService.create.mockClear(); NotificationService.create.mockImplementation(async (o) => ({ id: 'n-1', ...o })); });
 
   test('fetch is no longer dofollow-only; a valid EMPTY result is a complete scan, a missing result aborts', async () => {
     const { increments } = scanWith({ items: [], total: 0, active: [activeRow()] });
@@ -177,8 +179,9 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(lost.ids).toBe('bl-1');
     expect(lost.patch).toEqual(expect.objectContaining({ lost_reason: 'link_removed', miss_count: 2 }));
     expect(lost.patch.lost_at).toEqual(new Date('2026-08-30T07:30:00Z'));
-    expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'lost' })]);
-    expect(r).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, alertedNew: 1, recoveryQueued: 1 }));
+    // 'lost' ledger row, then the durable alert stamp (bell row + 'loss_alerted' commit together)
+    expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'lost' }), expect.objectContaining({ backlink_id: 'bl-1', event_type: 'loss_alerted' })]);
+    expect(r).toEqual(expect.objectContaining({ lostCount: 1, lostDomains: 1, highValueLost: 1, alertedNew: 1, alerted: 1, recoveryQueued: 1 }));
     expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'blog.example', lost_reason: 'link_removed', domain_rating: 45, alertable: true })]);
     // recovery reported a terminal outcome → the row is stamped so it is not swept again
     expect(updates.find(u => u.patch.recovery_queued_at)).toBeUndefined(); // stamp goes through whereIn, captured below
@@ -761,22 +764,40 @@ describe('lost-link recovery', () => {
     expect(updates.some(u => u.patch && u.patch.recovery_queued_at)).toBe(true);
   });
 
-  test('loss alert is DURABLE: an owed row with no loss_alerted ledger row rings (even though nothing was newly lost this scan), and rows are stamped only after the send succeeds', async () => {
+  test('loss alert is DURABLE: an owed row with no loss_alerted ledger row rings (even though nothing was newly lost this scan); the admin bell row and the ledger stamps commit together, the SMS copy goes out after commit', async () => {
     const recovery = jest.fn(async (losses) => ({ queued: losses.length, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
     const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
     const owed = [{ id: 'old-1', source_url: 'https://old.example/res', target_url: 'https://wavespestcontrol.com/', source_domain: 'old.example', domain_rating: 60, anchor_text: null, severity: 'clean', link_type: null, lost_reason: 'page_gone' }];
     const { events } = scanWith({ items: [seen], active: [], owed, alerted: [] });
-    const alertFn = jest.fn(async () => {});
+    const order = [];
+    NotificationService.create.mockImplementation(async (o) => { order.push('bell'); return { id: 'n-1', ...o }; });
+    const alertFn = jest.fn(async () => { order.push('sms'); });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn });
     expect(r).toEqual(expect.objectContaining({ lostCount: 0, alertedNew: 1, alerted: 1 }));
-    expect(alertFn).toHaveBeenCalledWith(expect.stringMatching(/1 referring domain\(s\) lost — verified by crawl: old\.example DR60 \(page_gone\)/));
-    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted' }));
+    const msg = expect.stringMatching(/1 referring domain\(s\) lost — verified by crawl: old\.example DR60 \(page_gone\)/);
+    expect(NotificationService.create).toHaveBeenCalledWith(expect.objectContaining({ recipientType: 'admin', category: 'system', body: msg, link: '/admin/seo', connection: db, metadata: expect.objectContaining({ lane: 'backlink_loss', domains: ['old.example'], backlinkIds: ['old-1'] }) }));
+    expect(alertFn).toHaveBeenCalledWith(msg);
+    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted', detail: JSON.stringify({ domains: 1, notification_id: 'n-1' }) }));
+    expect(order).toEqual(['bell', 'sms']); // bell + stamps committed BEFORE the SMS copy
 
-    // a failed send leaves the rows UNSTAMPED so the next scan rings again
+    // a failed SMS copy is logged by code only; the bell is the record, rows stay stamped (no re-ring next week)
     const { events: events2 } = scanWith({ items: [seen], active: [], owed, alerted: [] });
-    const r2 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: jest.fn(async () => { throw new Error('twilio down'); }) });
-    expect(r2).toEqual(expect.objectContaining({ alertedNew: 1, alerted: 0 }));
-    expect(events2.find(e => e && e.event_type === 'loss_alerted')).toBeUndefined();
+    const r2 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: jest.fn(async () => { const e = new Error('Twilio: +19415550100 unreachable'); e.code = 21211; throw e; }) });
+    expect(r2).toEqual(expect.objectContaining({ alertedNew: 1, alerted: 1 }));
+    expect(events2).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted' }));
+    const logger = require('../services/logger');
+    const warn = logger.warn.mock.calls.map(c => c[0]).find(m => /loss alert SMS copy failed/.test(m));
+    expect(warn).toMatch(/code=21211/);
+    expect(warn).not.toMatch(/\+1941/); // never the phone number
+
+    // a failed bell insert stamps NOTHING and sends nothing — the next scan rings
+    NotificationService.create.mockImplementation(async () => null);
+    const { events: events3 } = scanWith({ items: [seen], active: [], owed, alerted: [] });
+    const sms3 = jest.fn(async () => {});
+    const r3 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: sms3 });
+    expect(r3).toEqual(expect.objectContaining({ alertedNew: 1, alerted: 0 }));
+    expect(events3.find(e => e && e.event_type === 'loss_alerted')).toBeUndefined();
+    expect(sms3).not.toHaveBeenCalled();
   });
 
   test('a DataForSEO item is resolved from the in-memory canonical map — no per-item lookup query against seo_backlinks', async () => {

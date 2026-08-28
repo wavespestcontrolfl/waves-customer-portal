@@ -416,22 +416,40 @@ class BacklinkMonitor {
     }
     let alerted = 0;
     if (alertNow.length > 0) {
-      const send = alertFn || (process.env.NODE_ENV === 'production' && process.env.ADAM_PHONE
-        ? (msg) => require('../twilio').sendSMS(process.env.ADAM_PHONE, msg, { messageType: 'internal_alert', link: '/admin/seo' })
-        : null);
-      if (send) {
-        try {
-          const names = alertNow.slice(0, 3).map(d => `${d.domain} DR${d.domain_rating} (${d.lost_reason})`).join(', ');
-          await send(`⚠️ ${alertNow.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`);
-          // Stamp AFTER a successful send: a failed send leaves the rows unrung
-          // and the next scan rings them.
-          await db.transaction(async (trx) => {
-            for (const id of unrungIds) await this.recordEvent(id, 'loss_alerted', { domains: alertNow.length }, trx);
+      const names = alertNow.slice(0, 3).map(d => `${d.domain} DR${d.domain_rating} (${d.lost_reason})`).join(', ');
+      const message = `⚠️ ${alertNow.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`;
+      // The DURABLE alert is the admin bell (notifications row), written in ONE
+      // transaction with the 'loss_alerted' ledger stamps: either both land or
+      // neither, so a ledger failure can never leave a delivered alert unstamped
+      // (re-rung next week) and a bell failure never stamps rows nobody saw.
+      // The SMS is an out-of-band copy sent AFTER commit — best effort, never
+      // retried (the bell is the record), and an SMS failure is logged by code
+      // only: a Twilio message can carry the destination number (PII rule).
+      let bellOk = false;
+      try {
+        await db.transaction(async (trx) => {
+          const NotificationService = require('../notification-service');
+          const created = await NotificationService.create({
+            recipientType: 'admin', category: 'system', title: 'Referring domain(s) lost', body: message, link: '/admin/seo',
+            metadata: { lane: 'backlink_loss', domains: alertNow.map(d => d.domain), backlinkIds: unrungIds },
+            connection: trx,
           });
-          alerted = alertNow.length;
-        } catch (err) {
-          logger.warn(`Backlink scan: loss alert not sent (rows left unrung for the next scan): ${err.message}`);
-        }
+          if (!created) throw new Error('admin notification insert failed');
+          for (const id of unrungIds) await this.recordEvent(id, 'loss_alerted', { domains: alertNow.length, notification_id: created.id || null }, trx);
+        });
+        bellOk = true;
+        alerted = alertNow.length;
+      } catch (err) {
+        logger.warn(`Backlink scan: loss alert not recorded (rows left unrung for the next scan): ${err.message}`);
+      }
+      const send = alertFn || (process.env.NODE_ENV === 'production' && process.env.ADAM_PHONE
+        // allowOwnerSms: an owner-phone internal_alert is otherwise redirected into
+        // the admin bell — which this scan just wrote itself.
+        ? (msg) => require('../twilio').sendSMS(process.env.ADAM_PHONE, msg, { messageType: 'internal_alert', link: '/admin/seo', allowOwnerSms: true })
+        : null);
+      if (bellOk && send) {
+        try { await send(message); }
+        catch (err) { logger.warn(`Backlink scan: loss alert SMS copy failed (bell recorded; code=${(err && (err.code || err.name)) || 'unknown'})`); }
       }
     }
 
