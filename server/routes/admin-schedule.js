@@ -2335,7 +2335,11 @@ async function resolveSeriesExtensionPriceTemplate(conn, parentId, parent) {
     if (!(perVisit > 0)) return parent;
     const amount = Math.round(perVisit * 100) / 100;
     const template = { ...parent, estimated_price: amount };
-    if (Number(parent?.primary_line_price) > 0) {
+    // Any NON-NULL structured price is cleared — including 0: a this_only
+    // free re-service conversion stores primary_line_price = 0, and the
+    // invoice builder treats any numeric primary price as authoritative
+    // (codex #3551 r1 P1), so a copied 0 would bill an empty primary line.
+    if (parent?.primary_line_price != null && parent.primary_line_price !== '') {
       template.primary_line_price = null;
       template.line_discount_id = null;
       template.line_discount_name = null;
@@ -2615,8 +2619,17 @@ function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow, provenanc
     groupsToPin.push(PRICE_SERVICE_SERVICE_KEYS);
   }
   const anchoredPin = Number(provenance?.anchored_split_per_visit) > 0;
-  if (groups.priceChanged && !anchoredPin && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
-    groupsToPin.push(PRICE_SERVICE_PRICE_KEYS);
+  if (groups.priceChanged && !PRICE_SERVICE_PRICE_KEYS.some((key) => key in existing)) {
+    // With the marker present the two price-AUTHORITY keys are never pinned
+    // (a pinned pre-edit estimated_price would drop the marker in the
+    // stamp; a pinned structured primary_line_price would out-rank it in
+    // the resolver). The REST of the price group still pins at its
+    // pre-edit values — a this_only appointment discount on an anchored
+    // parent must stay a one-visit discount, not ride the marker onto
+    // every renewal (codex #3551 r1 P1).
+    groupsToPin.push(anchoredPin
+      ? PRICE_SERVICE_PRICE_KEYS.filter((key) => !ANCHORED_PRICE_AUTHORITY_KEYS.has(key))
+      : PRICE_SERVICE_PRICE_KEYS);
   }
   for (const keys of groupsToPin) {
     for (const key of keys) {
@@ -2627,6 +2640,7 @@ function pickUnpinnedGroupFields(existingOverrides, groups, beforeRow, provenanc
   }
   return pinned;
 }
+const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_price']);
 
 // Rewrite the still-upcoming BASE-series visits of the series — on/after
 // `fromDateStr` when the edit came from a mid-series visit, or ALL of them
@@ -8298,8 +8312,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         && isEnabled('editApptPriceServiceScope')
         && priceServiceBeforeRow
         && priceServiceBeforeRow.is_recurring && !priceServiceBeforeRow.recurring_parent_id
-        && parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides)) {
+        && (parseTemplateOverrides(priceServiceBeforeRow.recurring_template_overrides)
+          || Number(readProvenanceOverrides(priceServiceBeforeRow.recurring_template_overrides)?.anchored_split_per_visit) > 0)) {
         // Legacy surfaces (dispatch card edits, mobile saves) post no scope.
+        // A marker-only template counts as pinned here too (codex #3551 r1
+        // P1): the seeder's anchored split is the renewal authority until
+        // an operator sets a price, and these surfaces have always meant
+        // "this is the series price" for a parent — so a legacy reprice
+        // stamps the explicit override (retiring the marker) instead of
+        // saving a first-visit price the resolver would then ignore.
         // If the edited row is a series PARENT whose template is already
         // pinned by overrides, keep the pin fresh — but only for groups
         // whose values this save actually CHANGED against the locked

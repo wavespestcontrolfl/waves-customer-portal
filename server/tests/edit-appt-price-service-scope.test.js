@@ -610,6 +610,13 @@ describe('this_only edits on an anchored-split parent keep the seeder marker as 
     expect(groups.priceChanged).toBe(true);
     expect(pickUnpinnedGroupFields(parseTemplateOverrides(before.recurring_template_overrides), groups, before, readProvenanceOverrides(before.recurring_template_overrides)))
       .toEqual({});
+    // A this_only DISCOUNT on the anchored parent still pins the pre-edit
+    // discount fields (one-visit discount stays one-visit) — only the two
+    // price-authority keys are held back so the marker survives the stamp.
+    const discountGroups = computePriceServiceGroupChanges(before, { estimated_price: 79.5, discount_type: 'percentage', discount_amount: 10 });
+    const discountPin = pickUnpinnedGroupFields(null, discountGroups, before, readProvenanceOverrides(raw));
+    expect(discountPin).toEqual({ discount_type: null, discount_amount: null });
+    expect(discountPin).not.toHaveProperty('estimated_price');
     // Without the marker the pre-edit price IS pinned (unchanged behaviour).
     expect(pickUnpinnedGroupFields(null, groups, before, readProvenanceOverrides(null)))
       .toEqual({ primary_line_price: null, estimated_price: '88.34' });
@@ -655,6 +662,60 @@ describe('this_only edits on an anchored-split parent keep the seeder marker as 
     expect(written).toEqual({ primary_line_price: 95, estimated_price: 95 });
     const following = { ...afterEdit, recurring_template_overrides: written };
     expect(await resolveSeriesExtensionPriceTemplate(null, 'p1', following)).toBe(following);
+  });
+
+  it('a this_only discount pin on an anchored parent keeps the marker and the renewal template carries NO discount', async () => {
+    const discountGroups = computePriceServiceGroupChanges(before, { estimated_price: 79.5, discount_type: 'percentage', discount_amount: 10 });
+    const pinned = pickUnpinnedGroupFields(null, discountGroups, before, readProvenanceOverrides(raw));
+    let written = null;
+    const conn = () => ({
+      where: () => ({
+        first: async () => ({ recurring_template_overrides: raw }),
+        update: async (u) => { written = JSON.parse(u.recurring_template_overrides); return 1; },
+      }),
+    });
+    expect(await stampRecurringTemplateOverrides(conn, 'p1', pinned, { recurring_template_overrides: {} })).toBe(true);
+    expect(written).toEqual({ anchored_split_per_visit: 88.33, discount_type: null, discount_amount: null });
+    const afterEdit = { ...before, estimated_price: '79.50', discount_type: 'percentage', discount_amount: 10, recurring_template_overrides: written };
+    const overlaid = overlayRecurringTemplateOverrides(afterEdit, { recurring_template_overrides: {} });
+    expect(overlaid.discount_type).toBeNull();
+    const template = await resolveSeriesExtensionPriceTemplate(null, 'p1', overlaid);
+    expect(template.estimated_price).toBe(88.33);
+    const data = {};
+    applyStoredVisitFinancials(data, { estimated_price: {} }, template, [], []);
+    expect(data.estimated_price).toBe(88.33);
+  });
+
+  it('a this_only free re-service conversion (primary_line_price = 0) never copies the 0 onto renewals', async () => {
+    const converted = { ...before, estimated_price: 0, primary_line_price: 0, line_discount_dollars: null };
+    const template = await resolveSeriesExtensionPriceTemplate(null, 'p1', converted);
+    expect(template.primary_line_price).toBeNull();
+    expect(template.estimated_price).toBe(88.33);
+    const data = {};
+    applyStoredVisitFinancials(data, { estimated_price: {}, primary_line_price: {} }, template, [], []);
+    expect(data.estimated_price).toBe(88.33);
+    expect(data.primary_line_price).toBeUndefined();
+  });
+
+  it('a legacy no-scope parent reprice (mobile sheet) retires the marker with an explicit override — the series follows the new price', async () => {
+    // The legacy refresh block fires for a marker-only template.
+    expect(src).toMatch(/&& \(parseTemplateOverrides\(priceServiceBeforeRow\.recurring_template_overrides\)\n\s*\|\| Number\(readProvenanceOverrides\(priceServiceBeforeRow\.recurring_template_overrides\)\?\.anchored_split_per_visit\) > 0\)\) \{/);
+    const legacyGroups = computePriceServiceGroupChanges(before, { primary_line_price: 120, estimated_price: 120 });
+    let written = null;
+    const conn = () => ({
+      where: () => ({
+        first: async () => ({ recurring_template_overrides: raw }),
+        update: async (u) => { written = JSON.parse(u.recurring_template_overrides); return 1; },
+      }),
+    });
+    await stampRecurringTemplateOverrides(conn, 'p1', legacyGroups.fields, { recurring_template_overrides: {} });
+    expect(written).toEqual({ primary_line_price: 120, estimated_price: 120 });
+    const repriced = { ...before, estimated_price: '120.00', primary_line_price: '120.00', recurring_template_overrides: written };
+    const overlaid = overlayRecurringTemplateOverrides(repriced, { recurring_template_overrides: {} });
+    expect(await resolveSeriesExtensionPriceTemplate(null, 'p1', overlaid)).toBe(overlaid);
+    const data = {};
+    applyStoredVisitFinancials(data, { estimated_price: {} }, overlaid, [], []);
+    expect(data.estimated_price).toBe(120);
   });
 
   it('both this_only pin sites (price edit + re-service conversion) pass the provenance to the pin decision', () => {
