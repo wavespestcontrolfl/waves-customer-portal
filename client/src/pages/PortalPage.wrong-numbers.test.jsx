@@ -130,6 +130,11 @@ describe('expanded visit hydration and pagination', () => {
     expect(await screen.findByRole('button', { name: /download/i })).toBeInTheDocument();
     expect(screen.queryByText('Products Applied')).not.toBeInTheDocument();
     expect(api.getService).not.toHaveBeenCalled();
+    // No reportUrl on this fixture → the local fallback summary, never an
+    // iframe pointed at "/null".
+    expect(document.querySelector('iframe')).toBeNull();
+    // Row header + fallback summary title.
+    expect(screen.getAllByText('Lawn Fertilization Round 2')).toHaveLength(2);
   });
 
   it('offers Load More when the server reports more visits than one page', async () => {

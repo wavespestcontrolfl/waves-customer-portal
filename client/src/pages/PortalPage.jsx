@@ -3819,6 +3819,9 @@ function ServicesTab() {
                       // every non-live mode — merely expanding the row must not
                       // count as a view (GH codex P1).
                       const previewSrc = (() => {
+                        // No reportUrl (legacy record) → local fallback card,
+                        // never new URL(null) → "/null" (pre-push P1).
+                        if (!s.reportUrl) return null;
                         try { const u = new URL(s.reportUrl, window.location.origin); u.searchParams.set('mode', 'static'); return u.toString(); } catch { return null; }
                       })();
                       const download = () => {
