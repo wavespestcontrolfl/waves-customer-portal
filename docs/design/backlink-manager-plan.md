@@ -85,9 +85,9 @@ design choice.
 ```js
 t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
 t.text('domain').notNullable().unique();          // canonicalProspectDomain(): lower, no scheme/www/port/path
-t.string('source').notNullable();                 // provenance enum (§3.5)
-t.text('source_detail');                          // e.g. 'backlinks_csv_2026_08', gap id, X post URL, seed note
-t.uuid('source_ref');
+t.string('source').notNullable();                 // FIRST-TOUCH provenance (§3.5) — never overwritten
+t.text('source_detail');                          // first-touch detail: 'backlinks_csv_2026_08', gap id, seed note
+t.uuid('source_ref');                             // first-touch ref (registry row for recursive, gap id, …)
 t.string('discovery_priority').notNullable().defaultTo('normal'); // owner_seed | normal
 t.integer('domain_rating'); t.integer('organic_traffic'); t.integer('spam_score');
 t.integer('referring_domains'); t.integer('competitors_linked');
@@ -158,7 +158,20 @@ t.timestamps(true, true);
 ```
 `signup-evidence.js` writes here for the deterministic runner (its current ledger folds in).
 
-### 3.5 Provenance enum (`seo_link_domains.source`)
+### 3.4b `seo_link_domain_sources` — every touch, normalized
+
+```js
+t.uuid('id').primary(); t.uuid('domain_id').notNullable();
+t.string('source').notNullable(); t.text('source_detail'); t.uuid('source_ref');
+t.timestamp('seen_at').notNullable().defaultTo(knex.fn.now());
+t.unique(['domain_id', 'source', 'source_detail']);
+```
+`seo_link_domains.source` is first-touch attribution and is never overwritten; every feeder
+(including a repeat of the first) inserts a row here. §8 reports and learns per source from
+this table (a domain discovered by three feeders credits all three; "first-touch" and
+"any-touch" are both reportable), and recursive lineage follows `source_ref` chains here.
+
+### 3.5 Provenance enum (`seo_link_domains.source`, `seo_link_domain_sources.source`)
 
 `owner_seed` · `list_import` · `competitor_gap` · `competitor_clone` · `recursive` ·
 `x` · `google_search` · `dataforseo` · `strategy_agent` · `existing_backlink` ·
@@ -201,10 +214,19 @@ Accepts raw text: domains, URLs, an X post URL, a competitor backlink URL, a pas
 CSV rows. Steps, all idempotent:
 
 1. **Normalize** — extract hosts/URLs from the text; `canonicalProspectDomain()` for the host;
-   keep the URL as a *submission_url hint*.
+   keep the URL as a *submission_url hint*. **Resolvers run first** for URLs that are
+   *references to* opportunities rather than opportunities: an X post URL (`x.com`/
+   `twitter.com/<user>/status/<id>`) is resolved through the existing `backlink-agent/x-poller`
+   URL extraction (tweet entities → expanded URLs → redirect-resolved final hosts) and each
+   resolved host enters as `source='x'`, `source_detail=<post URL>`; the post host itself is
+   never a candidate. A competitor backlink URL contributes its host. Hosts on a fixed
+   never-a-target list (`x.com`, `twitter.com`, `google.com`, `t.co`, URL shorteners, Waves'
+   own domains) are dropped, not parked. If the X API is unavailable the post is parked in
+   intake as `unresolved` and retried, never turned into an `x.com` domain.
 2. **Dedupe** — against `seo_link_domains.domain` and, for placement hints, via
-   `findPlacementRow`. Existing rows are *updated* (new provenance appended to
-   `source_detail`, priority raised if the new source is `owner_seed`), never duplicated.
+   `findPlacementRow`. Existing rows are *updated* (a `seo_link_domain_sources` row is
+   added for the new touch; first-touch `source` is untouched; priority raised if the new
+   source is `owner_seed`), never duplicated.
 3. **Enrich** — DataForSEO bulk summary (rank, traffic, spam, referring domains) in one call
    per batch; `competitors_linked` from `seo_competitor_backlinks`. Behind
    `GATE_SEO_INTELLIGENCE`; cached in `enrichment`.
@@ -310,7 +332,9 @@ t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').n
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
 t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}` — one purchase per placement per ET month
 t.decimal('amount', 10, 2).notNullable(); t.string('authority').notNullable();
-t.string('state').notNullable();                    // reserved → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
+t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
+t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
+t.timestamp('submitting_at');
 t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
 
@@ -322,13 +346,27 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
   reservation unlocks the card details to the provider. Two workers can never both pass the
   check; the lock is per ET budget month (`link_budget:<budget_month>`), so the policy month
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
-- **Ambiguity is a state, not a retry.** A timeout/disconnect after the merchant may have
-  taken the card → `ambiguous`. The worker reports `outcome='payment_ambiguous'`; the row is
-  never retried by any provider until `reconcile` (card-issuer transaction lookup, or the owner
-  card) moves it to `reconciled_charged` / `reconciled_not_charged`. A `reserved` row whose
-  attempt fails *before* submission is `voided` in the same report.
-- **Lease safety.** `report` for a paid step is conditional on the lease AND on the purchase
-  row's `state='reserved'`; a stale lease cannot flip a purchase.
+- **`submitting` before the external call — non-retryable.** Immediately before the provider
+  submits the checkout (the last point at which nothing has been charged), the worker flips
+  the row `reserved → submitting` (conditional on the lease; `submitting_at = now`). Only a
+  `submitting` row exposes the card to the provider. Where the merchant supports it the
+  `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
+  transitions are `charged` (success reported with `merchant_ref`), `voided` (provider
+  proves the merchant rejected before capture), or `ambiguous`.
+- **Crash = ambiguous, never re-submit.** A worker that dies after `submitting` leaves the
+  row in `submitting`; the hourly lease-expiry sweep moves any `submitting` row older than the
+  lease TTL to `ambiguous` and marks its attempt `payment_ambiguous`. `claim()` never leases a
+  placement whose purchase is `submitting` or `ambiguous`, so a reclaimed lease cannot
+  re-submit the same checkout. A reported timeout/disconnect after submission →
+  `ambiguous` directly.
+- **Ambiguity is reconciled, not retried.** `ambiguous` rows count against the month's
+  budget and are cleared only by `reconcile` (card-issuer transaction lookup by
+  `merchant_idempotency_key`/amount/time, or the owner card) → `reconciled_charged` /
+  `reconciled_not_charged`. A `reserved` row whose attempt fails *before* `submitting` is
+  `voided` in the same report and releases its budget.
+- **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
+  prior state (`reserved→submitting`, `submitting→charged|voided|ambiguous`); a stale lease
+  or a wrong prior state affects 0 rows and returns 409.
 - **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
   method the runner can use; the bank's limit is a second, independent ceiling — it is not the
   policy. Owner-approved purchases above `max_auto_purchase` go through the same reservation
