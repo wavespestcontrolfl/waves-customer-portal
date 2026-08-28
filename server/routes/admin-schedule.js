@@ -6609,8 +6609,8 @@ async function planCollectiveEditDateMove(req) {
     );
   }
   let win = { start: null, end: null };
+  const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
   if (!clearWindow && intake.windowStart) {
-    const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
     const normalized = assertAdminAppointmentWindow({
       windowStart: intake.windowStart,
       windowEnd: intake.windowEnd || null,
@@ -6627,6 +6627,13 @@ async function planCollectiveEditDateMove(req) {
   const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
     ? req.body.operationKey
     : null;
+  // The duration the anchor carries when the series commits: the per-row
+  // edit ahead of it writes the submitted value under the handler's own
+  // presence predicate (`estimatedDuration !== undefined && !== ''`), else
+  // the row keeps what the plan read.
+  const postEditDuration = (req.body.estimatedDuration !== undefined && req.body.estimatedDuration !== '')
+    ? parseInt(req.body.estimatedDuration, 10)
+    : (row.estimated_duration_minutes ?? null);
   return {
     async commit() {
       const SmartRebooker = require('../services/rebooker');
@@ -6642,10 +6649,20 @@ async function planCollectiveEditDateMove(req) {
         // An explicit two-bound clear rides IN the series transaction with
         // the date move — never persisted ahead of it by the per-row edit.
         ...(clearWindow ? { clearAnchorWindow: true } : {}),
-        // Pin the anchor to the row the plan read — a concurrent move makes
-        // the delta stale and the series must not shift on it. The per-row
-        // edit above never touches the date or the window.
-        expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
+        // Pin the anchor to EVERY scheduling field the plan derived `win`
+        // from — date, start, end and duration — not just date + start
+        // (codex r8 P1): the per-row edit and this commit are separate
+        // transactions, and an edit landing between them that changed only
+        // window_end or the duration would otherwise pass the fence and be
+        // overwritten by a window derived from the older values. The
+        // per-row edit never touches the date or the window, so those pin
+        // at the plan's read; the duration pins at its post-edit value.
+        expect: {
+          scheduled_date: dateOnly(row.scheduled_date),
+          window_start: row.window_start ?? null,
+          window_end: row.window_end ?? null,
+          estimated_duration_minutes: postEditDuration,
+        },
       });
       const { applySeriesMoveEffects } = require('./admin-dispatch');
       const effects = await applySeriesMoveEffects({

@@ -142,6 +142,9 @@ class RescheduleSMS {
     // FUTURE candidate dates the appointment isn't on yet, so this never short-
     // circuits a genuine move.
     let alreadyOnSlot = false;
+    // The schedule this reply OBSERVED — the move below carries it as its
+    // expect pin.
+    let observedSchedule = null;
     if (selectedOption) {
       const svc = await db('scheduled_services')
         .where({ id: pending.scheduled_service_id })
@@ -168,6 +171,7 @@ class RescheduleSMS {
       // widened/edited off the reply option still re-books to the tight target
       // instead of being silently confirmed as-is. Exclude every non-live status
       // (completed/cancelled/skipped) so a reply can't "confirm" a dead visit.
+      observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null } : null;
       alreadyOnSlot = !!svc
         && toYmd(svc.scheduled_date) === toYmd(selectedOption.date)
         && normTime(svc.window_start) === normTime(selectedOption.window?.start)
@@ -185,10 +189,22 @@ class RescheduleSMS {
         // series_moves row records it, so the reconciler can finish it).
         // A single move ignores the flag and keeps this path's own
         // confirmation send.
+        // expect: the schedule this reply observed rides along as the
+        // move's pin. The single path CASes on it; the series path's
+        // retry-key resolution needs it to tell a legitimate return move
+        // (A→B, B→C, then C→B — observed at C) from a stale retry of the
+        // original A→B (observed at A), which it otherwise refuses as
+        // SERIES_MOVE_STALE and this valid reply lands in office follow-up
+        // (codex r8 P2). A pin that no longer holds surfaces as the 409
+        // the catch below routes to follow-up.
         smsMoveResult = await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
           selectedOption.window, pending.reason_code, 'customer_sms',
-          { sourceSurface: 'sms_reply', notifyRequested: true },
+          {
+            sourceSurface: 'sms_reply',
+            notifyRequested: true,
+            ...(observedSchedule ? { expect: observedSchedule } : {}),
+          },
         );
       } catch (err) {
         // The offer was computed without a route check — rebooker can now

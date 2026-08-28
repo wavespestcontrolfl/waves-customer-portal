@@ -36,7 +36,7 @@ const path = require('path');
 const db = require('../models/db');
 const SmartRebooker = require('../services/rebooker');
 const { findConflictingVisits } = require('../services/scheduling/occupancy');
-const { parseETDateTime, addETDays, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, addETDays, etDateString, etParts } = require('../utils/datetime-et');
 
 const dayOffset = (n) => etDateString(addETDays(parseETDateTime(`${etDateString()}T12:00`), n));
 // Weekly cadence: BASE, +7, +14, +21. Anchor moves +2 days.
@@ -99,12 +99,15 @@ function anchorRow(overrides = {}) {
   };
 }
 
-// Series harness (mirrors rebooker-live-reschedule-override): sibling SELECT,
-// same-series clash probe, then one UPDATE chain per sibling in order.
-function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null } = {}) {
+// Series harness (mirrors rebooker-live-reschedule-override): unlocked
+// sibling SELECT, the same SELECT again under the locks (lockedSiblings =
+// what that read returns; defaults to the same rows), same-series clash
+// probe, then one UPDATE chain per sibling in order.
+function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null, lockedSiblings = null } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+  const siblingsReread = chain({ select: jest.fn().mockResolvedValue(lockedSiblings || siblings) });
   const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
   const updates = siblings.map((_, i) => chain({
     update: jest.fn().mockResolvedValue(updateResults ? updateResults[i] : [{ updated_at: `stamp-${i}` }]),
@@ -113,7 +116,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
   const logInsert = chain();
   const seriesMovesInsert = chain();
 
-  const scheduledQueue = [siblingsQuery, seriesClashProbe, ...updates];
+  const scheduledQueue = [siblingsQuery, siblingsReread, seriesClashProbe, ...updates];
   const trx = jest.fn((table) => {
     if (table === 'scheduled_services') return scheduledQueue.shift();
     if (table === 'job_status_history') return historyInsert;
@@ -141,7 +144,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup, siblingsQuery };
+  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup, siblingsQuery, siblingsReread, trx };
 }
 
 const ADMIN_OPTS = { allowLive: true, adminWindowRules: true, overlapAdvisory: true, sourceSurface: 'dispatch_board' };
@@ -644,6 +647,81 @@ describe('rescheduleSeries — one recorded operation', () => {
       error: expect.stringContaining('changed concurrently'),
     }));
   });
+
+  test('the per-parent maintenance lock is taken AFTER the date-occupancy locks and BEFORE the locked re-read the sweep writes from', async () => {
+    const { siblingsQuery, siblingsReread, trx, updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    const rawOrder = (pred) => {
+      const idx = trx.raw.mock.calls.findIndex(([, bindings]) => Array.isArray(bindings) && pred(bindings));
+      expect(idx).toBeGreaterThan(-1);
+      return trx.raw.mock.invocationCallOrder[idx];
+    };
+    // Byte-identical key to admin-schedule's acquireRecurringSeriesMaintenanceLock.
+    const maintenance = rawOrder((b) => b[0] === 'recurring-series-maintenance' && b[1] === 'svc-1');
+    const lastOccupancy = Math.max(...trx.raw.mock.calls
+      .map(([, b], i) => (Array.isArray(b) && String(b[1]).startsWith('occupancy:') ? trx.raw.mock.invocationCallOrder[i] : -1)));
+    expect(lastOccupancy).toBeGreaterThan(-1);
+    const unlockedRead = siblingsQuery.select.mock.invocationCallOrder[0];
+    const lockedRead = siblingsReread.select.mock.invocationCallOrder[0];
+    expect(unlockedRead).toBeLessThan(lastOccupancy);
+    expect(lastOccupancy).toBeLessThan(maintenance);
+    expect(maintenance).toBeLessThan(lockedRead);
+    expect(lockedRead).toBeLessThan(updates[0].update.mock.invocationCallOrder[0]);
+  });
+
+  test('a series that changed between the unlocked read and the locked re-read (an auto-extend child landed) aborts 409 SERIES_CHANGED — nothing written, failure recorded', async () => {
+    const before = [sib('svc-1', BASE), sib('svc-2', SIB1)];
+    const { updates, seriesMovesInsert, seriesMovesDb } = wireSeriesMocks(before, {
+      lockedSiblings: [...before, sib('svc-3', SIB2, { status: 'pending' })],
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
+    expect(updates[0].update).not.toHaveBeenCalled();
+    expect(seriesMovesInsert.insert).not.toHaveBeenCalled();
+    expect(seriesMovesDb.insert).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed', anchor_service_id: 'svc-1' }));
+  });
+
+  test('a sibling whose movability flipped under the locks (confirmed → skipped) is a changed series too — 409, not a sweep over a stale picture', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
+      lockedSiblings: [sib('svc-1', BASE), sib('svc-2', SIB1, { status: 'skipped' })],
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
+    expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test('the sweep writes from the LOCKED read: a window that changed between the reads is what the sibling keeps', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
+      lockedSiblings: [sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '13:00:00', window_end: '15:00:00' })],
+    });
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: dayOffset(19), window_start: '13:00:00', window_end: '15:00:00' });
+  });
+
+  test('an exception records the COLLISION-ADJUSTED cadence slot as its position — never a raw cadence date another row already owns', async () => {
+    // Daily custom cadence with weekends skipped. Old anchor = a Wednesday W,
+    // moved +2 to Friday F. Projected from F: index 1 = Sat → Mon; index 2 =
+    // Sun → Mon, taken → Tue; the index-2 exception (W+5, a Monday) shifts by
+    // the delta to Wed and keeps its flag, so its position is Tue (slot 2),
+    // not the raw Monday the index-1 row owns; index 3 = Mon → Tue → Wed all
+    // taken → Thu.
+    let W = dayOffset(10);
+    while (etParts(parseETDateTime(`${W}T12:00`)).dayOfWeek !== 3) W = etDateString(addETDays(parseETDateTime(`${W}T12:00`), 1));
+    const day = (n) => etDateString(addETDays(parseETDateTime(`${W}T12:00`), n));
+    const F = day(2);
+    const { updates } = wireSeriesMocks([
+      sib('svc-1', W),
+      sib('svc-2', day(1)),
+      sib('svc-3', day(5), { date_exception: true, date_exception_source: 'admin', date_exception_cadence_date: day(2) }),
+      sib('svc-4', day(3)),
+    ], { anchor: anchorRow({ scheduled_date: W, recurring_pattern: 'custom', recurring_interval_days: 1, skip_weekends: true }) });
+    const result = await SmartRebooker.rescheduleSeries('svc-1', F, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result.success).toBe(true);
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(5) }); // Mon
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(7), date_exception_cadence_date: day(6) }); // Wed, position Tue
+    expect(updates[2].update.mock.calls[0][0]).not.toHaveProperty('date_exception');
+    expect(updates[3].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(8) }); // Thu
+  });
 });
 
 describe('previewSeriesMove', () => {
@@ -752,9 +830,38 @@ describe('caller wiring (source)', () => {
   test('SMS-reply effects — the customer confirmation included — run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
     const sms = read('../services/reschedule-sms.js');
     expect(sms).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
-    expect(sms).toContain("{ sourceSurface: 'sms_reply', notifyRequested: true }");
+    expect(sms).toContain("sourceSurface: 'sms_reply',\n            notifyRequested: true,");
     expect(sms).not.toContain('notify: false');
     expect(read('../index.js')).toContain("runExclusive('series-move-effects-reconcile'");
+  });
+
+  test('an SMS reply pins the schedule it observed on the move (the series path tells a return move from a stale retry by it)', () => {
+    const sms = read('../services/reschedule-sms.js');
+    expect(sms).toContain("observedSchedule = svc ? { scheduled_date: toYmd(svc.scheduled_date), window_start: svc.window_start ?? null } : null;");
+    expect(sms).toContain('...(observedSchedule ? { expect: observedSchedule } : {}),');
+  });
+
+  test('series effects: an occurrence rescheduled again since (stale sync, or a guard off this move\'s time) is excluded from the close and the re-arm', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const sync = disp.slice(disp.indexOf('async function syncRescheduleReminder('), disp.indexOf('async function markRescheduleReminderNotified('));
+    expect(sync).toContain("if (synced && synced.skippedStale === true) return 'stale';");
+    const fn = disp.indexOf('async function applySeriesMoveEffects(');
+    const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(body).toContain("if (synced === 'stale') {");
+    expect(body).toContain('seriesReminderGuards.push(...ownedGuards(occurrenceGuards));');
+    expect(body).toContain('await markRescheduleReminderNotified(ownedOccurrences().map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});');
+    expect(body).toContain('await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({');
+    // A retry pass re-arms guarded on a fresh, owned snapshot — not unguarded over every occurrence.
+    expect(body).toContain('const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));');
+  });
+
+  test('the Edit appointment series commit pins date, start, end AND duration on the anchor (the fields the landing window was derived from)', () => {
+    const sched = read('../routes/admin-schedule.js');
+    const fn = sched.indexOf('async function planCollectiveEditDateMove(req)');
+    const body = sched.slice(fn, sched.indexOf("router.put('/:id/update-details'"));
+    expect(body).toContain('window_end: row.window_end ?? null,');
+    expect(body).toContain('estimated_duration_minutes: postEditDuration,');
+    expect(body).toContain("const postEditDuration = (req.body.estimatedDuration !== undefined && req.body.estimatedDuration !== '')");
   });
 
   test('auto-dispatch hard-codes seriesPolicy single on its own move — never a caller convention', () => {

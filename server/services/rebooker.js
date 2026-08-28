@@ -657,19 +657,17 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr }) 
   // because the customer is traveling" survives "Sep 10 → Sep 15"). The
   // weekend/season rules still apply to the shifted date.
   const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
+  const anchorDate = String(newDate).split('T')[0];
   const pureCadenceDate = (occurrenceIndex) => projectSeriesDate(
     nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts),
   );
-  const projectedByOccurrence = new Map();
-  const projectOccurrenceDate = (occurrenceIndex, sib = null) => {
-    if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
-    let out = occurrenceIndex === 0
-      ? String(newDate).split('T')[0]
-      : (sib && sib.date_exception === true
-        ? projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)))
-        : pureCadenceDate(occurrenceIndex));
-    const used = new Set(projectedByOccurrence.values());
-    for (let guard = 0; guard < 31 && used.has(out); guard++) {
+  // Every date this projection has handed out — cadence slots AND exception
+  // landings — so no two rows are written on one day and no exception's
+  // recorded position ties with a written date.
+  const usedDates = new Set();
+  const advancePastUsed = (start) => {
+    let out = start;
+    for (let guard = 0; guard < 31 && usedDates.has(out); guard++) {
       let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
       if (seriesSkipWeekends) {
         const { dayOfWeek } = etParts(at);
@@ -680,10 +678,40 @@ async function makeSeriesProjector({ service, parent, newDate, seriesDateStr }) 
         out = clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
       }
     }
+    usedDates.add(out);
+    return out;
+  };
+  // The cadence SLOT an occurrence index owns after collision handling —
+  // where a plain cadence row at that index is written, and the series
+  // POSITION a date exception at that index records
+  // (date_exception_cadence_date). Collision-adjusted, never the raw
+  // cadence date (codex r8 P2): under weekend avoidance a Saturday and a
+  // Sunday occurrence both map to Monday and the second one's slot is
+  // Tuesday — recording Monday for an exception there would tie it with
+  // the Monday row and let a later collective move reorder the two.
+  // Slots are reserved in index order, so positions stay strictly
+  // increasing and unique against every date the sweep writes.
+  const cadenceSlotByOccurrence = new Map();
+  const cadenceSlotDate = (occurrenceIndex) => {
+    if (cadenceSlotByOccurrence.has(occurrenceIndex)) return cadenceSlotByOccurrence.get(occurrenceIndex);
+    const slot = advancePastUsed(occurrenceIndex === 0 ? anchorDate : pureCadenceDate(occurrenceIndex));
+    cadenceSlotByOccurrence.set(occurrenceIndex, slot);
+    return slot;
+  };
+  const projectedByOccurrence = new Map();
+  const projectOccurrenceDate = (occurrenceIndex, sib = null) => {
+    if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
+    const slot = cadenceSlotDate(occurrenceIndex);
+    let out = slot;
+    if (occurrenceIndex > 0 && sib && sib.date_exception === true) {
+      const shifted = projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)));
+      // Landing exactly on its own slot = the row rejoins the cadence.
+      out = shifted === slot ? slot : advancePastUsed(shifted);
+    }
     projectedByOccurrence.set(occurrenceIndex, out);
     return out;
   };
-  return { pattern, isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, pureCadenceDate, projectOccurrenceDate };
+  return { pattern, isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate };
 }
 
 class SmartRebooker {
@@ -1354,7 +1382,7 @@ class SmartRebooker {
       }
     }
     const {
-      isMonthBasedPattern, opts, deltaDays, pureCadenceDate, projectOccurrenceDate,
+      isMonthBasedPattern, opts, deltaDays, cadenceSlotDate, projectOccurrenceDate,
     } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
@@ -1412,7 +1440,7 @@ class SmartRebooker {
       // deliberately exceptional date: a later occurrence pulled before the
       // anchor is still a later occurrence, and two rows never swap index
       // because one of them was moved across the other.
-      const siblings = await trx('scheduled_services')
+      const readSiblings = () => trx('scheduled_services')
         .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
         .where('customer_id', service.customer_id)
         .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
@@ -1431,22 +1459,26 @@ class SmartRebooker {
           'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
           'track_sms_sent_at', 'arrival_sms_sent_at',
         );
+      // Read once UNLOCKED — only to learn the dates rung 1 must cover —
+      // and again under the locks (below) for the rows the sweep writes.
+      let siblings = await readSiblings();
 
-      // Anchor cadence at the dropped service's position so siblings
-      // before it (same-date ties) don't pull index 0 away from it.
-      const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
-      // Anchor race guard — ALL callers: between the outer service read and
-      // this SELECT the anchor may have completed/cancelled (absent — the
-      // terminal filter dropped it) or been marked skipped (present, since
-      // 'skipped' is non-terminal for cadence math, but a no-show drop that
-      // must NOT be revived to confirmed). Either way the series must not
-      // shift: a terminal anchor changing the customer's future cadence is
-      // wrong regardless of who initiated the move. Throw, rolling back the
-      // trx (and skipping the wasLive post-commit cleanup). A raced
-      // live→live advance (en_route→on_site) or live→confirmed flip stays
-      // movable under allowLive.
-      {
-        const anchorRow = droppedIdx === -1 ? null : siblings[droppedIdx];
+      // Anchor race guard — ALL callers, and re-run on the locked read:
+      // between the outer service read and this SELECT the anchor may have
+      // completed/cancelled (absent — the terminal filter dropped it) or
+      // been marked skipped (present, since 'skipped' is non-terminal for
+      // cadence math, but a no-show drop that must NOT be revived to
+      // confirmed). Either way the series must not shift: a terminal
+      // anchor changing the customer's future cadence is wrong regardless
+      // of who initiated the move. Throw, rolling back the trx (and
+      // skipping the wasLive post-commit cleanup). A raced live→live
+      // advance (en_route→on_site) or live→confirmed flip stays movable
+      // under allowLive. Returns the anchor's index — cadence is anchored
+      // at the dropped service's position so siblings before it (same-date
+      // ties) don't pull index 0 away from it.
+      const assertAnchorMovable = (list) => {
+        const idx = list.findIndex((s) => String(s.id) === String(serviceId));
+        const anchorRow = idx === -1 ? null : list[idx];
         const anchorStillMovable = !!anchorRow
           && (RESCHEDULABLE.has(anchorRow.status) || (wasLive && LIVE_OVERRIDE_STATUSES.has(anchorRow.status)));
         if (!anchorStillMovable) {
@@ -1454,38 +1486,53 @@ class SmartRebooker {
             statusCode: 409,
           });
         }
-        // Caller-supplied expected anchor state: the public route DECIDES
-        // scope (single vs whole-series) from its own read of the anchor.
-        // If the anchor's date/window moved between that read and this trx,
-        // the pull-forward math behind the decision is stale — abort so the
-        // caller re-reads and re-decides instead of shifting a series the
-        // customer no longer qualified to shift.
-        if (options.expectAnchor) {
-          const norm = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
-          const hm = (t) => (t ? String(t).slice(0, 5) : null);
-          const expDate = norm(options.expectAnchor.scheduled_date);
-          const expStart = hm(options.expectAnchor.window_start);
-          const has = (col) => Object.prototype.hasOwnProperty.call(options.expectAnchor, col);
-          const expEnd = has('window_end') ? hm(options.expectAnchor.window_end) : undefined;
-          const expDuration = has('estimated_duration_minutes')
-            ? (options.expectAnchor.estimated_duration_minutes ?? null)
-            : undefined;
-          // Presence-based for the window: a pinned NULL start (windowless
-          // anchor at planning time) must fail the fence if a window was
-          // added meanwhile, exactly like a pinned start that changed.
-          if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
-            || (has('window_start') && hm(anchorRow.window_start) !== expStart)
-            || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
-            || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
-            throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
-              statusCode: 409,
-              isOperational: true,
-              code: 'SLOT_TAKEN',
-            });
-          }
+        return idx;
+      };
+      // Caller-supplied expected anchor state: the public route DECIDES
+      // scope (single vs whole-series) from its own read of the anchor.
+      // If the anchor's date/window moved between that read and this trx,
+      // the pull-forward math behind the decision is stale — abort so the
+      // caller re-reads and re-decides instead of shifting a series the
+      // customer no longer qualified to shift. Judged on the LOCKED read.
+      const assertAnchorPin = (anchorRow) => {
+        if (!options.expectAnchor) return;
+        const norm = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : String(d || '').slice(0, 10));
+        const hm = (t) => (t ? String(t).slice(0, 5) : null);
+        const expDate = norm(options.expectAnchor.scheduled_date);
+        const expStart = hm(options.expectAnchor.window_start);
+        const has = (col) => Object.prototype.hasOwnProperty.call(options.expectAnchor, col);
+        const expEnd = has('window_end') ? hm(options.expectAnchor.window_end) : undefined;
+        const expDuration = has('estimated_duration_minutes')
+          ? (options.expectAnchor.estimated_duration_minutes ?? null)
+          : undefined;
+        // Presence-based for the window: a pinned NULL start (windowless
+        // anchor at planning time) must fail the fence if a window was
+        // added meanwhile, exactly like a pinned start that changed.
+        if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
+          || (has('window_start') && hm(anchorRow.window_start) !== expStart)
+          || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
+          || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
+          throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
+          });
         }
-      }
+      };
+      const droppedIdx = assertAnchorMovable(siblings);
       const startIdx = droppedIdx;
+      // What the sweep is about to write, as a comparable shape: identity,
+      // position (date + exception state) and whether the row is swept —
+      // exactly the inputs the lock keys and the memoized projection were
+      // derived from. Window/tech/tracker columns are NOT part of it: they
+      // are taken fresh from the locked read.
+      const seriesFingerprint = (list) => list.map((s) => [
+        String(s.id),
+        dateOnly(s.scheduled_date),
+        s.date_exception === true ? 'x' : '-',
+        s.date_exception_cadence_date ? dateOnly(s.date_exception_cadence_date) : '',
+        (RESCHEDULABLE.has(s.status) || (wasLive && String(s.id) === String(serviceId))) ? 'm' : '-',
+      ].join('|')).join(';');
 
       // The rows THIS sweep will move — conflict checks below exclude
       // exactly these (their dates are changing) and nothing else. Cadence
@@ -1523,6 +1570,40 @@ class SmartRebooker {
           // the series-vs-series case can deadlock. See the ORDERING CONTRACT
           // in scheduling/occupancy.js.
           await acquireOccupancyLocks(trx, projectedDates);
+          // Rung 1 → the per-parent recurring-series maintenance lock, the
+          // order update-details already takes (occupancy, then
+          // maintenance, then comms). Byte-identical key to admin-schedule's
+          // acquireRecurringSeriesMaintenanceLock (a service cannot import
+          // a route file): it serializes this sweep against the completion
+          // auto-extend, the series cancel and the plan-length reconcile,
+          // which all read-then-write this series. Without it an extension
+          // racing the sibling read computes from the OLD cadence and
+          // inserts a child after the snapshot; the sweep then commits its
+          // known siblings while the new child sits on the old cadence
+          // (codex r8 P1).
+          await trx.raw(
+            'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+            ['recurring-series-maintenance', String(parentId)],
+          );
+          // The authoritative sibling read runs UNDER both locks; the
+          // pre-lock read only named the dates rung 1 had to cover. What
+          // the sweep writes must be what it locked and projected for: a
+          // series that changed meanwhile (a row added, removed or moved,
+          // a row's movability flipped) needs new lock keys and a fresh
+          // projection — abort with a retryable 409 rather than sweep a
+          // stale picture. Read → lock → re-read, the ORDERING CONTRACT's
+          // idiom for keys that are only known from a read.
+          const locked = await readSiblings();
+          if (seriesFingerprint(locked) !== seriesFingerprint(siblings)) {
+            throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SERIES_CHANGED',
+            });
+          }
+          siblings = locked;
+          assertAnchorMovable(siblings);
+          assertAnchorPin(siblings[droppedIdx]);
 
           // First ROW lock of the series path — taken here, AFTER the rung-1
           // date advisory locks, never before (see the NOTE at the top of the
@@ -1646,7 +1727,7 @@ class SmartRebooker {
         // rejoined the series — clear the flag (the only clearing path until
         // an explicit rejoin operation exists).
         const rejoinsCadence = !isAnchor && sib.date_exception === true
-          && String(date).split('T')[0] === pureCadenceDate(occurrenceIndex);
+          && String(date).split('T')[0] === cadenceSlotDate(occurrenceIndex);
         // Exception bookkeeping: the anchor now DEFINES the cadence (any
         // exception it carried is spent); a kept exception's series position
         // moves to its new cadence slot; a rejoined row is plain cadence again.
@@ -1654,7 +1735,7 @@ class SmartRebooker {
           ? (sib.date_exception === true ? DATE_EXCEPTION_CLEAR : {})
           : (rejoinsCadence
             ? DATE_EXCEPTION_CLEAR
-            : (sib.date_exception === true ? { date_exception_cadence_date: pureCadenceDate(occurrenceIndex) } : {}));
+            : (sib.date_exception === true ? { date_exception_cadence_date: cadenceSlotDate(occurrenceIndex) } : {}));
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,

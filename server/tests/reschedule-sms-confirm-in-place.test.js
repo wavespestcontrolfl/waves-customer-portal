@@ -213,9 +213,11 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     const result = await RescheduleSMS.handleRescheduleReply('cust-1', '2');
 
+    // The move carries the schedule this reply observed as its expect pin.
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-06', { start: '08:00', end: '09:00', display: '8:00 AM - 10:00 AM' },
-      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply', notifyRequested: true },
+      'weather_rain', 'customer_sms',
+      { sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: '13:00:00' } },
     );
     // The re-book moved the visit, so the reminder row must be re-armed onto
     // the new slot — otherwise the promised day-before reminder never fires.
@@ -287,8 +289,19 @@ describe('handleRescheduleReply — confirm-in-place', () => {
 
     expect(SmartRebooker.reschedule).toHaveBeenCalledWith(
       'svc-1', '2026-07-04', { start: '13:00', end: '14:00', display: '1:00 PM - 3:00 PM' },
-      'weather_rain', 'customer_sms', { sourceSurface: 'sms_reply', notifyRequested: true },
+      'weather_rain', 'customer_sms',
+      { sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: '13:00:00' } },
     );
+  });
+
+  test('the observed-schedule pin normalizes a JS Date scheduled_date to YYYY-MM-DD and pins a windowless start as null', async () => {
+    wire({ scheduled_date: new Date('2026-07-04T00:00:00Z'), window_start: null, window_end: null, status: 'confirmed' });
+
+    await RescheduleSMS.handleRescheduleReply('cust-1', '2');
+
+    expect(SmartRebooker.reschedule.mock.calls[0][5]).toMatchObject({
+      sourceSurface: 'sms_reply', notifyRequested: true, expect: { scheduled_date: '2026-07-04', window_start: null },
+    });
   });
 
   test('a pending log WITHOUT options is ignored — inbound falls through to normal handling', async () => {

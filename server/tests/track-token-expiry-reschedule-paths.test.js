@@ -165,7 +165,7 @@ describe('track token expiry on reschedule paths', () => {
     // any row updates — no clash here.
     const collisionProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
 
-    const scheduledQueries = [siblingsQuery, collisionProbe, firstUpdate, secondUpdate];
+    const scheduledQueries = [siblingsQuery, siblingsQuery, collisionProbe, firstUpdate, secondUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;

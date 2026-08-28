@@ -13545,10 +13545,14 @@ function rescheduleReminderTime(date, window) {
   return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
 }
 
-// Returns true when the reminder row was synced, false when the sync failed
-// or handleReschedule reported no row (it resolves null on its failure
+// Returns true when the reminder row was synced, 'stale' when the caller's
+// expectSchedule pin no longer matched (the visit was rescheduled AGAIN
+// since — that newer move owns the reminder; nothing of this move's is
+// left to sync, close or re-arm on it), false when the sync failed or
+// handleReschedule reported no row (it resolves null on its failure
 // paths) — callers that record completion (applySeriesMoveEffects) stamp
-// only on true; single-visit callers keep their fire-and-forget contract.
+// only on true/'stale'; single-visit callers keep their fire-and-forget
+// contract.
 async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
@@ -13563,6 +13567,7 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // leaves the 24h reminder pending so the cron still reminds the customer.
       { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
+    if (synced && synced.skippedStale === true) return 'stale';
     if (synced !== null) return true;
     // handleReschedule resolves null both for a failure and for a visit that
     // simply has no appointment_reminders row (legacy visits predate the
@@ -14113,6 +14118,35 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     let seriesGuardSnapshotFailed = false;
     const remindersThisPass = !markers.reminders_synced_at;
     let allRemindersSynced = true;
+    // The reminder time THIS move recorded per occurrence — exactly what
+    // syncRescheduleReminder stamps. An occurrence rescheduled AGAIN since
+    // (the sync reports it stale, or its guard reads another time on a
+    // retry pass) belongs to that newer move: its reminder is neither
+    // closed under the series notice nor re-armed here — closing would
+    // silence the newer schedule's reminders, re-arming would clear flags
+    // the newer move owns and duplicate its texts (codex r8 P1).
+    const recordedReminderTimeById = new Map(occurrences.map((occurrence) => [
+      String(occurrence.id),
+      parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })).getTime(),
+    ]));
+    const staleOccurrenceIds = new Set();
+    const ownsRecordedTime = (guard) => {
+      const recorded = recordedReminderTimeById.get(String(guard.scheduledServiceId));
+      const at = new Date(guard.appointmentTime).getTime();
+      return recorded !== undefined && Number.isFinite(at) && at === recorded;
+    };
+    // Keeps the guards still on this move's time; a guard on another time
+    // marks its occurrence stale. The failure marker passes through as-is.
+    const ownedGuards = (guards) => {
+      if (!Array.isArray(guards)) return guards;
+      const owned = [];
+      for (const guard of guards) {
+        if (ownsRecordedTime(guard)) owned.push(guard);
+        else staleOccurrenceIds.add(String(guard.scheduledServiceId));
+      }
+      return owned;
+    };
+    const ownedOccurrences = () => occurrences.filter((occurrence) => !staleOccurrenceIds.has(String(occurrence.id)));
     if (remindersThisPass) {
       for (const occurrence of occurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on
@@ -14131,10 +14165,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             },
           },
         );
+        if (synced === 'stale') {
+          staleOccurrenceIds.add(String(occurrence.id));
+          continue;
+        }
         if (!synced) allRemindersSynced = false;
         const occurrenceGuards = await captureReminderGuards(occurrence.id);
         if (Array.isArray(occurrenceGuards)) {
-          seriesReminderGuards.push(...occurrenceGuards);
+          seriesReminderGuards.push(...ownedGuards(occurrenceGuards));
         } else {
           // Per-occurrence snapshot read failed — degrade the WHOLE set to the
           // unguarded fallback below. rearmRescheduleReminderWindows' failure
@@ -14257,11 +14295,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             // reschedule moved on keeps its own flags.
             const closeGuards = seriesReminderGuards.length
               ? seriesReminderGuards
-              : await captureReminderGuards(occurrences.map((occurrence) => occurrence.id));
+              : ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
             const guardsByServiceId = Array.isArray(closeGuards)
               ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
               : null;
-            await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});
+            // Only the occurrences still on this move's slot close — an id
+            // absent from the guard map closes UNGUARDED, so a stale one
+            // must leave the list, not just the map.
+            await markRescheduleReminderNotified(ownedOccurrences().map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});
             await stampMarker('notified_at', { customer_notified: true });
           }
         } catch (err) {
@@ -14272,15 +14313,21 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (!notificationSent) {
         // Nothing went out, so the due windows the sync covered above (this
         // pass, or an earlier pass that died before texting) must be handed
-        // back to the reminder cron. Fallback scope — a failed guard
-        // snapshot, or a retry pass that holds no snapshot of the earlier
-        // pass's sync — is each occurrence's NEW time, recomputed exactly as
+        // back to the reminder cron. A retry pass holds no snapshot of the
+        // earlier pass's sync, so it reads one NOW — the rows as they stand,
+        // kept only where the time is still this move's — and re-arms
+        // guarded on that. Fallback scope — a failed guard snapshot — is
+        // each owned occurrence's NEW time, recomputed exactly as
         // syncRescheduleReminder stamped it; a possible duplicate beats a
         // customer with neither a confirmation nor a reminder.
-        const guardsForRearm = (seriesGuardSnapshotFailed || !remindersThisPass)
-          ? { failed: true, guards: seriesReminderGuards }
-          : seriesReminderGuards;
-        await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
+        let guardsForRearm = seriesReminderGuards;
+        if (seriesGuardSnapshotFailed) {
+          guardsForRearm = { failed: true, guards: seriesReminderGuards };
+        } else if (!remindersThisPass) {
+          const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
+          guardsForRearm = Array.isArray(retryGuards) ? retryGuards : { failed: true, guards: [] };
+        }
+        await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({
           scheduledServiceId: occurrence.id,
           appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
         })));
