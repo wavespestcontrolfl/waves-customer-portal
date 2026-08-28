@@ -823,6 +823,11 @@ describe('countsTowardTrustBuild', () => {
 });
 
 describe('isDeterministicPublishError', () => {
+  test('BLOG_BODY_IMAGES_FAILED parks like the hero failure', () => {
+    const err = new Error('autonomous blog body image 1 generation failed');
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    expect(isDeterministicPublishError(err)).toBe(true);
+  });
   test('identifies draft validation errors that should not be retried automatically', () => {
     const frontmatterError = new Error('Astro frontmatter validation failed');
     frontmatterError.code = 'BLOG_FRONTMATTER_INVALID';

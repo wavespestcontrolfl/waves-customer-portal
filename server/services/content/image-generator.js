@@ -56,12 +56,17 @@ const MODEL_MAP = {
 
 const MODE_SIZES = {
   'blog-hero':     { openai: '1536x1024', gemini: '1536x1024' },
+  // In-article illustration (owner rule 2026-08-27: ≥3 images per post).
+  // Same 3:2 frame as the hero — the prose column renders body images at
+  // their intrinsic ratio, and 3:2 is what the reference posts already use.
+  'blog-body':     { openai: '1536x1024', gemini: '1536x1024' },
   'social-square': { openai: '1024x1024', gemini: '1024x1024' },
 };
 
 // aspectRatio for image-native Gemini models, per mode (must match MODE_SIZES).
 const MODE_ASPECTS = {
   'blog-hero': '3:2',
+  'blog-body': '3:2',
   'social-square': '1:1',
 };
 
@@ -90,7 +95,8 @@ function sizeFor(mode, api) {
 }
 
 function buildPrompt({ title, topic, keyword, city, mode }) {
-  const base = `A high-quality, photorealistic ${mode === 'social-square' ? 'social media tile' : 'blog hero image'} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
+  const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
+  const base = `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
   const focus = `Subject: ${keyword || topic || title || 'pest control / lawn care service'}.`;
   const local = city
     ? `Setting: a ${city}-area home or yard with characteristic SWFL landscaping (palm trees, sandy soil, bright sun).`

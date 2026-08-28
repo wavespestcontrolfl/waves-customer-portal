@@ -61,6 +61,11 @@ describe('sizeFor', () => {
     expect(sizeFor('blog-hero', 'openai')).toBe('1536x1024');
     expect(sizeFor('blog-hero', 'gemini')).toBe('1536x1024');
   });
+  test('blog-body shares the hero frame (3:2)', () => {
+    expect(sizeFor('blog-body', 'openai')).toBe('1536x1024');
+    expect(sizeFor('blog-body', 'gemini')).toBe('1536x1024');
+    expect(_internals.MODE_ASPECTS['blog-body']).toBe('3:2');
+  });
   test('social-square', () => {
     expect(sizeFor('social-square', 'openai')).toBe('1024x1024');
   });
@@ -75,6 +80,12 @@ describe('buildPrompt', () => {
     expect(p).toMatch(/Pest Control Bradenton/);
     expect(p).toMatch(/Bradenton/);
     expect(p).toMatch(/no text/i);
+  });
+  test('blog-body asks for an in-article illustration, subject = section heading', () => {
+    const p = buildPrompt({ title: 'Post', keyword: 'Reading the pellets', mode: 'blog-body' });
+    expect(p).toMatch(/in-article illustration/);
+    expect(p).not.toMatch(/hero/);
+    expect(p).toMatch(/Subject: Reading the pellets\./);
   });
   test('social-square wording differs', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);

@@ -3348,3 +3348,216 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     expect(without).not.toContain('Backfilled schema-required fields');
   });
 });
+
+
+describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)', () => {
+  const fmModule = require('../services/content-astro/frontmatter');
+  const featureGates = require('../config/feature-gates');
+  const { bodyImageSlots, insertBodyImages, countBodyImages, BODY_IMAGE_MIN } = AstroPublisher._internals;
+  const article = [
+    'Intro paragraph about frass on a Venice window sill.',
+    '',
+    '## Reading the pellets',
+    '',
+    'Drywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.',
+    '',
+    '- bullet one',
+    '- bullet two',
+    '',
+    '## Where the colony sits',
+    '',
+    '<ComparisonTable rows={[["a","b"]]} />',
+    '',
+    'Follow the pile straight up to the window frame.',
+    '',
+    '```js',
+    '## not a heading inside a fence',
+    '```',
+    '',
+    '### Fascia boards',
+    '',
+    'Fascia galleries are the usual suspects in older homes.',
+    '',
+    '## What a quote covers',
+    '',
+    'A drywood treatment quote is per structure.',
+    '',
+    '## Frequently asked questions',
+    '',
+    '**Is frass dangerous?** No.',
+  ].join('\n');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
+    factCheckGate.evaluate.mockResolvedValue({ pass: true, findings: [], checked: false });
+    heroAltVision.describeHeroForAlt.mockResolvedValue(null);
+    gh.createBranch.mockResolvedValue({});
+    gh.putFile.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'file-sha' } });
+    gh.createPr.mockResolvedValue({ number: 201, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/201' });
+    gh.createIssueComment.mockResolvedValue({});
+  });
+  afterEach(() => featureGates.isEnabled.mockRestore());
+
+  function draft(body = article, fmOverrides = {}) {
+    return {
+      type: 'draft',
+      frontmatter: validFrontmatter({
+        slug: '/drywood-frass-venice/',
+        title: 'Drywood Termite Frass in Venice',
+        canonical: 'https://www.wavespestcontrol.com/drywood-frass-venice/',
+        hero_image: { src: '/images/blog/drywood-frass-venice/hero.png', alt: 'Frass on a sill' },
+        og_image: '/images/blog/drywood-frass-venice/hero.png',
+        ...fmOverrides,
+      }),
+      body,
+    };
+  }
+
+  test('bodyImageSlots: spreads slots across H2 sections, skips FAQ, lists, MDX blocks and fences, inserts after prose', () => {
+    const slots = bodyImageSlots(article, 2, { title: 'T' });
+    expect(slots).toHaveLength(2);
+    const lines = article.split('\n');
+    // 1st slot: "Reading the pellets" — right after its prose paragraph, before the list.
+    expect(slots[0].heading).toBe('Reading the pellets');
+    expect(lines[slots[0].insertAt - 1]).toMatch(/^Drywood frass/);
+    expect(slots[0].lead).toBe('Drywood frass is hexagonal in cross-section. See our guide for more.');
+    // 2nd slot: spread to the 3rd eligible H2 (FAQ excluded) — after its prose.
+    expect(slots[1].heading).toBe('What a quote covers');
+    expect(lines[slots[1].insertAt - 1]).toMatch(/^A drywood treatment quote/);
+    // A heading inside a fence is never a section.
+    expect(slots.map((sl) => sl.heading)).not.toContain('not a heading inside a fence');
+  });
+
+  test('bodyImageSlots: sections that already carry an image are skipped; the intro backfills when sections run out', () => {
+    const body = 'Intro prose here.\n\n## Only section\n\nProse.\n\n![existing](/images/x.webp)\n';
+    const slots = bodyImageSlots(body, 2, { title: 'Title' });
+    expect(slots).toHaveLength(1);
+    expect(slots[0].heading).toBe('Title');
+    expect(body.split('\n')[slots[0].insertAt - 1]).toBe('Intro prose here.');
+  });
+
+  test('insertBodyImages: each image lands on its own paragraph, brackets stripped from alt, no triple blank lines', () => {
+    const body = 'One.\n\n## A\n\nTwo.\n\n## B\n\nThree.';
+    const out = insertBodyImages(body, [
+      { insertAt: 5, src: '/images/blog/s/body-1.webp', alt: 'Alt [one]' },
+      { insertAt: 9, src: '/images/blog/s/body-2.webp', alt: 'Alt two' },
+    ]);
+    expect(out).toBe('One.\n\n## A\n\nTwo.\n\n![Alt one](/images/blog/s/body-1.webp)\n\n## B\n\nThree.\n\n![Alt two](/images/blog/s/body-2.webp)');
+    expect(countBodyImages(out)).toBe(2);
+  });
+
+  test('gate ON, new post: generates BODY_IMAGE_MIN blog-body images from section context, commits them beside the hero in ONE commit, inserts refs with vetted alts', async () => {
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({
+      dataUrl: `data:image/png;base64,${HERO_PNG_B64}`,
+      model: 'test-model',
+      alt: mode === 'blog-body' ? `Prompt alt for ${keyword}` : 'hero alt',
+    }));
+    heroAltVision.describeHeroForAlt.mockImplementation(async ({ keyword }) => (keyword === 'Reading the pellets' ? 'Hexagonal drywood termite pellets on a white window sill' : null));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog', city: 'Venice' });
+
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls).toHaveLength(BODY_IMAGE_MIN);
+    expect(bodyCalls[0][0]).toEqual(expect.objectContaining({ keyword: 'Reading the pellets', city: 'Venice', title: 'Drywood Termite Frass in Venice' }));
+    expect(bodyCalls[0][0].topic).toMatch(/^Drywood frass is hexagonal/);
+    expect(bodyCalls[1][0].keyword).toBe('What a quote covers');
+
+    expect(gh.commitFiles).toHaveBeenCalledTimes(1);
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    expect(files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/hero.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-1.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+    for (const f of files.slice(1, 3)) {
+      expect(f.buffer.slice(0, 4).toString('ascii')).toBe('RIFF');
+      expect(f.buffer.slice(8, 12).toString('ascii')).toBe('WEBP');
+    }
+    const parsed = fmModule.parse(files[3].content);
+    // Vision alt where available, prompt-derived alt otherwise; refs sit at the end of each section's prose.
+    expect(parsed.content).toContain('See [our guide](/termite-control/) for more.\n\n![Hexagonal drywood termite pellets on a white window sill](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n- bullet one');
+    expect(parsed.content).toContain('A drywood treatment quote is per structure.\n\n![Prompt alt for What a quote covers](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n## Frequently asked questions');
+    expect(countBodyImages(parsed.content)).toBe(BODY_IMAGE_MIN);
+    // The hero is never embedded in the body (layout renders it).
+    expect(parsed.content).not.toContain('hero.webp');
+  });
+
+  test('gate OFF: body untouched, no blog-body generation', async () => {
+    featureGates.isEnabled.mockImplementation(() => false);
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/hero.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+  });
+
+  test('update run: a body-N.webp already on main whose alt the live body carries is REUSED (no regeneration); the missing one is generated', async () => {
+    // Live file carries the category route slug (what a prior publish wrote).
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: 'x', sha: 'h' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: 'x', sha: 'b1' };
+      return null;
+    });
+    heroImageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm', alt: 'Generated alt two' });
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls).toHaveLength(1);
+    const files = gh.commitFiles.mock.calls[0][0].files;
+    expect(files.map((f) => f.path)).toEqual([
+      'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'src/content/blog/pest-control/drywood-frass-venice.mdx',
+    ]);
+    const parsed = fmModule.parse(files[1].content);
+    expect(parsed.content).toContain('![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)');
+    expect(parsed.content).toContain('![Generated alt two](/images/blog/pest-control/drywood-frass-venice/body-2.webp)');
+  });
+
+  test('a draft that already carries ≥ BODY_IMAGE_MIN images generates nothing', async () => {
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    const body = `${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n`;
+    await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
+  });
+
+  test('fail-closed: body image generation failure throws BLOG_BODY_IMAGES_FAILED with the provider chain, before any branch is cut', async () => {
+    gh.getFile.mockResolvedValue(null);
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
+      if (mode === 'blog-hero') return { dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm' };
+      const err = new Error('image-generator: all providers failed');
+      err.attempts = [{ provider: 'gpt-image-2', result: { retryable: true, status: 503 } }];
+      throw err;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toContain('"Reading the pellets"');
+    expect(thrown.message).toContain('gpt-image-2');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+  });
+
+  test('fail-closed: too few prose sections to place the images parks instead of publishing short', async () => {
+    gh.getFile.mockResolvedValue(null);
+    mockHeroGeneration();
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft('![only](/images/x.webp)\n\n- a list\n- only'), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+});

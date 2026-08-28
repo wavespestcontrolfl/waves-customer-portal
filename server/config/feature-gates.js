@@ -18,6 +18,7 @@
  *   GATE_SHADOW_JUDGE=true      (nightly shadow-draft vs human-reply scoring)
  *   GATE_SMS_AUTO_SEND=true     (autonomously send verified house-voice drafts for graduated intents)
  *   GATE_AI_BLOG_WRITER=true    (enable AI blog content generation)
+ *   GATE_BLOG_BODY_IMAGES=true  (autonomous posts get ≥2 generated in-article images)
  *   GATE_CRON_JOBS=true         (enable all automated cron jobs)
  *   GATE_WEBHOOKS=true          (enable inbound webhook processing)
  *   GATE_EMAIL_TEMPLATE_AUTOMATIONS=true (enable template automation sends)
@@ -1165,6 +1166,16 @@ const gates = {
   // named-competitor draft routes to review instead of auto-publishing until
   // GATE_NAMED_COMPETITOR_COMPARISON=true. Category comparisons are unaffected.
   namedCompetitorComparison: isProd ? process.env.GATE_NAMED_COMPETITOR_COMPARISON === 'true' : true,
+
+  // Autonomous blog body images (owner rule 2026-08-27: every autopublished
+  // post ships ≥3 images — hero + ≥2 in-article illustrations). When ON,
+  // publishOrUpdatePage generates the missing body images, commits them
+  // beside the hero (/images/blog/<slug>/body-N.webp) and inserts them at the
+  // end of two section's prose; generation failure parks the run (same
+  // fail-closed posture as the hero). OFF in EVERY environment unless set to
+  // exactly 'true' — it adds two image-generation calls per publish. Kill =
+  // unset.
+  blogBodyImages: process.env.GATE_BLOG_BODY_IMAGES === 'true',
 
   // Named-competitor drafts that PASS every comparison/quality gate publish
   // autonomously instead of parking at named_competitor_review (owner

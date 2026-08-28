@@ -3824,6 +3824,10 @@ function isDeterministicPublishError(err) {
   // hero is the LCP element), so park the run for review instead of
   // retry-looping the same draft through image generation.
   if (err?.code === 'BLOG_HERO_IMAGE_FAILED') return true;
+  // Body-image generation is the same fail-closed contract as the hero (owner
+  // rule: ≥3 images per post) — park for review, never retry-loop the draft
+  // through image generation.
+  if (err?.code === 'BLOG_BODY_IMAGES_FAILED') return true;
   // An un-interpolated {{token}} in an .mdx body is edit-required (it crashes
   // the Astro build), not transient — park for review instead of releasing the
   // claim and re-running the same token-laden draft.

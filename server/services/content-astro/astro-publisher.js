@@ -774,13 +774,13 @@ async function fetchImageBuffer(url) {
 // filename (hero.webp) so the merge step can persist the path deterministically.
 // Mandatory (throws on failure → publish fails loudly) so the merge-time
 // /images/blog/<slug>/hero.webp assumption always holds.
-async function compressToWebp(buffer) {
+async function compressToWebp(buffer, { width = 1600 } = {}) {
   const sharp = require('sharp');
   return sharp(buffer)
     // Bake EXIF orientation into pixels before stripping metadata — a curated
     // phone/camera JPEG with an Orientation tag would otherwise serve sideways.
     .rotate()
-    .resize({ width: 1600, withoutEnlargement: true })
+    .resize({ width, withoutEnlargement: true })
     .webp({ quality: 80 })
     .toBuffer();
 }
@@ -1621,6 +1621,220 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
   return generated;
 }
 
+// ── Body images (publish-time) ──────────────────────────────────────
+//
+// Owner rule 2026-08-27: every autopublished post ships ≥3 images — the hero
+// plus at least BODY_IMAGE_MIN in-article illustrations. The writer emits
+// prose only; the publisher adds the illustrations deterministically so the
+// rule never depends on prompt compliance:
+//   - each image is generated from one H2 section (heading = subject, first
+//     prose paragraph = context) and inserted at the END of that section's
+//     prose — the shape the reference post (quarterly-pest-control.mdx) uses;
+//   - files commit beside the hero as /images/blog/<slug>/body-N.webp in the
+//     same atomic commit; an update run reuses a body-N.webp already on main
+//     (with the alt the live body carries) instead of regenerating;
+//   - failure is fail-closed (BLOG_BODY_IMAGES_FAILED, deterministic → parks
+//     the run for review), mirroring the hero.
+// Dark-shipped behind GATE_BLOG_BODY_IMAGES (feature-gates.blogBodyImages).
+const BODY_IMAGE_MIN = 2;
+const BODY_IMAGE_WIDTH = 1200;
+const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
+const BODY_IMAGE_SKIP_HEADING_RE = /\b(?:faq|faqs|frequently asked|questions|sources|references|summary|bottom line|key takeaways|next steps)\b/i;
+
+function bodyImagesEnabled() {
+  try { return require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { return false; }
+}
+
+function countBodyImages(body) {
+  return (String(body || '').match(MARKDOWN_IMAGE_RE) || []).length;
+}
+
+// Plain-text lead of a paragraph for the generation prompt: links → label,
+// decoration stripped, clamped.
+function proseLead(text) {
+  return String(text || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[*_`~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+}
+
+// Lines that open something other than a prose paragraph: lists, quotes,
+// tables, MDX/HTML blocks, images, definition-ish labels, fences.
+const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\{)/;
+
+// Scan the body into H2 sections and return up to `wanted` insertion slots,
+// spread across the article. A slot is the line index AFTER the last prose
+// paragraph of an eligible section (no image yet, not a FAQ/summary-style
+// section). Fenced code is never split. The intro (text before the first
+// heading) is the fallback slot when too few sections qualify.
+function bodyImageSlots(body, wanted, { title = '' } = {}) {
+  const lines = String(body || '').split('\n');
+  const sections = [];
+  let cur = { heading: String(title || '').trim(), start: 0, intro: true };
+  let inFence = false;
+  let fenceChar = '';
+  let paraStart = -1;
+  const closePara = (end) => {
+    if (paraStart < 0) return;
+    const text = lines.slice(paraStart, end).join(' ');
+    if (!NON_PROSE_LINE_RE.test(lines[paraStart])) {
+      cur.lastProse = end; // insert BEFORE this index
+      if (!cur.lead) cur.lead = proseLead(text);
+    }
+    paraStart = -1;
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence && (!inFence || fence[1][0] === fenceChar)) {
+      closePara(i);
+      inFence = !inFence;
+      fenceChar = inFence ? fence[1][0] : '';
+      cur.hasBlock = true;
+      continue;
+    }
+    if (inFence) continue;
+    const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      closePara(i);
+      sections.push(cur);
+      cur = heading[1].length === 2
+        ? { heading: heading[2].trim(), start: i }
+        : { heading: cur.heading, start: i, sub: true };
+      continue;
+    }
+    if (/!\[[^\]]*\]\([^)]*\)/.test(line)) cur.hasImage = true;
+    if (line.trim() === '') { closePara(i); continue; }
+    if (paraStart < 0) paraStart = i;
+  }
+  closePara(lines.length);
+  sections.push(cur);
+
+  // H3 sub-sections roll up into their H2 for eligibility (an image inside a
+  // sub-section still illustrates the H2 topic), but the slot stays at the
+  // end of the sub-section's own prose.
+  const eligible = sections.filter((sec) => !sec.intro && !sec.sub && !sec.hasImage
+    && sec.lastProse != null && !BODY_IMAGE_SKIP_HEADING_RE.test(sec.heading));
+  const picked = [];
+  const n = eligible.length;
+  // Centered spread: 2 images over 3 sections → 1st and 3rd; over 4 → 2nd and 4th.
+  for (let k = 0; k < wanted && k < n; k++) picked.push(eligible[Math.round(((k + 0.5) * n) / wanted - 0.5)]);
+  if (picked.length < wanted) {
+    const intro = sections.find((sec) => sec.intro && sec.lastProse != null && !sec.hasImage);
+    if (intro && !picked.includes(intro)) picked.unshift(intro);
+  }
+  return picked.slice(0, wanted).map((sec) => ({
+    insertAt: sec.lastProse,
+    heading: sec.heading,
+    lead: sec.lead || '',
+  }));
+}
+
+// Insert `![alt](src)` lines at the given slots (descending so indices stay
+// valid), each on its own paragraph.
+function insertBodyImages(body, placements) {
+  const lines = String(body || '').split('\n');
+  const ordered = [...placements].sort((a, b) => b.insertAt - a.insertAt);
+  for (const { insertAt, src, alt } of ordered) {
+    const label = String(alt || '').replace(/[\[\]]/g, '').replace(/\s+/g, ' ').trim();
+    lines.splice(insertAt, 0, '', `![${label}](${src})`, '');
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+// Alt the LIVE body carries for a committed body image — the only truthful
+// alt for a reused file (the new draft never saw the picture).
+function liveBodyImageAlt(existingFile, src) {
+  const content = existingFile?.file?.content;
+  if (!content) return null;
+  const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = String(content).match(new RegExp(`!\\[([^\\]]*)\\]\\(${escaped}\\)`));
+  const alt = m ? m[1].trim() : '';
+  return alt || null;
+}
+
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {} }) {
+  const none = { body, files: [], images: [], newAlts: [] };
+  if (!bodyImagesEnabled()) return none;
+  const have = countBodyImages(body);
+  const need = BODY_IMAGE_MIN - have;
+  if (need <= 0) return none;
+
+  const slots = bodyImageSlots(body, need, { title: frontmatter?.title });
+  if (slots.length < need) {
+    const err = new Error(`autonomous blog body images: only ${slots.length} of ${need} insertion slot(s) found for ${slug} — the body needs at least ${need} prose section(s) without an image`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
+
+  const files = [];
+  const images = [];
+  const newAlts = [];
+  const placements = [];
+  const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
+  for (let k = 0; k < slots.length; k++) {
+    const n = have + k + 1;
+    const src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`;
+    const repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
+    const slot = slots[k];
+
+    // Reuse a file already committed on main when the live body still
+    // describes it; otherwise (re)generate — never reuse a picture blind.
+    if (existingFile) {
+      const liveAlt = liveBodyImageAlt(existingFile, src);
+      if (liveAlt && await gh.getFile(repoPath)) {
+        images.push({ src, alt: liveAlt, reused: true });
+        placements.push({ insertAt: slot.insertAt, src, alt: liveAlt });
+        continue;
+      }
+    }
+
+    let gen;
+    let buffer;
+    try {
+      const imageGenerator = require('../content/image-generator');
+      gen = await imageGenerator.generate({
+        title: frontmatter.title,
+        topic: slot.lead || frontmatter.meta_description,
+        keyword: slot.heading || frontmatter.primary_keyword,
+        city,
+        mode: 'blog-body',
+      });
+      const img = await fetchImageBuffer(gen.dataUrl);
+      if (!img?.buffer) throw new Error('body image generation produced no usable image');
+      buffer = await compressToWebp(img.buffer, { width: BODY_IMAGE_WIDTH });
+    } catch (err) {
+      if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
+      const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
+      bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
+      bodyErr.cause = err;
+      throw bodyErr;
+    }
+    // Vision-described alt (fail-open) over the prompt-derived one, vetted by
+    // the same guardrails as the hero alt; the prompt-derived alt is the
+    // fallback — it describes what was asked for, never the writer's text.
+    const described = await describeHeroForAlt({ buffer, title: frontmatter.title, keyword: slot.heading });
+    const alt = vetGeneratedAlt(described, gen.alt || `Illustration for ${slot.heading}`, Array.isArray(frontmatter.domains) ? frontmatter.domains : null);
+    logger.info(`[astro-publisher] generated body image ${n} for ${slug} via ${gen.model} ("${slot.heading}")`);
+    files.push({ path: repoPath, buffer });
+    images.push({ src, alt, reused: false });
+    newAlts.push(alt);
+    placements.push({ insertAt: slot.insertAt, src, alt });
+  }
+
+  const nextBody = insertBodyImages(body, placements);
+  if (countBodyImages(nextBody) < BODY_IMAGE_MIN) {
+    const err = new Error(`autonomous blog body images: ${slug} still has fewer than ${BODY_IMAGE_MIN} body images after insertion`);
+    err.code = 'BLOG_BODY_IMAGES_FAILED';
+    throw err;
+  }
+  return { body: nextBody, files, images, newAlts };
+}
+
 async function publishOrUpdatePage(draft, brief = {}) {
   if (!canPublishDraftBrief(draft, brief)) {
     throw new Error(`unsupported autonomous draft for Astro publish: ${brief.action_type || 'unknown'}`);
@@ -1786,11 +2000,28 @@ async function publishOrUpdatePage(draft, brief = {}) {
     }, `${slug} (generated hero alt)`);
   }
 
+  // Body images (owner rule: ≥3 images per post) — resolved after the hero so
+  // a hero failure never burns two more generations, and before the branch is
+  // cut so a failure can't orphan a PR. Their alts are generated text that
+  // the semantic gate never saw: the same narrow second pass as the hero alt.
+  const bodyImages = await resolveBodyImages({ frontmatter, slug, body, existingFile, brief });
+  if (bodyImages.newAlts.length) {
+    await assertComplianceClear({
+      title: frontmatter.title,
+      body: '',
+      meta: bodyImages.newAlts,
+      city: brief.city || (Array.isArray(frontmatter.service_areas_tag) ? frontmatter.service_areas_tag[0] : ''),
+      keyword: frontmatter.primary_keyword,
+      tag: frontmatter.category,
+    }, `${slug} (generated body image alts)`);
+  }
+  const finalBody = bodyImages.body;
+
   // Binding validation — runs on the FINAL frontmatter, after hero stamping,
   // so what we validate is exactly what we commit.
   assertValidBlogFrontmatter(frontmatter);
 
-  const markdown = fm.stringify(frontmatter, `${body}\n`);
+  const markdown = fm.stringify(frontmatter, `${finalBody}\n`);
 
   await gh.createBranch(branch);
   // ONE commit for hero bytes + markdown (+ legacy .md removal). The hero
@@ -1805,6 +2036,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
     message: `feat(blog): publish ${slug}`,
     files: [
       ...(hero.buffer ? [{ path: hero.repoPath, buffer: hero.buffer }] : []),
+      ...bodyImages.files,
       { path: filePath, content: markdown },
     ],
     deletes: isLegacyMd ? [existingFile.path] : [],
@@ -1813,7 +2045,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   const pr = await gh.createPr({
     head: branch,
     title: `Blog: ${frontmatter.title}`.slice(0, 72),
-    body: buildDraftPrBody({ frontmatter, slug, branch, content: body, brief }),
+    body: buildDraftPrBody({ frontmatter, slug, branch, content: finalBody, brief }),
   });
   await requestCodexReview({
     pr,
@@ -3219,6 +3451,11 @@ module.exports = {
     generateHeroBuffer,
     compressToWebp,
     resolveAutonomousHero,
+    resolveBodyImages,
+    bodyImageSlots,
+    insertBodyImages,
+    countBodyImages,
+    BODY_IMAGE_MIN,
     fetchImageBuffer,
     parseImageDataUrl,
     defaultHeroForCategory,
