@@ -226,11 +226,15 @@ t.unique(['prospect_id', 'dimension', 'instance_key']);
 ```
 The bridge job writes one row per dimension the path touches — the dimensions are
 mutually exclusive by path type except for payment: **communication** for outreach/content
-types (their only non-payment dimension — EXCEPT that a `legal_attestation=true` path of any type also carries an execution-dimension `accept_terms` instance: the send click's `outreach_send` approval satisfies
-it), **execution** for every other type (self-service, account, business-claim, membership,
-vendor registration, human steps), and **payment** in addition whenever `payment_required`.
-An outreach placement therefore never carries an execution row, so the 56 drafts and their
-follow-ups need exactly the communication authority (plus payment only if paid). The locked claim and every
+types (their only non-payment dimension: the send click's `outreach_send` approval satisfies
+it and NOTHING else), **execution** for every other type (self-service, account,
+business-claim, membership, vendor registration, human steps), **payment** in addition
+whenever `payment_required`, and — for a `legal_attestation=true` path of ANY type, outreach
+included — a separate **execution-dimension `accept_terms` authority row** whose approval is
+bound to `legal_terms_hash`; the send approval never satisfies it (§3.6b). An outreach
+placement therefore carries no execution row unless it must accept terms, so the 56 drafts
+and their follow-ups need exactly the communication authority (plus payment only if paid,
+plus `accept_terms` only if an agreement must be signed). The locked claim and every
 irreversible step (submit, send, mint) load ALL rows for the placement. The dimension
 **owning the current action** (payment for mint, communication for send/follow-up, execution
 for submit/create-account) must be `AUTO_*` (gate on, re-run decision agreeing) or `OWNER_*`
@@ -605,7 +609,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_INPUT_REQUIRED` (payment dimension only: the path is otherwise valid but its price is unparseable or its currency is UNKNOWN (`currency='unknown'` — a bare `$` or no marker); a CONFIRMED non-USD quote (`currency='foreign'`) is NEVER routed here — it is `OWNER_MANUAL_PAYMENT`, because an owner entry cannot change a merchant's checkout currency — parked `awaiting_owner` with a PRICE-ENTRY card, never a purchase approval; the owner's entry writes `estimated_cost_cents`/`renewal_cost_cents` + `currency='USD'` (the owner attests the checkout is USD; the live-checkout currency check still runs before reservation and submit) on the path as an owner-sourced revision (bumps `revision_payment`, recorded as a `human` attempt `outcome='price_entered'`), after which the bridge re-decides normally — an entered price is an INPUT, never an approval) · `OWNER_OVERRIDE` (the audit label of a floor-waiver row in `seo_link_floor_waivers` only — never a dimension level and never an approval row, §6.3 1b) · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_INPUT_REQUIRED` (payment dimension only: the path is otherwise valid but its price is unparseable or its currency is UNKNOWN (`currency='unknown'` — a bare `$` or no marker); a CONFIRMED non-USD quote (`currency='foreign'`) is NEVER routed here — it is `OWNER_MANUAL_PAYMENT`, because an owner entry cannot change a merchant's checkout currency — parked `awaiting_owner` with a PRICE-ENTRY card, never a purchase approval; the owner's entry writes `estimated_cost_cents`/`renewal_cost_cents` + `currency='USD'` (the owner's entry is an ATTESTATION that this merchant's checkout is USD, stored immutably as `investigation.currency_evidence = { kind: 'owner_attestation', approval-style approved_by/at, merchant_binding snapshot }` and bound to the path's `merchant_binding` revision — it is the authoritative USD evidence the live-checkout guard accepts for THIS merchant binding when the checkout itself shows only a bare `$`; the guard still voids on any explicit non-USD marker on the live page, on a merchant-binding change (which invalidates the attestation), and on every amount/merchant check as before) on the path as an owner-sourced revision (bumps `revision_payment`, recorded as a `human` attempt `outcome='price_entered'`), after which the bridge re-decides normally — an entered price is an INPUT, never an approval) · `OWNER_OVERRIDE` (the audit label of a floor-waiver row in `seo_link_floor_waivers` only — never a dimension level and never an approval row, §6.3 1b) · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
