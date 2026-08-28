@@ -6673,6 +6673,10 @@ const CallRecordingProcessor = {
               .whereNull('voicemail_callback_alerted_at')
               .update({ voicemail_callback_alerted_at: new Date() });
             if (claimed) {
+              // The missed-call lane may have rung for this call before the
+              // recording landed (hook P1): the voicemail alert supersedes it.
+              await require('./notification-service').supersedeMissedCallAdmin({ callLogId: call.id })
+                .catch((err) => logger.warn(`[call-proc] missed-call supersede failed for ${callSid}: ${err.message}`));
               const { triggerNotification } = require('./notification-triggers');
               // Extraction name first (the caller's own words), matched
               // customer's account name as fallback.

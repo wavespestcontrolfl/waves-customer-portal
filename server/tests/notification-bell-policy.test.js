@@ -692,6 +692,7 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, answered_by: 'human' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: 'ai_agent' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: 'RE1' })).toBe(false); // voicemail lane
+    expect(missedCallEligible({ ...base, voicemail_callback_alerted_at: '2026-08-28T00:00:00Z' })).toBe(false); // voicemail lane already rang
     expect(missedCallEligible({ ...base, call_outcome: 'ai_handled' })).toBe(false);
     expect(missedCallEligible({ ...base, direction: 'outbound' })).toBe(false);
     expect(missedCallEligible({ ...base, customer_id: null })).toBe(false);
@@ -720,5 +721,21 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
     expect(stamps).toHaveLength(2);
     const stampedIds = emails.where.mock.calls.filter(([arg]) => arg && typeof arg === 'object' && arg.id).map(([arg]) => arg.id);
     expect(stampedIds).toEqual(expect.arrayContaining(['e-spoof', 'e-proof']));
+  });
+});
+
+describe('voicemail supersedes a missed-call bell for the same call (hook P1)', () => {
+  test('supersedeMissedCallAdmin retires only unread admin missed_call bells carrying that callLogId', async () => {
+    const notifications = chainMock(1);
+    mockTables({ notifications });
+    await expect(NotificationService.supersedeMissedCallAdmin({ callLogId: 'call-1' })).resolves.toBe(1);
+    expect(notifications.where).toHaveBeenCalledWith({ recipient_type: 'admin', category: 'missed_call' });
+    expect(notifications.whereNull).toHaveBeenCalledWith('read_at');
+    expect(notifications.whereRaw).toHaveBeenCalledWith("metadata->'payload'->>'callLogId' = ?", ['call-1']);
+    expect(notifications.update).toHaveBeenCalledWith({ read_at: expect.any(Date) });
+  });
+  test('no callLogId = no-op', async () => {
+    mockTables({});
+    await expect(NotificationService.supersedeMissedCallAdmin({})).resolves.toBe(0);
   });
 });

@@ -29,6 +29,7 @@ function outcomeUnanswered(row) {
 function missedCallEligible(row) {
   if (!row || row.direction !== 'inbound' || !row.customer_id) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
+  if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
   if (row.call_outcome === 'ai_handled') return false;
   if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
   let meta = row.metadata;
@@ -51,6 +52,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
       .whereNull('recording_sid')
       .whereNull('recording_url')
+      .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome,'') <> 'ai_handled'")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [new Date().toISOString()]) });
@@ -73,6 +75,15 @@ async function ringMissedCallIfUnanswered(callSid) {
         await db('call_log').where({ id: row.id })
           .update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
       }
+    }
+    // Post-check (hook P1): a recording that persisted between the claim
+    // and here makes this call the voicemail lane's — retire the bell just
+    // written. The voicemail path runs the same supersede when IT claims, so
+    // both orderings converge on one alert per call.
+    const after = await db('call_log').where({ id: row.id }).first('recording_sid', 'recording_url', 'voicemail_callback_alerted_at').catch(() => null);
+    if (after && (after.recording_sid || after.recording_url || after.voicemail_callback_alerted_at)) {
+      const NotificationService = require('./notification-service');
+      await NotificationService.supersedeMissedCallAdmin({ callLogId: row.id }).catch(() => {});
     }
     return true;
   } catch (err) {

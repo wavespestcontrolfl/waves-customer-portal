@@ -273,7 +273,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `Missed call — ${p.name || 'a customer'}`,
       body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
-      link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
+      // Calls live under the hash-routed Calls tab; ?thread= would open the
+      // SMS conversation instead (same destination as the voicemail bell).
+      link: '/admin/communications#tab=calls',
     }),
   },
   // Fired by estimate-converter when a paid acceptance deposit could not be
