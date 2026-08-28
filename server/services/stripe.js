@@ -683,7 +683,11 @@ const StripeService = {
     const piId = invoice?.stripe_payment_intent_id;
     if (!piId) return false;
     const stripe = getStripe();
-    if (!stripe) return false;
+    if (!stripe) {
+      // An unavailable client is the same unknown as a failed retrieve.
+      if (throwOnError) throw new Error('Stripe client unavailable — microdeposit state unknown');
+      return false;
+    }
     try {
       const pi = await stripe.paymentIntents.retrieve(piId);
       return pi.status === 'requires_action'

@@ -242,9 +242,21 @@ function etDayOfDeadline(value) {
   return Number.isNaN(t.getTime()) ? null : etDateString(t);
 }
 
+// A2's table does not exist yet: the read is gated on a process-memoized
+// hasTable so no call issues a predictably failing query (gh r7); it lights
+// up on A2's own deploy without a code change here.
+let dunningTableKnown = null;
+async function dunningTableExists() {
+  if (dunningTableKnown === null) {
+    try { dunningTableKnown = Boolean(await db.schema.hasTable('customer_dunning_sequences')); } catch { return false; }
+  }
+  return dunningTableKnown;
+}
+
 async function readDunningState(customerId) {
   if (!customerId) return { holdAppliedAt: null, consequenceDueAt: null };
   try {
+    if (!(await dunningTableExists())) return { holdAppliedAt: null, consequenceDueAt: null };
     const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('hold_applied_at', 'consequence_due_at');
     return {
       holdAppliedAt: row && row.hold_applied_at ? row.hold_applied_at : null,
@@ -1868,6 +1880,7 @@ class CollectionsConversation {
 module.exports = {
   buildSystemPrompt,
   readDunningState,
+  _resetDunningTableMemo: () => { dunningTableKnown = null; },
   REGISTER_RULES,
   CollectionsConversation,
   STATE_TOOLS,

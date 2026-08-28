@@ -21,6 +21,9 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // A2's customer_dunning_sequences: present by default in this suite (the
+  // read is memoized per process — tests that need "absent" reset the memo).
+  fn.schema = { hasTable: jest.fn(async () => true) };
   return fn;
 });
 
@@ -1503,6 +1506,20 @@ describe('account-level disclosure + registers', () => {
     expect(buildSystemPrompt({ firstName: 'Pat', register: 'firm' })).toMatch(/REGISTER: FIRM/);
     expect(buildSystemPrompt({ firstName: 'Pat', register: 'final' })).toMatch(/REGISTER: FINAL NOTICE/);
     expect(buildSystemPrompt({ firstName: 'Pat' })).toMatch(/REGISTER: FRIENDLY/); // default
+  });
+
+  test('readDunningState issues NO query while the A2 table is absent (memoized hasTable), and lights up once it exists', async () => {
+    const Convo = require('../services/collections/outbound-voice/collections-conversation');
+    Convo._resetDunningTableMemo();
+    db.schema.hasTable.mockResolvedValueOnce(false);
+    db.mockClear();
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(db).not.toHaveBeenCalledWith('customer_dunning_sequences');
+    expect(db.schema.hasTable).toHaveBeenCalledTimes(1); // memoized
+    Convo._resetDunningTableMemo();
+    setDb({ dunning: { hold_applied_at: '2026-08-01T12:00:00Z', consequence_due_at: '2026-09-15' } });
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: '2026-08-01T12:00:00Z', consequenceDueAt: '2026-09-15' });
   });
 
   test('readDunningState is all-null when the A2 table is absent or unreadable', async () => {

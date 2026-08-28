@@ -51,6 +51,17 @@ describe('StripeService.isInvoiceAwaitingMicrodepositVerification', () => {
     expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
   });
 
+  test('throwOnError also throws when the Stripe client is unavailable (no secret key) — unknown is unknown', async () => {
+    jest.doMock('../config/stripe-config', () => ({ secretKey: '', publishableKey: '' }));
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.isInvoiceAwaitingMicrodepositVerification(
+      { id: 'inv1', stripe_payment_intent_id: 'pi_1' }, { throwOnError: true },
+    )).rejects.toThrow(/unavailable/);
+    await expect(StripeService.isInvoiceAwaitingMicrodepositVerification(
+      { id: 'inv1', stripe_payment_intent_id: 'pi_1' },
+    )).resolves.toBe(false); // default stays fail-open
+  });
+
   test('throwOnError propagates the Stripe retrieve error — the outbound voice policy fails CLOSED on it', async () => {
     stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('stripe unavailable'));
     const StripeService = require('../services/stripe');
