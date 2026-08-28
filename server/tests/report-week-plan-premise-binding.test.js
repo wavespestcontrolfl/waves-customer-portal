@@ -104,3 +104,18 @@ describe('cache-key premise resolution (codex gh-r16: partial lookup rows must n
     expect(route).toMatch(/err\?\.code === 'pinned_assessment_unavailable' \|\| err\?\.code === 'pinned_week_plan_unavailable'/);
   });
 });
+
+describe('strict plan pin outranks the live gate/premise visibility checks (codex gh-r17)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
+  test('a string pin refuses when the gate is off or the premise now diverges, BEFORE the visibility gate', () => {
+    const pin = src.indexOf("if (typeof pinnedWeekPlanSentAt === 'string') {");
+    const gate = src.indexOf("if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {", pin);
+    expect(pin).toBeGreaterThan(0);
+    expect(gate).toBeGreaterThan(pin);
+    const block = src.slice(pin, gate);
+    expect(block).toMatch(/if \(!featureGates\.isEnabled\('irrigationWeekPlan'\)\) throw new PinnedWeekPlanUnavailable\('gate_off'\);/);
+    expect(block).toMatch(/if \(service\.stamped_address_diverges === true\) throw new PinnedWeekPlanUnavailable\('premise_diverged'\);/);
+  });
+});

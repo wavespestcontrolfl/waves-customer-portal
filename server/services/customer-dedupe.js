@@ -653,8 +653,34 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
 // the plan the customer got and the sweep resends a possibly different
 // plan (codex #3565 gh-r15). Rule: a sent row beats an unsent row; both
 // sent or both unsent → the winner's stays.
+// "Delivered" for a week-plan row: stamped sent_at, OR a durable customer-week
+// delivery record (email_messages at trigger_event_id
+// `irrigation.weekly:<customer>:<week>`, provider-accepted status) whose
+// `plan:<hash>` category names THIS row's decision — SendGrid can accept the
+// email while markWeekPlanSent fails, leaving sent_at null on the plan the
+// customer actually received (codex #3565 gh-r17). Read at collision time,
+// before the merge rewrites the loser's trigger identity.
+async function weekPlanDelivered(trx, row, customerId) {
+  if (!row) return false;
+  if (row.sent_at) return true;
+  if (!row.decision_hash) return false;
+  const weekEnding = row.week_ending instanceof Date
+    ? row.week_ending.toISOString().slice(0, 10)
+    : String(row.week_ending || '').slice(0, 10);
+  const msgs = await trx('email_messages')
+    .where({ trigger_event_id: `irrigation.weekly:${customerId}:${weekEnding}` })
+    .whereIn('status', ['sent', 'delivered', 'opened', 'clicked'])
+    .select('categories');
+  const wanted = `plan:${row.decision_hash}`;
+  return msgs.some((m) => {
+    let list = m.categories;
+    if (typeof list === 'string') { try { list = JSON.parse(list); } catch { list = []; } }
+    return Array.isArray(list) && list.includes(wanted);
+  });
+}
+
 async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at');
+  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at', 'decision_hash');
   let moved = 0;
   let replaced = 0;
   let dropped = 0;
@@ -668,8 +694,12 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
     }
-    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at');
-    if (winnerRow && !winnerRow.sent_at && row.sent_at) {
+    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at', 'week_ending', 'decision_hash');
+    // A delivered row beats an undelivered one; both delivered or neither →
+    // the winner's stays.
+    const loserDelivered = await weekPlanDelivered(trx, row, loserId);
+    const winnerDelivered = await weekPlanDelivered(trx, winnerRow, winnerId);
+    if (winnerRow && loserDelivered && !winnerDelivered) {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id: winnerRow.id }).del();
         await sp(table).where({ id: row.id }).update({ [column]: winnerId });
@@ -680,7 +710,7 @@ async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
       dropped += 1;
     }
   }
-  return `moved ${moved}, replaced ${replaced} unsent winner row(s) with the sent snapshot, dropped ${dropped} duplicate row(s)`;
+  return `moved ${moved}, replaced ${replaced} undelivered winner row(s) with the delivered snapshot, dropped ${dropped} duplicate row(s)`;
 }
 
 // collections_flags: at most one ACTIVE row per (customer, flag) — both
@@ -734,8 +764,9 @@ const UNIQUE_COLLISION_HANDLERS = {
   customer_alerts: repointRowwiseDropCollisions,
   // UNIQUE(customer_id, week_ending): both duplicate profiles holding a
   // Monday watering-plan snapshot for the same week — the DELIVERED
-  // snapshot survives (a sent row beats an unsent one, ties keep the
-  // winner's); never abort the merge (codex #3565 gh-r14/r15).
+  // snapshot survives (sent_at, or a provider-accepted delivery record
+  // naming its decision; ties keep the winner's); never abort the merge
+  // (codex #3565 gh-r14/r15/r17).
   irrigation_week_plans: repointWeekPlansKeepSent,
   collections_flags: repointFlagsReleaseCollisions,
 };

@@ -842,7 +842,7 @@ describe('executeMerge', () => {
     // Minimal in-memory irrigation_week_plans with the (customer_id,
     // week_ending) unique enforced on update, so the handler's collision
     // branches run against real row state.
-    const fakeTrx = (seed) => {
+    const fakeTrx = (seed, messages = []) => {
       const rows = seed.map((r) => ({ ...r }));
       const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
       const unique = (id, customerId) => {
@@ -852,6 +852,16 @@ describe('executeMerge', () => {
         }
       };
       const qb = (table) => {
+        if (table === 'email_messages') {
+          // The durable customer-week delivery record the delivered check reads.
+          let w = {}; let statuses = null;
+          const mq = {
+            where(a) { w = { ...w, ...a }; return mq; },
+            whereIn(col, vals) { statuses = vals; return mq; },
+            select() { return Promise.resolve(messages.filter((m) => matches(m, w) && (!statuses || statuses.includes(m.status))).map((m) => ({ ...m }))); },
+          };
+          return mq;
+        }
         expect(table).toBe('irrigation_week_plans');
         let where = {};
         const api = {
@@ -893,6 +903,30 @@ describe('executeMerge', () => {
       const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
       expect(out).toMatch(/replaced 1/);
       expect(trx.rows).toEqual([{ id: 'l1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' }]);
+    });
+
+    it('both UNSENT but the loser\'s email was provider-accepted (delivery record names its decision hash) → the delivered snapshot survives (codex gh-r17)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [
+        { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['irrigation', 'plan:hash-l']) },
+        // A pre-provider failure on the winner's side is not a delivery.
+        { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23`, status: 'failed', categories: JSON.stringify(['irrigation', 'plan:hash-w']) },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id])).toEqual([['l1', WINNER]]);
+    });
+
+    it('a delivery record naming a DIFFERENT decision does not make an unsent row delivered', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-w' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null, decision_hash: 'hash-l' },
+      ], [{ trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23`, status: 'sent', categories: JSON.stringify(['plan:hash-older']) }]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
     });
 
     it('both unsent → the winner row stays, the loser copy drops', async () => {

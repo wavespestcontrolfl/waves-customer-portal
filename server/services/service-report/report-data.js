@@ -47,7 +47,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
@@ -2629,6 +2629,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // policy changed mid-week) → no callout: a "this week" instruction must
   // never be built from a historical report's weather and season.
   waterContext.weekPlan = null;
+  // A render pinned to a SENT plan must produce that plan or refuse — the
+  // live gate and premise checks below are visibility rules for unpinned
+  // renders, never a way past the pin: a gate flipped off between the
+  // signature pod and the /data pod (rollout, kill switch), or a stamp that
+  // now diverges, would otherwise answer a plan-less page under the
+  // plan-present key (codex gh-r17).
+  if (typeof pinnedWeekPlanSentAt === 'string') {
+    if (!featureGates.isEnabled('irrigationWeekPlan')) throw new PinnedWeekPlanUnavailable('gate_off');
+    if (service.stamped_address_diverges === true) throw new PinnedWeekPlanUnavailable('premise_diverged');
+  }
   // A stamped service address that diverges from the home (rental): the plan
   // was decided for the home's parcel and county — never attach it here.
   if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
