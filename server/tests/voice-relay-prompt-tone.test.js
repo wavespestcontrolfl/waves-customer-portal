@@ -20,7 +20,9 @@ test('tone: calm front-desk register, no cheerleading', () => {
 test('pricing fallback (gate off): estimate within ~15 minutes + the four capture fields, before anything else', () => {
   expect(SYSTEM_PROMPT).toContain(PRICE_LINE_NO_CONTEXT);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/cannot give a number over the phone/i);
-  expect(PRICE_LINE_NO_CONTEXT).toMatch(/written estimate within about 15 minutes/);
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/during office hours that is usually about 15 minutes/);
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/otherwise as soon as the office opens/); // true at 2 AM too
+  expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/estimate within (about )?15 minutes/); // never a flat SLA
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/first and last name, email address, and full service street address/);
   expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/\$\s?\d/); // still never a figure
   expect(buildBasePrompt(false)).toBe(SYSTEM_PROMPT);
@@ -28,7 +30,8 @@ test('pricing fallback (gate off): estimate within ~15 minutes + the four captur
 
 test('pricing fallback (gate on): the same capture when get_pricing cannot return a number', () => {
   const ctx = String(PRICE_LINE_CONTEXT);
-  expect(ctx).toMatch(/written estimate within about 15 minutes/);
+  expect(ctx).toMatch(/usually about 15 minutes/);
+  expect(ctx).toMatch(/CLOCK DATA says the office is closed/);
   expect(ctx).toMatch(/first and last name, email address, and full service street address/);
   expect(ctx).toMatch(/quote ONLY numbers the get_pricing tool returned/);
 });

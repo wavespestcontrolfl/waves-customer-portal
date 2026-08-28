@@ -99,9 +99,10 @@ try {
 // below; buildBasePrompt(true) replaces this exact line with PRICE_LINE_CONTEXT.
 const PRICE_LINE_NO_CONTEXT =
   '- You CANNOT quote prices on this call. If the caller asks about price, say you cannot give a'
-  + ' number over the phone but Waves can send a written estimate within about 15 minutes — then,'
-  + ' before anything else, get their first and last name, email address, and full service street'
-  + ' address so it can go out.';
+  + ' number over the phone but Waves will send a written estimate — during office hours that is'
+  + ' usually about 15 minutes, otherwise as soon as the office opens (never promise a time you'
+  + ' cannot know) — then, before anything else, get their first and last name, email address,'
+  + ' and full service street address so it can go out.';
 
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
@@ -160,8 +161,10 @@ const PRICE_LINE_CONTEXT = [
   '  estimate a price yourself. If get_pricing says information is missing, ask the caller',
   '  for it and call the tool again. You still cannot take payment.',
   '- If you cannot give a number for what they want, do not leave them empty-handed: say Waves',
-  '  can send a written estimate within about 15 minutes, then — before anything else — get their',
-  '  first and last name, email address, and full service street address so it can go out.',
+  '  will send a written estimate — during office hours that is usually about 15 minutes; if',
+  '  CLOCK DATA says the office is closed, say it goes out when the office opens and follow the',
+  '  callback rules — then, before anything else, get their first and last name, email address,',
+  '  and full service street address so it can go out.',
 ].join('\n');
 
 function agentDisplayName() {
