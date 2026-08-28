@@ -284,6 +284,8 @@ test('a legacy call row without the stamp derives supervision from the case ONCE
   // Pre-deploy in-flight row (codex #3560 P0): the linked case still carries
   // its admin approver ⇒ supervised, and the stamp is written onto the row.
   const backfill = chain();
+  // The real backfill is UPDATE … RETURNING; this chain's update must expose it.
+  backfill.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
   setDb({ extraCallRows: [] });
   const dbm = require('../models/db');
   const orig = dbm.getMockImplementation();

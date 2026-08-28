@@ -325,6 +325,8 @@ test('human escape passes the call row supervision stamp to the staffed-hours pr
 test('a legacy stamp-less call row derives supervision from the case once and backfills it', async () => {
   const ContactPolicy = require('../services/collections/contact-policy');
   const backfill = chain();
+  // The real backfill is UPDATE … RETURNING; this chain's update must expose it.
+  backfill.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
   setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }) } });
   const orig = db.getMockImplementation();
   const cases = [chain({ first: { approved_by: 'admin:adam@wavespestcontrol.com' } }), chain({ first: CASE_ROW })];

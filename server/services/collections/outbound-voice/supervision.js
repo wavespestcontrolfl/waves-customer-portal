@@ -16,7 +16,11 @@
  * legacy derivations can disagree if approved_by moves between them: the
  * conditional backfill decides the winner, and the loser returns the
  * PERSISTED stamp — never its own local value — so every request applies
- * the same classification future requests will read (hook P1).
+ * the same classification future requests will read (hook P1). A verdict
+ * that was neither written nor read back is NOT used: it resolves
+ * unsupervised (the override is withheld), because a one-shot supervised
+ * classification that later retries cannot reproduce is exactly the
+ * inconsistency this module exists to prevent (hook P1, round 2).
  */
 
 const db = require('../../../models/db');
@@ -53,10 +57,12 @@ async function resolveCallSupervision({ row, meta, database = db }) {
     let stored = fresh && fresh.metadata;
     if (typeof stored === 'string') { try { stored = JSON.parse(stored); } catch { stored = null; } }
     if (stored && typeof stored.collectionsSupervised === 'boolean') return stored.collectionsSupervised;
+    logger.warn(`[collections-supervision] stamp neither written nor readable for call_log ${row.id} — resolving unsupervised (fail closed)`);
   } catch (err) {
-    logger.warn(`[collections-supervision] backfill failed for call_log ${row.id}: ${err.message}`);
+    logger.warn(`[collections-supervision] backfill failed for call_log ${row.id}: ${err.message} — resolving unsupervised (fail closed)`);
   }
-  return supervised;
+  // Nothing durable backs this verdict ⇒ withhold the override.
+  return false;
 }
 
 module.exports = { resolveCallSupervision };

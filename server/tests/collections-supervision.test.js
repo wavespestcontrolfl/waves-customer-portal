@@ -64,20 +64,20 @@ test('losing the backfill race returns the PERSISTED stamp, not the local deriva
   expect(reread.first).toHaveBeenCalledWith('metadata');
 });
 
-test('a lost race with an unreadable/absent stored stamp falls back to the local derivation', async () => {
-  const caseChain = chain({ first: { approved_by: 'admin:x' } });
+test('a lost race with no readable stored stamp resolves UNSUPERVISED — a verdict nobody persisted is never used', async () => {
+  const caseChain = chain({ first: { approved_by: 'admin:x' } }); // local says supervised
   const backfill = chain({ updateResult: [] });
   const reread = chain({ first: { metadata: null } });
   const callLogs = [backfill, reread];
   db.mockImplementation((t) => (t === 'collection_cases' ? caseChain : callLogs.shift()));
-  expect(await resolveCallSupervision({ row: ROW, meta: META })).toBe(true);
+  expect(await resolveCallSupervision({ row: ROW, meta: META })).toBe(false);
 });
 
-test('backfill failure does not change the verdict', async () => {
+test('backfill failure resolves UNSUPERVISED (fail closed) even when the case says supervised', async () => {
   const caseChain = chain({ first: { approved_by: 'admin:x' } });
   const backfill = chain(); backfill.returning = jest.fn(async () => { throw new Error('locked'); });
   db.mockImplementation((t) => (t === 'collection_cases' ? caseChain : backfill));
-  expect(await resolveCallSupervision({ row: ROW, meta: META })).toBe(true);
+  expect(await resolveCallSupervision({ row: ROW, meta: META })).toBe(false);
 });
 
 test('no case linkage ⇒ unsupervised, no reads', async () => {
