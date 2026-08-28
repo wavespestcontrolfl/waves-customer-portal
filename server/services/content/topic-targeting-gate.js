@@ -112,7 +112,21 @@ const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
 // "wdo inspection va loan" is a real termite topic) count only after a comma.
 const STATE_ABBR_SAFE = 'ak|az|ca|ct|dc|ga|ia|il|ks|ky|mn|nc|nd|nh|nj|nm|nv|ny|ri|sc|sd|tn|tx|ut|vt|wa|wi|wv|wy';
 const STATE_ABBR_AMBIGUOUS = 'al|ar|co|de|hi|id|in|la|ma|md|me|mi|mo|ms|ne|oh|ok|or|pa|va';
-const STATE_ABBR_RE = new RegExp(`\\b[a-z]+,?\\s+(${STATE_ABBR_SAFE})\\b(?![a-z])|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS})\\b(?![a-z])`, 'i');
+// "mt" is also "Mount" ("mt dora", "mt pleasant"), so it is Montana only
+// when it ends the phrase ("billings mt") or follows a comma ("Billings, MT").
+const STATE_ABBR_TRAILING = 'mt';
+const STATE_ABBR_RE = new RegExp(
+  `\\b[a-z]+,?\\s+(${STATE_ABBR_SAFE})\\b(?![a-z])`
+  + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
+  + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`,
+  'i'
+);
+// Hillsborough County is split: its south end (Ruskin, Apollo Beach, Sun City
+// Center, Wimauma, Gibsonton, Riverview — config/locations.js) is served from
+// Parrish; the rest is Tampa. County-wide targeting is out-of-area UNLESS a
+// served locality anchors it, which is why the county stays OUT of the shared
+// prose blocklist — "Ruskin, in south Hillsborough County" is a true claim.
+const SPLIT_COUNTY_RE = /\bhillsborough county\b/i;
 // Place names that are also ordinary words or person names. Deliberately
 // NOT in the shared content-guardrails blocklist (which scans body prose);
 // here they count only with geographic context — "in/near <Name>" or
@@ -140,8 +154,8 @@ const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)
 // "pests in cocoa mulch" stay topics, while "pest control in Brandon" and
 // "Ants in Cocoa: What to Do" are places.
 const CONTEXT_PLACE_RE = new RegExp(
-  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_NAME_SOURCE})\\b))`
-  + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
+  `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
+  + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
   'i'
 );
 
@@ -222,14 +236,15 @@ function findAll(re, text) {
  */
 function classifyGeoScope(text) {
   const t = String(text || '');
+  const footprint = findAll(cityRe(footprintCities()), t);
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), t),
     ...findAll(OUT_OF_STATE_RE, t),
     ...findAll(NAME_STATE_RE, t),
     ...findAll(CONTEXT_PLACE_RE, t),
     ...findAll(STATE_ABBR_RE, t).map((s) => s.toUpperCase()),
+    ...(!footprint.length && SPLIT_COUNTY_RE.test(t) ? ['Hillsborough County'] : []),
   ];
-  const footprint = findAll(cityRe(footprintCities()), t);
   const regional = findAll(REGIONAL_RE, t);
   const statewide = STATEWIDE_RE.test(t);
   let scope = 'none';

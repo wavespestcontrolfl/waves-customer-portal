@@ -1723,7 +1723,10 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Avon Park', 'Okeechobee', 'Clewiston', 'Belle Glade', 'Jensen Beach',
   'Hobe Sound', 'Key West', 'Key Largo', 'Islamorada', 'Everglades City',
   'Fort Myers Beach', 'North Fort Myers', 'Ave Maria',
-  'Hillsborough County', 'Pasco County', 'Hernando County', 'Citrus County',
+  // Hillsborough County is NOT here: its south end is served (locations.js),
+  // so the topic-targeting gate treats the county as out-of-area only when no
+  // served locality anchors the targeting (SPLIT_COUNTY_RE).
+  'Pasco County', 'Hernando County', 'Citrus County',
   'Marion County', 'Volusia County', 'Brevard County', 'Seminole County',
   'Osceola County', 'Orange County', 'Palm Beach County', 'Martin County',
   'St. Lucie County', 'Indian River County', 'Duval County', 'Leon County',

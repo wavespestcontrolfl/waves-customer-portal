@@ -303,6 +303,15 @@ describe('out-of-footprint coverage beyond the original 48-name list (hook r4)',
     expect(gate.classifyGeoScope('ask virginia about your plan').scope).toBe('none');
     expect(gate.classifyGeoScope('brandon asked about ghost ants').scope).toBe('none');
   });
+  test('PR codex r2: Hillsborough County blocks county-wide targeting only, never a served locality (and is not in the prose blocklist)', () => {
+    expect(gate.classifyGeoScope('pest control hillsborough county').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('Tampa, Hillsborough County termite bond').scope).toBe('out_of_area');
+    const served = gate.classifyGeoScope('pest control in Ruskin, Hillsborough County');
+    expect(served.scope).toBe('footprint');
+    expect(served.out_of_area).toEqual([]);
+    expect(gate.classifyGeoScope('Sun City Center, south Hillsborough County lawn care').scope).toBe('footprint');
+    expect(gate._internals.outOfAreaCityList().map((c) => c.toLowerCase())).not.toContain('hillsborough county');
+  });
 });
 
 describe('PR codex r1: ambiguous place names need geo context; postal abbreviations', () => {
@@ -339,6 +348,14 @@ describe('PR codex r1: ambiguous place names need geo context; postal abbreviati
     }
     for (const t of ['wdo inspection va loan', 'ants in kitchen', 'is pest control ok for pets', 'contact me about termites', 'pest control or exterminator']) {
       expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('PR codex r2: "mt" is Montana only trailing or after a comma — "mt dora" / "mt pleasant" are towns', () => {
+    for (const t of ['termite control billings mt', 'Billings, MT pest control', 'exterminator missoula mt?']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toContain('MT');
+    }
+    for (const t of ['termite bond mt pleasant', 'pest control mt dora fl', 'mt pleasant exterminator cost']) {
+      expect(gate.classifyGeoScope(t).out_of_area).not.toContain('MT');
     }
   });
 });

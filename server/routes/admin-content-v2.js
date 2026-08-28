@@ -944,7 +944,8 @@ router.post('/blog/:id/publish-astro', async (req, res, next) => {
     // (a 500 here reads as a server failure and can trip error alerting).
     const isClientErr = err.code === 'BLOG_FRONTMATTER_INVALID'
       || err.code === 'BLOG_GUARDRAILS_FAILED'
-      || err.code === 'BLOG_COMPARISON_GATE_FAILED';
+      || err.code === 'BLOG_COMPARISON_GATE_FAILED'
+      || err.code === 'BLOG_TOPIC_TARGETING_BLOCKED';
     res.status(isClientErr ? 400 : 500).json({ error: err.message, details: err.details });
   } finally {
     if (renewTimer) clearInterval(renewTimer);
