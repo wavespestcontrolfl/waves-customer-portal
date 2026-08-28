@@ -974,7 +974,8 @@ async function maybeAutoMerge(run, pr) {
         brief: briefForImages,
         branch,
         actionType: run.action_type,
-        targetUrl: targetForRun(run).url,
+        // Brief-aware target (publishRefresh takes brief.target_url first).
+        targetUrl: (await resolveTargetForRun(run)).url,
         filePath: draftForImages?.file_path || null,
       });
     } catch (err) {

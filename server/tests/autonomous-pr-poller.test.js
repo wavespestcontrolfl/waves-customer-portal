@@ -697,6 +697,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
+  test('body-image contract at HEAD for a REFRESH run: target URL comes from the brief when the draft carries none (hook r16)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const refreshRun = makeRun({
+      action_type: 'refresh_existing_page',
+      brief_id: 'brief-r',
+      draft_payload: JSON.stringify({ type: 'draft', frontmatter: { title: 'Refresh' }, body: 'x' }),
+    });
+    setupDb({ pending: [refreshRun], briefs: [{ id: 'brief-r', target_url: 'https://www.wavespestcontrol.com/blog/legacy-post/', target_keyword: 'k', city: 'Venice' }] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '1 distinct in-article image(s), minimum 2' });
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/legacy-post/' }));
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });
