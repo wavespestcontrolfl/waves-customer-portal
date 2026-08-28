@@ -1247,12 +1247,24 @@ describe('validateAutonomousRunGates', () => {
     const fg = require('../config/feature-gates');
     const spy = jest.spyOn(fg, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
     try {
+      const seen = [];
+      const gh = { getFile: async (path, ref) => { seen.push([path, ref]); return path.startsWith('public/images/blog/x/body-') ? { sha: 'ok' } : null; } };
+      const deps = { ...goodDeps(), gh, prHeadRef: 'content/autonomous-x' };
       const one = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![a again](/images/blog/x/body-1.webp)';
-      const res = await rem.validateAutonomousRunGates(one, RUN_REF, goodDeps());
+      const res = await rem.validateAutonomousRunGates(one, RUN_REF, deps);
       expect(res.ok).toBe(false);
       expect(res.reason).toMatch(/body images: fix leaves 1 distinct/);
       const two = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n## B\n\n![b](/images/blog/x/body-2.webp)';
-      expect((await rem.validateAutonomousRunGates(two, RUN_REF, goodDeps())).ok).toBe(true);
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, deps)).ok).toBe(true);
+      // Assets are verified on the PR BRANCH, not main.
+      expect(seen).toContainEqual(['public/images/blog/x/body-2.webp', 'content/autonomous-x']);
+      // Hero in the body / an unverifiable ref / a remote URL are rejected (hook r5).
+      const hero = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\nFixed.\n\n![h](/images/blog/x/hero.webp)\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(hero, RUN_REF, deps)).reason).toMatch(/embeds the hero/);
+      const ghost = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![z](https://example.com/z.jpg)';
+      expect((await rem.validateAutonomousRunGates(ghost, RUN_REF, deps)).reason).toMatch(/not committed/);
+      // No PR head ref → fail closed.
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, { ...deps, prHeadRef: null })).reason).toMatch(/PR head ref unavailable/);
     } finally { spy.mockRestore(); }
     // Gate off: no recount.
     expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);

@@ -1806,40 +1806,43 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = 
   return ref.alt;
 }
 
-// Draft-authored image references count toward the minimum only when they
-// resolve to a file committed in the Astro repo; an unresolvable one (an
-// invented path, a remote URL) would ship as a broken image, so it parks.
-async function assertDraftBodyImagesCommitted(refs, slug) {
+// Shared validity contract for the body's image references (publisher at
+// PR-open time; codex-remediation re-checks a rewritten body against the PR
+// branch): every rendered `![..](src)` must (a) not be the hero — the layout
+// renders it, a body that embeds it repeats the picture — and (b) resolve to
+// a file committed at `getFile` (an invented path or remote URL would ship
+// as a broken image). Returns { ok, reason, distinct } — distinct = number
+// of distinct verified sources.
+async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
+  const refs = bodyImageRefs(body);
+  const hero = String(heroSrc || '');
   for (const ref of refs) {
     const src = String(ref.src || '');
-    const ok = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
-      && await gh.getFile(`public${src}`);
-    if (!ok) {
-      const err = new Error(`autonomous blog body images: draft for ${slug} references an image that is not committed in the Astro repo (${src || 'empty src'})`);
-      err.code = 'BLOG_BODY_IMAGES_FAILED';
-      throw err;
+    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) {
+      return { ok: false, reason: `body embeds the hero image (${src}) — the layout renders the hero; body images must be distinct illustrations`, distinct: 0 };
+    }
+    const committed = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
+      && await getFile(`public${src}`);
+    if (!committed) {
+      return { ok: false, reason: `body references an image that is not committed in the Astro repo (${src || 'empty src'})`, distinct: 0 };
     }
   }
+  return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size };
 }
 
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {} }) {
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
   const draftRefs = bodyImageRefs(body);
-  // The layout renders the hero; a body that embeds it repeats the picture
-  // and would count it toward the minimum — never a body image (astro
-  // CLAUDE.md: "never embed the hero_image in the body").
-  const heroSrc = String(frontmatter?.hero_image?.src || '');
-  const heroRef = draftRefs.find((r) => r.src === heroSrc || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(r.src));
-  if (heroRef) {
-    const err = new Error(`autonomous blog body images: draft for ${slug} embeds the hero image in the body (${heroRef.src}) — the layout renders the hero; body images must be distinct illustrations`);
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path) });
+  if (!valid.ok) {
+    const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
     throw err;
   }
-  await assertDraftBodyImagesCommitted(draftRefs, slug);
   // Distinct pictures, not references — two links to one file is one image.
   const draftSrcs = new Set(draftRefs.map((r) => r.src));
-  const have = draftSrcs.size;
+  const have = valid.distinct;
   const need = BODY_IMAGE_MIN - have;
   if (need <= 0) return none;
 
@@ -3541,6 +3544,7 @@ module.exports = {
     insertBodyImages,
     countBodyImages,
     bodyImageRefs,
+    validateBodyImageRefs,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
     fetchImageBuffer,

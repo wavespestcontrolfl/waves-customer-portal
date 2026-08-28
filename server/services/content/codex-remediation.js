@@ -1277,10 +1277,19 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
     let bodyImagesOn = false;
     try { bodyImagesOn = require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { bodyImagesOn = false; }
     if (bodyImagesOn) {
+      // Same validity contract as the publisher, checked against the PR
+      // BRANCH (that is where the generated body-N.webp files live until
+      // merge): no hero in the body, every ref committed, ≥ minimum distinct.
       const pub = deps.astroPublisherInternals || require('../content-astro/astro-publisher')._internals;
-      const distinct = new Set(pub.bodyImageRefs(draft.body).map((r) => r.src)).size;
-      if (distinct < pub.BODY_IMAGE_MIN) {
-        return { ok: false, reason: `body images: fix leaves ${distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
+      const gh = deps.gh || ghDefault;
+      const prHeadRef = deps.prHeadRef || null;
+      if (!prHeadRef) return { ok: false, reason: 'body images: PR head ref unavailable for asset verification' };
+      const heroSrc = (fixedData.hero_image && typeof fixedData.hero_image === 'object' && fixedData.hero_image.src)
+        || (draft.frontmatter && draft.frontmatter.hero_image && draft.frontmatter.hero_image.src) || '';
+      const valid = await pub.validateBodyImageRefs({ body: draft.body, heroSrc, getFile: (path) => gh.getFile(path, prHeadRef) });
+      if (!valid.ok) return { ok: false, reason: `body images: ${valid.reason}` };
+      if (valid.distinct < pub.BODY_IMAGE_MIN) {
+        return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
       }
     }
 
@@ -2399,7 +2408,7 @@ async function maybeRemediateAutonomousPr(pr, run = null, deps = {}) {
     // commit — the run's uniqueness/quality/SEO/visibility verdicts covered
     // the ORIGINAL body only. Missing run row fails closed inside (parks).
     revalidateFix: async (fixedMarkdown) => {
-      const r = await revalidate(fixedMarkdown, run, deps);
+      const r = await revalidate(fixedMarkdown, run, { ...deps, prHeadRef: (pr && pr.head && pr.head.ref) || deps.prHeadRef || null });
       lastComparisonVerdict = (r && r.ok === true && r.comparisonResult) ? r.comparisonResult : null;
       return r;
     },
