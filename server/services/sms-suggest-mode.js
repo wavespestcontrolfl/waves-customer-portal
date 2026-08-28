@@ -153,7 +153,20 @@ async function lockSuggestThread(trx, key) {
  * is the question, and a newer auto-send always implies a newer inbound, which
  * the newer_inbound guard already catches.)
  */
-async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt }) {
+async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt, inboundSmsLogId = null }) {
+  // Compare against the DB's OWN timestamp, never the JS Date the caller read
+  // back: pg stores created_at at microsecond precision and a JS Date carries
+  // milliseconds, so `created_at > <Date>` matched the inbound row ITSELF
+  // (its µs tail exceeds the truncated value). Every thread then read as
+  // 'newer_inbound' and not one suggestion was ever published (found
+  // 2026-08-28: 310/310 live drafts self-matched). With the row id known,
+  // the bound is the row's stored value and the row itself is excluded.
+  const after = inboundSmsLogId
+    ? trx.raw('(SELECT created_at FROM sms_log WHERE id = ?)', [inboundSmsLogId])
+    : inboundCreatedAt;
+  const notSelf = function notSelf(q) {
+    if (inboundSmsLogId) q.whereNot('id', inboundSmsLogId);
+  };
   const byThread = (phoneColumn) => function matchThread() {
     if (threadLast10) {
       this.whereRaw(
@@ -170,7 +183,7 @@ async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreat
     .where(byThread('to_phone'))
     .whereIn('message_type', HUMAN_REPLY_TYPES)
     .whereIn('status', SENT_STATUSES)
-    .where('created_at', '>', inboundCreatedAt)
+    .where('created_at', '>', after)
     .first('id');
   if (answered) return 'human_answered';
 
@@ -179,14 +192,15 @@ async function threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreat
     .where(byThread('to_phone'))
     .whereIn('message_type', HUMAN_REPLY_TYPES)
     .whereIn('status', ['scheduled', 'sending'])
-    .where('created_at', '>', inboundCreatedAt)
+    .where('created_at', '>', after)
     .first('id');
   if (replyInFlight) return 'reply_in_flight';
 
   const newerInbound = await trx('sms_log')
     .where({ direction: 'inbound' })
     .where(byThread('from_phone'))
-    .where('created_at', '>', inboundCreatedAt)
+    .where('created_at', '>', after)
+    .modify(notSelf)
     .first('id');
   if (newerInbound) return 'newer_inbound';
 
@@ -510,7 +524,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
       // stale. Any hit → leave the draft shadow for the judge. The pending-
       // suggestion ordering check below catches the published-card case the
       // newer-inbound scan can't yet see.
-      if (await threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at })) {
+      if (await threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at, inboundSmsLogId: smsLogId })) {
         return null;
       }
 
