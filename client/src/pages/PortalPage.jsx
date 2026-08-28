@@ -7242,7 +7242,6 @@ function PropertyTab({ customer }) {
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
-  const pendingIrrigationEditRef = useRef(false);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -7304,6 +7303,11 @@ function PropertyTab({ customer }) {
         try {
           const result = await api.updatePropertyPreferences(toSave);
           if (result && result.preferences) lastSavedRef.current = result.preferences;
+          // The server stamps irrigation_system=true on any irrigation
+          // write, so suppression ends when THIS batch — the one that
+          // actually carried an irrigation field — succeeds. Never a shared
+          // flag: an older non-irrigation PUT resolving must not clear it.
+          if (Object.keys(toSave).some((k) => IRRIGATION_EDIT_FIELDS.has(k))) setIrrigationSuppressed(false);
         } catch (err) {
           // Re-queue UNDER newer edits (a field re-edited since this PUT left
           // wins) so the next flush retries these without clobbering fresher
@@ -7324,19 +7328,12 @@ function PropertyTab({ customer }) {
     // Merge into pending so earlier-edited fields aren't lost when the
     // debounce timer resets for a later field.
     pendingRef.current = { ...pendingRef.current, [field]: value };
-    if (IRRIGATION_EDIT_FIELDS.has(field)) pendingIrrigationEditRef.current = true;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       setSaveStatus('saving');
       flushAllPendingSaves()
         .then(() => {
-          // The server stamps irrigation_system=true on any irrigation
-          // write, so a successful flush that carried one ends suppression.
-          if (pendingIrrigationEditRef.current) {
-            pendingIrrigationEditRef.current = false;
-            setIrrigationSuppressed(false);
-          }
           setSaveStatus('saved');
           setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
         })
