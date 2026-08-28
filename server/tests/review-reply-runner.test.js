@@ -36,7 +36,8 @@ jest.mock('../models/db', () => {
   const dbFn = (table) => {
     const filters = [];
     const api = {
-      where(a) {
+      where(a, b) {
+        if (typeof a === 'string') { filters.push((r) => r[a] === b); return api; }
         if (typeof a === 'function') {
           // needsRealReply branch: whereNull(review_reply) OR like '[DRAFT]%'
           filters.push((r) => r.review_reply == null || String(r.review_reply).startsWith('[DRAFT]'));
@@ -415,6 +416,17 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'runner_error', auto_reply_attempts: Runner.MAX_ATTEMPTS });
     expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'runner_error', needsAction: true });
     mockGbp.isLocationConfigured.mockResolvedValue(true);
+  });
+
+  test('shadow: a draft written for a review that was edited meanwhile is not saved — the row is re-queued', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].star_rating = 2; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.drafted).toBe(0);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_claimed_until: null });
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('a review edited while drafting (rating/text changed) is re-queued for a fresh draft, never posted stale', async () => {

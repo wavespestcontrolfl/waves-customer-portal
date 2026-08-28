@@ -50,9 +50,13 @@ const CODES = {
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
 
 /**
- * Resolve (and persist) the GBP review resource name when the row lacks one
- * — moved verbatim from the admin reply route: name + 24h time match against
- * the location's live feed.
+ * Resolve (and persist) the GBP review resource name when the row lacks one.
+ * Two reviewers can share a display name, so a match must be UNAMBIGUOUS:
+ * exactly one live review with the same display name within 24h of the
+ * stored time whose rating and comment text also match. Anything else
+ * resolves to null (NO_RESOURCE) — a reply must never land on the wrong
+ * review. (The original admin-route fallback accepted the first same-name
+ * review; that lenience is gone for every caller.)
  */
 async function resolveGbpReviewName(review, { conn = db } = {}) {
   if (review.gbp_review_name) return review.gbp_review_name;
@@ -63,15 +67,21 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
     const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 100);
     const rName = (review.reviewer_name || '').toLowerCase();
     const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
-    const match = gbpReviews.find((g) => {
+    const rRating = Number(review.star_rating) || 0;
+    const rText = String(review.review_text || '').trim();
+    const ratingOf = (g) => ({ ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(g.starRating || '').toUpperCase()] || Number(g.starRating) || 0);
+    const candidates = gbpReviews.filter((g) => {
       const gName = (g.reviewer?.displayName || '').toLowerCase();
       const gTime = g.createTime ? new Date(g.createTime).getTime() : 0;
-      return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000;
+      return gName === rName && gTime && rTime && Math.abs(gTime - rTime) <= 24 * 60 * 60 * 1000
+        && ratingOf(g) === rRating
+        && String(g.comment || '').trim() === rText;
     });
-    if (match?.name) {
-      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: match.name });
-      return match.name;
+    if (candidates.length === 1 && candidates[0].name) {
+      await conn('google_reviews').where({ id: review.id }).update({ gbp_review_name: candidates[0].name });
+      return candidates[0].name;
     }
+    if (candidates.length > 1) logger.warn(`GBP resource name lookup ambiguous for review ${review.id} (${candidates.length} candidates) — not resolved`);
   } catch (lookupErr) {
     logger.warn(`GBP resource name lookup failed: ${lookupErr.message}`);
   }

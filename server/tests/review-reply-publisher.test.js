@@ -178,11 +178,25 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
-  test('resolves a missing GBP resource name by name + 24h match, else NO_RESOURCE', async () => {
+  test('resolves a missing GBP resource name only on an UNAMBIGUOUS name+time+rating+text match, else NO_RESOURCE', async () => {
     state.rows[0].gbp_review_name = null;
     state.rows[0].review_created_at = '2026-08-20T10:00:00Z';
+    // Two same-name reviews inside the window: ambiguous → no resolution.
     mockGbp.getAllLocationReviews.mockResolvedValueOnce([
-      { name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z' },
+      { name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Great' },
+      { name: 'accounts/1/locations/2/reviews/78', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T12:00:00Z', starRating: 'FIVE', comment: 'Great' },
+    ]);
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+    // Same name + time but different text: not a match.
+    mockGbp.getAllLocationReviews.mockResolvedValueOnce([
+      { name: 'accounts/1/locations/2/reviews/79', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Different review' },
+    ]);
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.NO_RESOURCE });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    mockGbp.getAllLocationReviews.mockResolvedValueOnce([
+      { name: 'accounts/1/locations/2/reviews/77', reviewer: { displayName: 'Dana W.' }, createTime: '2026-08-20T11:00:00Z', starRating: 'FIVE', comment: 'Great' },
     ]);
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } });
     expect(r.googlePosted).toBe(true);

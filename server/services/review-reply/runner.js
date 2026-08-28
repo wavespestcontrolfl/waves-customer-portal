@@ -262,6 +262,13 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     const updated = await db('google_reviews')
       .where({ id: row.id, auto_reply_claimed_until: row._claimToken })
       .whereNull('missing_since')
+      // The draft was written for THIS rating + text; a reviewer edit the
+      // sync applied meanwhile must not get a stale draft saved against it.
+      .where('star_rating', row.star_rating)
+      .where(function sameText() {
+        if (row.review_text == null || row.review_text === '') this.whereNull('review_text').orWhere('review_text', '');
+        else this.where('review_text', row.review_text);
+      })
       .where(function ownDraftOrEmpty() {
         // Never over a human's draft: only an empty reply or the pipeline's
         // OWN previous draft may be replaced.
@@ -270,7 +277,14 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
       })
       .update({ ...patch, review_reply: asDraft(draft.text), reply_updated_at: null });
     if ((Array.isArray(updated) ? updated.length : updated) > 0) return true;
-    // Lost the race (posted reply / stamped) — record state without the draft text.
+    // Lost the race. If the REVIEW changed (rating/text edit), go back to the
+    // queue for a fresh draft; otherwise (posted reply / stamped / claim
+    // lost) record the closed state without the draft text.
+    const fresh = await db('google_reviews').where({ id: row.id }).first();
+    if (fresh && !fresh.missing_since && !hasRealReply(fresh.review_reply) && reviewFingerprint(fresh) !== reviewFingerprint(row)) {
+      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: new Date().toISOString(), auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_grounding: null });
+      return false;
+    }
     await releaseClaim(row, { ...patch, auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'changed_during_draft' });
     return false;
   }
