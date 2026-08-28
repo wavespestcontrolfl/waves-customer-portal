@@ -105,6 +105,7 @@ const {
 } = require('../services/estimate-add-service-request');
 const featureGates = require('../config/feature-gates');
 const acceptanceTerms = require('../services/acceptance-terms-text');
+const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const {
   parcelOverlayEnabled,
@@ -309,46 +310,6 @@ function acceptanceTermsApplyTo(estimate) {
       || isTermiteFoamOneTimeItem(r)
       || isTermiteTrenchingOneTimeItem(r);
   });
-}
-
-/**
- * Customer-facing acceptance record for an accepted estimate whose
- * terms_version proves one was committed — served on /data (page + browser
- * document) and handed to the pdfkit fallback so no accepted document lacks
- * it. Deliberately NOT gated: the gate governs display/collection going
- * forward, never evidence already recorded. Masks the IP to two octets and
- * reduces the user-agent to a family label. Null when there is none.
- */
-//
-// `strict` (document generation — the browser ?mode=pdf data pass and the
-// pdfkit fallback): a read failure or a MISSING row where terms_version says
-// one exists THROWS, so no accepted document is ever produced without its
-// record (pre-push Codex P1). Non-strict (the ordinary page): fail-soft, the
-// page still renders and the miss is logged.
-async function acceptanceRecordForEstimate(estimate, { strict = false } = {}) {
-  if (!estimate || estimate.status !== 'accepted' || !estimate.terms_version) return null;
-  try {
-    const row = await db('estimate_acceptances')
-      .where({ estimate_id: estimate.id })
-      .orderBy('accepted_at', 'desc')
-      .first();
-    if (!row) {
-      if (strict) throw new Error(`acceptance record missing for estimate ${estimate.id} (terms_version ${estimate.terms_version})`);
-      return null;
-    }
-    return {
-      recordId: `ACC-${String(row.id).slice(0, 8).toUpperCase()}`,
-      termsVersion: row.terms_version,
-      termsText: row.terms_text,
-      acceptedAt: row.accepted_at,
-      ipMasked: acceptanceTerms.maskIpForCustomer(row.ip),
-      device: acceptanceTerms.deviceLabelFromUserAgent(row.user_agent),
-    };
-  } catch (e) {
-    if (strict) throw e;
-    logger.warn(`[estimate-acceptance] record read failed for estimate ${estimate.id}: ${e.message}`);
-    return null;
-  }
 }
 
 function clientIp(req) {
@@ -24106,4 +24067,3 @@ module.exports.attachMeasuredBasis = attachMeasuredBasis;
 // Test hook (acceptance-terms lane 2026-08-28): which estimates get the
 // cancel-anytime acceptance line at all.
 module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;
-module.exports.acceptanceRecordForEstimate = acceptanceRecordForEstimate;

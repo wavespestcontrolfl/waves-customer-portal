@@ -1250,7 +1250,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
   });
 
   test('acceptanceRecordForEstimate: strict document reads fail on a missing row or a read error; the page is fail-soft', async () => {
-    const { acceptanceRecordForEstimate } = require('../routes/estimate-public');
+    const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
     seed({ id: 'est-rec-1', token: 'tok-rec-1-x01234567890', status: 'accepted', terms_version: CURRENT });
     const accepted = { id: 'est-rec-1', status: 'accepted', terms_version: CURRENT };
     // Nothing recorded: not applicable.
