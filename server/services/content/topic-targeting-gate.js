@@ -154,8 +154,14 @@ const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)
 // colon, dash, or a state suffix — so "pest control in mobile homes" and
 // "pests in cocoa mulch" stay topics, while "pest control in Brandon" and
 // "Ants in Cocoa: What to Do" are places.
+// "in <Name> homes/neighborhoods/residents/…" is a place too — an audience
+// suffix after a preposition + place name. "Mobile" is excluded from that
+// branch: "pest control in mobile homes" is a housing type, not Mobile, AL.
+const AUDIENCE_SUFFIX = 'homes|homeowners|households|residents|neighborhoods|neighbourhoods|communities|properties|yards|lawns|families|businesses|area';
+const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 const CONTEXT_PLACE_RE = new RegExp(
   `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
+  + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
   + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
   'i'
 );

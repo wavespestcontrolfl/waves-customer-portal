@@ -359,6 +359,14 @@ describe('PR codex r1: ambiguous place names need geo context; postal abbreviati
       expect(gate.classifyGeoScope(t).scope).toBe('none');
     }
   });
+  test('hook (PR codex r2 push 2): "in <Name> homes/neighborhoods/residents" is a place; "mobile homes" / "cocoa mulch" stay topics', () => {
+    for (const t of ['Pest Control in Brandon Homes', 'Lawn Care in Stuart Neighborhoods', 'Pest Control in Austin Homes', 'termite risk for homeowners in plantation communities']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['pest control in mobile homes', 'pests in cocoa mulch', 'ants in homestead kitchens', 'pest control for mobile home residents']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
   test('PR codex r2: "mt" is Montana only trailing or after a comma — "mt dora" / "mt pleasant" are towns', () => {
     for (const t of ['termite control billings mt', 'Billings, MT pest control', 'exterminator missoula mt?']) {
       expect(gate.classifyGeoScope(t).out_of_area).toContain('MT');
