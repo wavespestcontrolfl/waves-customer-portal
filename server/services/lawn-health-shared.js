@@ -61,8 +61,11 @@ async function hasCustomerLawnCare(customerId, knex = db) {
   if (profile) return true;
 
   // Lazy require: irrigation-weekly-email pulls in the notification stack.
-  const { hasLawnServiceEvidence } = require('./irrigation-weekly-email');
-  return Boolean(await hasLawnServiceEvidence(customerId).catch(() => false));
+  // hasRecurringLawnEvidence, not hasLawnServiceEvidence — the latter is the
+  // deliberately broader Weekly-Inches render gate (any single live lawn
+  // visit, one-time jobs included).
+  const { hasRecurringLawnEvidence } = require('./irrigation-weekly-email');
+  return Boolean(await hasRecurringLawnEvidence(customerId).catch(() => false));
 }
 
 module.exports = {
