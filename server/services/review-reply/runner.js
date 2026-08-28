@@ -142,8 +142,28 @@ function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review
  * tick while the mode is not off; compare-and-set on NULL state so a row
  * that was queued / replied meanwhile is left alone. Returns the count.
  */
-async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 200 } = {}) {
+// Durable rollout cutoff = the moment the auto-reply migration ran in THIS
+// database. Rows inserted before it pre-date the enqueue hook and stay NULL
+// forever (owner ruling 2026-08-27, deploy-forward only); rows inserted
+// after it went through the hook and are the catch-up's only population.
+// Cached after the first successful read; unknown ⇒ catch-up disabled.
+let rolloutCutoffCache = undefined;
+async function rolloutCutoff({ conn = db } = {}) {
+  if (rolloutCutoffCache !== undefined) return rolloutCutoffCache;
+  try {
+    const m = await conn('knex_migrations').where('name', 'like', '20260828000001_review_auto_reply%').orderBy('id', 'asc').first('migration_time');
+    rolloutCutoffCache = m?.migration_time ? new Date(m.migration_time) : null;
+  } catch (err) {
+    logger.warn(`[review-auto-reply] rollout cutoff unavailable: ${err.message}`);
+    return null;
+  }
+  return rolloutCutoffCache;
+}
+
+async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 200, rollout = undefined } = {}) {
   if (cfg.mode === 'off') return 0;
+  const since = rollout !== undefined ? rollout : await rolloutCutoff();
+  if (!since) return 0;
   const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
   // Every eligibility predicate is applied in SQL, and the batch is ordered
   // oldest-first, so a run of ineligible rows (replied / dismissed / out of
@@ -154,6 +174,9 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
     .where('reviewer_name', '!=', '_stats')
     .whereRaw('COALESCE(dismissed, false) = false')
     .where('review_created_at', '>=', cutoff)
+    // Row INSERT time (not the review's Google time) after the rollout: a
+    // review that existed locally before the hook shipped is history.
+    .where('created_at', '>=', new Date(since).toISOString())
     .modify(whereNeedsRealReply)
     .orderBy('review_created_at', 'asc')
     .limit(limit);
@@ -785,7 +808,9 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
 // once the reviewer edits it. Reconciliation parks (google_uncertain /
 // persist_failed: a PUT may be live) and human drafts are left alone.
 const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED]);
-const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft']);
+// review_edited_after_post: a POSTED reply parked for a person after the
+// reviewer's first edit keeps that park (and Retract) through later edits.
+const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft', 'review_edited_after_post']);
 // Parks where the pipeline's own PUT may already be live on Google.
 const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 
@@ -1081,6 +1106,8 @@ module.exports = {
   computeDueAt,
   autoReplyInsertFields,
   enqueueMissedReviews,
+  rolloutCutoff,
+  _resetRolloutCutoffCache: () => { rolloutCutoffCache = undefined; },
   claimDueRows,
   processClaimedRow,
   processDueAutoReplies,

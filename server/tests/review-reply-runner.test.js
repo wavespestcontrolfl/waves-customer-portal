@@ -40,6 +40,10 @@ jest.mock('../services/review-reply/publisher', () => {
 });
 jest.mock('../models/db', () => {
   const dbFn = (table) => {
+    if (table === 'knex_migrations') {
+      const mig = { where() { return mig; }, orderBy() { return mig; }, async first() { return state.migration || null; } };
+      return mig;
+    }
     const filters = [];
     let agg = null; let groupCol = null; let order = null; let limitN = null;
     const hits = () => state.rows.filter((r) => filters.every((f) => f(r)));
@@ -137,6 +141,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   state.rows = [];
   state.raws = [];
+  state.migration = { migration_time: '2026-08-27T12:00:00Z' };
+  Runner._resetRolloutCutoffCache();
   delete process.env.GATE_REVIEW_AUTO_REPLY;
   delete process.env.REVIEW_AUTO_REPLY_MIN_STARS;
   delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
@@ -233,7 +239,9 @@ describe('enqueueMissedReviews — catch-up for rows the insert-time gate skippe
       row({ id: 'venice', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', location_id: 'venice' }),
       row({ id: 'stats', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', reviewer_name: '_stats' }),
       row({ id: 'done', auto_reply_status: 'skipped', review_created_at: '2026-08-27T15:00:00Z' }),
-    ];
+      // Inserted BEFORE the auto-reply migration ran (pre-deploy history): never queued (owner ruling).
+      row({ id: 'prehook', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', created_at: '2026-08-27T11:00:00Z' }),
+    ].map((r) => ({ created_at: '2026-08-27T15:05:00Z', ...r }));
     state.rows = rows();
     expect(await Runner.enqueueMissedReviews({ now })).toBe(0); // gate unset = off
     expect(state.rows.every((r) => r.id === 'done' || r.auto_reply_status == null)).toBe(true);
@@ -243,7 +251,7 @@ describe('enqueueMissedReviews — catch-up for rows the insert-time gate skippe
     const by = Object.fromEntries(state.rows.map((r) => [r.id, r]));
     expect(by.fresh.auto_reply_status).toBe('queued');
     expect(new Date(by.fresh.auto_reply_due_at).getTime()).toBeGreaterThan(now.getTime());
-    for (const id of ['old', 'replied', 'dismissed', 'venice', 'stats']) expect(by[id].auto_reply_status).toBeNull();
+    for (const id of ['old', 'replied', 'dismissed', 'venice', 'stats', 'prehook']) expect(by[id].auto_reply_status).toBeNull();
     expect(by.done.auto_reply_status).toBe('skipped');
     // Idempotent: a second tick finds nothing.
     expect(await Runner.enqueueMissedReviews({ now })).toBe(0);
@@ -251,12 +259,18 @@ describe('enqueueMissedReviews — catch-up for rows the insert-time gate skippe
     delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
     expect(await Runner.enqueueMissedReviews({ now })).toBe(1);
     expect(by.venice.auto_reply_status).toBe('queued');
+    // No durable rollout cutoff (migration row missing) ⇒ catch-up disabled, fail closed.
+    Runner._resetRolloutCutoffCache();
+    state.migration = null;
+    state.rows = rows();
+    expect(await Runner.enqueueMissedReviews({ now })).toBe(0);
+    expect(state.rows.every((r) => r.id === 'done' || r.auto_reply_status == null)).toBe(true);
   });
   test('eligibility is applied in SQL before the batch limit: a wall of replied rows cannot starve an eligible one (codex r26)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const now = new Date('2026-08-27T16:00:00Z');
-    state.rows = Array.from({ length: 30 }, (_, i) => row({ id: `replied-${i}`, auto_reply_status: null, auto_reply_due_at: null, review_created_at: `2026-08-27T10:${String(i).padStart(2, '0')}:00Z`, review_reply: 'Owner replied' }));
-    state.rows.push(row({ id: 'eligible', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:30:00Z' }));
+    state.rows = Array.from({ length: 30 }, (_, i) => row({ id: `replied-${i}`, auto_reply_status: null, auto_reply_due_at: null, created_at: '2026-08-27T13:00:00Z', review_created_at: `2026-08-27T10:${String(i).padStart(2, '0')}:00Z`, review_reply: 'Owner replied' }));
+    state.rows.push(row({ id: 'eligible', auto_reply_status: null, auto_reply_due_at: null, created_at: '2026-08-27T15:31:00Z', review_created_at: '2026-08-27T15:30:00Z' }));
     expect(await Runner.enqueueMissedReviews({ now, limit: 5 })).toBe(1);
     expect(state.rows.find((r) => r.id === 'eligible').auto_reply_status).toBe('queued');
     expect(state.rows.filter((r) => r.id !== 'eligible').every((r) => r.auto_reply_status == null)).toBe(true);
@@ -264,7 +278,7 @@ describe('enqueueMissedReviews — catch-up for rows the insert-time gate skippe
 
   test('the cron runs the catch-up before claiming', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
-    state.rows = [row({ id: 'fresh', auto_reply_status: null, auto_reply_due_at: null, review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    state.rows = [row({ id: 'fresh', auto_reply_status: null, auto_reply_due_at: null, created_at: new Date(Date.now() - 3500000).toISOString(), review_created_at: new Date(Date.now() - 3600000).toISOString() })];
     const stats = await Runner.processDueAutoReplies();
     expect(stats.enqueued).toBe(1);
     expect(state.rows[0].auto_reply_status).not.toBeNull();
@@ -818,6 +832,10 @@ describe('processDueAutoReplies — state machine', () => {
     const posted = row({ auto_reply_status: 'posted' });
     expect(Runner.reviewEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
     expect(Runner.reviewEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    // A SECOND edit keeps that park (and Retract) — it must not requeue and
+    // clear the draft while the real reply is still live (hook P1).
+    const parkedAfterPost = { ...posted, star_rating: 1, review_text: 'Actually terrible', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' };
+    expect(Runner.reviewEditFields(parkedAfterPost, { star_rating: 2, review_text: 'Slightly less terrible', reviewer_name: 'Dana W.' })).toEqual({});
     expect(Runner.reviewEditFields(row({ auto_reply_status: 'skipped' }), { star_rating: 1, review_text: 'x', reviewer_name: 'Dana W.' })).toEqual({});
   });
   test('reviewEditFields: a reviewer edit clears a pipeline-owned draft and requeues; human drafts and reconciliation parks are left alone', () => {
