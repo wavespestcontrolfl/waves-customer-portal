@@ -1645,8 +1645,31 @@ function bodyImagesEnabled() {
   try { return require('../../config/feature-gates').isEnabled('blogBodyImages') === true; } catch (_) { return false; }
 }
 
+// Rendered image references in the body — fenced code is skipped (an
+// `![x](y)` inside a code block is text, not an image).
+function bodyImageRefs(body) {
+  const out = [];
+  let inFence = false;
+  let fenceChar = '';
+  String(body || '').split('\n').forEach((line, index) => {
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence && (!inFence || fence[1][0] === fenceChar)) {
+      inFence = !inFence;
+      fenceChar = inFence ? fence[1][0] : '';
+      return;
+    }
+    if (inFence) return;
+    for (const m of line.matchAll(/!\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g)) out.push({ alt: m[1].trim(), src: m[2], line: index });
+  });
+  return out;
+}
+
 function countBodyImages(body) {
-  return (String(body || '').match(MARKDOWN_IMAGE_RE) || []).length;
+  return bodyImageRefs(body).length;
+}
+
+function headingKey(text) {
+  return String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 // Plain-text lead of a paragraph for the generation prompt: links → label,
@@ -1671,10 +1694,10 @@ const NON_PROSE_LINE_RE = /^\s*(?:[-*+]\s|\d+[.)]\s|>|\||<|!\[|`{3,}|~{3,}|:::|\
 // paragraph of an eligible section (no image yet, not a FAQ/summary-style
 // section). Fenced code is never split. The intro (text before the first
 // heading) is the fallback slot when too few sections qualify.
-function bodyImageSlots(body, wanted, { title = '' } = {}) {
+function scanBodySections(body, { title = '' } = {}) {
   const lines = String(body || '').split('\n');
   const sections = [];
-  let cur = { heading: String(title || '').trim(), start: 0, intro: true };
+  let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
   let inFence = false;
   let fenceChar = '';
   let paraStart = -1;
@@ -1707,17 +1730,29 @@ function bodyImageSlots(body, wanted, { title = '' } = {}) {
       // image under an H3 marks the H2 illustrated). Any H1 closes the range.
       if (heading[1].length === 2 || heading[1].length === 1) {
         sections.push(cur);
-        cur = heading[1].length === 2 ? { heading: heading[2].trim(), start: i } : { heading: cur.heading, start: i, sub: true };
+        cur = heading[1].length === 2 ? { heading: heading[2].trim(), start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
       }
       continue;
     }
-    if (/!\[[^\]]*\]\([^)]*\)/.test(line)) cur.hasImage = true;
+    for (const m of line.matchAll(/!\[[^\]]*\]\(([^)\s]*)[^)]*\)/g)) { cur.hasImage = true; cur.images.push(m[1]); }
     if (line.trim() === '') { closePara(i); continue; }
     if (paraStart < 0) paraStart = i;
   }
   closePara(lines.length);
   sections.push(cur);
+  return { lines, sections };
+}
 
+// The H2 heading a committed image sits under in the LIVE body (null when
+// the body no longer references it).
+function liveSectionHeadingForImage(content, src, { title = '' } = {}) {
+  const { sections } = scanBodySections(content, { title });
+  const owner = sections.find((sec) => sec.images.includes(src));
+  return owner ? owner.heading : null;
+}
+
+function bodyImageSlots(body, wanted, { title = '' } = {}) {
+  const { sections } = scanBodySections(body, { title });
   const eligible = sections.filter((sec) => !sec.intro && !sec.sub && !sec.hasImage
     && sec.lastProse != null && !BODY_IMAGE_SKIP_HEADING_RE.test(sec.heading));
   const picked = [];
@@ -1747,21 +1782,45 @@ function insertBodyImages(body, placements) {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-// Alt the LIVE body carries for a committed body image — the only truthful
-// alt for a reused file (the new draft never saw the picture).
-function liveBodyImageAlt(existingFile, src) {
+// A committed body image is reusable for a NEW slot only when the live body
+// still references it (its alt is the only truthful description of the
+// picture) AND it sat under the same H2 heading — a rewritten or reordered
+// article must not inherit an accurate-but-unrelated picture. Returns the
+// live alt, or null (regenerate).
+function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = {}) {
   const content = existingFile?.file?.content;
   if (!content) return null;
-  const escaped = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const m = String(content).match(new RegExp(`!\\[([^\\]]*)\\]\\(${escaped}\\)`));
-  const alt = m ? m[1].trim() : '';
-  return alt || null;
+  let liveBody;
+  try { liveBody = fm.parse(content)?.content ?? String(content); } catch { liveBody = String(content); }
+  const ref = bodyImageRefs(liveBody).find((r) => r.src === src);
+  if (!ref?.alt) return null;
+  const liveHeading = liveSectionHeadingForImage(liveBody, src, { title });
+  if (!liveHeading || headingKey(liveHeading) !== headingKey(slotHeading)) return null;
+  return ref.alt;
+}
+
+// Draft-authored image references count toward the minimum only when they
+// resolve to a file committed in the Astro repo; an unresolvable one (an
+// invented path, a remote URL) would ship as a broken image, so it parks.
+async function assertDraftBodyImagesCommitted(refs, slug) {
+  for (const ref of refs) {
+    const src = String(ref.src || '');
+    const ok = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
+      && await gh.getFile(`public${src}`);
+    if (!ok) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} references an image that is not committed in the Astro repo (${src || 'empty src'})`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+  }
 }
 
 async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {} }) {
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
-  const have = countBodyImages(body);
+  const draftRefs = bodyImageRefs(body);
+  await assertDraftBodyImagesCommitted(draftRefs, slug);
+  const have = draftRefs.length;
   const need = BODY_IMAGE_MIN - have;
   if (need <= 0) return none;
 
@@ -1786,7 +1845,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // Reuse a file already committed on main when the live body still
     // describes it; otherwise (re)generate — never reuse a picture blind.
     if (existingFile) {
-      const liveAlt = liveBodyImageAlt(existingFile, src);
+      const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title });
       if (liveAlt && await gh.getFile(repoPath)) {
         images.push({ src, alt: liveAlt, reused: true });
         placements.push({ insertAt: slot.insertAt, src, alt: liveAlt });
@@ -3456,6 +3515,8 @@ module.exports = {
     bodyImageSlots,
     insertBodyImages,
     countBodyImages,
+    bodyImageRefs,
+    reusableLiveBodyImage,
     BODY_IMAGE_MIN,
     fetchImageBuffer,
     parseImageDataUrl,
