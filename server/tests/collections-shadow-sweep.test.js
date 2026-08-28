@@ -132,7 +132,7 @@ describe('case + card creation', () => {
   test('a passing customer gets a version-1 shadow case and one proposal card', async () => {
     const caseInsert = chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -162,7 +162,7 @@ describe('case + card creation', () => {
 
   test('the card masks the phone, names the invoice/balance/age/consent, and speaks open-balance language', async () => {
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: [] })] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -214,7 +214,7 @@ describe('idempotency + versioning', () => {
 
   test('re-run with an unchanged eligible set/balance is a no-op (no new row, no new card)', async () => {
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ result: [] })],
     });
@@ -227,7 +227,7 @@ describe('idempotency + versioning', () => {
     ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
     const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 15300 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -248,7 +248,7 @@ describe('idempotency + versioning', () => {
   test('an already-filed card (same dedupe key) is not re-filed even when the case row is rewritten', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [
         chain({ first: EXISTING_CASE }),
@@ -264,7 +264,7 @@ describe('idempotency + versioning', () => {
   test('a version-guard miss (concurrent sweep already bumped) skips without a card', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ returning: [, chain({ result: [] })] })],
     });
@@ -282,7 +282,7 @@ describe('resilience', () => {
     setDbQueues({
       invoices: [
         chain({ result: [{ customer_id: 'cust-err' }, { customer_id: 'cust-1' }] }),
-        chain({ first: INVOICE }),
+        chain({ result: [INVOICE] }),
       ],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1 }, chain({ result: [] })] })],
@@ -318,7 +318,7 @@ describe('card durability', () => {
   test('a failed notifyAdmin insert is NOT counted as a filed card', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce(null);
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800 }, chain({ result: [] })] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -331,7 +331,7 @@ describe('card durability', () => {
   test('an unchanged case with NO standing card re-files it; with a card it stays a pure no-op', async () => {
     // Missing card ⇒ refile (probe null, then fileProposalCard's own probe null).
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ result: [] })],
       notifications: [chain({ first: null }), chain({ first: null })],
@@ -345,7 +345,7 @@ describe('card durability', () => {
     ContactPolicy.evaluate.mockResolvedValue(ALLOWED_VERDICT);
     NotificationService.notifyAdmin.mockResolvedValue({ id: 'notif-1' });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ result: [] })],
       notifications: [chain({ first: { id: 'notif-1' } })],
@@ -403,7 +403,7 @@ describe('retirement + tier rotation', () => {
     };
     const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: { ...INVOICE, due_date: '2026-07-08' } })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, due_date: '2026-07-08' }] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: existing }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -435,7 +435,7 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
     };
     const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 4, eligible_balance_snapshot: 12800 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: lapsed }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -476,7 +476,7 @@ describe('r6: evaluation errors preserve, duplicate live cases self-heal', () =>
     const healUpdate = chain({ result: 1 });
     const healCard = chain({ result: 1 });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [
         healSelect,
@@ -505,7 +505,7 @@ test('rotating the case version retires the previous version card', async () => 
   };
   const retireOld = chain({ result: 1 });
   setDbQueues({
-    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
     customers: [chain({ first: CUSTOMER })],
     collection_cases: [
       chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), // self-heal read (single row)
@@ -550,7 +550,7 @@ test('the rotation update fences on the originally read current_state', () => {
 test('a customer with ANY live/held case row is skipped — no second pipeline, no hold bypass', async () => {
   setDbQueues({
     customers: [chain({ first: CUSTOMER })],
-    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+    invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
     collection_cases: [
       chain({ result: [{ id: 'case-live', idempotency_key: 'collections:cust-1:3:14', current_state: 'dialing' }] }),
     ],
@@ -591,7 +591,7 @@ describe('gh-r10: post-file card recheck', () => {
     const notifications = [chain({ first: null })]; // existing-card probe
     if (retireChain) notifications.push(retireChain);
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ first: INVOICE })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert],
       call_log: [recheck],

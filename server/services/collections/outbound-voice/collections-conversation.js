@@ -51,6 +51,8 @@ const { isStaffedHours } = require('./staffed-hours');
 const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
+const { invoiceAmountDue } = require('../../invoice-helpers');
+const { anchorInvoiceOf, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
@@ -214,7 +216,36 @@ const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|oper
 const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|don'?t contact|do not contact)\b/i;
 const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdon'?t contact\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
 
-function buildSystemPrompt({ firstName, today }) {
+// The tier-60 consequence (A2's account dunning sequence, GATE_ACCOUNT_DUNNING)
+// exists ONLY when consequence_due_at is stamped on customer_dunning_sequences.
+// Until that table ships, or when the read fails, the answer is null — and a
+// null means the consequence is never spoken. Read-only, best-effort.
+async function readConsequenceDueAt(customerId) {
+  if (!customerId) return null;
+  try {
+    const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('consequence_due_at');
+    return row && row.consequence_due_at ? row.consequence_due_at : null;
+  } catch {
+    return null; // table absent (pre-A2) or unreadable ⇒ no consequence
+  }
+}
+
+// The three registers (owner ruling 2026-08-28). Consequence sentences are
+// spoken ONLY when the gated truth is present in the tool result — the
+// prompt never carries them on its own.
+const REGISTER_RULES = {
+  friendly: [
+    '- REGISTER: FRIENDLY REMINDER. Assume they simply missed or forgot the invoice. Warm, brief, no pressure; no mention of holds, cancellation, or consequences of any kind.',
+  ],
+  firm: [
+    '- REGISTER: FIRM. Be direct and matter-of-fact: the account is past due. No cheerfulness, no exclamation marks, shorter sentences. State a consequence ONLY if the balance tool result explicitly authorizes it — otherwise state none.',
+  ],
+  final: [
+    '- REGISTER: FINAL NOTICE. Calm, direct, serious; this is the last automated call about this balance. State the consequence ONLY if the balance tool result explicitly authorizes it, using its exact wording — otherwise say only that this is a final reminder and the office will follow up.',
+  ],
+};
+
+function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
   const who = firstName || 'the customer';
   return [
     'You are Sandy, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.',
@@ -227,9 +258,11 @@ function buildSystemPrompt({ firstName, today }) {
     `- FIRST confirm you are speaking with ${who} (call confirm_right_party). Until confirmed AND verified, never mention any balance, invoice, service, or account detail of any kind.`,
     '- If it is the wrong person, apologize for the interruption and end the call without saying why you called.',
     '- After confirmation, verify identity: ask the customer to tell you their street number OR their billing ZIP code, then call verify_identity with what they said. NEVER read out, suggest, or confirm any address, ZIP, or account detail yourself — they must supply it.',
-    '- Only after verification, use get_balance_details and share the open balance plainly and courteously.',
+    '- Only after verification, use get_balance_details and share the open balance plainly and courteously: state the TOTAL account balance, then name each open invoice briefly (service and date) as the tool lists them, and ask to take care of the full balance today. If they can only cover part of it, accept that gracefully and record the date they give for the rest.',
+    '- Never mention late fees, interest, or collection costs — Waves charges none on this account.',
+    ...(REGISTER_RULES[register] || REGISTER_RULES.friendly),
     '- Say "open balance" or "billing follow-up". NEVER say "collections", "debt", or "delinquent". Never threaten, pressure, negotiate, settle, or discount. You have no authority over amounts.',
-    '- NEVER take a payment or any card, bank, or account numbers on this call. If they want to pay, offer to text a secure payment link (send_pay_link) after they agree to receive the text.',
+    '- NEVER take a payment or any card, bank, or account numbers on this call. ALWAYS offer to text a secure payment link for the full balance (send_pay_link) — send it as soon as they agree to receive the text.',
     '- If they give a date they intend to pay, record it with record_payment_intent and thank them. Do not press for a date if they do not offer one; asking once is fine.',
     '- If they dispute the bill, use record_dispute and assure them the office will review it before any further notices.',
     '- If they ask you to stop calling, use record_do_not_call immediately and confirm it is done.',
@@ -295,7 +328,7 @@ class CollectionsConversation {
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
-        .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip')
+        .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip', 'service_pause_reason')
       : null;
     if (!caseRow || !customer) return this._refuse('case_or_customer_missing');
     // The case must belong to the authenticated call row's customer (gh
@@ -337,7 +370,6 @@ class CollectionsConversation {
       // their account was settled). Read-only; the policy decided
       // collectibility at dial, this only supplies data.
       const { loadEligibleInvoices } = require('../contact-policy');
-      const { invoiceAmountDue } = require('../../invoice-helpers');
       const eligibleInvoices = await loadEligibleInvoices(customer.id);
       const balance = {
         total: eligibleInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
@@ -345,12 +377,25 @@ class CollectionsConversation {
         invoices: eligibleInvoices,
       };
 
+      // ONE clock per customer: the register (friendly / firm / final) comes
+      // from the OLDEST-due open invoice, and the consequence lines are
+      // gated on TRUE state read here — never asserted (owner ruling +
+      // FCCPA: no consequence the system does not carry out).
+      const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), eligibleInvoices));
+      const register = registerForTier(tier);
+      const holdActive = String(customer.service_pause_reason || '') === 'nonpayment_hold';
+      const consequenceDueAt = await readConsequenceDueAt(customer.id);
+
       this._ctx = {
         callLogId: row.id,
         caseId: caseRow.id,
         caseVersion: caseRow.case_version,
         customer,
         balance,
+        tier,
+        register,
+        holdActive,
+        consequenceDueAt,
         // The number this call was DIALED to (gh prb-r16): verification and
         // SMS consent happened on this number — a send must never follow a
         // mid-call phone edit to a number that did neither.
@@ -690,7 +735,7 @@ class CollectionsConversation {
       }
       this._systemBlocks = [{
         type: 'text',
-        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today }),
+        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
         cache_control: { type: 'ephemeral' },
       }];
     }
@@ -994,7 +1039,6 @@ class CollectionsConversation {
     // contradicted. Fail closed: an unreadable balance discloses nothing.
     try {
       const { loadEligibleInvoices } = require('../contact-policy');
-      const { invoiceAmountDue } = require('../../invoice-helpers');
       const fresh = await loadEligibleInvoices(this._ctx.customer.id);
       this._ctx.balance = {
         total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
@@ -1037,11 +1081,31 @@ class CollectionsConversation {
     }
     this.state = 'RESOLUTION';
     this.disclosed = true;
-    const inv = (b.invoices && b.invoices[0]) || null;
-    const invLine = inv
-      ? ` The oldest open invoice is ${inv.invoice_number || 'on file'}${inv.due_date ? `, due ${String(inv.due_date).slice(0, 10)}` : ''}.`
-      : '';
-    return `Open balance: $${Number(b.total).toFixed(2)} across ${b.count} invoice(s).${invLine} Share the amount plainly. You may offer to text a secure payment link.`;
+    // ITEMIZED (owner ruling 2026-08-28): every open invoice — service and
+    // date — oldest first, the overdue ones marked, then ONE total. She asks
+    // for the whole balance.
+    const now = this._now();
+    const ordered = [...(b.invoices || [])].sort((x, y) => String(dueValueOf(x) || '').localeCompare(String(dueValueOf(y) || '')));
+    const lines = ordered.map((inv) => {
+      const label = inv.title || inv.service_type || 'service';
+      const when = inv.service_date || inv.due_date;
+      const days = daysOverdueOn(now, dueValueOf(inv));
+      const age = days > 0 ? `${days} day${days === 1 ? '' : 's'} past due` : 'not yet due';
+      return `${label}${when ? ` on ${String(when).slice(0, 10)}` : ''}: $${Number(invoiceAmountDue(inv)).toFixed(2)} (${age})`;
+    });
+    const anchor = anchorInvoiceOf(ordered);
+    const anchorDays = anchor ? daysOverdueOn(now, dueValueOf(anchor)) : 0;
+    // Consequence lines — spoken ONLY on true state (never asserted):
+    const ctx = this._ctx || {};
+    let consequence = '';
+    if (ctx.register === 'firm' && ctx.holdActive === true) {
+      consequence = ' AUTHORIZED consequence: future service is paused until the account is current — you may say exactly that.';
+    } else if (ctx.register === 'final' && ctx.consequenceDueAt) {
+      consequence = ` AUTHORIZED consequence: if payment is not received by ${String(ctx.consequenceDueAt).slice(0, 10)}, service will be cancelled and the account closed — you may say exactly that.`;
+    } else if (ctx.register === 'firm' || ctx.register === 'final') {
+      consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
+    }
+    return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; offer to text the secure payment link for the full amount.${consequence}`;
   }
 
   async _toolRecordPaymentIntent(input) {
@@ -1606,6 +1670,9 @@ class CollectionsConversation {
 }
 
 module.exports = {
+  buildSystemPrompt,
+  readConsequenceDueAt,
+  REGISTER_RULES,
   CollectionsConversation,
   STATE_TOOLS,
   TOOLS,
@@ -1614,5 +1681,4 @@ module.exports = {
   VERIFY_MAX_ATTEMPTS,
   utteranceHasSensitiveDetails,
   HUMAN_REQUEST_RE,
-  buildSystemPrompt,
 };

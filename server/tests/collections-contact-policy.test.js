@@ -441,10 +441,45 @@ describe('voice quiet window (9:00–17:59 ET, Mon–Fri, via datetime-et)', () 
 });
 
 describe('voice pilot caps (purpose late_payment)', () => {
-  test('two eligible invoices → pilot_requires_single_invoice', async () => {
-    armAllowedBaseline({ invoices: [invoiceRow(), invoiceRow({ id: 'inv-2', invoice_number: 'WPC-2026-1101' })] });
+  // ACCOUNT-LEVEL (owner ruling 2026-08-28): several open invoices are ONE
+  // balance, and the clock is the OLDEST-due invoice — a fresh 4-day invoice
+  // never softens a 30-day one, and the whole set rides eligibleInvoiceIds.
+  test('two eligible invoices are collected as one balance; the anchor is the oldest due', async () => {
+    armAllowedBaseline({ invoices: [
+      invoiceRow({ id: 'inv-new', invoice_number: 'WPC-2026-1101', due_date: '2026-08-08', created_at: '2026-08-01T12:00:00.000Z', total: '44.55' }),
+      invoiceRow(), // due 2026-07-22 ⇒ 21 days on WED_11AM (2026-08-12)
+    ] });
     const result = await evalVoice();
-    expect(result.denialReasons).toContain('pilot_requires_single_invoice');
+    expect(result.denialReasons).not.toContain('pilot_requires_single_invoice');
+    expect(result.denialReasons).not.toContain('pilot_not_overdue_long_enough');
+    expect(result.eligibleInvoiceIds.sort()).toEqual(['inv-1', 'inv-new']);
+    expect(result.eligibleBalanceCents).toBe(12800 + 4455);
+  });
+
+  test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {
+    armAllowedBaseline({ invoices: [invoiceRow({ due_date: '2026-08-08' })] });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('pilot_not_overdue_long_enough');
+  });
+
+  test('payment_plan_active blocks every channel (A2 mirrors its PAYMENT_PLAN state here)', async () => {
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.payment_plan_active).toEqual(['sms', 'email', 'voice', 'manual_call']);
+    armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
+    expect((await evalVoice()).denialReasons).toContain('flag_payment_plan_active');
+    armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT });
+    expect(sms.denialReasons).toContain('flag_payment_plan_active');
+  });
+
+  test('a customer who prefers Spanish is never given the English automated call', async () => {
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'es' }) });
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'es-US' }) });
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'en' }) });
+    expect((await evalVoice()).denialReasons).not.toContain('customer_prefers_spanish');
+    armAllowedBaseline();
+    expect((await evalVoice()).denialReasons).not.toContain('customer_prefers_spanish');
   });
 
   // Owner ruling 2026-08-28: NO balance band — any amount is callable.

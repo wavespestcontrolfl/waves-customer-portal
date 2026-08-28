@@ -15,8 +15,9 @@
  *   suppression_<reason> (canonical messaging_suppression row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
  *   outside_call_window,
- *   pilot_requires_single_invoice, pilot_not_overdue_long_enough,
+ *   pilot_not_overdue_long_enough (account clock = OLDEST unpaid invoice),
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
+ *   customer_prefers_spanish,
  *   pilot_awaiting_microdeposit_verification,
  *   line_type_unknown, line_type_not_mobile, commercial_customer,
  *   consent_no_evidence, rnd_check_required,
@@ -27,8 +28,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { openBalanceInvoices } = require('../open-balance');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { etParts, etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
+const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
+const { anchorInvoiceOf, accountDaysOverdue } = require('./account-anchor');
 
 const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
 
@@ -63,6 +65,9 @@ const FLAG_BLOCKED_CHANNELS = {
   // email. Pre-visit balance reminders and human calls are unaffected
   // (see FLAG_LATE_PAYMENT_ONLY). Set via ops/agents/collections-flag.js.
   pays_by_check: ['voice', 'sms', 'email'],
+  // Approved payment plan (A2 mirrors its PAYMENT_PLAN state here in the
+  // same txn): the whole sequence pauses — every channel.
+  payment_plan_active: ALL_CHANNELS,
 };
 // Flags whose sms/email block applies ONLY to the late_payment purpose —
 // the customer still gets ordinary balance reminders; only dunning stops.
@@ -126,16 +131,6 @@ function isSupervisedApprover(approvedBy) {
 const RND_STALENESS_DAYS = 90;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-// Whole ET calendar days between a due value (date column or timestamp) and
-// `now` — overdue age is COMPUTED from due_date, never read off a status.
-function daysOverdueOn(now, dueValue) {
-  const dueStr = etCalendarDayOf(dueValue);
-  const nowStr = etDateString(now);
-  const [dy, dm, dd] = dueStr.split('-').map(Number);
-  const [ny, nm, nd] = nowStr.split('-').map(Number);
-  return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
-}
 
 function isVoiceLike(channel) {
   return channel === 'voice' || channel === 'manual_call';
@@ -478,41 +473,43 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // ── Automated-voice-only checks ─────────────────────────────────────
     if (channel === 'voice') {
       if (purpose === 'late_payment') {
-        if (eligible.length !== 1) {
-          if (eligible.length > 1) deny('pilot_requires_single_invoice');
-        } else {
-          const invoice = eligible[0];
-          // No balance band (owner ruling 2026-08-28): any amount is callable.
-
-          // Overdue age is computed from due_date (created_at fallback — the
-          // same reference the late-payment rails use), never status.
-          const daysOverdue = daysOverdueOn(now, invoice.due_date || invoice.created_at);
+        // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
+        // is collected as ONE balance; the clock is the OLDEST unpaid
+        // invoice's due date. (The single-invoice pilot rule is gone.)
+        if (eligible.length) {
+          const anchor = anchorInvoiceOf(eligible);
+          const daysOverdue = accountDaysOverdue(now, eligible);
           if (daysOverdue < PILOT_MIN_DAYS_OVERDUE) deny('pilot_not_overdue_long_enough');
           if (daysOverdue > PILOT_MAX_DAYS_OVERDUE) deny('pilot_overdue_too_long');
 
-          const touches = await deliveredDunningTouches(invoice);
+          // Touch floor on the ANCHOR invoice until the account-level dunning
+          // sequence exists (A2 will expose countAccountTouches).
+          const touches = await deliveredDunningTouches(anchor);
           if (touches < PILOT_MIN_DUNNING_TOUCHES) deny('pilot_insufficient_dunning_history');
 
           // Microdeposit-blocked invoices (codex r5 P1): the customer
           // isn't ignoring the bill — they haven't confirmed their two ACH
           // micro-deposits, and the SMS rails deliberately divert them to
           // verification copy. An automated voice call asking them to PAY
-          // would contradict that. Same definitive check the rails use;
-          // an error is a denial (fail closed). This denies ONLY the
-          // call-shaped pilot — the invoice stays in the eligible set so
-          // the SMS rails' membership check still permits their
-          // verification re-nudge.
-          if (invoice.stripe_payment_intent_id) {
+          // would contradict that. ANY invoice in the set awaiting
+          // verification denies the call (fail closed on error).
+          for (const invoice of eligible) {
+            if (!invoice.stripe_payment_intent_id) continue;
             try {
               const StripeService = require('../stripe');
               const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice);
-              if (mdPending) deny('pilot_awaiting_microdeposit_verification');
+              if (mdPending) { deny('pilot_awaiting_microdeposit_verification'); break; }
             } catch (mdErr) {
               logger.warn(`[contact-policy] microdeposit check failed for invoice ${invoice.id}: ${mdErr.message} — denying voice`);
               deny('pilot_awaiting_microdeposit_verification');
+              break;
             }
           }
         }
+
+        // Owner ruling 2026-08-28: a customer who prefers Spanish never gets
+        // the English automated call (no Spanish collections script yet).
+        if (/^es(?:[-_]|$)/i.test(String(customer.preferred_language || ''))) deny('customer_prefers_spanish');
 
         // Mobile line only, from the EXISTING phone-keyed Lookup cache.
         // readCachedLineType is discriminated (hit/miss/error); its own

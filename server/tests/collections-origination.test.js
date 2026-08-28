@@ -107,6 +107,9 @@ beforeEach(() => {
   process.env.GATE_VOICE_LATE_PAYMENT = 'true';
   isEnabled.mockReturnValue(true);
   ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT });
+  // clearAllMocks does NOT reset mockReturnValue — a test that stops at the
+  // claim recheck must never leak its closed window forward.
+  ContactPolicy.isWithinCallWindow.mockReturnValue(true);
   ContactLedger.recordContact.mockImplementation(async () => {
     calls.push('ledger.record');
     return { id: 'ledger-1', metadata: {} };
@@ -175,6 +178,38 @@ test('policy denial at dial time ⇒ case CANCELLED, never dialed', async () => 
   expect(stateChain._updated.current_state).toBe('cancelled');
   expect(stateChain._updated.hold_reason).toContain('flag_do_not_call');
   expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
+// ACCOUNT-LEVEL (owner ruling 2026-08-28): a NEW invoice joining the balance
+// must not cancel a queued call — the case is re-snapshotted and proceeds;
+// a covered invoice leaving the set (paid/credited/reassigned) still cancels.
+test('a new invoice joining the account re-snapshots the case pre-dial and the call proceeds', async () => {
+  ContactPolicy.isWithinCallWindow.mockReturnValue(false); // stop at the claim recheck after the re-snapshot
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455 });
+  const resnap = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), resnap],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+  expect(res).toEqual({ dialed: false, reason: 'outside_call_window' }); // got PAST the snapshot gate
+  expect(resnap._updated.eligible_invoice_ids).toBe(JSON.stringify(['inv-1', 'inv-2']));
+  expect(resnap._updated.eligible_balance_snapshot).toBe(30255);
+  expect(resnap._updated.current_state).toBeUndefined(); // not cancelled
+});
+
+test('a covered invoice leaving the set ⇒ cancelled (predial_invoice_set_changed)', async () => {
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-9'], eligibleBalanceCents: 30000 });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.reason).toBe('snapshot_changed');
+  expect(stateChain._updated.current_state).toBe('cancelled');
+  expect(stateChain._updated.hold_reason).toBe('predial_invoice_set_changed');
 });
 
 test('balance drift vs approved snapshot ⇒ cancelled, never dialed', async () => {

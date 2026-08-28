@@ -19,37 +19,17 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
-const { invoiceAmountDue } = require('../invoice-helpers');
-const { etCalendarDayOf, etDateString } = require('../../utils/datetime-et');
+const { etCalendarDayOf } = require('../../utils/datetime-et');
+const { anchorInvoiceOf, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('./account-anchor');
 const { withCaseLock } = require('./case-lock');
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function shadowGateEnabled() {
   return process.env.GATE_COLLECTIONS_SHADOW === 'true';
 }
 
-// Same escalation boundaries as the late-payment tiers (7/14/30/60/90); the
-// pilot window (14–60 days) means shadow cases land on 14/30/60.
-function dunningTierForOverdue(daysSince) {
-  if (daysSince < 14) return 7;
-  if (daysSince < 30) return 14;
-  if (daysSince < 60) return 30;
-  if (daysSince < 90) return 60;
-  return 90;
-}
-
 function maskPhone(phone) {
   const digits = String(phone || '').replace(/\D/g, '');
   return digits ? `***-***-${digits.slice(-4)}` : 'unknown';
-}
-
-function daysOverdueOn(now, dueValue) {
-  const dueStr = etCalendarDayOf(dueValue);
-  const nowStr = etDateString(now);
-  const [dy, dm, dd] = dueStr.split('-').map(Number);
-  const [ny, nm, nd] = nowStr.split('-').map(Number);
-  return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
 }
 
 function normalizedIdSet(value) {
@@ -164,13 +144,13 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (!customer) continue;
 
       const invoiceIds = normalizedIdSet(verdict.eligibleInvoiceIds);
-      const invoice = await db('invoices')
-        .whereIn('id', verdict.eligibleInvoiceIds)
-        .orderBy('created_at', 'asc')
-        .first();
+      // ONE clock per customer: the anchor is the OLDEST-DUE open invoice
+      // (owner ruling 2026-08-28), not the first-created row.
+      const invoiceRows = await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*');
+      const invoice = anchorInvoiceOf(invoiceRows);
       if (!invoice) continue;
 
-      const dueValue = invoice.due_date || invoice.created_at;
+      const dueValue = dueValueOf(invoice);
       const daysOverdue = daysOverdueOn(now, dueValue);
       const tier = dunningTierForOverdue(daysOverdue);
 

@@ -138,16 +138,33 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   }
   const liveIds = sortedIds(verdict.eligibleInvoiceIds);
   const approvedIds = sortedIds(caseRow.eligible_invoice_ids);
-  const balanceChanged = Number(caseRow.eligible_balance_snapshot) !== verdict.eligibleBalanceCents;
+  const liveSet = new Set(liveIds);
+  const approvedStillOpen = approvedIds.every((id) => liveSet.has(id));
+  const balanceShrank = verdict.eligibleBalanceCents < Number(caseRow.eligible_balance_snapshot);
   const setChanged = JSON.stringify(liveIds) !== JSON.stringify(approvedIds);
-  if (balanceChanged || setChanged) {
-    // The approval was for a DIFFERENT balance — never dial on a stale
-    // approval; cancel and let the sweep regenerate a fresh proposal card.
+  if (!approvedStillOpen || balanceShrank) {
+    // A covered invoice was paid/credited/reassigned since approval — the
+    // approval was for a DIFFERENT balance; never dial on it. Cancel and
+    // let the sweep regenerate a fresh proposal card.
     await setCaseState(caseRow, {
       current_state: 'cancelled',
-      hold_reason: balanceChanged ? 'predial_balance_changed' : 'predial_invoice_set_changed',
+      hold_reason: !approvedStillOpen ? 'predial_invoice_set_changed' : 'predial_balance_changed',
     });
     return { dialed: false, reason: 'snapshot_changed' };
+  }
+  if (setChanged || verdict.eligibleBalanceCents !== Number(caseRow.eligible_balance_snapshot)) {
+    // The balance only GREW — a new invoice joined the account (owner ruling
+    // 2026-08-28: new invoices join the existing balance silently). Re-snapshot
+    // the case so the disclosed figure and the pay link cover the whole
+    // account, then proceed. Fenced like every other pre-claim write.
+    const resnapped = await setCaseState(caseRow, {
+      eligible_invoice_ids: JSON.stringify(liveIds),
+      eligible_balance_snapshot: verdict.eligibleBalanceCents,
+    });
+    if (!resnapped) return { dialed: false, reason: 'dial_claim_lost' };
+    caseRow.eligible_invoice_ids = liveIds;
+    caseRow.eligible_balance_snapshot = verdict.eligibleBalanceCents;
+    logger.info(`[collections-origination] case ${caseRow.id} re-snapshotted pre-dial: balance grew to ${verdict.eligibleBalanceCents}c (${liveIds.length} invoices)`);
   }
 
   const customer = await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at').first();

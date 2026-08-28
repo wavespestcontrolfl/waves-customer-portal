@@ -1209,6 +1209,73 @@ describe('prb-r17', () => {
   });
 });
 
+// ACCOUNT-LEVEL disclosure (owner ruling 2026-08-28): every open invoice is
+// named — service and date, oldest marked past due — then ONE total, and she
+// asks for the full balance. Registers from the oldest-due invoice; the
+// consequence lines only on true state.
+describe('account-level disclosure + registers', () => {
+  const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+  const { buildSystemPrompt, readConsequenceDueAt } = require('../services/collections/outbound-voice/collections-conversation');
+
+  test('get_balance_details itemizes every invoice oldest-first with its age and states the total; asks for the full balance', async () => {
+    // Read twice: by _init (constructor) and again at disclosure time.
+    const two = [
+      { id: 'inv-new', title: 'Pest Control', service_date: '2026-08-24', due_date: '2026-08-24', total: '105.30', credit_applied: 0 },
+      { id: 'inv-old', title: 'Lawn Care', service_date: '2026-07-12', due_date: '2026-07-29', total: '44.55', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    convo._ctx.register = 'friendly';
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/^Total account balance: \$149\.85 across 2 open invoices/);
+    expect(out.indexOf('Lawn Care on 2026-07-12')).toBeLessThan(out.indexOf('Pest Control on 2026-08-24'));
+    expect(out).toMatch(/Lawn Care on 2026-07-12: \$44\.55 \(\d+ days past due\)/);
+    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link for the full amount/);
+    expect(out).not.toMatch(/consequence/i); // friendly register never carries one
+  });
+
+  test('firm/final registers speak a consequence ONLY when the state is true', async () => {
+    const two = [
+      { id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-01', total: '44.55', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(two);
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    convo._ctx.register = 'firm'; convo._ctx.holdActive = false;
+    expect(await convo._toolGetBalance()).toMatch(/No consequence is authorized on this call/);
+    loadEligibleInvoices.mockResolvedValueOnce(two);
+    convo._ctx.register = 'firm'; convo._ctx.holdActive = true;
+    expect(await convo._toolGetBalance()).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
+    loadEligibleInvoices.mockResolvedValueOnce(two);
+    convo._ctx.register = 'final'; convo._ctx.consequenceDueAt = null;
+    expect(await convo._toolGetBalance()).toMatch(/No consequence is authorized/);
+    loadEligibleInvoices.mockResolvedValueOnce(two);
+    convo._ctx.register = 'final'; convo._ctx.consequenceDueAt = '2026-09-15';
+    expect(await convo._toolGetBalance()).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
+  });
+
+  test('the prompt carries exactly one register, the full-balance ask, the pay-link default, and the fee prohibition', () => {
+    const friendly = buildSystemPrompt({ firstName: 'Pat', today: '2026-08-28', register: 'friendly' });
+    expect(friendly).toMatch(/REGISTER: FRIENDLY REMINDER/);
+    expect(friendly).not.toMatch(/REGISTER: FIRM|REGISTER: FINAL/);
+    expect(friendly).toMatch(/state the TOTAL account balance, then name each open invoice/);
+    expect(friendly).toMatch(/ALWAYS offer to text a secure payment link for the full balance/);
+    expect(friendly).toMatch(/Never mention late fees, interest, or collection costs/);
+    expect(buildSystemPrompt({ firstName: 'Pat', register: 'firm' })).toMatch(/REGISTER: FIRM/);
+    expect(buildSystemPrompt({ firstName: 'Pat', register: 'final' })).toMatch(/REGISTER: FINAL NOTICE/);
+    expect(buildSystemPrompt({ firstName: 'Pat' })).toMatch(/REGISTER: FRIENDLY/); // default
+  });
+
+  test('readConsequenceDueAt is null when the A2 table is absent or unreadable', async () => {
+    db.mockImplementationOnce(() => { throw new Error('relation "customer_dunning_sequences" does not exist'); });
+    expect(await readConsequenceDueAt('cust-1')).toBeNull();
+    expect(await readConsequenceDueAt(null)).toBeNull();
+  });
+});
+
 // prb-r18 pins.
 describe('prb-r18', () => {
   test('a PAN read across turns is caught, and the prior fragments are sanitized out of the model history', async () => {
