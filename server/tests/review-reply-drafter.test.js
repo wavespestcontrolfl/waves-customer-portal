@@ -172,6 +172,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     // An account service category makes its words sourced.
     const g2 = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['mosquito control'], city: null } });
     expect(verify(good('Hi Dana, glad the mosquito control is doing its job. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    // Outcome vocabulary is a claim too.
+    expect(verify(good('Hi Dana, glad we eliminated the infestation and protected your home.'), g)).toBe('unlisted_service_claim');
+    const g3 = grounding({ text: 'They eliminated our ant infestation fast!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad the ants are eliminated and the infestation is behind you.'), g3)).toBeNull();
     // Relationship claims need provenance too.
     expect(verify(good('Hi Dana, thanks for years of trusting us with the service.'), g)).toBe('unlisted_relationship_claim');
   });

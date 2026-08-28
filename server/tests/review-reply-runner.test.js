@@ -13,7 +13,7 @@ jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 jest.mock('../config/locations', () => ({ WAVES_LOCATIONS: [{ id: 'sarasota', name: 'Sarasota' }, { id: 'venice', name: 'Venice' }] }));
 jest.mock('../services/review-reply/grounding', () => ({
-  buildReplyGrounding: jest.fn(async (row) => ({ version: 'grounding-v1', reviewId: row.id, reviewerName: row.reviewer_name, review: { rating: row.star_rating, text: row.review_text || '' }, account: null, provenance: {} })),
+  buildReplyGrounding: jest.fn(async (row) => ({ version: 'grounding-v1', reviewId: row.id, reviewerName: row.reviewer_name, customerId: row.customer_id || null, review: { rating: row.star_rating, text: row.review_text || '' }, account: null, provenance: {} })),
   loadActiveTechFirstNames: jest.fn(async () => ['Marcus']),
 }));
 jest.mock('../services/review-reply/drafter', () => ({
@@ -545,6 +545,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.syncReplyFields(posted, { owner_reply: 'Our auto reply' }, { now })).toEqual({ review_reply: 'Our auto reply', reply_updated_at: now.toISOString() });
     expect(Runner.syncReplyFields(posted, { owner_reply: 'Owner rewrote it' }, { now })).toMatchObject({ review_reply: 'Owner rewrote it', auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' });
     expect(Runner.syncReplyFields(posted, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' });
+  });
+
+  test('a customer re-attribution while drafting invalidates the draft (account facts derive from it)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ customer_id: 'cust-a' })];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].customer_id = 'cust-b'; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ retry: 1, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
+    expect(Runner.reviewFingerprint(row({ customer_id: 'cust-a' }))).not.toBe(Runner.reviewFingerprint(row({ customer_id: 'cust-b' })));
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

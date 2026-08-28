@@ -204,6 +204,7 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
     locationId: loc.id,
     locationName: loc.name,
     reviewerName: review.reviewer_name || null,
+    customerId: review.customer_id || null,
     review: {
       firstName,
       rating,

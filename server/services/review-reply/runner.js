@@ -182,7 +182,8 @@ function claimGuard(row, { publishingText = null } = {}) {
     // draft stale — and may move the review under the human-only rule.
     if (Number(fresh.star_rating) !== Number(row.star_rating)
       || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()
-      || String(fresh.reviewer_name || '').trim().toLowerCase() !== String(row.reviewer_name || '').trim().toLowerCase()) return REVIEW_CHANGED;
+      || String(fresh.reviewer_name || '').trim().toLowerCase() !== String(row.reviewer_name || '').trim().toLowerCase()
+      || (fresh.customer_id || null) !== (row.customer_id || null)) return REVIEW_CHANGED;
     // A "[DRAFT]" that is not ours (Agent Ops / operator saved one while we
     // were drafting) is a human intervention: never post over it.
     const human = humanDraftOn({ ...fresh, auto_reply_draft: row.auto_reply_draft || fresh.auto_reply_draft });
@@ -276,6 +277,9 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
       // sync applied meanwhile must not get a stale draft saved against it.
       .where('star_rating', row.star_rating)
       .where('reviewer_name', row.reviewer_name)
+      .where(function sameCustomer() {
+        if (row.customer_id) this.where('customer_id', row.customer_id); else this.whereNull('customer_id');
+      })
       .where(function sameText() {
         if (row.review_text == null || row.review_text === '') this.whereNull('review_text').orWhere('review_text', '');
         else this.where('review_text', row.review_text);
@@ -307,14 +311,17 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
 // What a draft was written FOR. A stored draft may only be reused when the
 // review's rating + text still hash to this.
 function reviewFingerprint(row) {
-  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}`).digest('hex');
+  // Rating, text, reviewer identity AND customer attribution: the account
+  // facts in the grounding derive from customer_id, so a re-attribution
+  // makes the draft stale too.
+  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}|${row.customer_id || ''}`).digest('hex');
 }
 
 function groundingSnapshot(grounding) {
   // Everything the model saw, minus the review text itself (already on the row).
   return {
     version: grounding.version,
-    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}|${String(grounding.reviewerName || '').trim().toLowerCase()}`).digest('hex'),
+    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}|${String(grounding.reviewerName || '').trim().toLowerCase()}|${grounding.customerId || ''}`).digest('hex'),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
     provenance: grounding.provenance,

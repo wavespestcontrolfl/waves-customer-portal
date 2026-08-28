@@ -128,7 +128,7 @@ const DATE_CLAIM_RE = /\b(?:yesterday|today|tomorrow|tonight|this (?:morning|aft
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
-const SERVICE_CLAIM_RE = /\b(?:mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
+const SERVICE_CLAIM_RE = /\b(?:eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|problems?|issues?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
 const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit))\b/gi;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
@@ -140,6 +140,11 @@ function greetingName(text) {
   if (!m) return null;
   const name = m[1];
   return /^(?:there|again|all|everyone|friend|neighbor)$/i.test(name) ? null : name;
+}
+
+// Crude stemmer for provenance matching only (never for output).
+function stemOf(w) {
+  return String(w).toLowerCase().replace(/(?:ations?|ation|ions?|ing|ed|es|s)$/, '');
 }
 
 function normalizeWords(s) {
@@ -300,9 +305,12 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   const genericServiceWords = new Set(['pest', 'pests', 'lawn', 'bug', 'bugs', 'home', 'house', 'property']);
   for (const term of body.match(SERVICE_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
-    const stem = t.replace(/(?:es|s)$/, '');
+    const stem = stemOf(t);
     const known = (w) => reviewWords.has(w) || categoryWords.has(w) || genericServiceWords.has(w);
-    if (known(t) || known(stem) || [...reviewWords].some((w) => w.startsWith(stem) && stem.length >= 4)) continue;
+    if (known(t) || known(stem)) continue;
+    // Same root in the reviewer's words ("eliminate" ↔ "eliminated",
+    // "infestation" ↔ "infested").
+    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) continue;
     return 'unlisted_service_claim';
   }
   // Provenance for relationship / tenure claims: the reviewer's words or the
