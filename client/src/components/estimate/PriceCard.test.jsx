@@ -712,3 +712,35 @@ describe('PriceCard — current-member savings corroborate the anchor gap (owner
     expect(screen.queryByText(/WaveGuard .* Discount/)).toBeNull();
   });
 });
+
+describe('PriceCard — residential-unit scope note', () => {
+  const NOTE = 'Interior of your unit only — building exterior, common areas and adjacent units are not included; German roach, bed bug, flea, rodent and termite programs are quoted separately.';
+  it('renders the server-attached scope line under a bedroom-band treatment row', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'quarterly',
+          label: 'Quarterly Pest Control',
+          monthly: 28.33,
+          annual: 340,
+          perTreatment: 85,
+          perServiceTreatments: [{
+            service: 'pest_control', label: 'Pest Control', perTreatment: 85, displayPrice: 85, visitsPerYear: 4, scopeNote: NOTE,
+          }],
+        }}
+      />,
+    );
+    expect(screen.getByTestId('row-scope-note')).toHaveTextContent(NOTE);
+  });
+  it('renders nothing extra for an ordinary row', () => {
+    render(
+      <PriceCard
+        frequency={{
+          key: 'quarterly', label: 'Quarterly Pest Control', monthly: 39, annual: 468, perTreatment: 117,
+          perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perTreatment: 117, displayPrice: 117, visitsPerYear: 4 }],
+        }}
+      />,
+    );
+    expect(screen.queryByTestId('row-scope-note')).toBeNull();
+  });
+});

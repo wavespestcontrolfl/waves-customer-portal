@@ -14752,6 +14752,10 @@ function shapeFrequencyEntry(ladder, engineResult, engineInputs) {
         cadence: li.cadence || null,
         frequencyKey: li.cadence || li.frequencyKey || null,
         waveGuardDiscountEligible: recurringServiceReceivesTierDiscount(li),
+        // Bedroom-band unit quote: the interior-only scope line is customer
+        // copy (owner ruling 2026-08-11 #5) — the React card renders it
+        // under the treatment row, same as renderPage's card note.
+        ...(li.scopeNote ? { scopeNote: String(li.scopeNote) } : {}),
       };
     });
   const sameDayTreatmentTotal = perServiceTreatments.reduce(
