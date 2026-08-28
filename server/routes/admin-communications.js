@@ -957,12 +957,23 @@ router.post('/messages/read', async (req, res, next) => {
         });
       }
     });
+    // Capture the legacy ids first so the same read mirrors into sms_log —
+    // recordTouchpoint fails soft, so sms_log stays the fallback source of
+    // truth and must agree with the unified row (hook P1).
+    const mirrorSids = (await q.clone().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
     const updated = await q.update({
       is_read: true,
       read_at: now,
       read_by_admin_user_id: req.technicianId || null,
       updated_at: now,
     });
+    if (mirrorSids.length) {
+      try {
+        await db('sms_log').where({ direction: 'inbound' }).whereIn('twilio_sid', mirrorSids)
+          .andWhere(function unread() { this.where({ is_read: false }).orWhereNull('is_read'); })
+          .update({ is_read: true });
+      } catch (e) { logger.warn(`[communications] sms_log read mirror failed: ${e.message}`); }
+    }
 
     // Opening the thread IS reading its "SMS from …" bell rows: those
     // notifications carry the thread only in their link
@@ -996,6 +1007,13 @@ router.post('/messages/read', async (req, res, next) => {
               .whereRaw('c2.customer_id = cv.customer_id')
               .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
               .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); });
+          })
+          // …and no unread LEGACY inbound row either (dual-write can fail).
+          .whereNotExists(function stillUnreadLegacy() {
+            this.select(1).from('sms_log as l')
+              .whereRaw('l.customer_id = cv.customer_id')
+              .where({ 'l.direction': 'inbound' })
+              .andWhere(function unread() { this.where({ 'l.is_read': false }).orWhereNull('l.is_read'); });
           })
           .distinct('cv.customer_id');
         for (const t of threads) {
