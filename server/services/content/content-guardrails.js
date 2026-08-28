@@ -168,12 +168,23 @@ function opensHiddenContent(tag) {
 // NESTING-AWARE: a regex stopping at the first </span> left the tail of a
 // hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
 function blankHiddenContent(str) {
+  return blankContentWhere(str, opensHiddenContent);
+}
+// Same walk with the CERTAINTY-only predicate: text a browser definitely
+// never shows (`hidden`, aria-hidden, display:none / visibility:hidden,
+// natively hidden containers). Used where the caller must judge the text
+// as SEEN — a CTA anchor's visible wording — without discarding merely
+// styled copy.
+function blankDefinitelyHiddenContent(str) {
+  return blankContentWhere(str, opensDefinitelyHidden);
+}
+function blankContentWhere(str, opens) {
   const text = String(str || '');
   const out = text.split('');
   const tags = [...eachTag(text)];
   for (let t = 0; t < tags.length; t += 1) {
     const tag = tags[t];
-    if (tag.isClose || tag.selfClosing || !opensHiddenContent(tag)) continue;
+    if (tag.isClose || tag.selfClosing || !opens(tag)) continue;
     let depth = 1;
     let endIdx = -1;
     for (let u = t + 1; u < tags.length; u += 1) {
@@ -1811,6 +1822,659 @@ function tenureClaimFinding(text) {
   const m = s.match(TENURE_CLAIM_RE) || s.match(TENURE_SINCE_RE);
   if (!m) return null;
   return finding('P0', 'TENURE_CLAIM', `Draft contains a tenure/company-history claim ("${m[0].trim()}") — Waves was founded in 2024; any earlier tenure or founding figure is fabricated (owner hard rule).`);
+}
+
+// Raw markdown pipe table detector — single source of truth for the
+// owner rule 2026-08-27 (tabular data renders via <ComparisonTable>, never
+// a raw GFM table: unstyled prose + bypasses the comparison gate's honesty
+// regime). Consumed by content-quality-gate's no_raw_markdown_tables hard
+// check AND enforced here so the manual /blog/:id/publish-astro lane
+// (which runs guardrails but not the quality gate) can't ship one.
+// Signature: a delimiter row (only pipes/dashes/colons/spaces, 2+ dashes,
+// at least one pipe) directly under a pipe header row; blockquote prefixes
+// are stripped first so quoted tables still count. Prose pipes and plain
+// --- dividers never form the pair.
+// Blank everything Markdown never renders — HTML/MDX comments, fenced code
+// (CommonMark fences: ≤3 leading spaces, same marker char, closing run at
+// least as long as the opener, marker-only close), inline code spans, and
+// indented code (top-level 4-space indent; inside a list item only 4+ past
+// the item's content column — a table indented as a list child block is
+// live content). Blockquote prefixes are stripped; newlines are preserved
+// so line-based scanners stay aligned. Single source for the table scanner
+// below AND the completion gate's CTA-link extraction.
+// Inline code-SPAN matcher, shared by pass 1 (a comment delimiter inside a
+// span is code, not a comment opener) and pass 2 (span masking). A span
+// never crosses a BLANK line, an ATX heading, or a THEMATIC BREAK — each
+// interrupts the paragraph, so inline code cannot continue across it. A
+// backslash-ESCAPED backtick (odd run) cannot OPEN a span.
+const SPAN_RE_SOURCE = '(?<!(?<!\\\\)(?:\\\\\\\\)*\\\\)(?<!`)(`+)(?!`)(?:(?!\\n[ \\t]*\\n)(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}#{1,6}(?:[ \\t\\r\\n]|$))(?!\\n {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:(?:\\*[ \\t]*){3,}|(?:-[ \\t]*){3,}|(?:_[ \\t]*){3,})(?:\\r?\\n|$))[\\s\\S])*?(?<!`)\\1(?!`)';
+
+// Container openers INTERRUPT a paragraph (CommonMark: no blank line
+// needed), so a span can never pair across a line that DEEPENS the quote
+// context, or across a LIST-ITEM opener (a bullet item, or an ordered item
+// numbered 1 — the only ordered form that can interrupt — with non-blank
+// content). The reverse (a quoted span continuing onto a shallower or
+// unquoted line) is lazy continuation and stays a single paragraph.
+// Checked as a match guard: the regex cannot see the opening line's depth,
+// so a crossing candidate is simply left unpaired (its content stays
+// visible — fail closed).
+function spanCrossesBlockBoundary(whole, start, matched) {
+  if (!matched.includes('\n')) return false;
+  const prefixOf = (line) => (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
+  const lineStart = whole.lastIndexOf('\n', start - 1) + 1;
+  const openLineEnd = whole.indexOf('\n', start);
+  const openDepth = (prefixOf(whole.slice(lineStart, openLineEnd === -1 ? undefined : openLineEnd)).match(/>/g) || []).length;
+  // Subsequent lines are judged on their FULL source text (the match may
+  // end mid-line at the closing run — a fence candidate's validity depends
+  // on the info string beyond it).
+  const matchEnd = start + matched.length;
+  let nl = whole.indexOf('\n', start);
+  while (nl !== -1 && nl < matchEnd) {
+    const ls = nl + 1;
+    const le = whole.indexOf('\n', ls);
+    const line = whole.slice(ls, le === -1 ? undefined : le);
+    const prefix = prefixOf(line);
+    if ((prefix.match(/>/g) || []).length > openDepth) return true;
+    const content = line.slice(prefix.length);
+    // A marker whose content is only pipes/colons/dashes ("- | -") is a
+    // table DELIMITER row shape, not a list interrupt — the table scanner
+    // owns those lines at block level.
+    if (/^ {0,3}(?:[-*+]|1[.)])[ \t]+\S/.test(content)
+      && !/^ {0,3}(?:[-*+]|1[.)])[ \t]+[|:\- \t]+$/.test(content)) return true;
+    // A VALID fence-opener line (3+ run at line start; a backtick fence's
+    // info string carries no backtick) interrupts the paragraph and opens
+    // a fenced block — the run belongs to the fence pass, so a span can
+    // neither cross it nor close on it.
+    const fenceOpen = content.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceOpen && !(fenceOpen[1][0] === '`' && fenceOpen[2].includes('`'))) return true;
+    nl = le;
+  }
+  return false;
+}
+
+function blankNonRenderedMarkdownWithDepths(text) {
+  const raw = String(text || '');
+  // Pass 1 — comments and <pre> (whole-text, newline-preserving). A
+  // delimiter that sits INSIDE an inline code span renders as code
+  // (`\u0060<!--\u0060 … \u0060-->\u0060`), so span intervals are computed on the raw
+  // text first and such matches are left for the span pass.
+  const spanIntervals = [];
+  const spanScan = new RegExp(SPAN_RE_SOURCE, 'g');
+  let sm;
+  while ((sm = spanScan.exec(raw)) !== null) {
+    if (!spanCrossesBlockBoundary(raw, sm.index, sm[0])) spanIntervals.push([sm.index, sm.index + sm[0].length]);
+  }
+  // …and FENCED regions likewise: a delimiter inside a fence is code. A
+  // rough line scan suffices here — pass 3 remains the fence authority for
+  // masking — but its intervals still END with their container (same
+  // posture as pass 3): a fence opened inside a blockquote or list item
+  // stops at a non-blank line outside that container, so a comment AFTER
+  // the container is stripped, never treated as fenced.
+  const fenceIntervals = [];
+  {
+    let pos = 0; let openCh = null; let openLen = 0; let start = 0; let openDepth = 0; let openListIndent = 0;
+    // Ambient (unquoted) list tracking, mirroring pass 3's rules: a fence
+    // opened on a list CONTINUATION line ("- item" then "  ~~~") scopes to
+    // that item's content column too, not just fences whose own line
+    // carries the marker.
+    let ambientListIndent = 0; let ambientListDepth = 0; let prevBlank = true;
+    for (const line of raw.split('\n')) {
+      const quotePrefix = (line.match(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/) || [''])[0];
+      const depth = (quotePrefix.match(/>/g) || []).length;
+      // The prefix consumes leading spaces even with NO ">" markers — only
+      // strip it when it actually carries quote depth, so list-content
+      // indentation survives the container-exit comparison below.
+      const strippedLine = depth > 0 ? line.slice(quotePrefix.length) : line;
+      const blank = strippedLine.trim() === '';
+      const indent = (strippedLine.match(/^ */) || [''])[0].length;
+      if (openCh && !blank && (depth < openDepth || indent < openListIndent)) {
+        fenceIntervals.push([start, Math.max(start, pos - 1)]);
+        openCh = null;
+      }
+      if (openCh) {
+        const close = strippedLine.match(/^ *(`{3,}|~{3,})\s*$/);
+        if (close && close[1][0] === openCh && close[1].length >= openLen) { fenceIntervals.push([start, pos + line.length]); openCh = null; }
+      } else {
+        // A fence may open DIRECTLY as list-item content ("- ~~~html").
+        const marker = strippedLine.match(/^ *(?:[-*+]|\d+[.)])\s+/);
+        const markerIndent = marker ? (marker[0].match(/^ */) || [''])[0].length : 0;
+        // The ambient list column applies at ITS quote depth — leaving the
+        // quote ends a quoted list; markers at any depth (quote-relative)
+        // set both the column and the depth.
+        if (!blank && depth < ambientListDepth) { ambientListIndent = 0; ambientListDepth = 0; }
+        if (marker && markerIndent <= (depth === ambientListDepth ? ambientListIndent : 0) + 3) {
+          ambientListIndent = marker[0].length;
+          ambientListDepth = depth;
+        } else if (!blank && depth === ambientListDepth && indent < ambientListIndent && prevBlank) ambientListIndent = 0;
+        const afterMarker = marker ? strippedLine.slice(marker[0].length) : strippedLine;
+        const opener = strippedLine.match(/^ {0,3}(`{3,}|~{3,})(.*)$/)
+          || (marker ? afterMarker.match(/^ *(`{3,}|~{3,})(.*)$/) : null);
+        if (opener && !(opener[1][0] === '`' && opener[2].includes('`'))) {
+          // A dedented fence itself ends the ambient list (pass-3 posture).
+          if (!marker && depth === ambientListDepth && indent < ambientListIndent) ambientListIndent = 0;
+          openCh = opener[1][0]; openLen = opener[1].length; start = pos;
+          openDepth = depth;
+          // The list column is QUOTE-RELATIVE (indent above is computed on
+          // the quote-stripped line): a fence opened as list-item content
+          // ("> - ~~~"), or on a CONTINUATION line of a quoted or unquoted
+          // item ("> - item" then ">   ~~~"), still ends when content
+          // dedents out of the item.
+          openListIndent = marker ? marker[0].length : (depth === ambientListDepth ? ambientListIndent : 0);
+        }
+        prevBlank = blank;
+      }
+      pos += line.length + 1;
+    }
+    if (openCh) fenceIntervals.push([start, raw.length]);
+  }
+  // …and QUOTED ATTRIBUTE VALUES inside HTML tags: a "<!--" inside
+  // `<span title="<!--">` is ordinary attribute text, not a comment opener —
+  // treating it as one would blank live content through to a later "-->".
+  // Tags are matched quote-aware (a quoted value may contain ">").
+  const attrIntervals = [];
+  {
+    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
+    const quoted = /"[^"]*"|'[^']*'/g;
+    let tm;
+    while ((tm = tagScan.exec(raw)) !== null) {
+      let qm;
+      quoted.lastIndex = 0;
+      while ((qm = quoted.exec(tm[0])) !== null) attrIntervals.push([tm.index + qm.index, tm.index + qm.index + qm[0].length]);
+    }
+  }
+  const inSpan = (pos) => spanIntervals.some(([a, b]) => pos >= a && pos < b)
+    || fenceIntervals.some(([a, b]) => pos >= a && pos < b)
+    || attrIntervals.some(([a, b]) => pos >= a && pos < b);
+  // An UNTERMINATED "<!--" comments out everything through EOF (CommonMark
+  // HTML block type 2 ends only at "-->"). A PROTECTED opener (inside a
+  // span, fence, or quoted attribute) must not CONSUME what follows it —
+  // scanning resumes right after the protected opener token so a later
+  // REAL comment in the same stretch is still stripped.
+  let afterComments = '';
+  {
+    const commentRe = /<!--[\s\S]*?(?:-->|$)|\{\/\*[\s\S]*?\*\/\}|<pre\b[\s\S]*?<\/pre\s*>/gi;
+    let last = 0;
+    let cm;
+    while ((cm = commentRe.exec(raw)) !== null) {
+      if (inSpan(cm.index)) {
+        commentRe.lastIndex = cm.index + (raw.startsWith('{/*', cm.index) ? 3 : 4);
+        continue;
+      }
+      afterComments += raw.slice(last, cm.index) + cm[0].replace(/[^\n]/g, '');
+      last = cm.index + cm[0].length;
+    }
+    afterComments += raw.slice(last);
+  }
+  // Pass 2 — inline code spans (any backtick-run length, possibly across
+  // lines), masked BEFORE fences so a span opened after prose can close at a
+  // line-start run ("See ```\n…\n``` here"). A span never OPENS on a VALID
+  // fence-opener line (a ≤3-space-indented 3+ run at line start) — that
+  // line is left for the fence pass. A REJECTED backtick-fence candidate
+  // (info string contains a backtick) is reprocessed by CommonMark as
+  // inline content, so its run CAN open a span. A span never crosses a
+  // BLANK line — inline code resolves within its paragraph, so an
+  // unmatched backtick before a blank line cannot pair with one in a later
+  // block. A backslash-ESCAPED backtick (odd backslash run) is literal text
+  // and cannot OPEN a span (inside a span backslashes are literal, so the
+  // closer needs no parity guard). Length-preserving mask to the U+0002 sentinel — code
+  // spans RENDER as visible text, so the sentinel keeps them countable as
+  // header-cell content while matching no link/table/word pattern.
+  const fenceLineRe = /^ {0,3}(?:> {0,3}(?=>)|> ?)* {0,3}(?:`{3,}|~{3,})/;
+  // A span also stops at an ATX HEADING line — a heading starts a new
+  // block and can never lazily continue the previous paragraph.
+  const spanned = afterComments.replace(new RegExp(SPAN_RE_SOURCE, 'g'), (c, run, offset, whole) => {
+    const lineStart = whole.lastIndexOf('\n', offset - 1) + 1;
+    const lineEnd = whole.indexOf('\n', offset);
+    const line = whole.slice(lineStart, lineEnd === -1 ? undefined : lineEnd);
+    if (fenceLineRe.test(line)) {
+      const open = line.replace(/^ {0,3}(?:> {0,3}(?=>)|> ?)*/, '').match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+      if (!open || !(open[1][0] === '`' && open[2].includes('`'))) return c;
+    }
+    // A backtick run inside MDX expression braces (`href={\`/contact/\`}`)
+    // is a JS template literal whose VALUE renders — an expression, not a
+    // markdown code span. Leave it for the link scanners.
+    if (/\{\s*$/.test(whole.slice(Math.max(0, offset - 8), offset)) && /^\s*\}/.test(whole.slice(offset + c.length, offset + c.length + 8))) return c;
+    // A span cannot pair across a DEEPENING blockquote line or a LIST-ITEM
+    // opener (both interrupt the paragraph) — leave the candidate unpaired;
+    // its content stays visible for the link/table scanners.
+    if (spanCrossesBlockBoundary(whole, offset, c)) return c;
+    // UNESCAPED pipes survive the mask: GFM recognizes table rows at BLOCK
+    // level, before inline code is parsed, so a pipe inside a code span is
+    // still a live cell separator ("| `a | b` | c |" is a 3-cell header).
+    // A pipe's preceding BACKSLASH RUN survives with it — "\\|" is escaped
+    // cell CONTENT even inside code (splitCells applies the same parity),
+    // so "| `a \\| b` | c |" stays a 2-cell header, not a 3-cell one.
+    return c.replace(/(\\*\|)|[^\n]/g, (ch, pipeRun) => pipeRun || '\u0002');
+  });
+  // Pass 3 — fenced code, per line, scoped to its blockquote AND list
+  // containers. Opener VALIDITY is judged on the pre-span-mask source line:
+  // a span mask can blank the info-string backtick that rejects a backtick
+  // fence (or the prose before a mid-line run), and a masked residue must
+  // not start reading as a fence.
+  const sourceLines = afterComments.split('\n');
+  let fence = null; // { ch, len, depth, listIndent }
+  let fenceListIndent = 0; // content column of the current list item (0 = top level)
+  let fenceListDepth = 0; // quote depth the current list lives at (0 = unquoted)
+  let fencePrevBlank = true;
+  // Line indices where THIS pass ends the list via fence geometry (a
+  // dedented fence opener, or content dedented out of a fence's list item).
+  // Pass 4 sees those fence lines BLANKED, so it cannot re-derive the list
+  // end itself — the reset is propagated explicitly (Codex r33: a dedented
+  // fence between "- item" and an indented code sample must not leave the
+  // sample scanned as live list content).
+  const listEndAt = new Set();
+  const fenced = spanned.split('\n').map((l, i) => {
+    // Blockquote-prefix matching is LIST-RELATIVE (same posture as pass 4):
+    // inside a list item the first ">" may sit up to 3 past the item's
+    // content column ("10. x" + "    > ```"). A fence opened at quote
+    // depth > 0 scopes to its QUOTE container (depth check), so its
+    // listIndent is 0.
+    const quoteRe = fenceListIndent > 0 && fenceListDepth === 0
+      ? new RegExp(`^ {0,${fenceListIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
+      : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
+    const prefix = l.match(quoteRe);
+    const depth = prefix ? (prefix[0].match(/>/g) || []).length : 0;
+    const stripped = prefix ? l.slice(prefix[0].length) : l;
+    const blank = stripped.trim() === '';
+    const indent = stripped.match(/^ */)[0].length;
+    // A DEDENTED blockquote interrupts an UNQUOTED list (no lazy
+    // continuation); leaving the quote entirely ends a QUOTED list.
+    const rawIndent = l.match(/^ */)[0].length;
+    if (depth > 0 && !blank && fenceListIndent > 0 && fenceListDepth === 0 && rawIndent < fenceListIndent && !fence) fenceListIndent = 0;
+    if (!blank && depth < fenceListDepth && !fence) { fenceListIndent = 0; fenceListDepth = 0; }
+    // A fence opened inside a container ends with its container: a
+    // non-blank line at a shallower quote depth — or dedented out of the
+    // fence's list item (code has no lazy continuation) — is outside the
+    // block and renders normally.
+    if (fence && !blank && (depth < fence.depth || indent < fence.listIndent)) {
+      // A fence's list end clears the tracked list only at the SAME quote
+      // depth; only a top-level end propagates to pass 4's ambient state.
+      if (indent < fence.listIndent) {
+        if (fence.depth === fenceListDepth) { fenceListIndent = 0; fenceListDepth = 0; }
+        if (fence.depth === 0) listEndAt.add(i);
+      }
+      fence = null;
+    }
+    if (fence) {
+      // A closing fence may sit up to 3 past its list item's content column.
+      const close = stripped.match(/^( *)(`{3,}|~{3,})\s*$/);
+      if (close && close[1].length < fence.listIndent + 4 && close[2][0] === fence.ch && close[2].length >= fence.len) fence = null;
+      return '';
+    }
+    // List tracking (pass-4 posture): a marker sets the item's content
+    // column; a dedented non-blank line after a blank ends the list.
+    // Quote-stripped indent is not comparable to the list content column,
+    // so dedent-based list-END rules apply only to UNQUOTED lines.
+    // NESTED list markers sit up to 3 past the parent's content column
+    // ("- outer" + "    - inner") — the content column moves with them.
+    // An interrupting block (ATX heading or thematic break) ends the list
+    // even with no blank line — neither can lazily continue a list item.
+    // A dashes-only break ("- - -") is a break, not a list marker.
+    const fenceInterrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    const listItem = fenceInterrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    // The tracked list column applies only at ITS quote depth — a line at
+    // a different depth measures against a fresh (zero) column.
+    const listCol = depth === fenceListDepth ? fenceListIndent : 0;
+    const markerAccepted = Boolean(listItem && listItem[1].length <= listCol + 3);
+    if (markerAccepted) { fenceListIndent = listItem[1].length + listItem[2].length; fenceListDepth = depth; }
+    else if (!blank && depth === fenceListDepth && indent < fenceListIndent
+      && (fencePrevBlank || fenceInterrupting)) { fenceListIndent = 0; fenceListDepth = 0; }
+    fencePrevBlank = blank;
+    // Indented code is LIST-RELATIVE: inside a list item, code starts 4 past
+    // the item's content column, so "10. item" + a 4-space fence is a fence
+    // (relative indent 0), not indented code. Resolved in pass 4.
+    if (/^\t/.test(stripped) || (!markerAccepted && indent >= (depth === fenceListDepth ? fenceListIndent : 0) + 4)) return l;
+    // A fence may open DIRECTLY as list-item content ("- ~~~") — the
+    // opener is matched on the post-marker text.
+    const markerLen = markerAccepted ? listItem[1].length + listItem[2].length : 0;
+    const openLine = markerLen ? stripped.slice(markerLen) : stripped;
+    const open = openLine.match(/^ *(`{3,}|~{3,})(.*)$/);
+    if (open) {
+      const srcTail = sourceLines[i].slice((prefix ? prefix[0].length : 0) + markerLen);
+      const srcOpen = srcTail.match(/^ *(`{3,}|~{3,})(.*)$/);
+      if (srcOpen && !(srcOpen[1][0] === '`' && srcOpen[2].includes('`'))) {
+        if (!markerAccepted && depth === fenceListDepth && indent < fenceListIndent) {
+          fenceListIndent = 0; // a dedented fence ends the list
+          if (depth === 0) listEndAt.add(i);
+        }
+        // A fence scopes to its QUOTE depth AND to the current list item's
+        // QUOTE-RELATIVE content column — whether its own line carries the
+        // marker ("> - ~~~") or it opens on a CONTINUATION line of a
+        // quoted item ("> - item" then ">   ~~~"): quoted content
+        // dedenting out of the item ends the fence (CommonMark).
+        fence = { ch: open[1][0], len: open[1].length, depth, listIndent: depth === fenceListDepth ? fenceListIndent : markerLen };
+        return '';
+      }
+    }
+    return l;
+  }).join('\n');
+  // Pass 4 — blockquote prefixes, indented code (list-aware), per line.
+  // Each line's QUOTE DEPTH is recorded alongside the stripped text: the
+  // markers are removed here, but depth still separates blocks (a header
+  // and delimiter at DIFFERENT depths are not one table).
+  let listContext = false;
+  let listContentIndent = 0;
+  let prevBlank = true;
+  const outDepths = [];
+  const outText = fenced.split('\n').map((l, i) => {
+    // A fence-geometry list end recorded by pass 3 (the fence lines it
+    // judged are blanked here, so this pass cannot re-derive it).
+    if (listEndAt.has(i)) listContext = false;
+    // Nested markers may carry up to three spaces before the inner ">"
+    // ("> " + "  > "); the LAST marker keeps only one optional space so
+    // remaining indentation stays content. Blockquote stripping is
+    // LIST-RELATIVE: inside a list item the first marker may sit up to
+    // 3 past the item's content column ("10. x" + "    > quoted").
+    const rawIndent = l.match(/^ */)[0].length;
+    const quoteRe = listContext
+      ? new RegExp(`^ {0,${listContentIndent + 3}}(?:> {0,3}(?=>)|> ?)+`)
+      : /^ {0,3}(?:> {0,3}(?=>)|> ?)+/;
+    const quotePrefix = l.match(quoteRe);
+    outDepths.push(quotePrefix ? (quotePrefix[0].match(/>/g) || []).length : 0);
+    const stripped = quotePrefix ? l.slice(quotePrefix[0].length) : l;
+    const blank = stripped.trim() === '';
+    const indented = /^(?: {4}|\t)/.test(stripped);
+    // NESTED list markers sit up to 3 past the parent's content column —
+    // the content column moves with them ("- outer" + "    - inner"). An
+    // INTERRUPTING block (ATX heading, thematic break — dashes-only "- - -"
+    // included — or a DEDENTED blockquote) ends the list even with no blank
+    // line; none can lazily continue a list item.
+    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped)
+      || Boolean(quotePrefix && listContext && rawIndent < listContentIndent);
+    const listItem = interrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
+    if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
+      listContext = true;
+      listContentIndent = listItem[1].length + listItem[2].length;
+    } else if (!blank && rawIndent < listContentIndent
+      && ((!indented && prevBlank) || interrupting)) {
+      listContext = false;
+    }
+    prevBlank = blank;
+    if (indented) {
+      if (!listContext) return '';
+      const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
+      if (indent >= listContentIndent + 4) return '';
+    }
+    return stripped.replace(/^\s+/, '');
+  }).join('\n');
+  return { text: outText, depths: outDepths };
+}
+
+function blankNonRenderedMarkdown(text) {
+  return blankNonRenderedMarkdownWithDepths(text).text;
+}
+
+// GFM: a table is recognized only when header and delimiter rows have the
+// same number of cells.
+// Escaped pipes ("\\|") are cell CONTENT, not separators — but only under
+// an ODD backslash run: "\\\\|" escapes the backslash, leaving a real
+// separator.
+function splitCells(line) {
+  return line.trim().replace(/(\\+)\|/g, (m, bs) => (bs.length % 2 === 1 ? `${bs.slice(1)}\u0000` : m)).replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.replace(/\u0000/g, '\\|'));
+}
+function cellCount(line) {
+  return splitCells(line).length;
+}
+
+// GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
+// (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
+function isDelimiterRow(line) {
+  const cells = splitCells(line).map((c) => c.trim());
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+function extractRawMarkdownTables(text) {
+  const { text: blanked, depths } = blankNonRenderedMarkdownWithDepths(text);
+  const lines = blanked.split('\n');
+  // Captured blocks use the RAW source lines (every pass preserves
+  // newlines, so line indices align): the blanked form masks code-span
+  // cell content to sentinels, which would make an edited cell compare
+  // EQUAL to its legacy value in the refresh grandfather.
+  const rawLines = String(text || '').split('\n');
+  const tables = [];
+  // Raw HTML tables are the other non-component table representation —
+  // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
+  // too (fence-blanked text, whitespace-normalized block).
+  // Quoted (and static template-literal, MDX) ATTRIBUTE VALUES do not
+  // render — `<span title="<table>…</table>">` is tooltip text, not a
+  // table — so the HTML scan reads a length-preserving copy with those
+  // values blanked (same masking the CTA link extractor applies). The
+  // pipe-row scan below keeps the raw lines: GFM splits cells on raw
+  // pipes BEFORE inline HTML is parsed, so a pipe inside an attribute
+  // value really does split a cell.
+  const attrMasked = blanked.replace(/<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|[^>"'])*>/g, (tag) => tag.replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}/g, (q) => {
+    const edge = q[0] === '{' ? 2 : 1;
+    return q.slice(0, edge) + q.slice(edge, -edge).replace(/[^\n]/g, ' ') + q.slice(-edge);
+  }));
+  const htmlTable = /<table\b[\s\S]*?<\/table\s*>/gi;
+  let hm;
+  // The captured block is the UNMASKED text (attribute values included)
+  // so the refresh grandfather compares real content — a legacy table
+  // whose colspan changed is a different table.
+  while ((hm = htmlTable.exec(attrMasked)) !== null) tables.push(blanked.slice(hm.index, hm.index + hm[0].length).replace(/\s+/g, ' ').trim());
+  for (let i = 1; i < lines.length; i += 1) {
+    // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
+    // visible-text requirement — the count match below is the signature.
+    // A header that IS a list item's content ("- | A | B |") renders with
+    // the marker removed, so the marker-stripped form is a candidate too.
+    // A line that is already a BLOCK construct — an ATX heading ("# DIY |
+    // Professional") — is not a paragraph the delimiter can transform:
+    // GFM renders the heading, then the delimiter as ordinary text.
+    const isAtxHeading = (h) => /^ {0,3}#{1,6}(?:[ \t]|$)/.test(h);
+    const headerCandidates = [lines[i - 1]];
+    const marked = lines[i - 1].match(/^(?:[-*+]|\d+[.)])\s+(.*)$/);
+    if (marked) headerCandidates.push(marked[1]);
+    // The list-item form ("- # A | B") is a heading INSIDE the item — no
+    // candidate on that line is a paragraph either.
+    if (isAtxHeading(lines[i - 1]) || (marked && isAtxHeading(marked[1]))) continue;
+    // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
+    // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
+    // Header and delimiter pair at the SAME quote depth — "> A | B" over
+    // "> > - | -" is an outer-quote paragraph before a nested quote, not a
+    // table — OR when the delimiter is an UNQUOTED lazy continuation of a
+    // quoted header's paragraph ("> A | B" then "- | -"), which GFM still
+    // reads as one table.
+    // A delimiter-shaped SIBLING list item is not a table: when the header
+    // line is itself a list item, a nested table's delimiter must be the
+    // item's INDENTED content — a same-level marker on the delimiter line
+    // ("- A | B" then "- | -") is the next bullet.
+    const siblingItems = Boolean(marked) && /^(?:[-*+]|\d+[.)])\s+/.test(lines[i]);
+    // A delimiter at a SHALLOWER depth (any number of dropped markers,
+    // zero included) lazily continues the header's paragraph; a DEEPER one
+    // starts a nested quote and never pairs.
+    const delimiter = lines[i].includes('|') && isDelimiterRow(lines[i]) && !siblingItems
+      && depths[i] <= depths[i - 1]
+      && headerCandidates.some((h) => h.includes('|') && cellCount(lines[i]) === cellCount(h));
+    if (!delimiter) continue;
+    // Capture the whole block (header + delimiter + contiguous pipe rows),
+    // whitespace-normalized, so refresh grandfathering can compare table
+    // CONTENT rather than counts.
+    let end = i + 1;
+    while (end < lines.length && lines[end].includes('|') && lines[end].trim() !== ''
+      && depths[end] <= depths[i - 1]) end += 1;
+    tables.push(rawLines.slice(i - 1, end).join('\n').replace(/\s+/g, ' ').trim());
+    i = end;
+  }
+  return tables;
+}
+
+// ---------------------------------------------------------------------------
+// UNSUPPORTED BODY SYNTAX — fail-closed park (owner ruling 2026-08-28).
+// The link/table/CTA scanners above are written for the PLAIN subset the
+// writer emits: CommonMark paragraphs, headings, lists, simple blockquotes,
+// inline links `[text](/path/)` on one line, and MDX components with
+// literal props. Every other Markdown/HTML/MDX form — hand-written HTML
+// anchors and tables, hidden or styled markup, reference-style links,
+// wrapped link syntax, titles, autolinks, escapes, entities in
+// destinations, CRLF endings, nested quotes, code spans in labels — is a
+// syntax the writer never produces and a corner a static scanner can be
+// tricked through. Rather than parse those precisely, a body that carries
+// ANY of them PARKS for human review: the autonomous lanes lose nothing
+// (writer output is plain) and the scanners only need to be right on the
+// plain subset. Detection is deliberately over-broad — a false park costs
+// one review, a missed form costs a published post without its CTA.
+// Attribute detection is QUOTE-AWARE: the word "hidden" inside a
+// component prop string ("…hidden ground nest…") is prose, not markup.
+const UNSUPPORTED_BODY_SYNTAX = [
+  ['cr_line_endings', /\r/],
+  ['html_comment', /<!--/],
+  // Tag-shaped rules capture the WHOLE element (open tag through its
+  // close tag when present) so the refresh grandfather compares real
+  // markup — a legacy anchor never licenses a differently-attributed one.
+  ['raw_html_anchor', /<(a)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
+  ['raw_html_table', /<(table)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
+  ['unsupported_html_container', /<(template|script|style|noscript|datalist|dialog|details|pre|iframe|object|embed|form|input|button|textarea|select|svg|math)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
+  ['reference_link_definition', /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?\[(?:\\.|[^\]\\\n])*\]:/m],
+  ['reference_link', /\]\s*\[/],
+  ['wrapped_link_syntax', /\[[^\]]*\n[^\]]*\]\(|\]\([^)]*\n/],
+  ['angle_bracket_destination', /\]\(\s*</],
+  ['link_title', /\]\([^)\s]+\s+["'(]/],
+  ['autolink', /<https?:\/\/[^>\s]+>/i],
+  ['backslash_escape', /\\[\[\]()|!<>`]/],
+  ['entity_or_encoded_destination', /\]\([^)]*(?:&|%|\.\.)/],
+  ['jsx_href_expression', /href\s*=\s*\{/],
+  ['template_literal_prop', /=\s*\{`/],
+  ['nested_blockquote', /^ {0,3}>[ \t]*>/m],
+  ['code_span_in_link_label', /\[[^\]]*`[^\]]*\]\(/],
+  // Nested brackets inside a link label ("[See [Our [Termite] Service]](…)",
+  // image-in-link) — never written by the writer; `{` excluded so
+  // component JSON props ([{ "label": … }]) are not read as labels.
+  ['nested_bracket_label', /\[[^\]\n{]*\[/],
+];
+// popover / inert subtrees are hidden (or non-interactive) until shown.
+const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className|popover|inert)(?:\s*=|\s|\/?>|$)/i;
+// Every unsupported CONSTRUCT in the body — { reason, text } per match —
+// so refresh grandfathering can compare the actual markup, not just the
+// category (a legacy `<a>` must not license a NEW, differently-hidden
+// anchor). Matches use a global clone of each rule.
+function unsupportedBodySyntaxConstructs(body) {
+  const text = String(body || '');
+  const out = [];
+  for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let mm;
+    while ((mm = g.exec(text)) !== null) {
+      out.push({ reason: name, text: mm[0] });
+      if (mm[0].length === 0) g.lastIndex += 1;
+    }
+  }
+  // Raw (lowercase) HTML tags: ANY brace is an MDX expression — a spread
+  // ("{...{hidden: true}}"), a computed prop, a template — which a static
+  // scan cannot evaluate; and a visibility-affecting attribute (quoted /
+  // template-literal VALUES blanked first so their text never reads as an
+  // attribute name). MDX components (uppercase) are the writer contract
+  // and are validated by their own gates.
+  const tagScan = /<\/?[a-z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}|[^>"'{])*>/g;
+  let tm;
+  while ((tm = tagScan.exec(text)) !== null) {
+    if (tm[0].includes('{')) out.push({ reason: 'jsx_expression_attribute', text: tm[0] });
+    const bare = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}/g, '""');
+    if (VISIBILITY_ATTR_RE.test(bare)) out.push({ reason: 'hidden_or_styled_markup', text: tm[0] });
+  }
+  return out;
+}
+function unsupportedBodySyntax(body) {
+  return [...new Set(unsupportedBodySyntaxConstructs(body).map((c) => c.reason))];
+}
+// Refresh grandfather: constructs the live prior body already carried
+// (exact text, whitespace-normalized, as a MULTISET) pass; every other
+// construct — a new one, or a changed one — is reported by reason. Both
+// the manual-lane finding and the quality gate's hard check use this so
+// they can never disagree.
+function unsupportedBodySyntaxAdded(body, priorBody) {
+  const key = (c) => `${c.reason}\u0000${c.text.replace(/\s+/g, ' ').trim()}`;
+  const prior = new Map();
+  for (const c of unsupportedBodySyntaxConstructs(priorBody)) { const k = key(c); prior.set(k, (prior.get(k) || 0) + 1); }
+  const added = [];
+  for (const c of unsupportedBodySyntaxConstructs(body)) {
+    const k = key(c);
+    const n = prior.get(k) || 0;
+    if (n > 0) { prior.set(k, n - 1); continue; }
+    if (!added.includes(c.reason)) added.push(c.reason);
+  }
+  return added;
+}
+
+function hasRawMarkdownTable(text) {
+  return extractRawMarkdownTables(text).length > 0;
+}
+
+// True when `body` contains a raw table that the prior body did NOT carry —
+// content-compared (normalized block multiset), so a refresh that deletes a
+// legacy table and adds a DIFFERENT one is still a violation even at equal
+// counts; only genuinely preserved legacy tables are grandfathered.
+function hasUnpreservedRawTable(body, priorBody) {
+  const current = extractRawMarkdownTables(body);
+  if (current.length === 0) return false;
+  const prior = new Map();
+  for (const t of extractRawMarkdownTables(priorBody)) prior.set(t, (prior.get(t) || 0) + 1);
+  for (const t of current) {
+    const n = prior.get(t) || 0;
+    if (n === 0) return true;
+    prior.set(t, n - 1);
+  }
+  return false;
+}
+
+// Blog bodies only (service/city page bodies are component-driven and the
+// autonomous lanes get the same rule from the quality gate's common hard
+// check). Refresh drafts GRANDFATHER only tables the live prior body
+// already carried — content-compared, same posture as the component/route
+// grandfathers: preserving a legacy table must not park the lane forever,
+// but the writer ADDING or SWAPPING IN a table is still a finding.
+function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  if (!targetIsBlog) return null;
+  const violated = isRefresh ? hasUnpreservedRawTable(body, priorBody) : hasRawMarkdownTable(body);
+  if (!violated) return null;
+  return finding('P1', 'RAW_MARKDOWN_TABLE', 'Body contains a raw markdown pipe table — tabular data must render via <ComparisonTable> (owner rule 2026-08-27).');
+}
+
+// Fail-closed park on the MANUAL lanes too (publishAstro / calendar run
+// only this evaluator): a blog body outside the writer's plain subset is a
+// P1. Refresh drafts grandfather by FEATURE NAME — a form the live prior
+// body already carried (a legacy hand-written <a href="tel:">) does not
+// make the post unpublishable, but any NEWLY introduced form still parks.
+function unsupportedBodySyntaxFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
+  if (!targetIsBlog) return null;
+  const added = isRefresh ? unsupportedBodySyntaxAdded(body, priorBody) : unsupportedBodySyntax(body);
+  if (!added.length) return null;
+  return finding('P1', 'UNSUPPORTED_BODY_SYNTAX', `Body uses Markdown/HTML syntax outside the supported writer subset (${added.join(', ')}) — parked for review (owner ruling 2026-08-28).`);
+}
+
+// CTA-wording hard rule (owner 2026-08-27) — enforced HERE so every blog
+// publish lane (manual /blog/:id/publish-astro, legacy BlogWriter,
+// refresh) carries it, via seo-completion-gate's shared collector (lazy
+// require: that module requires this one at load). The brief-independent
+// half (inspection-request anchors, wording-free actionable conversion
+// anchors) always runs; passing the post's `service` also runs the
+// SERVICE-TYING half (estimate/quote anchors must name the post's own
+// service), so a wrong-service CTA parks on the lanes the completion gate
+// never sees. Refresh drafts GRANDFATHER anchors the live prior body
+// already carried — content-compared, same posture as the raw-table
+// grandfather.
+function forbiddenCtaWordingFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null, service = null } = {}) {
+  if (!targetIsBlog) return null;
+  try {
+    const { collectForbiddenCtaAnchors } = require('./seo-completion-gate');
+    // A LOADED module without the export is a test double that deliberately
+    // neutralizes the gate — skip. A require/evaluation FAILURE falls to the
+    // catch below and routes to review (fail closed).
+    if (typeof collectForbiddenCtaAnchors !== 'function') return null;
+    const current = collectForbiddenCtaAnchors(String(body || ''), { service });
+    if (current.length === 0) return null;
+    const prior = new Map();
+    if (isRefresh) {
+      for (const a of collectForbiddenCtaAnchors(String(priorBody || ''), { service })) prior.set(a, (prior.get(a) || 0) + 1);
+    }
+    for (const a of current) {
+      const n = prior.get(a) || 0;
+      if (n === 0) return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA link anchor "${a}" violates the CTA-wording rule — conversion anchors use estimate/quote wording tied to the post's service, and inspection-request anchors are forbidden (owner rule 2026-08-27).`);
+      prior.set(a, n - 1);
+    }
+    return null;
+  } catch (err) {
+    return finding('P1', 'FORBIDDEN_CTA_WORDING', `CTA-wording check could not evaluate (${err.message}) — routed to review (fail closed).`);
+  }
 }
 
 // Disclaimer exemptions come in two scopes. FOOTPRINT-scoped phrases name
@@ -3894,6 +4558,15 @@ function evaluate(draft, { service = null, primaryKeyword = null, domains = null
     // Fabricated tenure is a brand hard rule (founded 2024) — deterministic
     // backstop to the writer prompt's BRAND FACTS ban, body AND meta.
     tenureClaimFinding(publishableText),
+    // Raw markdown tables in blog bodies — <ComparisonTable> only (owner
+    // rule 2026-08-27). Body-only (a pipe table can't ship in a meta), with
+    // the standard refresh grandfather.
+    rawMarkdownTableFinding(body, { targetIsBlog, isRefresh, priorBody }),
+    unsupportedBodySyntaxFinding(body, { targetIsBlog, isRefresh, priorBody }),
+    // CTA-wording hard rule — every blog lane, with the standard refresh
+    // grandfather; the post's service (when the lane knows it) arms the
+    // service-tying half too (see forbiddenCtaWordingFinding).
+    forbiddenCtaWordingFinding(body, { targetIsBlog, isRefresh, priorBody, service }),
     // Component + internal-route allowlists are body-structure policies.
     // Refresh drafts GRANDFATHER what the live prior body already carried
     // (legacy links/components the refresh merely preserves must not park
@@ -3943,6 +4616,26 @@ module.exports = {
   isFaqBlockedService,
   FAQ_BLOCKED_SERVICES,
   KEYWORD_DENSITY_MAX,
+  // single source of truth for the raw-markdown-table policy — consumed by
+  // content-quality-gate's no_raw_markdown_tables hard check so the two
+  // enforcement points can never drift.
+  hasRawMarkdownTable,
+  hasUnpreservedRawTable,
+  extractRawMarkdownTables,
+  blankNonRenderedMarkdown,
+  blankNonRenderedMarkdownWithDepths,
+  // certainty-only hidden-text blanker — the completion gate judges HTML
+  // CTA anchors by their VISIBLE wording.
+  blankDefinitelyHiddenContent,
+  // fail-closed park for bodies outside the writer's plain Markdown subset
+  unsupportedBodySyntax,
+  unsupportedBodySyntaxAdded,
+  // entity decoder (fail-closed, sentinel for control chars) — consumed by
+  // seo-completion-gate so CTA anchors are classified as RENDERED text.
+  decodeEntitiesForScan,
+  // first-party host set (hub + spoke fleet) — consumed by seo-completion-gate
+  // to read absolute Waves URLs as the site-relative paths they are.
+  hubHostSet,
   // single source of truth for the hardcoded-price policy — consumed by
   // seo-completion-gate so the two price P0s can never drift again.
   findHardcodedPrice,

@@ -31,7 +31,10 @@ afterEach(() => {
 
 describe('parseChain', () => {
   test('default when env unset', () => {
-    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gemini']);
+    // Image-native Nano Banana fallbacks (config/models.js) after the full
+    // OpenAI ladder (gpt-image-1 stays as the last OpenAI fallback); the
+    // legacy 'gemini' text-model slug is env-only.
+    expect(parseChain(undefined)).toEqual(['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gemini-image-best', 'gemini-image']);
   });
   test('respects env override', () => {
     expect(parseChain('gemini,gpt-image-2')).toEqual(['gemini', 'gpt-image-2']);

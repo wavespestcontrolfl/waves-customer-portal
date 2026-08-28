@@ -99,6 +99,15 @@ const HARD_CHECKS = [
   { name: 'indexable', weight: 4, evaluate: checkIndexable },
   { name: 'sitemap_updated', weight: 3, evaluate: checkSitemapUpdated },
   { name: 'preview_success', weight: 4, evaluate: checkPreviewSuccess },
+  // Owner rule 2026-08-27: tabular data renders via <ComparisonTable>,
+  // never a raw markdown pipe table (unstyled prose + bypasses the
+  // comparison gate's honesty regime). Common because EVERY body-producing
+  // lane must honor it (supporting-blog, city-service, customer-question,
+  // refresh); bodyless lanes (metadata) pass trivially on an empty body.
+  { name: 'no_raw_markdown_tables', weight: 0, evaluate: checkNoRawMarkdownTables },
+  // Owner ruling 2026-08-28: bodies outside the writer's plain Markdown
+  // subset park for human review instead of being parsed (fail-closed).
+  { name: 'body_syntax_supported', weight: 0, evaluate: checkBodySyntaxSupported },
 ];
 
 const PAGE_TYPE_CHECKS = {
@@ -1011,6 +1020,38 @@ function checkFaqSectionPresent(draft, brief) {
   return { ok: true };
 }
 
+// Raw markdown pipe table detector — delegates to the single-source
+// predicate in content-guardrails (hasRawMarkdownTable), which also
+// enforces the rule on the manual publishAstro lane, so the two
+// enforcement points can never drift. Mirrors the guardrails refresh
+// grandfather: a table the prior live body already carried must not
+// permanently park the refresh lane — only ADDED tables block.
+function checkNoRawMarkdownTables(draft, _brief, context = {}) {
+  const { hasRawMarkdownTable, hasUnpreservedRawTable } = require('./content-guardrails');
+  // Refresh grandfather mirrors the guardrails finding: only tables the
+  // prior live body already carried (content-compared) pass — adding or
+  // swapping in a table still blocks.
+  const violated = context.previousVersion
+    ? hasUnpreservedRawTable(draft.body, context.previousVersion.body)
+    : hasRawMarkdownTable(draft.body);
+  if (!violated) return { ok: true };
+  return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
+}
+
+// Fail-closed park for unsupported body syntax — single-source predicate
+// in content-guardrails (unsupportedBodySyntax); the completion gate raises
+// the matching P1 so both enforcement points agree.
+// Refresh grandfather mirrors the guardrails finding: exact constructs the
+// live prior body already carried pass; any new or changed construct parks.
+function checkBodySyntaxSupported(draft, _brief, context = {}) {
+  const { unsupportedBodySyntax, unsupportedBodySyntaxAdded } = require('./content-guardrails');
+  const added = context.previousVersion
+    ? unsupportedBodySyntaxAdded(draft.body, context.previousVersion.body)
+    : unsupportedBodySyntax(draft.body);
+  if (!added.length) return { ok: true };
+  return { ok: false, reason: `unsupported_body_syntax:${added.join(',')}` };
+}
+
 function checkVoiceMatch(draft) {
   const body = String(draft.body || '').toLowerCase();
   // Lightweight voice signals from the canonical waves_default voice
@@ -1202,4 +1243,6 @@ module.exports._internals = {
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
   checkBlogMetaSoftCta, checkAuthoredMetaLength,
+  checkNoRawMarkdownTables,
+  checkBodySyntaxSupported,
 };
