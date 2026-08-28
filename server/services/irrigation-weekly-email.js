@@ -1121,9 +1121,12 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
         if (prior.state === 'sent') {
           // Delivered by an earlier run: stamp exactly the row its record
-          // names (none named → the report stays without a plan).
+          // names (none named → the report stays without a plan) and STOP —
+          // one email per customer-week, whatever the recipient key now is
+          // (an address change must not earn a second plan).
           if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-          snapshotArgs.reconciled = true;
+          summary.deduped += 1;
+          continue;
         } else if (prior.state !== 'pending') {
           const claim = await persistWeekPlan(snapshotArgs);
           snapshotArgs.claimToken = claim.claimToken;
@@ -1180,7 +1183,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // deduped (webhook/supersede races), as does a thrown error.
       if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
 
-      if (snapshotArgs && !snapshotArgs.reconciled) {
+      if (snapshotArgs) {
         if (result.sent && (!result.deduped || result.providerAttempted)) {
           // The email built from THIS decision reached the provider (including
           // the accepted-then-superseded race reported as
@@ -1231,7 +1234,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // definitely not delivered → drop the unsent row so a retry's plan is
       // the one both sent and stored; in flight/unknown → leave it for the
       // next run to reconcile.
-      if (snapshotArgs && !snapshotArgs.reconciled) {
+      if (snapshotArgs) {
         const prior = await weekPlanDeliveryState({ triggerEventId: snapshotArgs.triggerEventId, idempotencyKey: snapshotArgs.idempotencyKey });
         if (prior.state === 'sent') {
           if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });

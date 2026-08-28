@@ -16,12 +16,15 @@ describe('irrigation_week_plans table', () => {
       unique: jest.fn(), index: jest.fn(),
     };
     const chain = { primary: () => chain, defaultTo: () => chain, notNullable: () => chain, references: () => chain, inTable: () => chain, onDelete: () => chain };
-    const knex = { schema: { hasTable: jest.fn().mockResolvedValue(false), createTable: jest.fn(async (_n, cb) => cb(builder)) }, raw: (s) => s, fn: { now: () => 'now()' } };
+    const raw = jest.fn(async (s) => s);
+    const knex = { schema: { hasTable: jest.fn(async (n) => n === 'email_messages'), hasColumn: jest.fn().mockResolvedValue(true), createTable: jest.fn(async (_n, cb) => cb(builder)) }, raw, fn: { now: () => 'now()' } };
     await table.up(knex);
     expect(knex.schema.createTable).toHaveBeenCalledWith('irrigation_week_plans', expect.any(Function));
+    // Reconciliation lookups by trigger_event_id must be indexed.
+    expect(raw).toHaveBeenCalledWith(expect.stringMatching(/CREATE INDEX IF NOT EXISTS email_messages_trigger_event_id_idx ON email_messages \(trigger_event_id\)/));
     expect(cols).toEqual(expect.arrayContaining(['customer_id', 'week_ending', 'plan_as_of', 'weather_inputs', 'restriction_policy', 'week_plan', 'sent_at', 'decision_hash', 'claim_token', 'claimed_at']));
     expect(builder.unique).toHaveBeenCalledWith(['customer_id', 'week_ending']);
-    knex.schema.hasTable.mockResolvedValue(true);
+    knex.schema.hasTable.mockImplementation(async () => true);
     knex.schema.createTable.mockClear();
     await table.up(knex);
     expect(knex.schema.createTable).not.toHaveBeenCalled();

@@ -125,7 +125,9 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
     // A snapshot-claim DB error falls back to the pre-plan email (never silence).
     expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
-    // Delivery reconciliation is customer/week scoped (trigger_event_id).
+    // Delivery reconciliation is customer/week scoped (trigger_event_id)…
     expect(src).toMatch(/weekPlanDeliveryState\(\{ triggerEventId, idempotencyKey \}\)/);
+    // …and a prior delivery ends the customer's turn: never a second email on a new recipient key.
+    expect(src).toMatch(/if \(prior\.state === 'sent'\) \{[\s\S]{0,600}summary\.deduped \+= 1;\s*continue;/);
   });
 });

@@ -5,6 +5,12 @@
  * inserted before the send and stamped sent_at after the provider accepts.
  */
 exports.up = async function up(knex) {
+  // The sweep reconciles delivery per customer-week by
+  // email_messages.trigger_event_id (one lookup per eligible customer) —
+  // index it so that is never a full scan of message history.
+  if (await knex.schema.hasTable('email_messages') && await knex.schema.hasColumn('email_messages', 'trigger_event_id')) {
+    await knex.raw('CREATE INDEX IF NOT EXISTS email_messages_trigger_event_id_idx ON email_messages (trigger_event_id)');
+  }
   if (await knex.schema.hasTable('irrigation_week_plans')) return;
   await knex.schema.createTable('irrigation_week_plans', (t) => {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
@@ -38,4 +44,5 @@ exports.down = async function down(knex) {
   if (await knex.schema.hasTable('irrigation_week_plans')) {
     await knex.schema.dropTable('irrigation_week_plans');
   }
+  await knex.raw('DROP INDEX IF EXISTS email_messages_trigger_event_id_idx');
 };
