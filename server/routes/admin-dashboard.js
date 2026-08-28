@@ -52,13 +52,7 @@ const MAX_WIDGETS_PER_USER = 24;
 
 router.use(adminAuthenticate, requireAdmin);
 
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function whereNeedsRealReviewReply(qb, column = 'review_reply') {
-  qb.where(function needsRealReply() {
-    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
-  });
-}
+const { DRAFT_REPLY_PREFIX, whereNeedsRealReply: whereNeedsRealReviewReply } = require('../services/review-reply/draft-prefix');
 
 // Per-user response cache (60s) for the read-only KPI panels. The underlying
 // SQL aggregates revenue/AR/MRR/attribution windows that don't shift inside a

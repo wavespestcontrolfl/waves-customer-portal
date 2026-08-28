@@ -136,16 +136,20 @@ function createDbMock(initialRows = {}) {
       whereNotNull(column) { this._rawFilters.push(row => row[column] != null); return this; },
       whereIn(column, values) { this._rawFilters.push(row => values.includes(row[column])); return this; },
       whereNot() { return this; },
+      forUpdate() { return this; },
       select() { return this; },
       orderBy() { return this; },
       limit(n) { this._limit = n; return this; },
       async first() {
         const rows = state.rows[this._table] || [];
-        return rows
+        const hit = rows
           .filter(row => matchesWhere(row, this._where))
           .filter(row => this._rawFilters.every(fn => fn(row)))
           .filter(row => !this._whereNull || row[this._whereNull] == null)
-          .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
+          .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value));
+        // A snapshot, as knex returns: a later UPDATE must not mutate the
+        // row a caller read earlier (the edit reconcile compares the two).
+        return hit ? { ...hit } : null;
       },
       insert(record) {
         // created_at mirrors the DB column default — the degraded-sync
@@ -265,6 +269,25 @@ describe('Google Business review sync', () => {
   afterEach(() => {
     delete global.fetch;
     delete process.env.GOOGLE_MAPS_API_KEY;
+  });
+
+  test('replyToReview flags ambiguous mutation outcomes: transport rejection and 2xx-unparseable body carry e.transport; HTTP rejection does not (codex r64/r65)', async () => {
+    global.fetch = jest.fn(async () => { throw new Error('fetch failed: ECONNRESET'); });
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    global.fetch = jest.fn(async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); throw e; });
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    // codex r72: pre-send failures (DNS, refused, TLS) never reached Google → plain retryable failures.
+    for (const code of ['ENOTFOUND', 'ECONNREFUSED', 'ERR_TLS_CERT_ALTNAME_INVALID']) {
+      global.fetch = jest.fn(async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error(`${code} mybusiness.googleapis.com`), { code }); throw e; });
+      const pre = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((err) => err);
+      expect(pre.transport).toBeUndefined();
+    }
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<html>ok</html>' }));
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    global.fetch = jest.fn(async () => ({ ok: false, status: 429, headers: { get: () => 'application/json' }, text: async () => '{"error":"quota"}' }));
+    const err = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((e) => e);
+    expect(err.message).toMatch(/429/);
+    expect(err.transport).toBeUndefined();
   });
 
   test('paginates GBP reviews and upserts each page by GBP resource name', async () => {
@@ -401,7 +424,88 @@ describe('Google Business review sync', () => {
 
     await service.syncAllReviews();
 
-    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('[DRAFT] We are sorry.');
+    // Rule (auto-reply lane, PR #3559): a local draft survives an EMPTY feed,
+    // but an owner reply that exists on Google replaces it — the review is
+    // answered, and keeping the draft would pin it in the needs-reply queue.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('Public Google reply');
+  });
+
+  test('preserves a local draft reply when the GBP feed carries no owner reply', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'review-2',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-2',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-2',
+      location_id: 'bradenton',
+      reviewer_name: 'Jane Doe',
+      star_rating: 2,
+      review_text: 'Meh',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: '[DRAFT] We are sorry.',
+      reply_updated_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-2',
+        reviewer: { displayName: 'Jane Doe' },
+        starRating: 'TWO',
+        comment: 'Meh',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-2').review_reply).toBe('[DRAFT] We are sorry.');
+  });
+
+  test('GBP sync: a reviewer edit on a row with a pipeline draft clears the draft and requeues it (never a stale upbeat draft on a rewritten review)', async () => {
+    const draft = 'Hi John,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: `[DRAFT] ${draft}`,
+      auto_reply_status: 'drafted',
+      auto_reply_reason: 'shadow',
+      auto_reply_draft: draft,
+      auto_reply_drafted_at: '2026-05-26T12:00:00Z',
+      auto_reply_attempts: 1,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'ONE',
+        comment: 'They never came back and the ants are worse',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const rows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      star_rating: 1,
+      review_text: 'They never came back and the ants are worse',
+      review_reply: null,
+      auto_reply_status: 'queued',
+      auto_reply_reason: 'review_changed',
+      auto_reply_draft: null,
+      auto_reply_attempts: 0,
+    });
   });
 
   test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {
@@ -442,6 +546,47 @@ describe('Google Business review sync', () => {
       google_review_id: 'accounts/1/locations/2/reviews/rev-1',
       review_text: 'Edited text',
       review_reply: 'Hello Paula! Thanks!', // Places carries no reply data — never downgrade
+    });
+  });
+
+  test('Places fallback: an owner reply edited directly on Google replaces our POSTED auto reply and closes the auto state', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Edited text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hi Paula,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Bradenton Team',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 5,
+          text: 'Edited text',
+          time: 1779307832,
+          owner_response: { text: 'Thanks Paula, the owner rewrote this on Google.' },
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      review_reply: 'Thanks Paula, the owner rewrote this on Google.',
+      auto_reply_status: 'skipped',
+      auto_reply_reason: 'edited_on_google',
     });
   });
 
@@ -519,6 +664,97 @@ describe('Google Business review sync', () => {
       google_review_id: 'places_place-1_1779307900',
       star_rating: 4,
     });
+  });
+
+  test('Places fallback: same-name different content on a POSTED auto-reply row parks it for a person (no merge, no overwrite)', async () => {
+    // A reviewer edit during a GBP outage moves the Places id and changes
+    // the content — the row is still deferred to GBP, but the upbeat reply
+    // already posted on it may no longer fit: route it to a person now.
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 1,
+          text: 'Completely different text',
+          time: 1775768075, // == review_created_at second: identity corroborated (hook P1)
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      // codex r59: a CORROBORATED edit is persisted with the reconciliation so
+      // the bell's card shows what the reviewer now says.
+      star_rating: 1,
+      review_text: 'Completely different text',
+      review_reply: 'Hello Paula! Thanks!',
+      auto_reply_status: 'parked',
+      auto_reply_reason: 'review_edited_after_post',
+    });
+    expect(spy).toHaveBeenCalledWith('review', 'Review edited after auto-reply', expect.any(String), expect.objectContaining({
+      link: '/admin/reviews?responded=all&review=gbp-row-1',
+      metadata: expect.objectContaining({ reason: 'review_edited_after_post', reviewId: 'gbp-row-1' }),
+    }));
+    spy.mockRestore();
+  });
+
+  test('Places fallback: an UNCORROBORATED same-name different-content sample never mutates the candidate (display names are not unique) — hook P1', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 1,
+          text: 'A different Paula entirely',
+          time: 1779307832, // ≠ stored creation second: a different account with the same name
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+    await service.syncAllReviews();
+    const rows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'gbp-row-1', star_rating: 5, review_text: 'Original text', review_reply: 'Hello Paula! Thanks!', auto_reply_status: 'posted', auto_reply_reason: null });
+    expect(spy.mock.calls.filter(c => /edited/i.test(String(c[1])))).toHaveLength(0);
+    spy.mockRestore();
   });
 
   test('Places fallback never name-merges into an un-linked Places row (same display name = new row)', async () => {
@@ -1190,6 +1426,32 @@ describe('Google Business review sync', () => {
     expect(degraded[0].body).toContain('REMOVALS will not be detected');
     const urls = global.fetch.mock.calls.map(c => String(c[0]));
     expect(urls.filter(u => u.includes('fields=reviews'))).toHaveLength(0);
+  });
+
+  test('an older overlapping runner YIELDS on an existing row: no content regression, no reviewer-edit park, no attribution side effects (codex r48)', async () => {
+    const newerToken = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    seedSyncedReview({ id: 'overlap-y', synced_at: newerToken });
+    const rowBefore = { ...db.__state.rows.google_reviews.find(r => r.id === 'overlap-y') };
+    Object.assign(db.__state.rows.google_reviews.find(r => r.id === 'overlap-y'), { review_text: 'Newer text from runner B', star_rating: 5, review_reply: 'Our posted reply', auto_reply_status: 'posted', auto_reply_reason: null });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    const olderStart = new Date(Date.now() - 60 * 60 * 1000);
+    const res = await service._upsertGbpReview({
+      google_review_id: rowBefore.google_review_id,
+      gbp_review_name: rowBefore.gbp_review_name,
+      location_id: rowBefore.location_id,
+      reviewer_name: rowBefore.reviewer_name,
+      star_rating: 4,
+      review_text: 'Older text from runner A',
+      owner_reply: null,
+      review_created_at: rowBefore.review_created_at,
+    }, olderStart);
+    expect(res).toMatchObject({ id: 'overlap-y', inserted: false, yielded: true });
+    const after = db.__state.rows.google_reviews.find(r => r.id === 'overlap-y');
+    expect(after).toMatchObject({ review_text: 'Newer text from runner B', star_rating: 5, review_reply: 'Our posted reply', auto_reply_status: 'posted', auto_reply_reason: null });
+    expect(new Date(after.synced_at).toISOString()).toBe(newerToken);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 
   test('an older overlapping runner cannot regress a newer synced_at token', async () => {

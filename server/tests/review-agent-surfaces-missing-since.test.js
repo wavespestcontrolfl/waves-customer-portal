@@ -66,6 +66,7 @@ jest.mock('../models/db', () => {
       },
       whereNull(col) { q.filters.push((r) => r[col] == null); return api; },
       whereNotNull(col) { q.filters.push((r) => r[col] != null); return api; },
+      forUpdate() { return api; },
       modify(fn, ...args) { fn(api, ...args); return api; },
       select(...cols) { q.selects = cols; return api; },
       limit(n) { q.limit = n; return api; },
@@ -113,11 +114,17 @@ jest.mock('../models/db', () => {
   }
   const db = (table) => makeQuery(table);
   db.raw = (sql) => ({ __raw: sql });
+  db.transaction = async (fn) => fn(db);
   return db;
 });
 
 const { executeReviewTool } = require('../services/intelligence-bar/review-tools');
 const { executeBITool } = require('../services/bi-agent-tools');
+const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+const { accountFingerprint } = require('../services/review-reply/grounding');
+// The token draft_review_reply hands back: review + (review-only) account facts.
+// codex r67: the IB token also binds the exact approved reply text.
+const tokenFor = (row, text) => `${reviewFingerprint(row)}|${accountFingerprint(null)}${text == null ? '' : `#${require('crypto').createHash('sha1').update(String(text).trim()).digest('hex')}`}`;
 
 // Rolling-window fixtures derive from the clock (AGENTS.md: no hardcoded
 // dates that rot past a cutoff); historical rows stay fixed — they are
@@ -160,8 +167,9 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
   test('rejects a row already stamped at read time', async () => {
     state.rows.google_reviews = [liveReview({ missing_since: '2026-08-07T09:00:00Z' })];
 
+    const row = state.rows.google_reviews[0];
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks!',
+      review_id: 'rev-1', reply_text: 'Thanks!', grounding_token: tokenFor(row, 'Thanks!'),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -175,7 +183,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     state.afterFirstRead = () => { row.missing_since = '2026-08-07T10:00:00Z'; };
 
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks!',
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row, 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team'),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -186,12 +194,76 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     const row = liveReview();
     state.rows.google_reviews = [row];
 
+    const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks so much!',
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row, reply),
     });
 
     expect(result.success).toBe(true);
-    expect(row.review_reply).toBe('Thanks so much!');
+    expect(row.review_reply).toBe(reply);
+  });
+
+  test('submit_review_reply refuses reply_text that differs from the approved draft bound in the token (codex r67)', async () => {
+    const row = liveReview();
+    state.rows.google_reviews = [row];
+    const approved = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    const result = await executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: approved.replace('Glad', 'So glad'), grounding_token: tokenFor(row, approved),
+    });
+    expect(result.code).toBe('draft_text_mismatch');
+    expect(row.review_reply).toBeNull();
+  });
+
+  test('a click_auto-linked review submits through the same review-only grounding the draft used (codex r22)', async () => {
+    // customer_id set by GATE_REVIEW_CLICK_AUTOLINK, unconfirmed: the guard
+    // must reload facts through groundingCustomerId (→ null), not the raw
+    // customer_id. This rig has no customers table, so a raw reload throws
+    // and the guard would report every submit as stale. The publisher is
+    // mocked to RUN the guard the way the real in-claim path does (the
+    // unconfigured-GBP local path above never reaches it).
+    const row = liveReview({ customer_id: 'cust-1', link_source: 'click_auto' });
+    state.rows.google_reviews = [row];
+    const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    const guards = [];
+    let tools;
+    jest.isolateModules(() => {
+      jest.doMock('../services/review-reply/publisher', () => {
+        const actual = jest.requireActual('../services/review-reply/publisher');
+        return {
+          ...actual,
+          publishReviewReply: async ({ reviewId, text, guard }) => {
+            guards.push(guard);
+            const fresh = state.rows.google_reviews.find((r) => r.id === reviewId);
+            const reason = await guard({ ...fresh });
+            if (reason) throw new actual.ReviewReplyError(actual.CODES.STALE, `Reply not posted: ${reason}`, { status: 409 });
+            fresh.review_reply = text;
+            return { googlePosted: true, reviewId };
+          },
+        };
+      });
+      tools = require('../services/intelligence-bar/review-tools');
+    });
+    const result = await tools.executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row, reply),
+    });
+    expect(result.success).toBe(true);
+    expect(row.review_reply).toBe(reply);
+    // The link being confirmed (or cleared) between verification and the PUT
+    // changes what the draft was grounded on → stale, never posted.
+    expect(await guards[0]({ ...row, link_source: 'manual' })).toMatch(/could not be re-read|changed/);
+    // Clearing an UNCONFIRMED click link leaves a review-only draft valid (codex r57).
+    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toBeNull();
+    expect(await guards[0]({ ...row })).toBeNull();
+  });
+
+  test('a model-proposed reply that fails the public-reply verifier is never posted', async () => {
+    const row = liveReview();
+    state.rows.google_reviews = [row];
+    const result = await executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row, 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team'),
+    });
+    expect(result.code).toBe('verifier_reject');
+    expect(row.review_reply).toBeNull();
   });
 });
 

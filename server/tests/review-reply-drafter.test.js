@@ -1,0 +1,622 @@
+// Review reply drafter: mode classification, the deterministic verifier
+// (every rule the model is told is re-checked here), and the fallback ladder.
+// Replies are PUBLIC — the verifier is the last line between a bad draft and
+// Google; each rule gets a test.
+const mockDispatch = jest.fn();
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: (...a) => mockDispatch(...a) }));
+jest.mock('../config/models', () => ({ TEXT_POLICIES: { customerCopy: { name: 'customerCopy' } } }));
+
+const Drafter = require('../services/review-reply/drafter');
+
+const LOCATION = 'Sarasota';
+const SIGN_OFF = Drafter.signOffFor(LOCATION);
+
+function grounding(over = {}) {
+  const text = over.text ?? 'Marcus came out fast and the ants in the kitchen are gone. Great service.';
+  return {
+    version: 'grounding-v1',
+    reviewId: 'rev-1',
+    locationId: 'sarasota',
+    locationName: LOCATION,
+    review: {
+      firstName: over.firstName ?? 'Dana',
+      rating: over.rating ?? 5,
+      text,
+      hasText: text.length > 0,
+      wordCount: text ? text.split(/\s+/).length : 0,
+      mentionedTechNames: over.mentionedTechNames ?? ['Marcus'],
+      topics: over.topics ?? ['technician', 'responsiveness', 'results', 'pest'],
+    },
+    account: over.account === undefined ? { relationship: 'recurring', tenure: 'established', serviceCategories: ['pest control'], city: 'Sarasota' } : over.account,
+    provenance: {},
+    allow: {
+      names: ['Dana', 'Marcus'],
+      forbiddenNames: over.forbiddenNames ?? ['Bob', 'Tyler'],
+      cities: ['Sarasota', 'Southwest Florida', 'Florida'],
+      digits: text.match(/\d+/g) || [],
+    },
+  };
+}
+
+const good = (body) => `${body}\n\n${SIGN_OFF}`;
+const CLEAN = good('Hi Dana,\n\nGlad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.');
+
+beforeEach(() => { mockDispatch.mockReset(); });
+
+describe('classifyReplyMode', () => {
+  test('low rating wins over everything', () => {
+    expect(Drafter.classifyReplyMode(grounding({ rating: 2 }))).toBe('low_rating');
+  });
+  test('no text → no_text', () => {
+    expect(Drafter.classifyReplyMode(grounding({ text: '', mentionedTechNames: [], topics: [] }))).toBe('no_text');
+  });
+  test('named technician → tech_praise', () => {
+    expect(Drafter.classifyReplyMode(grounding())).toBe('tech_praise');
+  });
+  test('long review → detailed_testimonial', () => {
+    const text = Array.from({ length: 70 }, (_, i) => `word${i}`).join(' ');
+    expect(Drafter.classifyReplyMode(grounding({ text, mentionedTechNames: [], topics: [] }))).toBe('detailed_testimonial');
+  });
+  test('results / responsiveness / loyalty / default', () => {
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['results'] }))).toBe('results');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['responsiveness'] }))).toBe('responsiveness');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: ['loyalty'] }))).toBe('loyalty');
+    expect(Drafter.classifyReplyMode(grounding({ mentionedTechNames: [], topics: [] }))).toBe('service_quality');
+  });
+});
+
+describe('verifyReplyText — public-surface safety net', () => {
+  const verify = (text, g = grounding(), opts = {}) => Drafter.verifyReplyText(text, g, opts);
+
+  test('a clean reply passes', () => {
+    expect(verify(CLEAN)).toBeNull();
+  });
+  test('requires the exact sign-off as the last line', () => {
+    expect(verify('Hi Dana, thanks for having us out to handle the ants.')).toBe('missing_sign_off');
+    expect(verify(`Hi Dana, thanks for having us out.\n\nThe Waves Team`)).toBe('missing_sign_off');
+    expect(verify(good(`Hi Dana, thanks. ${SIGN_OFF}`))).toBe('duplicate_sign_off');
+  });
+  test('length bounds per mode', () => {
+    expect(verify(good('Hi Dana, thanks.'))).toBe('too_short');
+    const long = Array.from({ length: 95 }, () => 'word').join(' ');
+    expect(verify(good(`Hi Dana, ${long}`))).toBe('too_long');
+    // no_text mode is tighter
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [] });
+    const fortyFive = Array.from({ length: 45 }, () => 'word').join(' ');
+    expect(verify(good(`Hello there, ${fortyFive}`), g)).toBe('too_long');
+  });
+  test('style rules: emoji, em dash, first person singular, stock phrases', () => {
+    expect(verify(good('Hi Dana, thanks for the note about Marcus 🎉 we will tell him.'))).toBe('emoji');
+    expect(verify(good('Hi Dana, Marcus was glad to help — the ants are gone for good now.'))).toBe('em_dash');
+    expect(verify(good('Hi Dana, I am so glad Marcus could get the ants out of your kitchen.'))).toBe('first_person_singular');
+    expect(verify(good("Hi Dana, i'm thankful Marcus could get the ants out of your kitchen."))).toBe('first_person_singular');
+    // codex r65: the former company name never publishes.
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn & Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn and Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Pest Control for your home. Marcus got the ants.'))).toBe(null);
+    expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
+  });
+  test('never a link, email, phone, money, or street address', () => {
+    expect(verify(good('Hi Dana, see wavespestcontrol.com/ants for more on what Marcus did.'))).toBe('url');
+    expect(verify(good('Hi Dana, email us at help@waves.com about the ants Marcus treated.'))).toBe('email');
+    expect(verify(good('Hi Dana, call 941-555-1212 any time about the ants Marcus treated.'))).toBe('phone');
+    expect(verify(good('Hi Dana, Marcus treated the ants and the $89 visit was worth it.'))).toBe('money');
+    expect(verify(good('Hi Dana, Marcus treated the ants at 123 Palm Ave and they are gone.'))).toBe('address');
+  });
+  test('banned phrases: incentives, rating asks, safety claims, guarantees, rank, competitors', () => {
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Enjoy a free visit on us.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Please give us five stars.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus used a safe product and the ants are gone.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't harm your pets."))).toBe('banned_phrase');
+    // The poison / toxic / danger / hazard families in every wrapper (codex r19).
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't poison your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a non-poisonous product.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there is no danger to your dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product that poses no hazard to kids.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and the products won't make your pets sick."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the toxicity is low.'))).toBe('banned_phrase');
+    // codex r22: no-injury / no-threat assertions in ANY wrapper.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments cannot hurt your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product is not able to affect your dogs.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and it couldn't bother the kids."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants without any risk to your family.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there is no threat to your cats.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing will injure your pets.'))).toBe('banned_phrase');
+    // codex r23: illness constructions.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't cause illness for your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nobody got sick from it.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and it never makes anyone ill.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with no allergic reaction for the kids.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there are no health concerns for your family.'))).toBe('banned_phrase');
+    // codex r24: suitability / tolerance framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments are suitable around pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product appropriate for use near children.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r51: "agreed with your pets" tolerance framing.
+    const gpets = grounding({ text: 'Great pest treatment. We have pets.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad the treatment agreed with your pets.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
+    // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
+    expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r62: "none the wiser" + euphemistic incentives + indirect solicitations.
+    expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
+    // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
+    expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r72: Unicode / slash fractions.
+    const g1dog = grounding({ text: 'Great pest treatment. We have 1 dog.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad access resumed after 1½ hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after ½ hour following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after 1 1/2 hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    // Standalone fraction at the start of a leading-anchored pattern (\b cannot sit between a space and ½).
+    expect(verify(good('Hello there, ½ hour before access resumed after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    // codex r75: clock times and day parts are fixed re-entry moments too.
+    const gclock = grounding({ text: 'Great pest treatment. He arrived at 4:30 and was gone by 6.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, access resumed at 4:30 after the pest treatment.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was back in use by 6 pm after the pest treatment.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, by noon the yard was good to go.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready by the next morning.'), gclock)).toBe('banned_phrase');
+    // A day part without a re-entry state is not a re-entry claim (trips a different rule, never banned_phrase).
+    expect(verify(good('Hello there, we are glad the treatment went well and the morning visit fit your schedule.'), gclock)).not.toBe('banned_phrase');
+    // codex r74: qualified dozens.
+    expect(verify(good('Hello there, we are glad access resumed after a couple dozen minutes following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready several dozen minutes after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, a few dozen minutes before access resumed we were done with the pest treatment.'), g1dog)).toBe('banned_phrase');
+    // codex r73: compound fractional counts.
+    expect(verify(good('Hello there, we are glad access resumed after two and a half hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready 3 and three quarters hours after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, two-and-a-half hours later the yard was open again.'), g1dog)).toBe('banned_phrase');
+    // codex r71: seconds are durations too.
+    expect(verify(good('Hello there, we are glad access resumed after thirty seconds following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready 90 secs after the pest treatment.'), gpets)).toBe('banned_phrase');
+    // codex r70: lost-momentum idioms + odd-suffixed durations.
+    expect(verify(good('Hello there, your pets never lost momentum after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids lost no steam after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after twenty-odd minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after 30-some minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    // codex r69: outcome → duration → treatment ordering + fabricated conversational contact.
+    expect(verify(good('Hello there, we are glad access resumed a half-hour after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad everyone was back inside forty minutes after the pest treatment.'), gpets)).toBe('banned_phrase');
+    const gsvc2 = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we appreciated our conversation about your pest service.'), gsvc2)).toBe('private_channel');
+    expect(verify(good('Hello there, we enjoyed speaking with you about the pest service.'), gsvc2)).toBe('private_channel');
+    // codex r68: "no worse off", arbitrary spelled-out durations, promise-shaped guarantees.
+    expect(verify(good('Hello there, the treatment left your pets no worse off.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after thirty-five minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after a dozen minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    const ggone = grounding({ text: 'Great service. The ants are gone.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we promise the ants will not return.'), ggone)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the ants will stay gone permanently.'), ggone)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the ants are gone for good now.'), ggone)).toBe('banned_phrase');
+    // codex r67: "did not skip a step" / "never broke stride".
+    expect(verify(good('Hello there, your pets did not skip a step after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids never broke stride after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids never batted an eye at the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, your pets were no worse for wear after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after one-half hour following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the yard was ready within three-quarters of an hour after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad everyone was back inside after 1.5 hours following the pest treatment.'), gpets)).toBe('banned_phrase');
+    const gsvc = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    expect(verify(good('Hello there, we are glad the crickets are behind you.'), gsvc)).toBe('unlisted_service_claim');
+    expect(verify(good('Hello there, we are glad the gnats are a thing of the past.'), gsvc)).toBe('unlisted_service_claim');
+    const gcrk = grounding({ text: 'The crickets are finally behind us. Great service.', mentionedTechNames: [], topics: [] });
+    expect(verify(good('Hello there, we are glad the crickets are behind you.'), gcrk)).toBe(null);
+    expect(verify(good('Hi Dana, we have a price break waiting for you because of this review. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, this review has earned you a little something. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we hope to earn five stars from you next time. Marcus got the ants.'))).toBe('banned_phrase');
+    // codex r64: perfect-score solicitations + "acted normally".
+    expect(verify(good('Hi Dana, we hope to earn a perfect score from you next time. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, perhaps next time we can earn full marks from you. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we would love that fifth star next visit. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad your pets acted normally after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids went about their day as usual after the treatment.'), gpets)).toBe('banned_phrase');
+    // codex r66: "sailed right along" + duration-before-wait.
+    expect(verify(good('Hello there, your pets sailed right along after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids rolled on happily after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, half an hour was all the wait needed after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, thirty minutes of downtime is all the pest treatment took.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we hope you will consider a five-star rating next time. Marcus got the ants.'))).toBe('banned_phrase');
+    // codex r61: "didn't slow your pets down".
+    expect(verify(good("Hello there, glad the pest treatment didn't slow your pets down."), gpets)).toBe('banned_phrase');
+    // codex r60: "weathered the treatment well" / "in stride" + by-the-mark / no-later-than intervals.
+    expect(verify(good('Hello there, glad your pets weathered the pest treatment well.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad your pets took the pest treatment in stride.'), gpets)).toBe('banned_phrase');
+    // codex r59: "felt normal" + hyphenated / "at the half-hour mark" re-entry.
+    const gfn = grounding({ text: 'Great pest treatment. The tech felt professional. We have pets.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad your pets felt normal after the pest treatment.'), gfn)).toBe('banned_phrase');
+    const ghm = grounding({ text: 'The yard was available at the half-hour mark. Great pest treatment.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad the yard was available again at the half-hour mark after the pest treatment.'), ghm)).toBe('banned_phrase');
+    // codex r58: "came out okay" with unrelated "came out" provenance.
+    const gco = grounding({ text: 'Great pest treatment. The tech came out quickly. We have pets.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad your pets came out okay after the pest treatment.'), gco)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids ended up none the worse.'), gco)).toBe('banned_phrase');
+    // codex r57: passive "weren't fazed by".
+    expect(verify(good("Hello there, we are glad your pets weren't fazed by the pest treatment."), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids were not bothered in the least by the treatment.'), gpets)).toBe('banned_phrase');
+    // codex r56: "a breeze for your pets" + "<duration> later".
+    expect(verify(good('Hello there, the pest treatment was a breeze for your pets.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed half an hour later following the pest treatment.'), gpets)).toBe('banned_phrase');
+    // codex r53: "easy on your pets".
+    expect(verify(good('Hello there, we are glad the pest treatment was easy on your pets.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the product is gentle enough on the kids.'), gpets)).toBe('banned_phrase');
+    // codex r50: experienced / had / suffered no problems.
+    const gp = grounding({ text: 'Marcus fixed our ant problems and the pets were fine.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, we are glad your pets experienced no problems afterward.'), gp)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids had no issues with it.'), gp)).toBe('banned_phrase');
+    // codex r49: post-verbal "none of your pets".
+    expect(verify(good('Hi Dana, we are glad the treatment bothered none of your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and it troubled neither of the kids.'))).toBe('banned_phrase');
+    // codex r48: "never noticed a thing".
+    expect(verify(good('Hi Dana, we appreciate your note about the pest treatment. We are glad your pets never noticed a thing afterward.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids barely knew we were there.'))).toBe('banned_phrase');
+    // codex r45: post-verbal negation + indirect fixed intervals.
+    expect(verify(good('Hi Dana, we are glad the pest treatment caused your pets no discomfort.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and left the kids without any irritation.'))).toBe('banned_phrase');
+    const g30 = grounding({ text: 'Marcus was in and out in 30 minutes and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad the yard was ready after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad everything was back to normal within an hour.'), g30)).toBe('banned_phrase');
+    // codex r52: "sailed through" + reopened/resumed re-entry intervals.
+    expect(verify(good('Hello there, we are glad your pets sailed through the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad the yard reopened after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad everyone returned after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed by the 30-minute mark after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed no later than 30 minutes after the pest treatment.'), g30)).toBe('banned_phrase');
+    // codex r62: elapsed-before-re-entry.
+    expect(verify(good('Hi Dana, it took 30 minutes before access resumed after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, access resumed once 30 minutes had passed.'), g30)).toBe('banned_phrase');
+    // codex r61: hedged intervals.
+    expect(verify(good('Hi Dana, glad access resumed in about an hour after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad the yard was ready after roughly 30 minutes.'), g30)).toBe('banned_phrase');
+    // codex r44: "did not trouble your pets".
+    expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
+    // codex r43: spared-harm / trouble-free framing.
+    expect(verify(good('Hi Dana, we are glad our pest treatment spared your pets from any trouble.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and kept trouble away from the kids.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a worry-free treatment.'))).toBe('banned_phrase');
+    // codex r42: inserted ability / permission phrases.
+    expect(verify(good('Hi Dana, we are glad your pets were able to stay outside after our pest treatment.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids managed to keep playing in the yard.'))).toBe('banned_phrase');
+    // codex r41: direct tolerance / reaction claims.
+    expect(verify(good('Hi Dana, we are glad your pets tolerated our pest treatment well.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids handled it fine.'))).toBe('banned_phrase');
+    // codex r39: peril / detriment / noxious / menace.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments pose no peril to your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing we use is a detriment to your dogs.'))).toBe('banned_phrase');
+    // codex r38: activity-continuation framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments let your pets keep enjoying the yard.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids can carry on playing outside as usual.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants without changing your routine.'))).toBe('banned_phrase');
+    // codex r37: quality-of-life / preserve / protect-your-pets framing.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments preserve your pets' quality of life."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we protect your family every visit.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we safeguard the kids.'))).toBe('banned_phrase');
+    // codex r35: positive health claims.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments keep your pets healthy.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments support your pets' health."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and your garden will thrive.'))).toBe('banned_phrase');
+    // codex r34: unaffected / untouched / no negative consequences.
+    expect(verify(good('Hi Dana, Marcus got the ants and the treatments left your pets unaffected.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the treatments have no negative consequences for your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and your dogs came through untouched.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with no side effects for the kids.'))).toBe('banned_phrase');
+    // codex r33: household / owner formulations.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments can be applied in households containing pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments are appropriate choices for pet owners.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we work in homes that have small children every day.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and families with kids trust our treatments.'))).toBe('banned_phrase');
+    // codex r32: compromise / well-being family.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments don't compromise your pets' well-being."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with your family\'s welfare in mind.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and nothing we use will interfere with your dogs."))).toBe('banned_phrase');
+    // codex r30: adverb-wrapped / "have an adverse effect" no-effect claims.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't adversely affect your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product will not have an adverse effect on your dogs.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and it can't really bother the kids at all."))).toBe('banned_phrase');
+    // codex r29: use-near / apply-near / while-pets-are-home framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments can be used near pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product that may be applied near children.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we can spray while your pets are home.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product goes next to the kids without issue.'))).toBe('banned_phrase');
+    // codex r28: benign / innocuous / inert / gentle / mild / non-harmful.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments are benign for your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with an innocuous product.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a gentle, non-harmful product.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with an inert, low-impact product.'))).toBe('banned_phrase');
+    // codex r25: lethal-effect family.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't kill your pets."))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and the product isn't lethal to animals."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing we use is fatal to dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and no pet has ever died from it.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the spray kills nothing but ants; it will not kill the grass.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and our warranties cover this.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we warrant the work Marcus did on the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants. We are the best in Sarasota.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, unlike Orkin, Marcus actually got the ants out.'))).toBe('banned_phrase');
+  });
+  test('dispute vocabulary and private-channel references are rejected', () => {
+    expect(verify(good('Hi Dana, Marcus got the ants. Sorry about the refund delay.'))).toBe('dispute_words');
+    expect(verify(good('Hi Dana, when you called about the ants Marcus got right out.'))).toBe('private_channel');
+    expect(verify(good('Hi Dana, our records show Marcus treated the ants on his visit.'))).toBe('private_channel');
+  });
+  test('private-channel phrasing is allowed when the reviewer wrote it themselves', () => {
+    const g = grounding({ text: 'I called about ants and Marcus came out the same day. When you called back it was fast.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus got out the same day when you called about the ants.'), g)).toBeNull();
+  });
+  test('provenance: technician names the reviewer did not write are forbidden (case-insensitive)', () => {
+    expect(verify(good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.'))).toBe('forbidden_name');
+    expect(verify(good('Hi Dana, Marcus and TYLER are glad the ants are gone from your kitchen.'))).toBe('forbidden_name');
+  });
+  test('provenance: a name greeted in a recent reply cannot be copied into this one', () => {
+    const recent = [good('Hi Priya, glad the wasps by the pool cage are handled. Thanks for having us.')];
+    expect(verify(good('Hi Priya, glad Marcus got the ants out of your kitchen so fast.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
+    expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBeNull();
+    expect(Drafter.greetingName('Hello there, thanks')).toBeNull();
+    expect(Drafter.greetingName('Hey Priya, thanks')).toBe('Priya');
+  });
+  test('provenance: an introduced name with no source in the review is rejected (hallucinated / former tech)', () => {
+    expect(verify(good('Hi Dana, Kevin and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, glad the ants are gone. Thanks from Marcus and the Waves Pest Control team.'))).toBeNull();
+    // A capitalized word the reviewer wrote is fine mid-sentence.
+    const g = grounding({ text: 'Marcus took care of the German roaches fast.' });
+    expect(verify(good('Hi Dana, glad Marcus took care of the German roaches so fast.'), g)).toBeNull();
+  });
+  test('provenance: sentence-initial names need provenance too; common starters are exempt', () => {
+    expect(verify(good('Hi Dana,\n\nKevin was glad to help with the ants. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Anytime you need us, reach out.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nGlad the ants are gone. Marcus says thanks. Thanks for having us out.'))).toBeNull();
+  });
+  test('provenance: fragments of unrelated served cities do not launder a name', () => {
+    expect(verify(good('Hi Dana, Charlotte was glad to help with the ants alongside Marcus.'))).toBe('unlisted_name');
+  });
+  test('addresses are caught case-insensitively and with numbered streets', () => {
+    const g = grounding({ text: 'Marcus treated the ants at 123 main st and 123 4th St, great.' });
+    expect(verify(good('Hi Dana, glad Marcus got the ants at 123 main st handled.'), g)).toBe('address');
+    expect(verify(good('Hi Dana, glad Marcus got the ants at 123 4th St handled.'), g)).toBe('address');
+  });
+  test('date and relative-time claims are rejected unless the reviewer wrote them', () => {
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled on Tuesday.'))).toBe('date_claim');
+    // codex r22: seasonal phrasing in every wrapper is a timing claim too.
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled over the summer.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled this spring.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled during the summer heat.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled before winter.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled in the rainy season.'))).toBe('date_claim');
+    const gSeason = grounding({ text: 'Marcus came out this spring and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got to the ants this spring.'), gSeason)).toBeNull();
+    const g = grounding({ text: 'Marcus came out last week and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got to the ants last week.'), g)).toBeNull();
+  });
+  test('Unicode names survive normalization and the name allowlist', () => {
+    const g = grounding({ firstName: 'José' });
+    g.allow.names = ['José', 'Marcus'];
+    expect(verify(good('Hi José, glad Marcus got the ants out of your kitchen so fast.'), g)).toBeNull();
+    expect(Drafter.greetingName('Hi José, thanks')).toBe('José');
+  });
+  test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
+    expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    // codex r66: lowercase names outside a role slot.
+    const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hi Dana, we will make sure kevin hears your feedback about the ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, we will pass this along to tasha, who handled the ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, thanks to kevin for helping with your ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, we will make sure the team hears your feedback about the ants.'), gants)).toBe(null);
+    expect(verify(good('Hi Dana, we will pass this along to everyone who helped with the ants.'), gants)).toBe(null);
+    // codex r64: the low-rating prompt mandates "the owner wants to make it right" — ordinary verbs after a role noun are not names.
+    const glow = grounding({ rating: 2, text: 'Ants came back after a week.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hi Dana, we are sorry the experience fell short. Our owner wants to make it right with you, so please call the office directly.'), glow)).toBe(null);
+    expect(verify(good('Hi Dana, we are sorry the experience fell short. Our manager personally apologizes and hopes to make it right, so please call the office.'), glow)).toBe(null);
+    expect(verify(good('Hi Dana,\n\nWe will keep the ants out. Marcus says thanks.'))).toBeNull();
+  });
+  test('service / treatment claims need provenance from the review or the account categories', () => {
+    const g = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hi Dana, glad our mosquito treatments delivered great service. We look forward to protecting your yard."), g)).toBe('unlisted_service_claim');
+    expect(verify(good('Hi Dana, glad the service hit the mark. Thanks for having us out to the house.'), g)).toBeNull();
+    // An account service category makes its words sourced.
+    const g2 = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['mosquito control'], city: null } });
+    expect(verify(good('Hi Dana, glad the mosquito control is doing its job. Thanks for sticking with us over the years.'), g2)).toBeNull();
+    // Outcome vocabulary is a claim too.
+    expect(verify(good('Hi Dana, glad we eliminated the infestation and protected your home.'), g)).toBe('unlisted_service_claim');
+    const g3 = grounding({ text: 'They eliminated our ant infestation fast!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad the ants are eliminated and the infestation is behind you.'), g3)).toBeNull();
+    // Relationship claims need provenance too.
+    expect(verify(good('Hi Dana, thanks for years of trusting us with the service.'), g)).toBe('unlisted_relationship_claim');
+  });
+  test('visit-experience claims (timeliness, communication) need the reviewer\'s words', () => {
+    const g = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad the service hit the mark. Our team arrived on time and explained everything clearly.'), g)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
+  });
+  test('a lowercase staff name after a role noun needs provenance (codex r59)', () => {
+    const g = grounding({ text: 'Great service for ants', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad our technician kevin could help with your ants.'), g)).toBe('unlisted_name');
+    const g2 = grounding({ text: 'Great service for ants from kevin', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad our technician kevin could help with your ants.'), g2)).toBeNull();
+    expect(verify(good('Hello there, we are glad our tech was able to help with your ants.'), g)).toBeNull();
+  });
+
+  test('technician credential / award claims need the reviewer\'s words (codex r52)', () => {
+    expect(verify(good('Hi Dana, our certified technician Marcus did a great job with your ants.'))).toBe('unlisted_credential_claim');
+    expect(verify(good('Hi Dana, our award-winning team is glad Marcus got the ants.'))).toBe('unlisted_credential_claim');
+    const g = grounding({ text: 'Marcus, your licensed tech, got the ants out fast. Great.' });
+    expect(verify(good('Hi Dana, glad our licensed tech Marcus got the ants.'), g)).toBeNull();
+  });
+
+  test('continuing-customer claims need recurring provenance (codex r45)', () => {
+    const g = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'], account: null });
+    expect(verify(good('Hello there, thank you for continuing to count on our pest team.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hello there, we appreciate that you keep choosing our pest team.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hello there, thanks for sticking with our pest team.'), g)).toBe('unlisted_relationship_claim');
+    const gr = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'], account: { relationship: 'recurring', tenure: 'new', serviceCategories: ['pest'], city: null } });
+    expect(verify(good('Hello there, thank you for continuing to count on our pest team.'), gr)).toBeNull();
+    expect(verify(good('Hello there, we appreciate that you keep choosing our pest team.'), gr)).toBeNull();
+  });
+
+  test('grounded phrases match on token boundaries: "ants" is not inside "plants" (codex r41)', () => {
+    const g = grounding({ text: 'Great care for our plants.', mentionedTechNames: [], topics: ['lawn'] });
+    expect(verify(good('Hello there, we appreciate you trusting us with the ants.'), g)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'Great care for our ants problem.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we appreciate you trusting us with the ants.'), g2)).toBeNull();
+  });
+
+  test('a result the reviewer NEGATED does not license the claim (codex r26)', () => {
+    const g = grounding({ text: 'Great staff, but they did not get rid of the ants.', topics: ['technician', 'pest'] });
+    expect(verify(good("Hi Dana, we're glad we got rid of the ants for you."), g)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, glad the ants are gone now.'), g)).toBe('unlisted_service_claim');
+    // The reply that negates it too is honest and passes this rule.
+    expect(verify(good("Hi Dana, sorry we did not get rid of the ants yet. Thanks for the note about the staff."), g)).toBeNull();
+    // An un-negated occurrence elsewhere still sources it.
+    const g2 = grounding({ text: 'At first they did not get rid of the ants, but the second visit got rid of the ants for good.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, glad we got rid of the ants in the end.'), g2)).toBeNull();
+    // Experience claims too: "they were not on time" cannot become "glad we were on time".
+    const g3 = grounding({ text: 'Marcus was friendly but he was not on time.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus was on time and friendly.'), g3)).toBe('negated_review_claim');
+    expect(verify(good('Hi Dana, glad Marcus was friendly, and we hear you that he was not on time.'), g3)).toBeNull();
+    // Root matches respect negation as well: "never eliminated" ≠ "eliminate".
+    const g4 = grounding({ text: 'Nice people, but they never eliminated the roaches.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, glad we could eliminate the roaches.'), g4)).toBe('negated_review_claim');
+  });
+
+  test('outcome verbs and clock times need the reviewer\'s words', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we solved it and got everything handled for you."), g)).toBe('unlisted_service_claim');
+    expect(verify(good("Hello there, glad we could stop by at noon. Thanks for the rating."), g)).toBe('date_claim');
+    expect(verify(good("Hello there, glad we could be there at 5 pm. Thanks for the rating."), g)).toBe('date_claim');
+    const g2 = grounding({ text: 'They came at noon and handled the ants.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad we came at noon and handled the ants for you.'), g2)).toBeNull();
+  });
+  test('service-quality adjectives need the reviewer\'s words (rating-only reviews get none)', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad our team was helpful, honest, and efficient. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
+  });
+  test('quantified tenure needs the whole phrase in the review', () => {
+    const g = grounding({ text: '10/10 great service', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], city: null } });
+    expect(verify(good('Hi Dana, thank you for trusting us with the pest control for 10 years.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hi Dana, thank you for sticking with us over the years for the pest control.'), g)).toBeNull();
+    const g2 = grounding({ text: 'Ten years with them and still great.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, ten years is a long run and we are glad to still be the ones you call.'), g2)).toBeNull();
+  });
+  test('comparative/noun safety forms and rank language in any wrapper are rejected', () => {
+    expect(verify(good('Hi Dana, glad Marcus offered a safer option for the ants in your kitchen.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus put safety first with the ants in your kitchen.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus is proud to be on the best pest control team for your ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, thanks for choosing the number one team for the ants Marcus handled.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus and a top pest control team got the ants out.'))).toBe('banned_phrase');
+  });
+  test('charge-waiver incentive forms are banned; respect / visit-condition claims need the reviewer\'s words', () => {
+    expect(verify(good("Hi Dana, Marcus got the ants out and we'd like to waive the charge on your next service."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants out at no cost to you.'))).toBe('banned_phrase');
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we respected your home and left everything exactly as we found it. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+  });
+  test('visit-occurrence claims need the reviewer\'s words; grounded multiword outcome phrases pass', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we could stop by. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'They came out and took care of the wasps, everything is under control.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad we could come out and take care of the wasps. Good to hear everything is under control.'), g2)).toBeNull();
+  });
+  test('all-caps names need provenance too; common acronyms are fine', () => {
+    expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, glad the ants are gone before your HOA walk-through. Marcus says thanks.'))).toBeNull();
+  });
+  test('drying / curing / wait-before language is banned even when the number came from the review', () => {
+    const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad Marcus got the ants. Just wait a few hours before letting pets out.'), g)).toBe('banned_phrase');
+  });
+  test('recent replies shown to the model have their greeted names redacted', () => {
+    const text = Drafter.buildUserText(grounding(), [good('Hi Priya, glad the wasps are handled.')], null);
+    expect(text).toContain('Hi (name), glad the wasps');
+    expect(text).not.toContain('Priya');
+  });
+  test('provenance: digits the reviewer did not type are rejected; the star rating is allowed', () => {
+    expect(verify(good('Hi Dana, Marcus got the ants on his 2nd visit and they are gone.'))).toBe('unlisted_digits');
+    expect(verify(good('Hi Dana, thanks for the 5 star note. Marcus is glad the ants are gone.'))).toBeNull();
+    expect(verify(good('Hi Dana, thanks for the 5-star review. Marcus is glad the ants are gone.'))).toBeNull();
+    // codex r50: the rating digit is not a licence for a bare number.
+    expect(verify(good('Hi Dana, our team arrived in 5 minutes and Marcus got the ants.'))).toBe('unlisted_digits');
+    const g = grounding({ text: 'Marcus came out within 2 hours and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got there within 2 hours and the ants are gone.'), g)).toBeNull();
+  });
+  test('provenance: served cities the reviewer did not mention are rejected unless they are the location/account city', () => {
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Venice kitchen.'))).toBe('unlisted_city');
+    expect(verify(good('Hi Dana, Marcus is glad the ants are gone from your Sarasota kitchen.'))).toBeNull();
+  });
+  test('non-repetition against recent posted replies', () => {
+    const recent = [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')];
+    expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBe('repetitive_opening');
+    const recent2 = [good('Hello there, glad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.')];
+    expect(verify(CLEAN, grounding(), { recentReplies: recent2 })).toBe('repetitive_body');
+  });
+  test('the greeting is mandatory: "Hi <reviewer first name>," or "Hello there,"', () => {
+    expect(verify(good('Thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
+    expect(verify(good('Hey Dana, thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
+    expect(verify(good('Hello there, thanks for trusting Marcus with the ants in your kitchen.'))).toBeNull();
+    const g = grounding({ firstName: null, text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
+  });
+  test('placeholders are rejected', () => {
+    expect(verify(good('Hi {first name}, Marcus is glad the ants are gone from your kitchen.'))).toBe('placeholder');
+  });
+});
+
+describe('draftReviewReply — fallback ladder', () => {
+  test('accepts a clean first draft and reports mode/version', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: CLEAN });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.text).toBe(CLEAN);
+    expect(r.mode).toBe('tech_praise');
+    expect(r.version).toBe(Drafter.REPLY_VERSION);
+    expect(r.attempts).toBe(1);
+    // Rules ride the system channel; the review rides the user channel.
+    const payload = mockDispatch.mock.calls[0][1];
+    expect(payload.system).toContain('HARD RULES');
+    expect(payload.text).toContain('Review text:');
+    expect(payload.system).not.toContain('ants in the kitchen');
+  });
+  test('retries with the violation named, then falls back to review-only, then gives up', async () => {
+    mockDispatch
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') })
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, call 941-555-1212 about the ants Marcus treated.') })
+      .mockResolvedValueOnce({ ok: true, text: good('Hi Dana, our records show Marcus treated the ants for you.') });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('verifier_reject');
+    expect(r.rejections).toEqual(['forbidden_name', 'phone', 'private_channel']);
+    expect(r.attempts).toBe(3);
+    expect(mockDispatch.mock.calls[1][1].text).toContain('PREVIOUS ATTEMPT WAS REJECTED');
+    // third attempt is review-only: no account facts in the user text
+    expect(mockDispatch.mock.calls[2][1].text).toContain('ACCOUNT FACTS: none available');
+  });
+  test('no review-only step when there were no account facts (2 attempts max)', async () => {
+    mockDispatch.mockResolvedValue({ ok: true, text: good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.') });
+    const r = await Drafter.draftReviewReply({ grounding: grounding({ account: null }), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.attempts).toBe(2);
+  });
+  test('provider outage surfaces as provider_unavailable', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: false, reason: 'all_failed' });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toBe('provider_unavailable');
+  });
+  test('a quoted draft is normalized before verification', async () => {
+    mockDispatch.mockResolvedValueOnce({ ok: true, text: `"${CLEAN}"` });
+    const r = await Drafter.draftReviewReply({ grounding: grounding(), recentReplies: [] });
+    expect(r.ok).toBe(true);
+    expect(r.text).toBe(CLEAN);
+  });
+});

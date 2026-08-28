@@ -14,13 +14,7 @@ function today() { return etDateString(); }
 function daysAgo(n) { return etDateString(addETDays(new Date(), -n)); }
 function mondayThisWeek() { return etWeekStart(); }
 
-const DRAFT_REPLY_PREFIX = '[DRAFT]';
-
-function whereNeedsRealReviewReply(qb, column = 'review_reply') {
-  qb.where(function needsRealReply() {
-    this.whereNull(column).orWhere(column, 'like', `${DRAFT_REPLY_PREFIX}%`);
-  });
-}
+const { DRAFT_REPLY_PREFIX, whereNeedsRealReply: whereNeedsRealReviewReply } = require('./review-reply/draft-prefix');
 
 async function executeBITool(toolName, input) {
   switch (toolName) {
