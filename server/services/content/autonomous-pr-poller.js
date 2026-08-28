@@ -1014,6 +1014,13 @@ async function maybeAutoMerge(run, pr) {
       logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
       return { pending: true, reason: `topic_targeting_blocked: ${topic.reason}` };
     }
+    // 3.8 The recheck above was more async work (GitHub + corpus reads): an
+    //     operator dismiss/requeue landing during it must still block the
+    //     merge — repeat the queue re-check immediately before gh.mergePr.
+    if (!(await queueRowStillParked(run))) {
+      logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
+      return { pending: true, reason: 'queue_row_moved_during_gating' };
+    }
   }
 
   // 4. The merge itself is pinned to the head commit the gates above were
