@@ -123,6 +123,11 @@ const STATE_ABBR_TRAILING = 'mt';
 // Service-intent words: "<place> pest control" / "<abbr> exterminator" is a
 // geographic search phrase even without a preposition or a state suffix.
 const SERVICE_INTENT = 'pest control|pest|pests|exterminator|exterminators|termite|termites|lawn care|lawn|mosquito|mosquitoes|rodent|rodents|wdo|fumigation|bed bugs?';
+// Service nouns that may sit between the intent word and the place in the
+// service-first form ("termite treatment austin"). Never a preposition —
+// "pests in cocoa mulch" is a topic, and the preposition forms carry
+// their own boundary rules.
+const SERVICE_FILLER = 'treatment|treatments|service|services|company|companies|control|removal|inspection|inspections|cost|costs|price|prices|pricing|experts|specialists';
 // Ambiguous abbreviations that are NOT English words: they also count in
 // "<word> <abbr> <service>" ("boulder co pest control"). The pure English
 // words (hi, in, me, oh, ok, or) never do — "pest control or exterminator".
@@ -134,7 +139,11 @@ const STATE_ABBR_RE = new RegExp(
   // "pest control in va" — an ambiguous abbreviation right after a geo
   // preposition, at the end of the phrase ("ants in or around" is not).
   + `|\\b(?:in|near|around|serving|across)\\s+(${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
-  + `|\\b[a-z]+\\s+(${STATE_ABBR_SEMI})\\s+(?:${SERVICE_INTENT})\\b`,
+  + `|\\b[a-z]+\\s+(${STATE_ABBR_SEMI})\\s+(?:${SERVICE_INTENT})\\b`
+  // "al termite treatment" / "pa pest control laws" — a non-word ambiguous
+  // abbreviation LEADING the text before a service ("in wall pest control"
+  // and "or pest control" never: in/or are English words, not in SEMI).
+  + `|^\\s*(${STATE_ABBR_SEMI})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`,
   'i'
 );
 // Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
@@ -170,7 +179,15 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
 // office), so they count only with state context: "in/near Washington",
 // "Washington state", or as the trailing geo of a query ("spokane
 // washington") when the word before them is not a person-name cue.
-const NAME_STATE_RE = /\b(?:in|near|around|across|serving)\s+(washington|virginia)\b|\b(washington|virginia)\s+state\b|\b(?!(?:ask|meet|with|from|by|and|contact|call|text|email|thanks|thank|our|the|hi|hello|dear)\b)[a-z]+,?\s+(washington|virginia)\s*$/i;
+// "Virginia termite treatment" / "Washington pest control" — the name
+// directly before a service (optionally a service noun) is the state; "ask
+// virginia about pest control" is not (about ≠ service word).
+const NAME_STATE_RE = new RegExp(
+  '\\b(?:in|near|around|across|serving)\\s+(washington|virginia)\\b|\\b(washington|virginia)\\s+state\\b'
+  + '|\\b(?!(?:ask|meet|with|from|by|and|contact|call|text|email|thanks|thank|our|the|hi|hello|dear)\\b)[a-z]+,?\\s+(washington|virginia)\\s*$'
+  + `|\\b(washington|virginia)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`,
+  'i'
+);
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
@@ -189,11 +206,6 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // service-first search forms. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
 // activity") are excluded: both read as ordinary words before a service.
 const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile' && n !== 'Sunrise');
-// Service nouns that may sit between the intent word and the place in the
-// service-first form ("termite treatment austin"). Never a preposition —
-// "pests in cocoa mulch" is a topic, and the preposition forms above carry
-// their own boundary rules.
-const SERVICE_FILLER = 'treatment|treatments|service|services|company|companies|control|removal|inspection|inspections|cost|costs|price|prices|pricing|experts|specialists';
 const CONTEXT_PLACE_RE = new RegExp(
   `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
   + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
@@ -639,8 +651,6 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // → compare against all (conservative).
   const category = String(candidate.category || categoryFromSlug(slug) || SERVICE_TO_CATEGORY[String(candidate.service || '').toLowerCase()] || '').toLowerCase() || null;
   const owners = new Map();
-  const pool = compatiblePosts(idx, category);
-  const df = dfForCategory(idx, category);
   // Entities come from every targeting field (keyword + title + slug): an
   // idea may carry a generic or empty keyword with the owned entity only in
   // its title ("Your New Home Came With Taexx"). Framing words in titles
@@ -648,15 +658,25 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // the token (≥ OWNER_MIN_OCCURRENCES across its own targeting fields).
   const properNouns = idx.properNouns || new Set();
   const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' ')).filter((tok) => properNouns.has(tok));
-  for (const tok of tokens) {
-    const n = df.get(tok) || 0;
-    if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;
-    for (const post of pool) {
-      if ((post.counts.get(tok) || 0) < OWNER_MIN_OCCURRENCES) continue;
-      const key = post.url || post.path || post.title;
-      const entry = owners.get(key) || { url: post.url, title: post.title, entities: [] };
-      entry.entities.push(tok);
-      owners.set(key, entry);
+  // Unknown candidate category (an unmapped tag): judge it against EVERY
+  // category and union the owners. A global document frequency would let a
+  // brand named across categories ("Advion" in termite + pest posts) exceed
+  // RARE_ENTITY_DF_MAX and hide the one same-category post built around it.
+  const categories = category ? [category] : [...new Set(idx.posts.map((p) => p.category).filter(Boolean))];
+  if (!categories.length) categories.push(null);
+  for (const cat of categories) {
+    const pool = compatiblePosts(idx, cat);
+    const df = dfForCategory(idx, cat);
+    for (const tok of tokens) {
+      const n = df.get(tok) || 0;
+      if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;
+      for (const post of pool) {
+        if ((post.counts.get(tok) || 0) < OWNER_MIN_OCCURRENCES) continue;
+        const key = post.url || post.path || post.title;
+        const entry = owners.get(key) || { url: post.url, title: post.title, entities: [] };
+        if (!entry.entities.includes(tok)) entry.entities.push(tok);
+        owners.set(key, entry);
+      }
     }
   }
   const entity_owners = [...owners.values()];

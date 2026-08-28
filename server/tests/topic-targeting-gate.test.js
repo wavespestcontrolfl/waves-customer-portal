@@ -543,6 +543,28 @@ describe('PR codex r4 (2b1bcc9cb)', () => {
   });
 });
 
+describe('hook (PR codex r5 push): state names / leading abbreviations before a service; unknown category unions per-category ownership', () => {
+  test('"Virginia termite treatment", "Washington pest control", "AL termite treatment", "PA pest control laws" are out-of-state', () => {
+    for (const t of ['Virginia termite treatment', 'Washington pest control', 'AL termite treatment', 'PA pest control laws', 'virginia pest control services cost']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['ask virginia about pest control', 'in wall pest control', 'or pest control', 'virginia creeper vine pests', 'washington navel orange pests']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('an unmapped tag (unknown category) still finds the same-category owner of a brand named across categories', () => {
+    const prose = 'Technicians place Advion where pests travel. Most Advion placements last a season.';
+    const termite = { url: '/termite/advion-termite-bait/', body: `---\ntitle: Advion Termite Bait Stations\nslug: /termite/advion-termite-bait/\nprimary_keyword: advion termite bait stations\ncategory: termite\n---\n${prose}\n## How Advion stations work\n## When Advion beats liquid\n` };
+    const pest = ['advion-ant-gel', 'advion-roach-gel', 'advion-rodent-safety'].map((leaf) => ({ url: `/pest-control/${leaf}/`, body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n${prose}\n` }));
+    const corpus = [termite, ...pest];
+    // Global DF for "advion" is 4 (> RARE_ENTITY_DF_MAX) — a global pass would hide the termite owner.
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'advion termite bait review', title: 'Is Advion Termite Bait Worth It?', slug: '/advion-termite-bait-review/' }, { corpus });
+    expect(r.category).toBeNull();
+    expect(r.ok).toBe(false);
+    expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['advion'], owners: ['/termite/advion-termite-bait/'] });
+  });
+});
+
 describe('PR codex r5 (ab050983a)', () => {
   test('service-first place phrases are geographic too; Mobile/Sunrise still ordinary words', () => {
     for (const t of ['pest control Boston', 'termite treatment Austin', 'exterminator Houston', 'lawn care wellington']) {
