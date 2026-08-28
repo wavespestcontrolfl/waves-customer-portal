@@ -364,6 +364,9 @@ function buildWeeklyEmailDecision({
   // decision stays pure; `now` pins the restriction policy in tests.
   // Week-ahead ET₀ (inches, from the forecast) — sizes the plan's target.
   forecastEt0Inches = null,
+  // The home the plan is decided for (bound to the snapshot; the report
+  // attaches the plan only to a service at this address).
+  home = null,
   // Jurisdiction for the restriction policy (resolveRestrictionCounty).
   county = null,
   weekPlanEnabled = false,
@@ -635,6 +638,7 @@ function buildWeeklyEmailDecision({
       explicitInchesPerWeek: prefsInches,
       rainSensor: rainSensor === true || rainSensor === 't',
       county,
+      home,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -906,6 +910,8 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // or we email "we don't have your watering schedule" to someone whose
       // own report displays that very number.
       'c.city',
+      'c.address_line1',
+      'c.zip',
       'tp.county as turf_county',
       'tp.municipality as turf_city',
       'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
@@ -1060,6 +1066,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
         county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city }),
+        home: { addressLine1: customer.address_line1, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
         now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
@@ -1114,12 +1121,22 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // idempotency key (the customer changed email mid-week) means the
         // week's email already went out — never send a second, possibly
         // different, plan to the new address.
-        if (await hasSentWeekPlan({ customerId: customer.id, weekEnding })) {
+        const alreadySent = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
+        if (alreadySent === true) {
           summary.deduped += 1;
           continue;
         }
-        const prior = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
-        if (prior.state === 'sent') {
+        if (alreadySent === null) {
+          // Unreadable snapshot table is not proof of a sent row: the week's
+          // email still goes out on the pre-plan template.
+          summary.plan.claim_error += 1;
+          decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
+          snapshotArgs = null;
+        }
+        const prior = snapshotArgs ? await weekPlanDeliveryState({ triggerEventId, idempotencyKey }) : { state: 'pending' };
+        if (!snapshotArgs) {
+          // fell back above — nothing to claim
+        } else if (prior.state === 'sent') {
           // Delivered by an earlier run: stamp exactly the row its record
           // names (none named → the report stays without a plan) and STOP —
           // one email per customer-week, whatever the recipient key now is

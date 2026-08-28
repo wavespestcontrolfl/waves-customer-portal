@@ -75,6 +75,9 @@ function decideWeekPlan({
   explicitInchesPerWeek = null,
   rainSensor = false,
   county = null,
+  // The home the plan is decided for (address + coordinates the sweep used);
+  // the report attaches the plan only to a service at THIS address.
+  home = null,
   now = new Date(),
 } = {}) {
   const restriction = currentRestrictionPolicy(now, { county });
@@ -119,6 +122,13 @@ function decideWeekPlan({
     explicitInchesPerWeek: explicitInchesPerWeek ?? null,
     rainSensor: rainSensor === true,
     county,
+    home: home ? {
+      addressLine1: home.addressLine1 || null,
+      city: home.city || null,
+      zip: home.zip || null,
+      latitude: home.latitude ?? null,
+      longitude: home.longitude ?? null,
+    } : null,
   };
   return { plan, restriction, decisionInputs };
 }
@@ -269,9 +279,16 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
         : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }
+  // No forecast was available when the plan was decided: the email carries
+  // a "skip after ½" of real rain" safeguard — the report must too.
+  const noForecastNote = plan.reasons.includes('forecast_unavailable')
+    ? (plan.events > 1
+      ? ' No rain forecast was available for this plan — before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not), skip that run.'
+      : ' No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.')
+    : '';
   return {
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
-    detail: `${plan.events > 1 ? `On each of your ${plan.events} permitted watering days` : `On ${permittedDayPhrase(plan)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.`,
+    detail: `${plan.events > 1 ? `On each of your ${plan.events} permitted watering days` : `On ${permittedDayPhrase(plan)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
   };
 }
 
@@ -391,8 +408,8 @@ function hashFromCategories(raw) {
  * A prior run's delivery, from the durable email_messages record — looked up
  * at customer/week scope (trigger_event_id): { state, decisionHash } — state 'sent' (provider
  * accepted — sent/delivered/opened/clicked), 'blocked' (suppressed),
- * 'failed', 'pending' (queued / in flight / lookup failed), or null (no
- * attempt); decisionHash = the snapshot the delivered email was built from
+ * 'pending' (queued / in flight / FAILED-ambiguous / lookup failed), or
+ * null (no attempt); decisionHash = the snapshot the delivered email was built from
  * (null on a record that carries none). The sweep reconciles from THIS,
  * never from a return shape or an exception, and stamps only the row whose
  * hash the record names.
@@ -406,11 +423,13 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   try {
     const rows = await db('email_messages').where(where).select('status', 'categories');
     if (!rows || !rows.length) return { state: null, decisionHash: null };
+    // 'failed' is AMBIGUOUS — the library can mark a row failed when its
+    // post-provider status update fails — so it classifies as pending: never
+    // reclaimed, never resent, never deleted until a webhook repairs it.
     const classify = (row) => {
       const status = String(row.status || '').toLowerCase();
       if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
       if (status === 'blocked') return 'blocked';
-      if (status === 'failed') return 'failed';
       return 'pending';
     };
     // A delivered record wins over any other attempt for the week.
@@ -427,6 +446,11 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
 }
 
 /** A SENT snapshot already exists for this customer-week (the weekly email went out). */
+/**
+ * true = a SENT snapshot exists for the customer-week; false = none; null =
+ * UNKNOWN (lookup failed / table unavailable) — the caller falls back to the
+ * pre-plan email rather than treating an unreadable table as a sent row.
+ */
 async function hasSentWeekPlan({ customerId, weekEnding } = {}) {
   try {
     const row = await db('irrigation_week_plans')
@@ -436,7 +460,7 @@ async function hasSentWeekPlan({ customerId, weekEnding } = {}) {
     return !!row;
   } catch (err) {
     logger.warn(`[irrigation-week-plan] sent-check failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return true; // unknown → do not send a second, possibly different, plan
+    return null;
   }
 }
 

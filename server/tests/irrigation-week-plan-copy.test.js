@@ -129,6 +129,15 @@ describe('renderWeekPlanEmail', () => {
     expect(report.detail).not.toMatch(/permitted watering day|run one cycle/);
   });
 
+  test('report carries the no-forecast rain safeguard the email has', () => {
+    const one = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanReport(one).detail).toContain('No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.');
+    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanReport(two).detail).toContain('since your previous permitted watering day (skipped or not), skip that run');
+    const withForecast = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: 0.1, ...SPRAY });
+    expect(renderWeekPlanReport(withForecast).detail).not.toContain('No rain forecast');
+  });
+
   test('unavailable plan → null (the sender keeps its pre-plan template)', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: null, ...SPRAY });
     expect(renderWeekPlanEmail(plan, CTX)).toBeNull();
@@ -160,6 +169,8 @@ describe('decideWeekPlan (server glue)', () => {
     expect(restriction.maxDaysPerWeek).toBe(1);
     expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek); // same month, same ET₀ → same target
     expect(decisionInputs.targetBasis).toBe('forecast_et0');
+    const withHome = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, ...SPRAY, county: 'Manatee', home: { addressLine1: '123 Sample Ln', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 }, now: new Date('2026-08-28T12:00:00Z') });
+    expect(withHome.decisionInputs.home).toEqual({ addressLine1: '123 Sample Ln', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 });
     expect(decisionInputs.planMonth).toBe(8);
     expect(plan.carryoverInches).toBe(0.5);
     expect(plan.action).toBe('run');
@@ -301,6 +312,19 @@ describe('snapshot lifecycle — exactness contract', () => {
   });
 });
 
+describe('hasSentWeekPlan', () => {
+  const db = require('../models/db');
+  const { hasSentWeekPlan } = require('../services/irrigation-week-plan');
+  test('true / false / null(unknown) — an unreadable table is never proof of a sent row', async () => {
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => ({ id: 'x' }) }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => undefined }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('relation missing'); } }));
+    expect(await hasSentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBeNull();
+  });
+});
+
 describe('weekPlanDeliveryState — the durable record decides, at customer/week scope, and names the snapshot', () => {
   const db = require('../models/db');
   const { weekPlanDeliveryState, planCategory, _private } = require('../services/irrigation-week-plan');
@@ -309,7 +333,7 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
 
   test.each([
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
-    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
+    ['blocked', 'blocked'], ['failed', 'pending'], ['queued', 'pending'],
   ])('status %s → %s', async (status, expected) => {
     withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']) }]);
     const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });

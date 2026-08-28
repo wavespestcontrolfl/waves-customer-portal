@@ -48,6 +48,7 @@ const {
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
+const { stampedAddressDiverges } = require('../stamped-address');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2597,7 +2598,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // Pinned renders are STRICT: a failed lookup must refuse the render
     // rather than cache a plan-less page under a plan-present key.
     const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });
-    if (snapshot?.plan) {
+    // The plan binds to the HOME the sweep decided it for: the serviced
+    // address (stamped, else the customer's current mirror) must be that
+    // home — a mid-week move makes the stamp match the NEW address while
+    // the snapshot's weather and county belong to the old one.
+    const home = snapshot?.decisionInputs?.home || null;
+    const servicedElsewhere = home && stampedAddressDiverges({
+      service_address_line1: service.address_line1, service_address_city: service.city, service_address_zip: service.zip,
+      customer_address_line1: home.addressLine1, customer_city: home.city, customer_zip: home.zip,
+    });
+    if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });
     }

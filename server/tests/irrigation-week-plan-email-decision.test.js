@@ -31,6 +31,7 @@ describe('weekly email decision — plan mode', () => {
     expect(d.restriction.maxDaysPerWeek).toBe(1);
     // The snapshot carries the inputs the decision saw (report comparisons use these).
     expect(d.decisionInputs).toMatchObject({ runMinutes: 20, headTypes: ['spray'], forecastRainInches: 0.3, scheduleSource: 'portal', rainfallInches7d: 0.6 });
+    expect(d.decisionInputs.home).toBeNull(); // the sweep supplies the home; a bare decision records none
     // Last week's story stays in summary_line; the plan owns subject/heading/callout.
     expect(d.payload.summary_line).toMatch(/more than the .* your St\. Augustine needs/);
     // Typed 2" ÷ (20 min × 4 days) = a MEASURED 1.5 in/hr; need = 1.25 − ½"
@@ -123,6 +124,10 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/const isMondayET = etParts\(now\)\.dayOfWeek === 1;/);
     expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
+    // An UNKNOWN sent-check (unreadable table) falls back to the pre-plan email too.
+    expect(src).toMatch(/if \(alreadySent === null\) \{[\s\S]{0,400}weekPlanEnabled: false/);
+    // The sweep binds the home (address + coords) it decided for into the snapshot.
+    expect(src).toMatch(/home: \{ addressLine1: customer\.address_line1, city: customer\.city, zip: customer\.zip, latitude: customer\.latitude, longitude: customer\.longitude \}/);
     // A snapshot-claim DB error falls back to the pre-plan email (never silence).
     expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
     // Delivery reconciliation is customer/week scoped (trigger_event_id)…
