@@ -75,6 +75,10 @@ const WRITE_TOOL_IN_FLIGHT_TEXT =
 const WRITE_DRAIN_TIMEOUT_MS = 10000;
 
 /** Resolve `promise`, or `fallback` after `ms`. The loser is never awaited. */
+// Bound on the detached preferred_language stamp (read + write) — never on
+// the caller's path, so a stall only costs the stamp.
+const LANGUAGE_STAMP_TIMEOUT_MS = 3000;
+
 function withTimeout(promise, ms, fallback = undefined) {
   let timer;
   const timeout = new Promise((resolve) => {
@@ -273,11 +277,16 @@ function bookingPromptAddendum() {
  * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
  * The booking addendum appears only while GATE_VOICE_AI_BOOKING is ALSO on.
  */
-function buildBasePrompt(contextEnabled) {
-  if (!contextEnabled) return SYSTEM_PROMPT;
+function buildBasePrompt(contextEnabled, language = null) {
+  // Spanish session (GATE_VOICE_SPANISH_MENU — the caller pressed 2): the
+  // language addendum is appended LAST so it governs everything above it.
+  // No/English language ⇒ byte-identical to before.
+  const { isSpanish, LANGUAGE_ADDENDUM_ES } = require('./relay-language');
+  const langSuffix = isSpanish(language) ? '\n' + LANGUAGE_ADDENDUM_ES : '';
+  if (!contextEnabled) return SYSTEM_PROMPT + langSuffix;
   const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base;
+  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + langSuffix;
 }
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
@@ -418,6 +427,18 @@ class RelayConversation {
     // is not. Read by the tool ctx below.
     this._callerVerified = false;
     this._contextReady = null;
+    // Session language PROOF (codex #3561 r3). `this.language` is the setup
+    // frame's hint — it may steer speech (prompt addendum, spoken closes) but
+    // never account data. Anything that WRITES a language (the customer
+    // preference stamp, the lead capture hint) reads `_provedLanguage`, set
+    // only after the authenticated call_log row's metadata.caller_language
+    // (written by the signed /voice press-2 handler) confirms the selection.
+    // Absent proof ⇒ null ⇒ no language reaches any writer (fail closed).
+    this._provedLanguage = null;
+    this._languageProof = null;
+    if (this.callSid && require('./relay-language').isSpanish(this.language)) {
+      this._languageProof = this._proveSelectedLanguage();
+    }
     // Session-scoped lookup ref registry (Phase B lookup_customer): refs are
     // OPAQUE per-call handles — raw customer ids never cross the model
     // boundary in either direction, so the model can only reference accounts
@@ -505,11 +526,22 @@ class RelayConversation {
             // stability) — the KNOWN CALLER block then rides the next user
             // turn instead, like the recent-texts data turn.
             if (this._systemBlocks) this._lateContextBlockPending = true;
+            // A late confident match still earns the language stamp (codex
+            // #3561 P2) — same guarded, bounded, detached write as below.
+            void this._persistLanguagePreference();
           }
         },
       })
         .then((ctx) => { this._callerContext = this._callerContext || ctx; })
         .catch(() => {});
+      // Spanish session + CONFIDENT resolution ⇒ remember the preference on
+      // the customer. DETACHED from _contextReady (codex #3561 P1): the first
+      // model turn awaits that promise, and a locked customers row must never
+      // cost the caller silence — this write is non-blocking metadata with
+      // its own bound. Never from ANI + press-2 alone: a redacted /
+      // contact-slot match is a shared number and does not speak for the
+      // account holder.
+      this._contextReady.then(() => { void this._persistLanguagePreference(); }).catch(() => {});
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()
         .then((hours) => { this._officeHours = hours; })
@@ -543,6 +575,75 @@ class RelayConversation {
   }
 
   /** Speak a line to the caller (no-op on empty). Everything spoken is recorded. */
+  /**
+   * Re-prove the Spanish selection from the authenticated call_log row —
+   * once per session, bounded, detached (never on the caller's path).
+   * Resolves the proved language ('es') or null.
+   */
+  async _proveSelectedLanguage() {
+    if (this._languageProof) return this._languageProof;
+    const { isSpanish } = require('./relay-language');
+    if (!this.callSid || !isSpanish(this.language)) return null;
+    const work = (async () => {
+      try {
+        const proof = await withTimeout(
+          db('call_log').where({ twilio_call_sid: this.callSid }).first('metadata'),
+          LANGUAGE_STAMP_TIMEOUT_MS,
+          null,
+        );
+        let meta = proof && proof.metadata;
+        if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+        if (meta && isSpanish(meta.caller_language)) {
+          this._provedLanguage = 'es';
+          return 'es';
+        }
+        logger.warn(`[voice-relay] Spanish session without a signed press-2 stamp on call_log — language NOT proved callSid=${this.callSid}`);
+        return null;
+      } catch (err) {
+        logger.warn(`[voice-relay] language proof read failed (non-blocking): ${err.message}`);
+        return null;
+      }
+    })();
+    this._languageProof = work;
+    return work;
+  }
+
+  /**
+   * preferred_language='es' on the resolved customer — every leg fails closed:
+   *   1. the session language is Spanish (setup-frame hint),
+   *   2. the caller resolved CONFIDENTLY — ANI matched the account's own
+   *      number (tier 'full') and the verification callback fired,
+   *   3. the selection is RE-PROVEN from the authenticated call_log row's
+   *      metadata.caller_language, which only the signed /voice press-2
+   *      handler writes (codex #3561 P1): the setup frame's `lang` is
+   *      unverified input and never mutates an account on its own,
+   *   4. one attempt per session; the whole thing is time-bounded and
+   *      detached from the first-turn wait.
+   * Writes through lead-from-extraction's ONE customer-language writer.
+   */
+  async _persistLanguagePreference() {
+    if (this._languageStampStarted) return false;
+    const { isSpanish } = require('./relay-language');
+    if (!isSpanish(this.language)) return false;
+    const ctx = this._callerContext;
+    const customerId = ctx && ctx.tier === 'full' && ctx.customer && ctx.customer.id;
+    if (!customerId || this._callerVerified !== true || !this.callSid) return false;
+    this._languageStampStarted = true;
+    try {
+      const proved = await this._proveSelectedLanguage();
+      if (proved !== 'es') {
+        logger.warn(`[voice-relay] preference NOT persisted — selection not proved callSid=${this.callSid}`);
+        return false;
+      }
+      const { stampCustomerPreferredLanguage } = require('../lead-from-extraction');
+      const wrote = await withTimeout(stampCustomerPreferredLanguage(customerId, 'es'), LANGUAGE_STAMP_TIMEOUT_MS, false);
+      return wrote === true;
+    } catch (err) {
+      logger.warn(`[voice-relay] language preference stamp skipped (non-blocking): ${err.message}`);
+      return false;
+    }
+  }
+
   say(text) {
     const t = String(text || '').trim();
     if (t) {
@@ -564,7 +665,7 @@ class RelayConversation {
         logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
         // Neutral copy ON PURPOSE — this line is spoken directly (no model in
         // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
-        this.say('A Waves team member will follow up with you as soon as possible to take care of this. Thanks for calling!');
+        this.say(require('./relay-language').copy('turnCap', this.language));
         this._ending = true;
         try {
           if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
@@ -697,7 +798,9 @@ class RelayConversation {
           }
         }, 0);
       },
-      language: this.language,
+      // PROVED language only (codex #3561 r3): the lead writer stamps the
+      // customer's preferred_language from this — never the frame hint.
+      get language() { return convo._provedLanguage; },
       // Live getters like callerVerified below: a late-landing verification
       // UPGRADES the session context after this turn's ctx was built, and a
       // snapshot would run this turn's tools as the pre-upgrade caller.
@@ -826,7 +929,7 @@ class RelayConversation {
 
   async _runLoop(callerText = null) {
     if (this.ended || !anthropic) {
-      if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
+      if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -898,7 +1001,7 @@ class RelayConversation {
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
-      const basePrompt = buildBasePrompt(contextEnabled)
+      const basePrompt = buildBasePrompt(contextEnabled, this.language)
         + (contextEnabled && this._callerContext && this._callerContext.block
           ? `\n\n${this._callerContext.block}`
           : '');
@@ -959,12 +1062,12 @@ class RelayConversation {
       } catch (err) {
         if (streamTimedOut) {
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
-          this.say('Sorry, that took a moment — could you say that again?');
+          this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
         }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
-        this.say('Sorry, I had trouble there. Could you say that again?');
+        this.say(require('./relay-language').copy('modelError', this.language));
         return;
       } finally {
         clearTimeout(streamTimer);
@@ -1037,7 +1140,7 @@ class RelayConversation {
     // simpler next question), and the lead/booking writes that did land are
     // already durable.
     logger.warn(`[voice-relay] hit MAX_TOOL_ROUNDS callSid=${this.callSid}`);
-    this.say("Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?");
+    this.say(require('./relay-language').copy('toolRounds', this.language));
     this._maybeEndAfterTurn();
   }
 
@@ -1236,7 +1339,7 @@ class RelayConversation {
         phone: callerPhone,
         toPhone: this.to,
         callSid: this.callSid,
-        language: this.language,
+        language: this._provedLanguage, // proved only — never the frame hint
         // The floor's phone IS the setup frame's ANI — mark it as such, with
         // its verification verdict, so an unverified session's hangup lead
         // stays UNLINKED instead of resolving the claimed number's account.
