@@ -41,6 +41,13 @@ function normalizedCents(value) {
   return Object.entries(map).map(([id, c]) => [String(id), Number(c)]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
 }
 
+// Denials that are unknowns or computed FROM the eligible balance — the only
+// ones an incomplete read can excuse.
+function isTransientOrBalanceDerived(reason) {
+  const r = String(reason).split(':')[0];
+  return r === 'policy_evaluation_error' || r === 'balance_read_incomplete' || r === 'no_eligible_balance' || r.startsWith('pilot_');
+}
+
 function normalizedIdSet(value) {
   const arr = Array.isArray(value)
     ? value
@@ -161,8 +168,11 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // retirement pass would lapse EVERY valid case + dismiss its card.
         // Preserve the case; only definitive denials lapse. An INCOMPLETE
         // balance read (a payer-resolve / dunning-stop lookup blip) is the
-        // same kind of unknown (gh r5): the call is denied, the case stays.
-        if (verdict.denialReasons.some((r) => r === 'policy_evaluation_error' || r === 'balance_read_incomplete')) {
+        // same kind of unknown (gh r5) — but ONLY when every other denial
+        // is itself derived from that unreliable balance (hook r12): a hard
+        // flag or suppression in the same verdict (payment plan, do-not-
+        // call, commercial, consent…) is definitive and lapses the case.
+        if (verdict.denialReasons.every(isTransientOrBalanceDerived)) {
           stillEligible.add(customerId);
         }
         continue;

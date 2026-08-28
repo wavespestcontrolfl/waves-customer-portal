@@ -516,6 +516,20 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
 
 // r6: outage safety + merge hygiene.
 describe('r6: evaluation errors preserve, duplicate live cases self-heal', () => {
+  test('an incomplete read alongside a DEFINITIVE denial (payment plan, do-not-call) still lapses the case', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['balance_read_incomplete', 'flag_payment_plan_active'] });
+    const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });
+    const updateChain = chain({ returning: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14' }] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
+      collection_cases: [selectChain, updateChain],
+      notifications: [chain({ result: 1 })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesLapsed).toBe(1);
+    expect(selectChain.whereNotIn).toHaveBeenCalledWith('customer_id', []); // NOT preserved
+  });
+
   test('a balance_read_incomplete denial (resolver blip) does NOT lapse the standing case either', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['balance_read_incomplete', 'pilot_insufficient_dunning_history'] });
     const lapse = chain({ result: [] });

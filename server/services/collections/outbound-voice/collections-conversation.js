@@ -52,7 +52,7 @@ const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 const { invoiceAmountDue } = require('../../invoice-helpers');
-const { etCalendarDayOf } = require('../../../utils/datetime-et');
+const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
@@ -236,13 +236,23 @@ const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdon'?t contact\b|\bdo not con
 // 20260801200000), so it never authorizes "service is paused". Until the
 // table ships, or when the read fails, both are null — and null is never
 // spoken. Read-only, best-effort.
+function etDayOfDeadline(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const t = new Date(value);
+  return Number.isNaN(t.getTime()) ? null : etDateString(t);
+}
+
 async function readDunningState(customerId) {
   if (!customerId) return { holdAppliedAt: null, consequenceDueAt: null };
   try {
     const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('hold_applied_at', 'consequence_due_at');
     return {
       holdAppliedAt: row && row.hold_applied_at ? row.hold_applied_at : null,
-      consequenceDueAt: row && row.consequence_due_at ? row.consequence_due_at : null,
+      // Normalized ONCE to the ET calendar day it is spoken as: `_at` is a
+      // timestamptz by house convention (a UTC-midnight instant is the
+      // PREVIOUS day in ET — never read as date-only); a plain DATE string
+      // passes through literally (hook r11).
+      consequenceDueAt: row && row.consequence_due_at ? etDayOfDeadline(row.consequence_due_at) : null,
     };
   } catch {
     return { holdAppliedAt: null, consequenceDueAt: null }; // table absent (pre-A2) or unreadable ⇒ no consequence
@@ -1213,7 +1223,7 @@ class CollectionsConversation {
       // A2's deadline comes back from Knex as a Date (timestamptz) or a
       // DATE string — etCalendarDayOf renders either as its ET calendar day
       // (hook r9), never String(Date) in the box's UTC.
-      consequence = ` AUTHORIZED consequence: if payment is not received by ${etCalendarDayOf(ctx.consequenceDueAt)}, service will be cancelled and the account closed — you may say exactly that.`;
+      consequence = ` AUTHORIZED consequence: if payment is not received by ${ctx.consequenceDueAt}, service will be cancelled and the account closed — you may say exactly that.`;
     } else if (ctx.register === 'firm' || ctx.register === 'final') {
       consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
     }

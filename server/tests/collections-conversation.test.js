@@ -1480,6 +1480,13 @@ describe('account-level disclosure + registers', () => {
     r = await disclose(finalSet, { dunning: { consequence_due_at: new Date('2026-09-16T02:30:00Z') } }); // 22:30 ET on 09-15
     expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled/);
     expect(r.out).not.toMatch(/Sep 1/);
+    // A UTC-MIDNIGHT timestamptz is still the previous ET day — never read as a date-only value.
+    r = await disclose(finalSet, { dunning: { consequence_due_at: new Date('2026-09-16T00:00:00Z') } }); // 20:00 ET on 09-15
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled/);
+    expect(r.convo._ctx.consequenceDueAt).toBe('2026-09-15');
+    // An unparseable deadline authorizes nothing.
+    r = await disclose(finalSet, { dunning: { consequence_due_at: 'not-a-date' } });
+    expect(r.out).toMatch(/No consequence is authorized/);
     // A hold on a FRIENDLY account is never spoken (the register gates it too).
     r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } });
     expect(r.convo._ctx.register).toBe('friendly');
