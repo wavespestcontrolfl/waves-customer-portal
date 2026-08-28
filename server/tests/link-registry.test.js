@@ -99,6 +99,10 @@ describe('legacy mappings (plan §4 / §3.4)', () => {
     expect(a).toMatchObject({ prospect_id: 'P1', path_id: 'PATH', provider: 'deterministic_runner', action: 'submit', outcome: 'captcha', cost_cents: 25, sandbox: false, evidence_url: 'e.png', legacy_attempt_id: 'L1', created_at: created, updated_at: created });
     expect(JSON.parse(a.detail)).toEqual({ legacy_outcome: 'blocked_captcha', mode: 'auto', live_url: null, link_rel: 'nofollow', indexed: null, error_code: 'blocked_captcha', error_message: 'captcha wall', screenshot_url: 'e.png' });
     expect(R.attemptFromLegacyRow({ id: 'L2', outcome: 'submitted', cost_usd: null }).cost_cents).toBeNull();
+    // placed/submitted WITHOUT a live URL = moderation pending (same rule as the live writer)
+    expect(R.attemptFromLegacyRow({ id: 'L3', outcome: 'placed' }).outcome).toBe('pending');
+    expect(R.attemptFromLegacyRow({ id: 'L4', outcome: 'submitted', live_url: '' }).outcome).toBe('pending');
+    expect(R.attemptFromLegacyRow({ id: 'L5', outcome: 'placed', live_url: 'https://dir.example/waves' }).outcome).toBe('placed');
   });
 });
 

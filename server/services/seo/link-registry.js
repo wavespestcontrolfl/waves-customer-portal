@@ -202,15 +202,21 @@ function acquisitionPathFromLegacyRow(row) {
   };
 }
 
-/** Legacy `seo_signup_attempts` row (+ optional joined path_id) → §3.4 row. */
+/**
+ * Legacy `seo_signup_attempts` row (+ optional joined path_id) → §3.4 row.
+ * The old filler recorded a successful submit as `placed` with live_url=NULL
+ * while moderation was pending — the same rule the new writer applies
+ * (placed without a live URL = `pending`) keeps historical state honest.
+ */
 function attemptFromLegacyRow(a, { pathId = null } = {}) {
   const cost = a.cost_usd == null || a.cost_usd === '' ? NaN : Number(a.cost_usd);
+  const mapped = mapLegacyOutcome(a.outcome);
   return {
     prospect_id: a.prospect_id || null,
     path_id: pathId || null,
     provider: 'deterministic_runner',
     action: 'submit',
-    outcome: mapLegacyOutcome(a.outcome),
+    outcome: mapped === 'placed' && !a.live_url ? 'pending' : mapped,
     cost_cents: Number.isFinite(cost) ? Math.round(cost * 100) : null,
     duration_ms: null,
     sandbox: false,

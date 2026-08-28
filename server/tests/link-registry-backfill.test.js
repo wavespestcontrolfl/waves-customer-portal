@@ -147,7 +147,7 @@ describe('backfillLegacyBoard (plan §4 legacy board backfill)', () => {
 
 describe('backfillLegacyAttempts (plan §3.4 expand/contract)', () => {
   const legacy = [
-    { id: 'L1', prospect_id: 'p1', outcome: 'submitted', mode: 'auto', cost_usd: '0', created_at: new Date('2026-07-01T00:00:00Z') },
+    { id: 'L1', prospect_id: 'p1', outcome: 'submitted', mode: 'auto', cost_usd: '0', live_url: 'https://dir.example/waves', created_at: new Date('2026-07-01T00:00:00Z') },
     { id: 'L2', prospect_id: 'p2', outcome: 'blocked_payment', mode: 'auto', cost_usd: null, error_code: 'blocked_payment', created_at: new Date('2026-07-02T00:00:00Z') },
     { id: 'L3', prospect_id: null, outcome: 'garbage', created_at: new Date('2026-07-03T00:00:00Z') },
   ];
