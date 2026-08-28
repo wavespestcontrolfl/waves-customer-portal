@@ -122,6 +122,17 @@ describe('blog-writer generatePost — every persisted row is gated before write
     expect(dbMock._updates[0].patch.status).toBe('idea');
   });
 
+  test('the fence covers meta_description / content / secondary_keywords too (hook, PR codex r8 push)', async () => {
+    let reads = 0;
+    const post = () => (reads++ === 0 ? TAEXX_ROW : { ...TAEXX_ROW, meta_description: 'Rewritten by the operator mid-gate.' });
+    const { writer } = load({ post, updateResult: 0 });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/targeting was edited while the topic gate ran/) });
+    reads = 0;
+    const post2 = () => (reads++ === 0 ? TAEXX_ROW : { ...TAEXX_ROW, secondary_keywords: ['ghost ants'] });
+    const { writer: w2 } = load({ post: post2, updateResult: 0 });
+    await expect(w2.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/targeting was edited/) });
+  });
+
   test('the de-queue is a CAS: a row that entered the publish pipeline while the corpus loaded is left alone (409)', async () => {
     const { writer, dispatch } = load({ post: TAEXX_ROW, updateResult: 0 });
     await expect(writer.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/entered the Astro pipeline while the topic gate ran/) });

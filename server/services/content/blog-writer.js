@@ -173,15 +173,20 @@ function faqFormatInstruction(serviceFields) {
 // The columns the topic gate reads from a row. The block de-queue is fenced
 // on them: an operator fix that lands while the live corpus loads must not be
 // reset to idea with a verdict about the OLD targeting.
-const TARGETING_COLUMNS = ['title', 'keyword', 'slug', 'tag', 'category', 'city'];
+const TARGETING_COLUMNS = ['title', 'keyword', 'slug', 'tag', 'category', 'city', 'meta_description', 'content'];
+// Compared by value, fenced through updated_at (every admin edit bumps it)
+// rather than bound in SQL.
+const TARGETING_VALUE_FIELDS = ['secondary_keywords'];
 function whereTargetingUnchanged(query, snapshot) {
   for (const col of TARGETING_COLUMNS) {
     query = snapshot[col] === null || snapshot[col] === undefined ? query.whereNull(col) : query.where(col, snapshot[col]);
   }
+  if (snapshot.updated_at) query = query.where('updated_at', snapshot.updated_at);
   return query;
 }
 function targetingChanged(before, after) {
-  return TARGETING_COLUMNS.some((col) => (before[col] ?? null) !== (after[col] ?? null));
+  return TARGETING_COLUMNS.some((col) => (before[col] ?? null) !== (after[col] ?? null))
+    || TARGETING_VALUE_FIELDS.some((col) => JSON.stringify(before[col] ?? null) !== JSON.stringify(after[col] ?? null));
 }
 
 function whereOutsideAstroPipeline(query) {
