@@ -243,7 +243,7 @@ function priorStillCurrent(prior, service) {
 }
 // A derived-key match whose anchor has since changed is a STALE retry: it
 // must never fall through and apply its old window as a single edit.
-async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null) {
+async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null, expect = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
@@ -261,6 +261,16 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }
     });
   }
   if (service && !priorStillCurrent(prior, service)) {
+    // The anchor no longer sits where the prior move left it. Two cases share
+    // this shape: a STALE retry of the prior move (dangerous — its window is
+    // obsolete) and a LEGITIMATE new move back to the same slot (A→B, B→C,
+    // C→B within the horizon). The caller's scheduling pin tells them apart:
+    // a request observed at the prior's ORIGINAL date is the old attempt; a
+    // request observed anywhere else is a new action on the current state,
+    // which proceeds (its row supersedes the prior). No pin → stay safe.
+    const observedDate = expect && expect.scheduled_date ? dateOnly(expect.scheduled_date) : null;
+    const observedElsewhere = observedDate && prior.original_date && observedDate !== dateOnly(prior.original_date);
+    if (derived && observedElsewhere) return null;
     throw Object.assign(new Error('This move was already applied and the visit has changed since — reload and check the schedule before moving it again'), {
       statusCode: 409,
       isOperational: true,
@@ -809,7 +819,7 @@ class SmartRebooker {
       // retry replays it (and its caller can finish the effects) instead of
       // falling into a same-date single edit.
       const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expect || null);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveResult(prior, newDate);
@@ -1308,7 +1318,7 @@ class SmartRebooker {
     const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
     const operationKey = opKey.key;
     {
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expectAnchor || null);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveResult(prior, newDate);
@@ -1581,13 +1591,26 @@ class SmartRebooker {
         } else if (isAnchor) {
           occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
         } else {
+          // A kept sibling window is still a window this move writes onto a
+          // new date, so it passes the canonical validator on EVERY series
+          // path (windows start on the hour — AGENTS.md), not only for admin
+          // callers. Staff paths abort with the visit named (they can fix
+          // that visit's time); customer paths (web, SMS) must not dead-end
+          // on a legacy sibling's data — the sibling's start is normalized
+          // to its hour, duration kept, same as Quick Move's anchor rule.
           try {
-            occurrenceWindow = seriesOccurrenceWindow({ start: null, end: null }, sib, options);
+            occurrenceWindow = seriesOccurrenceWindow({ start: null, end: null }, sib, { ...options, adminWindowRules: true });
           } catch (err) {
-            if (err && (err.statusCode === 422 || err.status === 422)) {
+            if (!(err && (err.statusCode === 422 || err.status === 422))) throw err;
+            if (options.adminWindowRules === true) {
               err.message = `The future visit on ${dateOnly(sib.scheduled_date)} keeps a time this move can't carry forward (${err.message}) — fix that visit's time first, then move the series`;
+              throw err;
             }
-            throw err;
+            const [hh] = String(sib.window_start).split(':');
+            const flooredStart = `${String(hh).padStart(2, '0')}:00`;
+            const sibDuration = windowDurationMinutes(sib.window_start, sib.window_end, sib.estimated_duration_minutes);
+            occurrenceWindow = { start: flooredStart, end: deriveWindowEnd(flooredStart, sibDuration) };
+            logger.warn(`[rebooker] series sibling ${sib.id} kept an off-hour start ${sib.window_start} — normalized to ${flooredStart} on its new date (${err.message})`);
           }
         }
         // An exception row this shift lands exactly on its cadence date has

@@ -13580,10 +13580,10 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
   }
 }
 
-async function markRescheduleReminderNotified(serviceIds) {
+async function markRescheduleReminderNotified(serviceIds, options = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    await AppointmentReminders.markRescheduleNoticeSent(serviceIds);
+    await AppointmentReminders.markRescheduleNoticeSent(serviceIds, options);
   } catch (err) {
     const count = Array.isArray(serviceIds) ? serviceIds.length : 1;
     logger.warn(`[dispatch] Reschedule SMS sent for ${count} appointment(s), but reminder notice sync failed: ${err.message}`);
@@ -14182,15 +14182,22 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       // uses), never a direct customers.phone text: a primary who opted out,
       // has no phone, or routes appointment texts to an authorized service
       // contact gets exactly what the single-visit notice would do.
-      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date');
+      const svc = await db('scheduled_services').where({ id: serviceId }).first('customer_id', 'scheduled_date', 'window_start');
       const customer = svc?.customer_id ? await db('customers').where({ id: svc.customer_id }).first() : null;
+      // The text quotes the slot the series move RECORDED for the anchor —
+      // date and arrival window. A replayed/retried pass whose anchor was
+      // corrected since (another date, or another window on the same date)
+      // must not send the obsolete slot; the later move's own notice covers
+      // the customer.
+      const anchorOcc = occurrences.find((occ) => String(occ.id) === String(serviceId));
+      const hm = (t) => (t ? String(t).slice(0, 5) : null);
+      const recordedStart = anchorOcc ? hm(anchorOcc.windowStart) : hm(parseRescheduleWindow(newWindow).start);
+      const anchorStillOnRecordedSlot = (row) => String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0]
+        && (!anchorOcc || hm(row.window_start) === recordedStart);
       if (!customer) {
         notificationError = 'Customer not found';
         definitiveNonSend = true;
-      } else if (String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || '').slice(0, 10) !== String(newDate).split('T')[0]) {
-        // A replayed/retried pass: the anchor was moved again after this
-        // series move committed — the recorded text would announce a
-        // superseded date. The later move's own notice covers the customer.
+      } else if (!anchorStillOnRecordedSlot(svc)) {
         notificationError = 'anchor_changed';
         definitiveNonSend = true;
       } else {
@@ -14199,7 +14206,6 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         // The anchor's landing window (the caller's, or its own kept window on
         // a date-only move) — window_text quotes the 2-hour arrival promise
         // from that start, never the job-duration block (see sms-time-format).
-        const anchorOcc = occurrences.find((occ) => String(occ.id) === String(serviceId));
         const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
         const arrivalRange = arrivalWindowRange(startForText);
         const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
@@ -14230,13 +14236,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             operatorInitiated: true,
             sendOutcome,
             preDispatchCheck: async () => {
-              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'status');
+              const row = await db('scheduled_services').where({ id: serviceId }).first('scheduled_date', 'window_start', 'status');
               if (!row) return { ok: false, code: 'appointment_missing', reason: 'appointment no longer exists' };
               if (['cancelled', 'completed', 'skipped', 'no_show'].includes(String(row.status))) {
                 return { ok: false, code: 'appointment_terminal', reason: `appointment is now ${row.status}` };
               }
-              const stillDate = String(row.scheduled_date instanceof Date ? row.scheduled_date.toISOString() : row.scheduled_date || '').slice(0, 10) === String(newDate).split('T')[0];
-              return stillDate ? { ok: true } : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
+              return anchorStillOnRecordedSlot(row)
+                ? { ok: true }
+                : { ok: false, code: 'appointment_moved', reason: 'appointment changed again before the series text was sent' };
             },
           });
           if (!notificationSent) {
@@ -14244,7 +14251,17 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             definitiveNonSend = sendOutcome.lastDeferred !== true;
           }
           if (notificationSent) {
-            await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
+            // Guarded close: each reminder row is closed only if it still
+            // carries the state THIS pass synced (or, on a retry pass, the
+            // state read just before the send) — a row a concurrent
+            // reschedule moved on keeps its own flags.
+            const closeGuards = seriesReminderGuards.length
+              ? seriesReminderGuards
+              : await captureReminderGuards(occurrences.map((occurrence) => occurrence.id));
+            const guardsByServiceId = Array.isArray(closeGuards)
+              ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
+              : null;
+            await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});
             await stampMarker('notified_at', { customer_notified: true });
           }
         } catch (err) {
@@ -14252,7 +14269,6 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
         }
       }
-      if (!notificationSent && definitiveNonSend) await stampMarker('notified_at', { customer_notified: false });
       if (!notificationSent) {
         // Nothing went out, so the due windows the sync covered above (this
         // pass, or an earlier pass that died before texting) must be handed
@@ -14268,6 +14284,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           scheduledServiceId: occurrence.id,
           appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
         })));
+        // The terminal marker lands only AFTER the compensation: a pass that
+        // dies between the two leaves the row selectable for the reconciler
+        // (re-arm is idempotent), never a customer with neither notice nor
+        // reminders.
+        if (definitiveNonSend) await stampMarker('notified_at', { customer_notified: false });
       }
     }
     return { notificationSent, notificationError, conflicts, seriesMoveId };

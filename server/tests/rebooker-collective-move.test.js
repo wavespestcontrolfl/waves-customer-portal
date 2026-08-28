@@ -225,6 +225,28 @@ describe('reschedule() choke point', () => {
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('a legitimate return move (A→B, B→C, C→B within the horizon) proceeds: the request was observed at C, not at the prior move\'s origin', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const C = dayOffset(20);
+    wireLookup(anchorRow({ scheduled_date: C, window_start: '13:00:00', window_end: '15:00:00' }), {
+      priorMove: { id: 'sm-prior', original_date: BASE, new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
+      priorKey: `svc-1:${TARGET}:13:00:15:00`,
+    });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expect: { scheduled_date: C, window_start: '13:00:00' } });
+    expect(result.seriesMoveId).toBe('sm-1');
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
+  });
+
+  test('the same shape observed at the prior move\'s ORIGIN is the stale retry — 409', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    wireLookup(anchorRow({ scheduled_date: dayOffset(20), window_start: '13:00:00', window_end: '15:00:00' }), {
+      priorMove: { id: 'sm-prior', original_date: BASE, new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
+      priorKey: `svc-1:${TARGET}:13:00:15:00`,
+    });
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expect: { scheduled_date: BASE, window_start: '09:00:00' } }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_MOVE_STALE' });
+  });
+
   test('an end-only correction right after a series move is a DIFFERENT request — no replay, the single same-date edit proceeds', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
     wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '15:00:00' }), {
@@ -489,6 +511,12 @@ describe('rescheduleSeries — one recorded operation', () => {
     preclose.mockRestore();
   });
 
+  test('a customer/SMS series path normalizes an off-hour kept sibling start to its hour (duration kept) instead of dead-ending; staff paths abort', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '09:15:00', window_end: '11:15:00' })]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve', {});
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00', window_end: '11:00' });
+  });
+
   test('a pinned NULL window_start fences a window added meanwhile (presence-based, like window_end)', async () => {
     wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', {
@@ -674,6 +702,18 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
 
 describe('caller wiring (source)', () => {
   const read = (rel) => fs.readFileSync(path.join(__dirname, rel), 'utf8');
+
+  test('series text: the recorded window is rechecked before sending, reminders close under the captured guards, and the terminal marker lands after the re-arm', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const fn = disp.indexOf('async function applySeriesMoveEffects(');
+    const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(body).toContain("hm(row.window_start) === recordedStart");
+    expect(body).toContain('guardsByServiceId ? { guardsByServiceId } : {}');
+    const rearm = body.indexOf('await rearmRescheduleReminderWindows(');
+    const terminal = body.indexOf("stampMarker('notified_at', { customer_notified: false })");
+    expect(rearm).toBeGreaterThan(-1);
+    expect(terminal).toBeGreaterThan(rearm);
+  });
 
   test('SMS-reply effects run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
     expect(read('../services/reschedule-sms.js')).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
