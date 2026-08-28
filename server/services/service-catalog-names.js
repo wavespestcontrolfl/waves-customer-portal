@@ -27,20 +27,35 @@ async function refreshCatalogNames(conn = require('../models/db')) {
   const next = new Map();
   for (const row of rows) {
     if (row.name) next.set(row.name.trim().toLowerCase(), row.name.trim());
-    // short_name is an alias for the same catalog identity — display the full name.
-    if (row.short_name && row.name) next.set(row.short_name.trim().toLowerCase(), row.name.trim());
+  }
+  // short_name is NOT unique (five "Lawn Care" rows, two "Mosquito") — alias
+  // it only when exactly one catalog row owns it, and never over a full name.
+  const shortOwners = new Map();
+  for (const row of rows) {
+    if (!row.short_name || !row.name) continue;
+    const key = row.short_name.trim().toLowerCase();
+    shortOwners.set(key, shortOwners.has(key) ? null : row.name.trim());
+  }
+  for (const [key, owner] of shortOwners) {
+    if (owner && !next.has(key)) next.set(key, owner);
   }
   byLower = next;
   return next.size;
 }
 
 const REFRESH_MS = 10 * 60 * 1000;
+const PRIME_TIMEOUT_MS = 5000;
 
-function startCatalogNameRefresh(logger = console) {
+// Resolves once the initial prime has completed (or timed out / failed —
+// boot must never hang on a display cache), then keeps refreshing.
+async function startCatalogNameRefresh(logger = console) {
   const run = () => refreshCatalogNames()
     .then((n) => logger.info?.(`[service-catalog-names] primed ${n} names`))
     .catch((err) => logger.error?.(`[service-catalog-names] refresh failed: ${err.message}`));
-  void run();
+  await Promise.race([
+    run(),
+    new Promise((resolve) => setTimeout(resolve, PRIME_TIMEOUT_MS).unref()),
+  ]);
   setInterval(run, REFRESH_MS).unref();
 }
 

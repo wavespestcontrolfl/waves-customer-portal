@@ -7,7 +7,7 @@
  */
 
 const { normalizeServiceType } = require('../utils/service-normalizer');
-const { __setCatalogNamesForTest } = require('../services/service-catalog-names');
+const { __setCatalogNamesForTest, refreshCatalogNames } = require('../services/service-catalog-names');
 
 const CATALOG = [
   'Seasonal Mosquito Control Service',
@@ -55,5 +55,23 @@ describe('family map ordering (unprimed cache)', () => {
   test('german roach is reachable ahead of the generic roach pattern', () => {
     expect(normalizeServiceType('German Roach Cleanout')).toBe('German Roach Treatment');
     expect(normalizeServiceType('Palmetto Roach Service')).toBe('Cockroach Treatment Service');
+  });
+});
+
+describe('refreshCatalogNames aliasing', () => {
+  afterAll(() => __setCatalogNamesForTest([]));
+
+  test('short_name aliases only when one row owns it; full names always win', async () => {
+    const rows = [
+      { name: 'Lawn Care Program — Monthly', short_name: 'Lawn Care' },
+      { name: 'Lawn Care Program — Quarterly', short_name: 'Lawn Care' },
+      { name: 'Seasonal Mosquito Control Service', short_name: 'Seasonal Mosquito' },
+      { name: 'Lawn Care', short_name: null },
+    ];
+    const conn = () => ({ select: async () => rows });
+    await refreshCatalogNames(conn);
+    // Ambiguous alias must not pick an arbitrary program.
+    expect(normalizeServiceType('lawn care')).toBe('Lawn Care');
+    expect(normalizeServiceType('Seasonal Mosquito')).toBe('Seasonal Mosquito Control Service');
   });
 });
