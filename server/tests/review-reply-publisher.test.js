@@ -111,6 +111,15 @@ describe('publishReviewReply', () => {
     expect(mockGbp.getReview).toHaveBeenCalledTimes(2);
   });
 
+  test('the ownership guard is re-run on a fresh read after the live GET, right before the PUT', async () => {
+    let calls = 0;
+    const guard = jest.fn(() => (++calls === 2 ? 'auto-reply claim was lost' : null));
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' }, guard }))
+      .rejects.toMatchObject({ code: CODES.STALE });
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+  });
+
   test('activity_log never carries the reviewer name', async () => {
     await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' }, allowOverwrite: true });
     expect(state.activity[0].description).not.toContain('Dana');
@@ -235,6 +244,7 @@ describe('publishReviewReply — post-publish persistence failure', () => {
 describe('retractReviewReply', () => {
   test('deletes on Google under the lock, clears locally, audits', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
     const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' }, autoFields: { auto_reply_status: 'retracted' } });
     expect(r.googleDeleted).toBe(true);
     expect(mockGbp.deleteReply).toHaveBeenCalledWith('accounts/1/locations/2/reviews/9', 'sarasota');
@@ -246,6 +256,22 @@ describe('retractReviewReply', () => {
     state.rows[0].review_reply = '[DRAFT] not posted';
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(mockGbp.deleteReply).not.toHaveBeenCalled();
+  });
+  test('P0: a reply edited directly in Google (unseen locally) is never deleted; the live text is recorded', async () => {
+    state.rows[0].review_reply = 'Posted reply';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Edited in Google', updateTime: '2026-08-27T11:00:00Z' } });
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.STALE });
+    expect(mockGbp.deleteReply).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Edited in Google');
+    // Matching live reply → delete proceeds.
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Edited in Google' } });
+    const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } });
+    expect(r.googleDeleted).toBe(true);
+    // Read failure fails closed.
+    state.rows[0].review_reply = 'Posted reply';
+    mockGbp.getReview.mockRejectedValueOnce(new Error('GBP 503'));
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
+    expect(mockGbp.deleteReply).toHaveBeenCalledTimes(1);
   });
   test('a reply edited by someone else between confirm and lock is not deleted', async () => {
     state.rows[0].review_reply = 'Posted reply';
@@ -262,6 +288,7 @@ describe('retractReviewReply', () => {
   });
   test('deleted on Google but the local clear failed → PERSIST_FAILED, claim abandoned, no audit', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
     mockGbp.deleteReply.mockImplementationOnce(async () => { state.failNextUpdate = true; return true; });

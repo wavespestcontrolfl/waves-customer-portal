@@ -185,6 +185,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
             .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
           throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }
+        // The live GET is a network round-trip; an admin skip/dismiss can
+        // land during it. Re-run the ownership guard on a fresh read
+        // IMMEDIATELY before the PUT so that window cannot post over a
+        // cancellation.
+        if (guard) {
+          const again = await db('google_reviews').where({ id: reviewId }).first();
+          if (!again || again.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+          if (hasRealReply(again.review_reply)) throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
+          const lateReason = await guard(again);
+          if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
+        }
       }
       await gbp.replyToReview(resourceName, replyText, review.location_id);
       return true;
@@ -265,6 +276,26 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
       if (String(fresh.review_reply || '') !== String(review.review_reply || '')) {
         throw new ReviewReplyError(CODES.STALE, 'The reply changed while you were retracting — reload and check the current reply.', { status: 409 });
+      }
+      // And Google's LIVE reply must be the one the admin confirmed: an owner
+      // edit made directly in GBP after the last sync is invisible locally,
+      // and deleting blind would destroy it. Fail closed on a read error.
+      let live;
+      try {
+        live = await gbp.getReview(resourceName, review.location_id);
+      } catch (e) {
+        throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before retracting: ${e.message}`, { status: 502, cause: e });
+      }
+      const liveReply = String(live?.reviewReply?.comment || '').trim();
+      if (liveReply !== String(review.review_reply || '').trim()) {
+        if (liveReply) {
+          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
+            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
+            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+        }
+        throw new ReviewReplyError(CODES.STALE, liveReply
+          ? 'The reply on Google differs from the one shown here (edited in Google) — reload and check the current reply.'
+          : 'There is no reply on Google to retract — reload.', { status: 409 });
       }
       await gbp.deleteReply(resourceName, review.location_id);
       return true;

@@ -48,6 +48,10 @@ jest.mock('../models/db', () => {
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       whereIn(col, vals) { filters.push((r) => vals.includes(r[col])); return api; },
       whereNotNull(col) { filters.push((r) => r[col] != null); return api; },
+      whereRaw(sql, params) {
+        if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
+        return api;
+      },
       orWhere() { return api; },
       select() { return api; },
       groupBy() { return api; },
@@ -337,15 +341,20 @@ describe('processDueAutoReplies — state machine', () => {
 
   test('a publish retry reuses the stored verified draft instead of calling the model again', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality' })];
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: fp } })];
     await Runner.processDueAutoReplies();
     expect(mockDraft).not.toHaveBeenCalled();
     expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
     expect(state.rows[0].auto_reply_status).toBe('posted');
     // A stale prompt version goes back to the model.
-    state.rows = [row({ id: 'v0', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: 'old', auto_reply_version: 'reply-v0' })];
+    state.rows = [row({ id: 'v0', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: 'old', auto_reply_version: 'reply-v0', auto_reply_grounding: { fingerprint: fp } })];
     await Runner.processDueAutoReplies();
     expect(mockDraft).toHaveBeenCalledTimes(1);
+    // So does a draft written for different review text (reviewer edited it).
+    state.rows = [row({ id: 'ed', review_text: 'Edited: actually not great', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp } })];
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).toHaveBeenCalledTimes(2);
   });
 
   test('a provider outage after a Google failure does not erase the stored draft', async () => {
@@ -454,7 +463,7 @@ describe('processDueAutoReplies — state machine', () => {
 describe('admin actions', () => {
   test('postNow publishes an existing verified draft immediately (shadow mode, low rating included) as the admin actor', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
-    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team' })];
+    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row({ star_rating: 2 })) } })];
     const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
     expect(r.outcome).toBe('posted');
     expect(mockDraft).not.toHaveBeenCalled();
@@ -473,7 +482,7 @@ describe('admin actions', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('persist_failed', 'live but unrecorded', { status: 500 }));
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality' })];
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()) } })];
     await expect(Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' })).rejects.toMatchObject({ code: 'persist_failed' });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
     // The cron must not pick it up again.
@@ -508,10 +517,12 @@ describe('admin actions', () => {
     await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toMatchObject({ code: 'already_replied' });
     expect(state.rows[0].auto_reply_claimed_until).toBeNull();
   });
-  test('skipAutoReply only touches pipeline-pending rows', async () => {
-    state.rows = [row(), row({ id: 'p', auto_reply_status: 'posted' })];
+  test('skipAutoReply only touches pipeline-pending rows and refuses while a publish claim is live', async () => {
+    state.rows = [row(), row({ id: 'p', auto_reply_status: 'posted' }), row({ id: 'inflight', publish_claimed_until: '2099-01-01T00:00:00Z' })];
     expect(await Runner.skipAutoReply('rev-1')).toBe(true);
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip' });
     expect(await Runner.skipAutoReply('p')).toBe(false);
+    expect(await Runner.skipAutoReply('inflight')).toBe(false);
+    expect(state.rows[2].auto_reply_status).toBe('queued');
   });
 });

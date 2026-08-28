@@ -386,7 +386,7 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
 router.post('/:id/auto-reply/skip', requireAdmin, async (req, res, next) => {
   try {
     const skipped = await AutoReply.skipAutoReply(req.params.id);
-    if (!skipped) return res.status(409).json({ error: 'This review is not waiting on the auto-reply pipeline' });
+    if (!skipped) return res.status(409).json({ error: 'This review is not waiting on the auto-reply pipeline (or a reply is being posted right now — try again in a moment)' });
     res.json({ success: true });
   } catch (err) { next(err); }
 });
@@ -410,9 +410,11 @@ router.post('/:id/dismiss', async (req, res, next) => {
     const updated = await db('google_reviews')
       .where({ id: req.params.id })
       .whereNull('missing_since')
+      // Never under an in-flight automatic publish (mirrors Skip).
+      .modify(AutoReply.whereNoLivePublishClaim)
       .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-      return res.status(409).json({ error: 'This review has been removed from Google — it is retained as evidence and cannot be dismissed.' });
+      return res.status(409).json({ error: 'This review cannot be dismissed right now — it was removed from Google (retained as evidence) or a reply is being posted this moment; try again in a minute.' });
     }
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -428,6 +430,8 @@ router.post('/dismiss-batch', async (req, res, next) => {
     const dismissed = await db('google_reviews')
       .whereIn('id', ids)
       .whereNull('missing_since')
+      // Rows under an in-flight automatic publish are skipped, like stamped ones.
+      .modify(AutoReply.whereNoLivePublishClaim)
       .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     res.json({ success: true, dismissed: Array.isArray(dismissed) ? dismissed.length : dismissed });
   } catch (err) { next(err); }

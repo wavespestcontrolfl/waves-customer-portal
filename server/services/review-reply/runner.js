@@ -23,6 +23,7 @@
  * review; the publisher's liveness lock covers the Google side.
  */
 
+const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gbp = require('../google-business');
@@ -276,10 +277,17 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
   return true;
 }
 
+// What a draft was written FOR. A stored draft may only be reused when the
+// review's rating + text still hash to this.
+function reviewFingerprint(row) {
+  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}`).digest('hex');
+}
+
 function groundingSnapshot(grounding) {
   // Everything the model saw, minus the review text itself (already on the row).
   return {
     version: grounding.version,
+    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}`).digest('hex'),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
     provenance: grounding.provenance,
@@ -335,15 +343,19 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
   const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, 'unexpected', 'runner_error']);
+  const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
     && merged.auto_reply_draft
-    && merged.auto_reply_version === REPLY_VERSION;
+    && merged.auto_reply_version === REPLY_VERSION
+    // …and it was drafted for THIS rating + text (a reviewer edit since
+    // then makes it stale: redraft).
+    && storedGrounding?.fingerprint === reviewFingerprint(merged);
   let draft;
   let snapshot;
   if (reusable) {
     draft = { ok: true, text: merged.auto_reply_draft, mode: merged.auto_reply_mode || 'service_quality', version: merged.auto_reply_version, attempts: 0, rejections: [], reused: true };
-    snapshot = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
+    snapshot = storedGrounding;
   } else {
     // Draft (grounding is public-safe by construction).
     const grounding = await buildReplyGrounding(merged, { techFirstNames });
@@ -506,8 +518,12 @@ async function postNow(reviewId, actor) {
   }
   // The draft the admin is looking at wins: a human-written "[DRAFT]" first,
   // then the pipeline's own verified draft, else draft fresh.
+  const storedFp = row.auto_reply_grounding && typeof row.auto_reply_grounding === 'object' ? row.auto_reply_grounding.fingerprint : null;
   const existing = humanDraftOn(row)
-    || (row.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status) ? row.auto_reply_draft : null);
+    || (row.auto_reply_draft
+      && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status)
+      && storedFp === reviewFingerprint(row)
+      ? row.auto_reply_draft : null);
   if (existing) {
     const publishedAt = new Date().toISOString();
     try {
@@ -548,6 +564,10 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
   const updated = await db('google_reviews')
     .where({ id: reviewId })
     .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED])
+    // A publish in flight holds the per-review publish claim; refusing the
+    // skip (409 to the admin, retry in a moment) is the honest answer — the
+    // publisher's pre-PUT guard covers the rest of the window.
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
     .update({ auto_reply_status: STATUS.SKIPPED, auto_reply_reason: reason, auto_reply_claimed_until: null });
   return (Array.isArray(updated) ? updated.length : updated) > 0;
 }
@@ -557,6 +577,12 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * auto-reply state in the same statement (and drops a live claim, which
  * makes the holder's in-lock guard fail).
  */
+// Dismissal must not land under an in-flight publish (same predicate as
+// skipAutoReply): the dismiss routes add this to their WHERE.
+function whereNoLivePublishClaim(qb) {
+  qb.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()]);
+}
+
 function dismissCancelFields(conn = db) {
   const pending = "('queued','drafted','parked','failed')";
   return {
@@ -604,6 +630,8 @@ module.exports = {
   postNow,
   skipAutoReply,
   dismissCancelFields,
+  whereNoLivePublishClaim,
+  reviewFingerprint,
   autoReplyStatus,
   classifyReplyMode,
   isDraftReply,
