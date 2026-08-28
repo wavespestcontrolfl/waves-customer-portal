@@ -632,7 +632,7 @@ describe('live dashboard-alert overlay under the bell policy', () => {
 
 describe('customer_email_received eligibility (email-sync) — sender must authenticate', () => {
   const { customerEmailBellEligible } = require('../services/email/email-sync');
-  const base = { customerId: 'c1', classification: null, listUnsubscribe: null, labelIds: ['INBOX'], fromAddress: 'jane@customer-domain.com' };
+  const base = { customerId: 'c1', classification: null, listUnsubscribe: null, labelIds: ['INBOX'], fromAddress: 'jane@customer-domain.com', receivedAt: new Date().toISOString() };
   test('aligned DKIM/SPF for the From domain rings', () => {
     expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=pass header.d=customer-domain.com; spf=pass smtp.mailfrom=customer-domain.com' })).toBe(true);
   });
@@ -647,5 +647,10 @@ describe('customer_email_received eligibility (email-sync) — sender must authe
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, listUnsubscribe: '<mailto:x>' })).toBe(false);
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, labelIds: ['SENT'] })).toBe(false);
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, customerId: null })).toBe(false);
+  });
+  test('historical mail (full-sync backfill) never rings — only arrivals within 24h', () => {
+    const ok = 'dkim=pass header.d=customer-domain.com';
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString() })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: null })).toBe(false);
   });
 });

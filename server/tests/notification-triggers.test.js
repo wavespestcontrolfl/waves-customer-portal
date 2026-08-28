@@ -286,14 +286,25 @@ describe('push follows the bell policy (owner ruling 2026-08-28)', () => {
       table === 'technicians' ? tableMock([{ id: 'admin-1' }]) : tableMock([])
     ));
   });
-  test('an event the bell policy silences does not push either', async () => {
+  test('an event the bell policy silences neither bells nor pushes — even for a push-only admin', async () => {
     const NotificationService = require('../services/notification-service');
     const PushService = require('../services/push-notifications');
-    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'bell_policy' });
+    const bellPolicy = require('../services/notification-bell-policy');
+    const gateSpy = jest.spyOn(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    const allowSpy = jest.spyOn(bellPolicy, 'bellAllowed').mockResolvedValue(false);
+    // bell off / push on for the only admin: the pre-fix bypass case.
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1' }])
+        : table === 'notification_preferences' ? tableMock([{ admin_user_id: 'admin-1', bell_enabled: false, push_enabled: true }])
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
     PushService.sendToAdminUsers.mockClear();
     const stats = await triggerNotification('dashboard_alert', { title: 'x', body: 'y' });
     expect(stats.policySilenced).toBe(true);
     expect(stats.push).toEqual({ sent: 0, skipped: 'bell_policy' });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
     expect(PushService.sendToAdminUsers).not.toHaveBeenCalled();
+    gateSpy.mockRestore(); allowSpy.mockRestore();
   });
 });

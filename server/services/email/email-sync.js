@@ -321,6 +321,7 @@ async function upsertEmail(parsed) {
     labelIds: parsed.label_ids,
     authenticationResults: parsed.authentication_results,
     fromAddress: parsed.from_address,
+    receivedAt: parsed.received_at,
   })) {
     try {
       const { triggerNotification } = require('../notification-triggers');
@@ -403,9 +404,14 @@ async function upsertEmail(parsed) {
  * Vendor/spam/bulk mail (classification set, or a List-Unsubscribe header)
  * and anything not in INBOX never ring.
  */
-function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress } = {}) {
+const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress, receivedAt, now = Date.now() } = {}) {
   if (!customerId || classification || listUnsubscribe) return false;
   if (!(labelIds || []).includes('INBOX')) return false;
+  // Only NEW arrivals ring: a full mailbox backfill (first connect, empty
+  // table) inserts history and must never bell/push for it (hook P1).
+  const ts = receivedAt ? new Date(receivedAt).getTime() : NaN;
+  if (!Number.isFinite(ts) || now - ts > CUSTOMER_EMAIL_BELL_MAX_AGE_MS) return false;
   const { hasAlignedAuth } = require('./inbox-hygiene');
   const { domainFromAddress } = require('./spam-blocker');
   return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
