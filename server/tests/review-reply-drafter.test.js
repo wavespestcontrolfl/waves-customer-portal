@@ -155,6 +155,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, we are glad access resumed after 1 1/2 hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
     // Standalone fraction at the start of a leading-anchored pattern (\b cannot sit between a space and ½).
     expect(verify(good('Hello there, ½ hour before access resumed after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    // codex r74: qualified dozens.
+    expect(verify(good('Hello there, we are glad access resumed after a couple dozen minutes following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready several dozen minutes after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, a few dozen minutes before access resumed we were done with the pest treatment.'), g1dog)).toBe('banned_phrase');
     // codex r73: compound fractional counts.
     expect(verify(good('Hello there, we are glad access resumed after two and a half hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
     expect(verify(good('Hello there, the yard was ready 3 and three quarters hours after the pest treatment.'), g1dog)).toBe('banned_phrase');

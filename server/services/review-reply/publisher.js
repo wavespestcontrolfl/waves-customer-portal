@@ -48,6 +48,10 @@ const CODES = {
   PERSIST_FAILED: 'persist_failed',
   REVIEW_CHANGED: 'review_changed',
   GOOGLE_UNCERTAIN: 'google_uncertain',
+  // Google shows an owner reply but recording that locally failed (transient
+  // DB error): retryable, and it must NOT be read as a definitive
+  // "someone else replied" (codex r74).
+  RECONCILE_FAILED: 'reconcile_failed',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
@@ -156,7 +160,16 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
     const wrote = (Array.isArray(n) ? n.length : n) > 0;
     if (wrote && fields.auto_reply_status === 'parked' && fields.auto_reply_reason === 'review_edited_after_post') parkedPromotion = locked;
     if (wrote && fields.auto_reply_status === 'posted' && wasReconcilePark) promoted = true;
-  }).catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+  }).catch((e) => {
+    // Propagate (codex r74): swallowing this made the caller throw HAS_REPLY,
+    // which the auto runner treats as a definitive unrelated reply and
+    // closes the row as skipped/already_replied — destroying a
+    // google_uncertain / persist_failed park whose earlier PUT had actually
+    // landed (its posted provenance and Retract). A transient error keeps
+    // the row's state and retries; the next live read reconciles again.
+    logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`);
+    throw new ReviewReplyError(CODES.RECONCILE_FAILED, `Google shows an owner reply but recording it failed: ${e.message}`, { status: 503, cause: e });
+  });
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).
   if (parkedPromotion) {

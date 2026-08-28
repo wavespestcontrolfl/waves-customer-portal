@@ -35,7 +35,7 @@ jest.mock('../services/review-reply/publisher', () => {
   return {
     publishReviewReply: (...a) => mockPublish(...a),
     ReviewReplyError,
-    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed', REVIEW_CHANGED: 'review_changed', GOOGLE_UNCERTAIN: 'google_uncertain' },
+    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed', REVIEW_CHANGED: 'review_changed', GOOGLE_UNCERTAIN: 'google_uncertain', RECONCILE_FAILED: 'reconcile_failed' },
   };
 });
 jest.mock('../models/db', () => {
@@ -73,6 +73,7 @@ jest.mock('../models/db', () => {
       forUpdate() { return api; },
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
+        if (/auto_reply_claimed_until IS NULL OR auto_reply_claimed_until </.test(sql)) filters.push((r) => r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < new Date(params[0]));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
         if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
@@ -114,11 +115,12 @@ jest.mock('../models/db', () => {
     const hasLoc = /lower\(location_id\) = ANY\(\?\)/.test(sql);
     const [token, ...rest] = params;
     const now = new Date(force ? rest[1] : rest[0]);
-    const locs = hasLoc ? rest[1] : null;
+    const cutoff = force ? null : rest[1];
+    const locs = hasLoc ? rest[2] : null;
     const limit = rest[rest.length - 1];
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
       && (!locs || locs.includes(String(r.location_id).toLowerCase()))
-      && (force ? (r.id === rest[0] && r.auto_reply_status !== 'skipped') : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now))
+      && (force ? (r.id === rest[0] && r.auto_reply_status !== 'skipped') : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now && r.review_created_at >= cutoff))
       && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
     return { rows: hits.map((r) => ({ ...r })) };
@@ -132,7 +134,9 @@ const NOW = new Date('2026-08-27T15:00:00Z');
 function row(over = {}) {
   return {
     id: 'rev-1', location_id: 'sarasota', reviewer_name: 'Dana W.', star_rating: 5, review_text: 'Great work',
-    review_reply: null, missing_since: null, review_created_at: '2026-08-27T14:50:00Z',
+    // Relative: the claim applies the 48h deploy-forward cutoff against the
+    // real clock (codex r74), so a fixed date would rot.
+    review_reply: null, missing_since: null, review_created_at: new Date(Date.now() - 10 * 60000).toISOString(),
     auto_reply_status: 'queued', auto_reply_due_at: '2026-08-27T14:55:00Z', auto_reply_claimed_until: null, auto_reply_attempts: 0,
     ...over,
   };
@@ -408,6 +412,39 @@ describe('processDueAutoReplies — state machine', () => {
     Runner.whereNoReconcilePark(qb);
     // codex r71: NULL-safe — a NULL auto_reply_status row must still be dismissible.
     expect(qb.whereRaw).toHaveBeenCalledWith("NOT COALESCE((auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed')), false)");
+  });
+
+  test('queued rows older than maxQueueAgeHours leave the lane before a claim instead of auto-posting after a pause (codex r74)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const stale = new Date(Date.now() - 49 * 3600000).toISOString();
+    state.rows = [
+      row({ id: 'old-q', review_created_at: stale }),
+      row({ id: 'old-f', review_created_at: stale, auto_reply_status: 'failed', auto_reply_attempts: 1 }),
+      row({ id: 'old-held', review_created_at: stale, auto_reply_claimed_until: '2099-01-01T00:00:00Z' }),
+      row({ id: 'old-parked', review_created_at: stale, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' }),
+      row({ id: 'fresh' }),
+    ];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ claimed: 1, posted: 1 });
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+    expect(mockPublish.mock.calls[0][0].reviewId).toBe('fresh');
+    for (const id of ['old-q', 'old-f']) expect(state.rows.find((r) => r.id === id)).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null });
+    // A live claim and a park are someone else's / a person's: untouched.
+    expect(state.rows.find((r) => r.id === 'old-held')).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: '2099-01-01T00:00:00Z' });
+    expect(state.rows.find((r) => r.id === 'old-parked')).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    // Post now (force) still reaches an expired row — it is an admin action.
+    const [forced] = await Runner.claimDueRows({ limit: 1, force: 'old-q' });
+    expect(forced?.id).toBe('old-q');
+  });
+
+  test('a failed live-reply reconciliation retries instead of closing the row as already_replied (codex r74)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('reconcile_failed', 'Google shows an owner reply but recording it failed: connection reset', { status: 503 }));
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ claimed: 1, retry: 1, skipped: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'reconcile_failed', auto_reply_attempts: 1, auto_reply_claimed_until: null });
   });
 
   test('batch rows re-stamp their claim just before processing; a lost claim is skipped without drafting (codex r73)', async () => {

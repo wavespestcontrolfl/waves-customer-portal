@@ -198,16 +198,39 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
  * the candidate set is selected FOR UPDATE SKIP LOCKED and the claim stamp is
  * the ownership token (only the claimant's token releases it).
  */
+// Deploy-forward also bounds how long a row may WAIT in the lane (codex r74):
+// rows queued before a pause (gate off, location removed from scope) must
+// not auto-publish when automation resumes weeks later — a review of that
+// age first seen now would never enter the lane. Over-age pending rows leave
+// the lane the same way (auto state cleared, reason stamped): Post now still
+// works on them, the catch-up enqueue will not re-queue them (same cutoff),
+// and a person sees them in the needs-reply queue.
+async function expireOverAgeQueued({ now = new Date(), cfg = config() } = {}) {
+  const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
+  const n = await db('google_reviews')
+    .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.FAILED])
+    .where('review_created_at', '<', cutoff)
+    .whereRaw('(auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)', [now.toISOString()])
+    .update({ auto_reply_status: null, auto_reply_reason: 'queue_expired', auto_reply_due_at: null, auto_reply_claimed_until: null, auto_reply_error: null });
+  const count = Array.isArray(n) ? n.length : (n || 0);
+  if (count) logger.info(`[review-auto-reply] ${count} queued review(s) older than ${cfg.maxQueueAgeHours}h left the lane unposted (queue_expired)`);
+  return count;
+}
+
 async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = null } = {}) {
   const token = new Date(now.getTime() + CLAIM_MS).toISOString();
   const nowIso = now.toISOString();
-  const forceClause = force ? "AND id = ? AND auto_reply_status IS DISTINCT FROM 'skipped'" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ?`;
+  const cfg = config();
+  const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
+  if (!force) await expireOverAgeQueued({ now, cfg });
+  // The claim re-checks the age itself (a row can age past the cutoff
+  // between the expiry sweep and this statement).
+  const forceClause = force ? "AND id = ? AND auto_reply_status IS DISTINCT FROM 'skipped'" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ? AND review_created_at >= ?`;
   // Rollout scope is re-applied at claim time (not only at enqueue) so
   // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
   // rows outside it. Post-now (force) is an explicit admin action and ignores it.
-  const cfg = config();
   const locClause = !force && cfg.locations.length ? 'AND lower(location_id) = ANY(?)' : '';
-  const params = force ? [token, force, nowIso, limit] : [token, nowIso, ...(locClause ? [cfg.locations] : []), nowIso, limit];
+  const params = force ? [token, force, nowIso, limit] : [token, nowIso, cutoff, ...(locClause ? [cfg.locations] : []), nowIso, limit];
   const res = await db.raw(
     `UPDATE google_reviews SET auto_reply_claimed_until = ?
      WHERE id IN (
@@ -727,7 +750,9 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
-    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
+    // RECONCILE_FAILED (codex r74): Google shows an owner reply but the
+    // local record of it failed — transient, retry; never "already replied".
+    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === CODES.RECONCILE_FAILED || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
       const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
@@ -1520,6 +1545,7 @@ module.exports = {
   rolloutCutoff,
   _resetRolloutCutoffCache: () => { rolloutCutoffCache = undefined; },
   claimDueRows,
+  expireOverAgeQueued,
   renewClaim,
   processClaimedRow,
   processDueAutoReplies,

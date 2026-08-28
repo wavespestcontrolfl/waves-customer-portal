@@ -461,6 +461,17 @@ describe('publishReviewReply', () => {
     mockAccountFacts.mockReset().mockResolvedValue(null);
   });
 
+  test('a live owner reply whose local record fails surfaces reconcile_failed, never already_replied (codex r74)', async () => {
+    const draft = 'Hi Dana, glad to keep looking after your Venice home.';
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft };
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    state.failNextUpdate = true;
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.RECONCILE_FAILED, status: 503 });
+    // The reconciliation park is intact for the next attempt.
+    expect(state.rows[0]).toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+  });
+
   test('a dismissal that landed since the caller\'s read is honoured inside the claim (codex r54)', async () => {
     state.rows[0].dismissed = true;
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject({ code: CODES.STALE, status: 409 });
