@@ -1240,7 +1240,10 @@ class CollectionsConversation {
     if (ctx.register === 'firm' && ctx.holdActive === true) {
       consequence = ' AUTHORIZED consequence: future service is paused until the account is current — you may say exactly that.';
     } else if (ctx.register === 'final' && ctx.consequenceDueAt) {
-      consequence = ` AUTHORIZED consequence: if payment is not received by ${String(ctx.consequenceDueAt).slice(0, 10)}, service will be cancelled and the account closed — you may say exactly that.`;
+      // A2's deadline comes back from Knex as a Date (timestamptz) or a
+      // DATE string — etCalendarDayOf renders either as its ET calendar day
+      // (hook r9), never String(Date) in the box's UTC.
+      consequence = ` AUTHORIZED consequence: if payment is not received by ${etCalendarDayOf(ctx.consequenceDueAt)}, service will be cancelled and the account closed — you may say exactly that.`;
     } else if (ctx.register === 'firm' || ctx.register === 'final') {
       consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
     }

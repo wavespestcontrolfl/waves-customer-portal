@@ -1536,6 +1536,10 @@ describe('account-level disclosure + registers', () => {
     expect(r.out).toMatch(/No consequence is authorized/);
     r = await disclose(finalSet, { dunning: { consequence_due_at: '2026-09-15' } });
     expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
+    // Knex returns a timestamptz as a Date — rendered as its ET calendar day, never "Tue Sep 15".
+    r = await disclose(finalSet, { dunning: { consequence_due_at: new Date('2026-09-16T02:30:00Z') } }); // 22:30 ET on 09-15
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled/);
+    expect(r.out).not.toMatch(/Sep 1/);
     // A hold on a FRIENDLY account is never spoken (the register gates it too).
     r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } });
     expect(r.convo._ctx.register).toBe('friendly');
