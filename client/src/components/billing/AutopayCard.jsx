@@ -7,8 +7,8 @@
 // billing day. Used inside the customer portal billing tab.
 //
 // Endpoints:
-//   GET  /api/customer/autopay              (state)
-//   PUT  /api/customer/autopay              (enable/disable/pause/billing-day)
+//   GET  /api/billing/autopay               (state)
+//   PUT  /api/billing/autopay               (enable/disable/pause/billing-day)
 //
 // Server orchestrators (Codex follows via api.put):
 //   server/routes/customer-autopay.js       (rate-limited 6 ops/min
@@ -48,6 +48,7 @@ import { createPortal } from 'react-dom';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import api from '../../utils/api';
+import { cardBrandLabel } from '../../lib/cardBrand';
 import { etDateString, addETDays } from '../../lib/timezone';
 import { getStripe } from '../../lib/stripeLoader';
 import {
@@ -65,7 +66,13 @@ import useModalFocus from '../../hooks/useModalFocus';
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
 // too or alias rows lose the pending/failed affordances.
-const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+// FOUR aliases, matching server/services/autopay-eligibility.js
+// isBankMethodType ('bank' / 'bank_account' are the defensive aliases the
+// server already treats as bank) — GH codex #3556 r3.
+const isBankMethod = (t) => {
+  const v = String(t || '').toLowerCase();
+  return v === 'ach' || v === 'us_bank_account' || v === 'bank' || v === 'bank_account';
+};
 
 // Local alias kept for the many call sites below; values come from the
 // shared customer palette (this used to be a hand-copied hex block).
@@ -143,7 +150,12 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
  * 3 visual states: active (green), paused (amber), disabled (neutral).
  * Controls: toggle on/off, pause until date, change card, change billing day.
  */
-export default function AutopayCard({ onStateChange }) {
+// openRequest: { modal: 'card', seq } — the Payment Methods list's
+// "Replace card" hands off to THIS card's method picker, so replacing is
+// the existing atomic workflow (choose/add → server repoints Auto Pay in
+// one transaction → old card untouched until then). onOpenRequestHandled
+// lets the parent clear the request so a later remount doesn't replay it.
+export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -201,6 +213,16 @@ export default function AutopayCard({ onStateChange }) {
   useEffect(() => {
     if (modal !== 'card' && addingCard) resetAddCard();
   }, [modal]);
+
+  const handledOpenSeqRef = useRef(null);
+  useEffect(() => {
+    if (!openRequest?.seq || loading || !data) return;
+    if (handledOpenSeqRef.current === openRequest.seq) return;
+    handledOpenSeqRef.current = openRequest.seq;
+    setErr('');
+    setModal(openRequest.modal || 'card');
+    onOpenRequestHandled?.(openRequest.seq);
+  }, [openRequest?.seq, loading, data]);
 
   useEffect(() => {
     if (processedReturnRef.current) return;
@@ -520,7 +542,7 @@ export default function AutopayCard({ onStateChange }) {
           )}
           {activeCard && state !== 'disabled' && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
+              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : cardBrandLabel(activeCard.brand, 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>
@@ -622,7 +644,7 @@ export default function AutopayCard({ onStateChange }) {
                       <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
                         {isBankMethod(pm.method_type)
                           ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pm.ach_status === 'verification_failed' ? ' - verification failed' : (pendingBank ? ' - verification pending' : '')}`
-                          : `${pm.brand || 'Card'} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
+                          : `${cardBrandLabel(pm.brand)} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
                       </span>
                     </label>
                   );

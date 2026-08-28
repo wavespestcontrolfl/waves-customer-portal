@@ -273,9 +273,68 @@ function isBankMethodType(methodType) {
   return t === 'ach' || t === 'us_bank_account' || t === 'bank' || t === 'bank_account';
 }
 
+/**
+ * Which saved-method rows Auto Pay is USING right now — the identity the
+ * portal removal guard, the row hierarchy, and the detached-webhook cleanup
+ * all agree on (owner ruling 2026-08-27: one canonical resolver for
+ * display, removal, and charging).
+ *
+ * Deliberately BROADER than getChargeableAutopayMethod: an expired or
+ * ACH-blocked in-charge method is still the selected one — the customer
+ * must Replace or Turn off first, no special-case escape hatch — so the
+ * set is: the charge resolver's pick (what charge() would bill), PLUS the
+ * enrollment pointer, PLUS (no pointer) the default+enabled row. Empty when
+ * Auto Pay is explicitly off (autopay_enabled === false; NULL reads as on,
+ * matching customerOnAutopay). Paused counts as on — pausing is temporary and removing
+ * the card underneath it would strand the resume.
+ *
+ * Read-only. Without rethrow a broken resolver read still reports the
+ * pointer (refusing a removal is the recoverable direction); a broken
+ * customers/fallback read returns []. The DELETE route passes rethrow and
+ * 503s instead, so it never guesses.
+ */
+async function getAutopaySelectedMethodIds(customer, knex = defaultDb, { rethrow = false, now = new Date() } = {}) {
+  if (!customer?.id) return [];
+  try {
+    let cust = customer;
+    if (cust.autopay_enabled === undefined || cust.autopay_payment_method_id === undefined || cust.ach_status === undefined) {
+      const row = await knex('customers').where({ id: cust.id })
+        .first('autopay_enabled', 'autopay_payment_method_id', 'ach_status');
+      cust = { ...(row || {}), ...cust };
+      for (const key of ['autopay_enabled', 'autopay_payment_method_id', 'ach_status']) {
+        if (cust[key] === undefined) cust[key] = row ? row[key] : null;
+      }
+    }
+    // Nullable column: only explicit false is "off" — same rule as
+    // customerOnAutopay and autopayActivePredicate (GH codex r2 P1), or a
+    // NULL-flag customer collection still charges could detach the method.
+    if (cust.autopay_enabled === false) return [];
+
+    const ids = new Set();
+    const chargeable = await getChargeableAutopayMethod(cust, knex, { rethrow, now });
+    if (chargeable?.id) ids.add(String(chargeable.id));
+
+    if (cust.autopay_payment_method_id) {
+      ids.add(String(cust.autopay_payment_method_id));
+    } else {
+      // No pointer: charge() walks default+enabled rows — every such row is
+      // "selected" for identity purposes (mirrors the webhook's wasInCharge).
+      const fallbackRows = await knex('payment_methods')
+        .where({ customer_id: cust.id, processor: 'stripe', is_default: true, autopay_enabled: true })
+        .select('id');
+      for (const r of fallbackRows || []) ids.add(String(r.id));
+    }
+    return [...ids];
+  } catch (err) {
+    if (rethrow) throw err;
+    return [];
+  }
+}
+
 module.exports = {
   customerOnAutopay,
   getChargeableAutopayMethod,
+  getAutopaySelectedMethodIds,
   listChargeableAutopayMethods,
   isChargeableAutopayMethod,
   isBankMethodType,

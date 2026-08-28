@@ -27,6 +27,8 @@
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
+ *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
+ *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
@@ -81,6 +83,23 @@ const gates = {
   // switch: unset or any non-'true' value. Booking/estimate flows stay
   // card-only regardless (owner ruling 2026-07-13).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // Portal payment-method removal guard (owner ruling 2026-08-27): the
+  // method Auto Pay is using (getAutopaySelectedMethodIds — the charge
+  // resolver's pick + the enrollment pointer, expired included) cannot be
+  // detached from the portal; the customer replaces it or turns Auto Pay
+  // off first. DELETE is side-effect-free under the gate — it never flips
+  // customers.autopay_enabled. Gate off = the legacy path (unconditional
+  // remove + best-effort, non-transactional Auto Pay disable). Customer-
+  // facing money surface — fail-closed ==='true' in every environment.
+  portalMethodRemovalGuard: process.env.GATE_PORTAL_METHOD_REMOVAL_GUARD === 'true',
+
+  // Negative lifecycle emails (payment.autopay_disabled /
+  // payment.method_removed) — the positive counterparts have shipped for
+  // months; these fire on the portal Turn-off, portal remove, and the
+  // payment_method.detached webhook (Stripe-dashboard removals). Separate
+  // from the guard gate so either can run alone. Off = senders no-op.
+  paymentMethodChangeEmails: process.env.GATE_PAYMENT_METHOD_CHANGE_EMAILS === 'true',
 
   // /secure/:token plan-choice step (pay per application vs. annual prepay)
   // on the appointment card-request page. Customer-facing money surface —

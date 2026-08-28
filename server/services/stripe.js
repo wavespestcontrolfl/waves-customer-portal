@@ -1208,8 +1208,12 @@ const StripeService = {
   /**
    * Detach a payment method via Stripe.
    */
-  async removeCard(customerId, cardId) {
-    const card = await db('payment_methods')
+  async removeCard(customerId, cardId, { cascadeAutopay = true, db: knex = db } = {}) {
+    // `db` may be the caller's transaction: the portal DELETE route holds
+    // FOR UPDATE locks on the customer + card rows across this call so a
+    // concurrent Auto Pay switch cannot land between its guard check and
+    // the detach (pre-push r1 P0).
+    const card = await knex('payment_methods')
       .where({ id: cardId, customer_id: customerId })
       .first();
 
@@ -1261,34 +1265,51 @@ const StripeService = {
         }
         logger.warn(`[stripe] Detach warning (PM already detached, proceeding with DB removal): ${err.message}`);
       }
-      await db('payment_methods').where({ id: cardId }).del();
-      await this._disableAutopayIfMethodRemoved(customerId, card);
+      await knex('payment_methods').where({ id: cardId }).del();
+      if (cascadeAutopay) await this._disableAutopayIfMethodRemoved(customerId, card, knex);
       logger.info(`[stripe] Payment method removed for ${customerId}: ${cardId}`);
       return { success: true };
     }
 
     // Fallback — just remove from DB
-    await db('payment_methods').where({ id: cardId }).del();
-    await this._disableAutopayIfMethodRemoved(customerId, card);
+    await knex('payment_methods').where({ id: cardId }).del();
+    if (cascadeAutopay) await this._disableAutopayIfMethodRemoved(customerId, card, knex);
     logger.info(`[stripe] Payment method removed (DB only) for ${customerId}: ${cardId}`);
     return { success: true };
   },
 
   /**
+   * LEGACY cascade — only runs while GATE_PORTAL_METHOD_REMOVAL_GUARD is
+   * off (the DELETE route passes cascadeAutopay:false under the gate).
+   * Under the guard the in-charge method can never reach removeCard, so
+   * there is nothing to cascade; removal is side-effect-free (owner ruling
+   * 2026-08-27). Out-of-band detaches are reconciled transactionally by
+   * handlePaymentMethodDetached in stripe-webhook.js, not here.
+   *
    * Removing the card that carried Auto Pay used to leave the customer's
    * autopay flags pointing at a deleted row — the cron silently stopped
    * charging while the AutopayCard still showed Active. Disable autopay
-   * honestly so the UI shows Off with a set-up CTA.
+   * honestly so the UI shows Off with a set-up CTA. Best-effort and NOT
+   * transactional (a failure here leaves autopay_enabled=true with the row
+   * gone) — the guard exists to retire this path.
    */
-  async _disableAutopayIfMethodRemoved(customerId, removedCard) {
+  async _disableAutopayIfMethodRemoved(customerId, removedCard, knex = db) {
     if (!removedCard?.autopay_enabled) return;
     try {
-      await db('customers')
-        .where({ id: customerId })
-        .update({ autopay_enabled: false, autopay_payment_method_id: null });
-      const { logAutopay } = require('./autopay-log');
-      await logAutopay(customerId, 'autopay_disabled', {
-        details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+      // SAVEPOINT (knex nests a transaction on a trx handle): the caller's
+      // removal transaction must survive a failed cascade — a swallowed
+      // error inside an aborted PG transaction would roll back the local
+      // delete AFTER Stripe already detached the method (GH codex r4 P2).
+      await knex.transaction(async (sp) => {
+        await sp('customers')
+          .where({ id: customerId })
+          .update({ autopay_enabled: false, autopay_payment_method_id: null });
+        const { logAutopay } = require('./autopay-log');
+        await logAutopay(customerId, 'autopay_disabled', {
+          details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+          db: sp,
+          required: true,
+        });
       });
     } catch (err) {
       logger.warn(`[stripe] autopay cleanup after card removal failed for ${customerId}: ${err.message}`);

@@ -4324,6 +4324,7 @@ async function handleRefundFailed(refund) {
  * payment_method.detached — Remove from our DB
  */
 async function handlePaymentMethodDetached(paymentMethod) {
+  const { getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
   const pmId = paymentMethod.id;
   logger.info(`[stripe-webhook] Payment method detached: ${pmId}`);
 
@@ -4340,10 +4341,40 @@ async function handlePaymentMethodDetached(paymentMethod) {
   // which customer pointer to clear, and Auto Pay stayed falsely Active.
   // A rollback keeps the row, so the retry re-enters with intact state.
   const disabledCustomers = [];
+  const removedRows = [];
   await db.transaction(async (trx) => {
+    // Lock order = CUSTOMER first, then the method rows — the same order
+    // enrollConsentedMethod, DELETE /cards/:id, PUT /billing/autopay and
+    // PUT /cards/:id/default take (pre-push r2 P0/P1). Resolving "which
+    // rows Auto Pay is using" from an unlocked snapshot let a concurrent
+    // replacement select the detached row after the read (Auto Pay left
+    // pointing at a deleted row) or move away from it (this cleanup then
+    // disabled the NEW method). The customer ids come from an unlocked
+    // pre-read; the locked re-read below is what the reconciliation uses.
+    const ownerIds = (await trx('payment_methods')
+      .where({ stripe_payment_method_id: pmId })
+      .select('customer_id')).map((r) => r.customer_id);
+    for (const customerId of [...new Set(ownerIds)].sort()) {
+      await trx('customers').where({ id: customerId }).forUpdate().first('id');
+    }
     const rows = await trx('payment_methods')
       .where({ stripe_payment_method_id: pmId })
-      .select('id', 'customer_id', 'is_default', 'autopay_enabled');
+      .forUpdate()
+      .select('id', 'customer_id', 'is_default', 'autopay_enabled',
+        'method_type', 'card_brand', 'last_four', 'bank_name', 'bank_last_four');
+    removedRows.push(...rows);
+
+    // Which of these rows Auto Pay is USING — the same canonical identity
+    // the portal removal guard and row hierarchy use (pre-push r1 P1:
+    // the old pointer-only check missed the chargeable fallback the walk
+    // would bill when the pointer is ineligible). Computed under the locks
+    // and BEFORE the delete so the fallback walk can still see the row; a
+    // failed read throws and rolls back (fail loud, retry).
+    const inChargeRowIds = new Set();
+    for (const customerId of new Set(rows.map((r) => r.customer_id))) {
+      const ids = await getAutopaySelectedMethodIds({ id: customerId }, trx, { rethrow: true });
+      for (const id of ids) inChargeRowIds.add(String(id));
+    }
 
     const deleted = await trx('payment_methods')
       .where({ stripe_payment_method_id: pmId })
@@ -4367,13 +4398,7 @@ async function handlePaymentMethodDetached(paymentMethod) {
     }
 
     for (const row of rows) {
-      const cust = await trx('customers')
-        .where({ id: row.customer_id })
-        .first('autopay_enabled', 'autopay_payment_method_id');
-      const wasInCharge = cust?.autopay_enabled
-        && (cust.autopay_payment_method_id === row.id
-          || (!cust.autopay_payment_method_id && row.is_default && row.autopay_enabled));
-      if (!wasInCharge) continue;
+      if (!inChargeRowIds.has(String(row.id))) continue;
       // Mirror removeCard's cleanup (_disableAutopayIfMethodRemoved):
       // disable honestly rather than silently promoting another method —
       // enrollment is consent-gated and never auto-picks a replacement.
@@ -4395,6 +4420,22 @@ async function handlePaymentMethodDetached(paymentMethod) {
 
   for (const row of disabledCustomers) {
     logger.info(`[stripe-webhook] Auto Pay disabled for customer ${row.customer_id} — in-charge method ${row.id} detached out-of-band`);
+  }
+
+  // The customer cares about the resulting account state, not which surface
+  // detached the method (owner ruling 2026-08-27) — a Stripe-dashboard
+  // removal gets the same lifecycle notice as a portal removal. After
+  // commit, fire-and-forget, gated inside the sender.
+  for (const row of removedRows) {
+    const autopayDisabled = disabledCustomers.some((d) => d.id === row.id);
+    void require('../services/payment-lifecycle-email').sendPaymentMethodRemoved({
+      customerId: row.customer_id,
+      method: row,
+      autopayDisabled,
+      removedAt: new Date(),
+    }).catch((emailErr) => {
+      logger.warn(`[stripe-webhook] payment method removed email failed for customer ${row.customer_id}: ${emailErr.message}`);
+    });
   }
 }
 
