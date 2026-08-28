@@ -148,6 +148,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
     expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r72: Unicode / slash fractions.
+    const g1dog = grounding({ text: 'Great pest treatment. We have 1 dog.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad access resumed after 1½ hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after ½ hour following the pest treatment.'), g1dog)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after 1 1/2 hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
     // codex r71: seconds are durations too.
     expect(verify(good('Hello there, we are glad access resumed after thirty seconds following the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the yard was ready 90 secs after the pest treatment.'), gpets)).toBe('banned_phrase');

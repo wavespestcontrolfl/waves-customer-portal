@@ -274,6 +274,14 @@ describe('Google Business review sync', () => {
   test('replyToReview flags ambiguous mutation outcomes: transport rejection and 2xx-unparseable body carry e.transport; HTTP rejection does not (codex r64/r65)', async () => {
     global.fetch = jest.fn(async () => { throw new Error('fetch failed: ECONNRESET'); });
     await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    global.fetch = jest.fn(async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }); throw e; });
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    // codex r72: pre-send failures (DNS, refused, TLS) never reached Google → plain retryable failures.
+    for (const code of ['ENOTFOUND', 'ECONNREFUSED', 'ERR_TLS_CERT_ALTNAME_INVALID']) {
+      global.fetch = jest.fn(async () => { const e = new TypeError('fetch failed'); e.cause = Object.assign(new Error(`${code} mybusiness.googleapis.com`), { code }); throw e; });
+      const pre = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((err) => err);
+      expect(pre.transport).toBeUndefined();
+    }
     global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<html>ok</html>' }));
     await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
     global.fetch = jest.fn(async () => ({ ok: false, status: 429, headers: { get: () => 'application/json' }, text: async () => '{"error":"quota"}' }));

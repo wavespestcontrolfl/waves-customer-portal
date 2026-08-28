@@ -88,9 +88,21 @@ const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
 // (ECONNRESET, socket hang-up, abort) may have been applied by Google.
 // Flag it so the reply publisher parks for reconciliation instead of
 // treating it as a definitive rejection and retrying the write (codex r64).
+// Failures that happen BEFORE a request can be sent (DNS, refused
+// connection, unreachable network, TLS handshake / certificate) — Google
+// never received the mutation, so they are ordinary retryable failures
+// (codex r72). Everything else (reset, abort, socket errors mid-flight) is
+// ambiguous.
+const PRE_SEND_CODES = new Set(['ENOTFOUND', 'EAI_AGAIN', 'EAI_FAIL', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ENETDOWN', 'EADDRNOTAVAIL', 'ERR_INVALID_URL', 'UND_ERR_CONNECT_TIMEOUT', 'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_HANDSHAKE_TIMEOUT', 'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'CERT_HAS_EXPIRED', 'ERR_SSL_WRONG_VERSION_NUMBER', 'EPROTO']);
+function isPreSendFailure(e) {
+  const code = String(e?.cause?.code || e?.code || '');
+  if (PRE_SEND_CODES.has(code)) return true;
+  if (/^(?:ERR_TLS_|ERR_SSL_|CERT_|UNABLE_TO_)/.test(code)) return true;
+  return /\b(?:getaddrinfo|certificate|handshake|ssl|tls)\b/i.test(String(e?.cause?.message || ''));
+}
 async function mutationFetch(url, init) {
   try { return await fetch(url, init); }
-  catch (e) { if (e && typeof e === 'object') e.transport = true; throw e; }
+  catch (e) { if (e && typeof e === 'object' && !isPreSendFailure(e)) e.transport = true; throw e; }
 }
 
 async function readJsonOrThrow(res, label) {
