@@ -498,10 +498,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   prior state (`reserved→voided`, `reserved→submitting`, `submitting→charged|ambiguous`,
   `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
   stale lease or a wrong prior state affects 0 rows and returns 409.
-- **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
-  method the runner can use; the bank's limit is a second, independent ceiling — it is not the
-  policy. Owner-approved purchases above `max_auto_purchase_cents` go through the same reservation
-  after the click. `seo_link_attempts.cost_cents` mirrors `final_cents` for reporting only.
+- **Instrument.** A dedicated **issuer account/program** (with its own hard monthly program
+  limit) that **mints one capped single-use card per purchase** is the only payment source
+  the runner can use; the runner never holds a reusable card number, so a stored-card retry,
+  a renewal, or any charge without a fresh reservation has no instrument to hit. The
+  program's monthly limit is a second, independent ceiling — it is not the policy. Owner-
+  approved purchases above `max_auto_purchase_cents` go through the same reservation and
+  the same per-purchase minting after the click. `seo_link_attempts.cost_cents` mirrors `final_cents` for reporting only.
 
 ### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
 
@@ -689,12 +692,15 @@ Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
 `LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
 New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
-`GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`; off ⇒ everything
-`awaiting_owner`), `GATE_LINK_AUTO_PAID` (separately arms `AUTO_PAID_WITHIN_POLICY`),
-`GATE_LINK_RECURSIVE_DISCOVERY`. The runner's allowlist is superseded by the registry's
-`ready_to_acquire` set once `GATE_LINK_AUTHORITY` is on (the registry *is* the allowlist);
-until then `SIGNUP_RUNNER_ALLOWLIST` stays authoritative. Kill for any lane = unset its gate;
-budget kill = the virtual card's limit.
+`GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`; **off ⇒ the claim route
+grants no automated lease at all** — every row, pre-existing ones included, is
+`awaiting_owner` and only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
+(separately arms `AUTO_PAID_WITHIN_POLICY`), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
+the registry's `ready_to_acquire` + stamped authority is the *only* allowlist: the
+authority-aware claim predicate is unconditional (not gated), and `SIGNUP_RUNNER_ALLOWLIST`
+is retired in that PR (its rows are migrated into registry paths with
+`authority=OWNER_OVERRIDE` recorded as the prior owner allowlisting). Kill for any lane =
+unset its gate; budget kill = the issuer program's limit.
 
 ---
 
