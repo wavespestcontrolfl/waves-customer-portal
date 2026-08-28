@@ -161,7 +161,7 @@ t.timestamp('superseded_at');
 // old submission_url gone/redirected/renamed to the new one, or the same form under a new URL). In that case it inserts
 // the new path and, in the SAME transaction, marks the matched old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
 // repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
-// purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`):
+// purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`) OR an active execution/communication lease with an attempt in `submitting`/`sending`/`submit_ambiguous`/`send_error` (an external action may already be past its final authority check):
 // that placement stays PINNED to the old path: the old path is marked `superseded_by` = new path immediately (so no
 // NEW work can start on it), and the placement records `pending_path_id` = new path (durable FK on seo_link_prospects,
 // nullable) instead of being repointed; purchases/reconciliation are explicitly permitted to complete against a
@@ -274,6 +274,7 @@ alone, nor send on an outreach approval alone.
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
+t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and RESUMES it (persisted session + the row's state) instead of repeating the external call; a crashed mutation is therefore recovered, never duplicated
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
@@ -331,7 +332,7 @@ t.unique(['domain_id', 'touch_key']);
 (including a repeat of the first) inserts a row here. §8 reports and learns per source from
 this table (a domain discovered by three feeders credits all three; "first-touch" and
 "any-touch" are both reportable) — **but only touches recorded BEFORE the placement was
-acquired** (`seen_at < first_live_at`, and never `existing_backlink`, which is observational):
+acquired** (`seen_at` < the timestamp of the successful acquisition attempt — the same `seo_link_attempts` row the §8 learning join uses; `first_live_at` is only the fallback when no attempt exists, i.e. never for executed placements — and never `existing_backlink`, which is observational):
 a feeder that merely notices a link after it converted earns no attribution and cannot
 bias `P(live at D30 | source, path)`. Recursive lineage follows `source_ref` chains here.
 
@@ -1157,8 +1158,11 @@ together:
 - **Draft leases are separate from send authority (no claim-before-draft deadlock).** The
   drafter (`backlink-outreach-drafter.js`) claims with `?type=outreach&mode=draft`: a draft
   lease requires only a `prospect` row on a `qualified`/`ready_to_acquire` domain in an
-  outreach lane and grants NOTHING beyond research + composing a draft (report
-  `outcome='drafted'`, never a send). Send authority is decided afterwards: once the draft
+  outreach lane — OR, for the §6.4 follow-up lane, a `contacted` row with
+  `outreach_status='sent'` and `follow_up_status='due'` whatever the domain's aggregate state
+  (`acquiring`/`acquired` are normal there) — and grants NOTHING beyond research + composing
+  a draft (report `outcome='drafted'`, never a send; for the follow-up lane it flips
+  `due → drafted`). Send authority is decided afterwards: once the draft
   exists and passes `comms-lint` and the §6.4 classifier, the bridge job evaluates
   `AUTO_OUTREACH` on that draft; only a `mode=send` lease — which requires the stamped
   `AUTO_OUTREACH` (or an approval) — may call the sender. Drafting therefore never needs
@@ -1222,8 +1226,8 @@ phase** — `submit()`, and, for the deterministic runner alone, `createAccount(
 `activateVerification()` (the verification link's GET is treated as mutating and allowed
 only here) — each of which is entered only after the locked authority/approval/gate recheck,
 a durable attempt row (`slot_reserved → submitting` for submit; `create_account`/`resume`
-attempts with their own idempotency key `${prospect_id}:${action}:${generation}` for the
-credentialed operations, so a crash mid-phase resumes rather than repeats), and is re-blocked
+attempts with their own persisted `idempotency_key` `${prospect_id}:${action}:${generation}` (§3.4, partial UNIQUE) for the
+credentialed operations, so a crash mid-phase resumes the existing row rather than repeats the external call), and is re-blocked
 when the phase returns — so a mis-click or page script during `completeForm` can never POST
 around the submission guard or the daily cap, and account creation cannot be blocked by the
 policy that protects it.
