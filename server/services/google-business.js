@@ -827,8 +827,11 @@ class GoogleBusinessService {
     if (existing) {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
-      const { requeueFieldsOnIdentity } = require('./review-reply/runner');
-      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt, ...requeueFieldsOnIdentity(existing, normalized) });
+      const { applyRequeueOnIdentity } = require('./review-reply/runner');
+      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+      // Conditional on the row STILL being parked for that reason (an admin
+      // Skip in the meantime wins).
+      await applyRequeueOnIdentity(existing.id, existing, normalized);
       await applySyncReplyFields(existing.id, existingReplyFields);
       result = { id: existing.id, inserted: false };
     } else {

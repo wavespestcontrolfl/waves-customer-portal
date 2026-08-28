@@ -31,7 +31,7 @@ const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint } = require('./grounding');
-const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, REPLY_VERSION } = require('./drafter');
+const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
 const STATUS = {
@@ -414,10 +414,23 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     && storedGrounding?.accountFingerprint === accountFingerprint(await loadAccountFacts(merged.customer_id).catch(() => null));
   let draft;
   let snapshot;
+  // A reused draft is re-verified against the CURRENT state (recent posted
+  // replies changed since it was written — another review may have posted
+  // the same opening); a failed re-verification falls through to a redraft.
+  let reuseOk = false;
   if (reusable) {
-    draft = { ok: true, text: merged.auto_reply_draft, mode: merged.auto_reply_mode || 'service_quality', version: merged.auto_reply_version, attempts: 0, rejections: [], reused: true };
-    snapshot = storedGrounding;
-  } else {
+    const groundingNow = await buildReplyGrounding(merged, { techFirstNames });
+    const recentNow = await loadRecentPostedReplies(merged.location_id);
+    const verdict = verifyReplyText(merged.auto_reply_draft, groundingNow, { recentReplies: recentNow, mode: merged.auto_reply_mode || undefined });
+    if (!verdict) {
+      reuseOk = true;
+      draft = { ok: true, text: merged.auto_reply_draft, mode: merged.auto_reply_mode || 'service_quality', version: merged.auto_reply_version, attempts: 0, rejections: [], reused: true };
+      snapshot = storedGrounding;
+    } else {
+      logger.info(`[review-auto-reply] stored draft for ${merged.id} no longer verifies (${verdict}) — redrafting`);
+    }
+  }
+  if (!reuseOk) {
     // Draft (grounding is public-safe by construction).
     const grounding = await buildReplyGrounding(merged, { techFirstNames });
     const recentReplies = await loadRecentPostedReplies(merged.location_id);
@@ -655,6 +668,20 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * makes the holder's in-lock guard fail).
  */
 /**
+ * Conditional write for requeueFieldsOnIdentity: only when the row is STILL
+ * parked for the same reason the snapshot saw (an admin Skip in between
+ * must win). Returns the affected-row count.
+ */
+async function applyRequeueOnIdentity(reviewId, existing, normalized, { conn = db } = {}) {
+  const fields = requeueFieldsOnIdentity(existing, normalized);
+  if (!Object.keys(fields).length) return 0;
+  const n = await conn('google_reviews')
+    .where({ id: reviewId, auto_reply_status: STATUS.PARKED, auto_reply_reason: existing.auto_reply_reason })
+    .update(fields);
+  return Array.isArray(n) ? n.length : n;
+}
+
+/**
  * Reply fields the GBP sync writes onto an EXISTING row from a feed snapshot.
  *   - A live publish claim on the row means a publisher is mid-flight: the
  *     snapshot may predate its PUT, so provider reply fields are deferred to
@@ -779,6 +806,7 @@ module.exports = {
   dismissCancelFields,
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
+  applyRequeueOnIdentity,
   syncReplyFields,
   applySyncReplyFields,
   reviewFingerprint,

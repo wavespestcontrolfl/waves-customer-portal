@@ -134,12 +134,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad the ants are gone. Thanks from Marcus and the Waves Pest Control team.'))).toBeNull();
     // A capitalized word the reviewer wrote is fine mid-sentence.
     const g = grounding({ text: 'Marcus took care of the German roaches fast.' });
-    expect(verify(good('Hi Dana, glad Marcus got the German roaches handled so fast.'), g)).toBeNull();
+    expect(verify(good('Hi Dana, glad Marcus took care of the German roaches so fast.'), g)).toBeNull();
   });
   test('provenance: sentence-initial names need provenance too; common starters are exempt', () => {
     expect(verify(good('Hi Dana,\n\nKevin was glad to help with the ants. Marcus says thanks.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Anytime you need us, reach out.'))).toBe('unlisted_name');
-    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Thanks for having us out.'))).toBeNull();
+    expect(verify(good('Hi Dana,\n\nGlad the ants are gone. Marcus says thanks. Thanks for having us out.'))).toBeNull();
   });
   test('provenance: fragments of unrelated served cities do not launder a name', () => {
     expect(verify(good('Hi Dana, Charlotte was glad to help with the ants alongside Marcus.'))).toBe('unlisted_name');
@@ -153,7 +153,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'))).toBe('date_claim');
     expect(verify(good('Hi Dana, glad Marcus got the ants handled on Tuesday.'))).toBe('date_claim');
     const g = grounding({ text: 'Marcus came out last week and the ants are gone.' });
-    expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'), g)).toBeNull();
+    expect(verify(good('Hi Dana, glad Marcus got to the ants last week.'), g)).toBeNull();
   });
   test('Unicode names survive normalization and the name allowlist', () => {
     const g = grounding({ firstName: 'José' });
@@ -185,6 +185,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('outcome verbs and clock times need the reviewer\'s words', () => {
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we solved it and got everything handled for you."), g)).toBe('unlisted_service_claim');
+    expect(verify(good("Hello there, glad we could stop by at noon. Thanks for the rating."), g)).toBe('date_claim');
+    expect(verify(good("Hello there, glad we could be there at 5 pm. Thanks for the rating."), g)).toBe('date_claim');
+    const g2 = grounding({ text: 'They came at noon and handled the ants.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad the noon visit handled the ants for you.'), g2)).toBeNull();
+  });
   test('service-quality adjectives need the reviewer\'s words (rating-only reviews get none)', () => {
     const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
     expect(verify(good("Hello there, we're glad our team was helpful, honest, and efficient. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
@@ -206,7 +214,7 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
-    expect(verify(good('Hi Dana, glad Marcus got the ants handled before your HOA walk-through.'))).toBeNull();
+    expect(verify(good('Hi Dana, glad the ants are gone before your HOA walk-through. Marcus says thanks.'))).toBeNull();
   });
   test('drying / curing / wait-before language is banned even when the number came from the review', () => {
     const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });

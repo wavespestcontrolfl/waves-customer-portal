@@ -1366,6 +1366,9 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
       .where(function needsRealReply() {
         this.whereNull('review_reply').orWhere('review_reply', 'like', `${DRAFT_REPLY_PREFIX}%`);
       })
+      // Never under an in-flight automatic publish (the auto-reply lane's
+      // per-review publish claim): the draft would be overwritten or race it.
+      .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
       .update({
         review_reply: `${DRAFT_REPLY_PREFIX} ${draftResponse}`,
         reply_updated_at: null,

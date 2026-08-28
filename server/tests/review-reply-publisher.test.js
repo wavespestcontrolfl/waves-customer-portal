@@ -24,7 +24,25 @@ jest.mock('../models/db', () => {
   const dbFn = (table) => {
     const filters = [];
     const api = {
-      where(obj) { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
+      where(obj) {
+        if (typeof obj === 'function') {
+          // ownSlot(): review_reply IS NULL OR review_reply = '[DRAFT] <own draft>'
+          const branches = [];
+          const sub = {
+            whereNull(col) { branches.push((r) => r[col] == null); return sub; },
+            orWhere(col, val) { branches.push((r) => r[col] === val); return sub; },
+          };
+          obj.call(sub);
+          filters.push((r) => branches.some((b) => b(r)));
+        } else if (typeof obj === 'string') {
+          const val = arguments[1];
+          filters.push((r) => r[obj] === val);
+        } else {
+          filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v));
+        }
+        return api;
+      },
+      modify(fn) { fn(api); return api; },
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
@@ -44,7 +62,7 @@ jest.mock('../models/db', () => {
 const { publishReviewReply, retractReviewReply, CODES } = require('../services/review-reply/publisher');
 
 function liveLock() {
-  return { blocked: false, result: true, releaseClaim: jest.fn(async () => {}) };
+  return { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
 }
 
 beforeEach(() => {
@@ -145,10 +163,14 @@ describe('publishReviewReply', () => {
     expect(r.googlePosted).toBe(true);
   });
 
-  test('a local [DRAFT] does not count as a real reply', async () => {
-    state.rows[0].review_reply = '[DRAFT] pending';
+  test('a local [DRAFT] is not a real reply — the pipeline\'s own draft is replaced, a foreign one blocks before the PUT', async () => {
+    state.rows[0].review_reply = '[DRAFT] Thanks Dana.';
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } });
     expect(r.googlePosted).toBe(true);
+    state.rows[0].review_reply = '[DRAFT] someone else wrote this';
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.STALE });
+    expect(mockGbp.replyToReview).toHaveBeenCalledTimes(1);
   });
 
   test('stamped (missing) reviews and _stats rows are rejected before any Google call', async () => {
@@ -226,6 +248,25 @@ describe('publishReviewReply', () => {
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'admin' }, requireGoogle: true }))
       .rejects.toMatchObject({ code: CODES.NOT_CONFIGURED });
     expect(state.rows[0].review_reply).toBeNull();
+  });
+});
+
+describe('publishReviewReply — human draft saved during the Google PUT', () => {
+  test('non-overwrite persistence is conditional on the reply slot: a human [DRAFT] saved mid-PUT is kept and the row parks', async () => {
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows[0].review_reply = '[DRAFT] Agent Ops saved this mid-flight'; return {}; });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.PERSIST_FAILED });
+    expect(state.rows[0].review_reply).toBe('[DRAFT] Agent Ops saved this mid-flight');
+    expect(out.abandonClaim).toHaveBeenCalled();
+  });
+  test('the pipeline\'s own shadow draft in the slot is replaced normally', async () => {
+    state.rows[0].review_reply = '[DRAFT] Thanks Dana.';
+    state.rows[0].auto_reply_draft = 'Thanks Dana.';
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } });
+    expect(r.googlePosted).toBe(true);
+    expect(state.rows[0].review_reply).toBe('Thanks Dana.');
   });
 });
 

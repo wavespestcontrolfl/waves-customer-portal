@@ -21,7 +21,7 @@ const db = require('../../models/db');
 const gbp = require('../google-business');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply } = require('./draft-prefix');
+const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix } = require('./draft-prefix');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -174,6 +174,14 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       if (!allowOverwrite && hasRealReply(fresh.review_reply)) {
         throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
       }
+      // A "[DRAFT]" that is not the pipeline's own is a person's saved draft:
+      // a non-overwriting caller never posts over it (fail BEFORE the PUT).
+      if (!allowOverwrite && isDraftReply(fresh.review_reply)) {
+        const own = new Set([review.auto_reply_draft, autoFields?.auto_reply_draft, replyText].filter(Boolean).map((t) => String(t).trim()));
+        if (!own.has(stripDraftPrefix(fresh.review_reply))) {
+          throw new ReviewReplyError(CODES.STALE, 'A saved draft is on this review — post it from the editor or clear it first.', { status: 409 });
+        }
+      }
       const staleReason = guard ? await guard(fresh) : null;
       if (staleReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${staleReason}`, { status: 409 });
       if (!allowOverwrite) {
@@ -228,6 +236,18 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const updated = await db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
+      // Non-overwriting callers: the reply slot must still be empty or the
+      // pipeline's own draft — a human "[DRAFT]" saved while the PUT was in
+      // flight is not overwritten (zero rows → PERSIST_FAILED → reconcile).
+      .modify((qb) => {
+        if (allowOverwrite) return;
+        qb.where(function ownSlot() {
+          this.whereNull('review_reply');
+          if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
+          if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
+          this.orWhere('review_reply', asDraft(replyText));
+        });
+      })
       .update({
         review_reply: replyText,
         reply_updated_at: db.fn.now(),

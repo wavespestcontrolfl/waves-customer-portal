@@ -6,6 +6,7 @@ const mockDraft = jest.fn();
 const mockPublish = jest.fn();
 const mockNotify = jest.fn(async () => ({}));
 const mockAccountFacts = jest.fn(async () => null);
+const mockVerify = jest.fn(() => null);
 const mockGbp = { isLocationConfigured: jest.fn(async () => true) };
 const state = { rows: [], raws: [] };
 
@@ -21,6 +22,7 @@ jest.mock('../services/review-reply/grounding', () => ({
 }));
 jest.mock('../services/review-reply/drafter', () => ({
   draftReviewReply: (...a) => mockDraft(...a),
+  verifyReplyText: (...a) => mockVerify(...a),
   loadRecentPostedReplies: jest.fn(async () => []),
   classifyReplyMode: jest.fn(() => 'service_quality'),
   REPLY_VERSION: 'reply-v1',
@@ -112,6 +114,7 @@ beforeEach(() => {
   delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
   mockDraft.mockResolvedValue(GOOD_DRAFT);
   mockAccountFacts.mockReset().mockResolvedValue(null);
+  mockVerify.mockReset().mockReturnValue(null);
   mockPublish.mockImplementation(async ({ reviewId, autoFields, guard }) => {
     const r = state.rows.find((x) => x.id === reviewId);
     // Mirrors the real publisher's in-claim recheck: the guard runs on a fresh row.
@@ -595,6 +598,27 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.applySyncReplyFields('rev-1', { review_reply: 'from feed', reply_updated_at: 'x' })).toBe(1);
     expect(state.rows[0].review_reply).toBe('from feed');
     expect(await Runner.applySyncReplyFields('rev-1', {})).toBe(0);
+  });
+
+  test('a reused draft is re-verified against current replies; a failing one is redrafted', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const fp = Runner.reviewFingerprint(row());
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: fp, accountFingerprint: 'fp:none' } })];
+    mockVerify.mockReturnValueOnce('repetitive_opening');
+    await Runner.processDueAutoReplies();
+    expect(mockVerify).toHaveBeenCalledWith(GOOD_DRAFT.text, expect.any(Object), expect.objectContaining({ recentReplies: expect.any(Array) }));
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+  });
+
+  test('applyRequeueOnIdentity only revives a row STILL parked for the snapshot reason (an admin Skip wins)', async () => {
+    const parked = row({ id: 'p', auto_reply_status: 'parked', auto_reply_reason: 'no_gbp_resource', gbp_review_name: null, dismissed: false });
+    state.rows = [{ ...parked, auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip' }];
+    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(0);
+    expect(state.rows[0].auto_reply_status).toBe('skipped');
+    state.rows = [{ ...parked }];
+    expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
