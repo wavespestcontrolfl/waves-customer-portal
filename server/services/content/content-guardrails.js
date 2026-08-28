@@ -260,10 +260,48 @@ function blankExpressions(str) {
 // ("[a](/x \"title\")" — the title is never rendered text); labels and
 // destinations stay where they are. Length-preserving. Also the body-image
 // scanner's non-rendered-link pass (astro-publisher).
-function blankLinkDefinitionsAndTitles(str) {
-  return String(str || '')
-    .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan)
-    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan)
+// A CommonMark thematic break (`***`, `---`, `___`, spaced variants such as
+// `- - -`), judged on a quote-stripped line. It interrupts a paragraph and a
+// list item in the rendered scanner below, and the body-image scanner treats
+// it as a section divider that is never prose. ONE classification — every
+// scanner that asks "is this a break?" asks here.
+const THEMATIC_BREAK_RE = /^ {0,3}(?:(?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/;
+function isThematicBreak(line) {
+  return THEMATIC_BREAK_RE.test(String(line || ''));
+}
+// A block that INTERRUPTS a paragraph / list item without a blank line: an
+// ATX heading or a thematic break.
+const INTERRUPTING_BLOCK_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+function isInterruptingBlock(line) {
+  return INTERRUPTING_BLOCK_RE.test(line) || isThematicBreak(line);
+}
+
+// Link reference definitions (`[label]: /dest "title"`) → Map(normalized
+// label → destination). CommonMark label matching: case-folded, interior
+// whitespace collapsed; the FIRST definition of a label wins. Callers pass
+// the code/comment-stripped text (a definition inside a fence is code).
+const REF_DEFINITION_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]*)>|(\S+))/;
+function normalizeReferenceLabel(label) {
+  return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+function markdownReferenceDefinitions(str) {
+  const defs = new Map();
+  for (const line of String(str || '').split('\n')) {
+    const m = line.match(REF_DEFINITION_RE);
+    if (!m) continue;
+    const label = normalizeReferenceLabel(m[1]);
+    if (!label || defs.has(label)) continue;
+    defs.set(label, (m[2] !== undefined ? m[2] : m[3]).trim());
+  }
+  return defs;
+}
+
+// `keepReferenceTails`: leave `][label]` reference tails in place — the
+// balanced scanner below then decides per occurrence (an IMAGE reference
+// is kept under keepImages; a link reference is still blanked).
+function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false } = {}) {
+  const defsBlanked = String(str || '').replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan);
+  return (keepReferenceTails ? defsBlanked : defsBlanked.replace(/\]\s*\[[^\]\n]*\]/g, blankSpan))
     .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
 }
 
@@ -271,8 +309,13 @@ function blankLinkDefinitionsAndTitles(str) {
 // the images themselves) while still blanking every LINK destination — an
 // image nested inside a link destination renders nothing and is blanked
 // with it; an image inside a link LABEL renders and stays.
+// Reference-style images (`![alt][label]`, `![alt][]`, `![alt]`) RENDER a
+// picture exactly like an inline image, so under keepImages their reference
+// tails are kept for the image scanner to resolve against the body's
+// definitions (markdownReferenceDefinitions); reference-style LINKS are
+// blanked to their label either way.
 function blankMarkdownLinkDestinations(str, { keepImages = false } = {}) {
-  const text = blankLinkDefinitionsAndTitles(str);
+  const text = blankLinkDefinitionsAndTitles(str, { keepReferenceTails: keepImages });
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
   for (let i = 0; i < text.length; i += 1) {
@@ -288,9 +331,22 @@ function blankMarkdownLinkDestinations(str, { keepImages = false } = {}) {
       else if (ch === ']') { depth -= 1; if (depth === 0) break; }
       else if (ch === '\n' && text[j + 1] === '\n') break; // paragraph end
     }
-    if (j >= text.length || text[j] !== ']' || text[j + 1] !== '(') continue;
+    if (j >= text.length || text[j] !== ']') continue;
     const labelStart = i;
     const labelEnd = j;
+    if (text[j + 1] === '[') {
+      // Reference tail `[label]` (only reachable with keepReferenceTails).
+      const tailEnd = text.indexOf(']', j + 2);
+      const tail = tailEnd > 0 ? text.slice(j + 2, tailEnd) : '';
+      if (tailEnd < 0 || tail.includes('\n')) continue;
+      if (!(isImage && keepImages)) {
+        blank(labelStart, labelStart);       // "["
+        blank(labelEnd, tailEnd);            // "][label]"
+      }
+      i = tailEnd;
+      continue;
+    }
+    if (text[j + 1] !== '(') continue;
     // Balanced destination scan.
     let k = j + 1;
     let pdepth = 0;
@@ -2122,7 +2178,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // An interrupting block (ATX heading or thematic break) ends the list
     // even with no blank line — neither can lazily continue a list item.
     // A dashes-only break ("- - -") is a break, not a list marker.
-    const fenceInterrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped);
+    const fenceInterrupting = isInterruptingBlock(stripped);
     const listItem = fenceInterrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     // The tracked list column applies only at ITS quote depth — a line at
     // a different depth measures against a fresh (zero) column.
@@ -2168,6 +2224,12 @@ function blankNonRenderedMarkdownWithDepths(text) {
   let listContentIndent = 0;
   let prevBlank = true;
   const outDepths = [];
+  // Per line: is it LIST content (a marker line, an item's continuation or
+  // lazy continuation, blank lines inside the list)? Consumers that only
+  // want TOP-LEVEL blocks (the body-image scanner) read this instead of
+  // re-deriving list membership from raw indentation — a 1–3 space
+  // indented top-level heading or paragraph is NOT nested (CommonMark).
+  const outInList = [];
   const outText = fenced.split('\n').map((l, i) => {
     // A fence-geometry list end recorded by pass 3 (the fence lines it
     // judged are blanked here, so this pass cannot re-derive it).
@@ -2191,7 +2253,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     // INTERRUPTING block (ATX heading, thematic break — dashes-only "- - -"
     // included — or a DEDENTED blockquote) ends the list even with no blank
     // line; none can lazily continue a list item.
-    const interrupting = /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$)/.test(stripped)
+    const interrupting = isInterruptingBlock(stripped)
       || Boolean(quotePrefix && listContext && rawIndent < listContentIndent);
     const listItem = interrupting ? null : stripped.match(/^( *)((?:[-*+]|\d+[.)])\s+)/);
     if (listItem && listItem[1].length <= (listContext ? listContentIndent + 3 : 3)) {
@@ -2202,6 +2264,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
       listContext = false;
     }
     prevBlank = blank;
+    outInList.push(listContext);
     if (indented) {
       if (!listContext) return '';
       const indent = stripped.match(/^[ \t]*/)[0].replace(/\t/g, '    ').length;
@@ -2209,7 +2272,7 @@ function blankNonRenderedMarkdownWithDepths(text) {
     }
     return stripped.replace(/^\s+/, '');
   }).join('\n');
-  return { text: outText, depths: outDepths };
+  return { text: outText, depths: outDepths, inList: outInList };
 }
 
 function blankNonRenderedMarkdown(text) {
@@ -4646,6 +4709,9 @@ module.exports = {
   blankExpressions,
   blankLinkDefinitionsAndTitles,
   blankMarkdownLinkDestinations,
+  markdownReferenceDefinitions,
+  normalizeReferenceLabel,
+  isThematicBreak,
   blankHiddenContent,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,

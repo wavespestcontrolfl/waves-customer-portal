@@ -4669,3 +4669,29 @@ describe('banned service topics guard (P0 BANNED_TOPIC)', () => {
     expect(referral.findings.some((f) => f.code === 'BANNED_TOPIC')).toBe(false);
   });
 });
+
+describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on PR #3567)', () => {
+  test('isThematicBreak: CommonMark breaks incl. spaced variants; not list markers, headings, setext-only text', () => {
+    for (const l of ['---', '***', '___', '- - -', ' * * *', '   _ _ _', '-----', '*\t*\t*']) expect(guardrails.isThematicBreak(l)).toBe(true);
+    for (const l of ['- item', '--', '## h', '    ---', '-- -x', '', 'text']) expect(guardrails.isThematicBreak(l)).toBe(false);
+  });
+
+  test('markdownReferenceDefinitions: normalized labels, <dest> form, first definition wins', () => {
+    const defs = guardrails.markdownReferenceDefinitions('[Body]: /a.webp "t"\n[ two   words ]: </b c.webp>\n[body]: /dup.webp\ntext [x]: not-at-line-start');
+    expect([...defs.entries()]).toEqual([['body', '/a.webp'], ['two words', '/b c.webp']]);
+    expect(guardrails.normalizeReferenceLabel('  Two\n  Words ')).toBe('two words');
+  });
+
+  test('blankMarkdownLinkDestinations keepImages: reference-style IMAGE tails are kept, reference-style LINK tails are blanked; default path unchanged', () => {
+    const src = '![pic][ref] and [link][ref] and [text](/x/)';
+    expect(guardrails.blankMarkdownLinkDestinations(src, { keepImages: true })).toBe('![pic][ref] and  link       and  text      ');
+    // Default path (no keepImages) is byte-for-byte what it was before reference tails were image-aware.
+    expect(guardrails.blankMarkdownLinkDestinations(src)).toBe('![pic       and [link       and  text      ');
+  });
+
+  test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {
+    const body = ['  ## Indented', '', '- item', '  continued', 'lazy continuation', '', '  still item', '', 'after list', '', ' - - -', 'x'].join('\n');
+    const { inList } = guardrails.blankNonRenderedMarkdownWithDepths(body);
+    expect(inList).toEqual([false, false, true, true, true, true, true, true, false, false, false, false]);
+  });
+});

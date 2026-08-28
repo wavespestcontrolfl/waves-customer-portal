@@ -1808,7 +1808,23 @@ function bodyImagesEnabled() {
 // Only an ODD backslash run escapes the "!" (Markdown escape parity).
 // Destination = up to the first whitespace; ONE level of balanced parens is
 // part of the path ("/body-(detail).webp"), as CommonMark allows.
-const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))*)(?:\s[^)]*)?\)/g;
+// Inline OR reference-style image: `![alt](dest)`, `![alt][label]`,
+// `![alt][]` (collapsed), `![alt]` (shortcut). A reference form renders a
+// picture only when its label has a definition in the body — an undefined
+// label is text, not an image.
+const RENDERED_IMAGE_ANY_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\](?:\(((?:[^()\s]|\([^()\s]*\))*)(?:\s[^)]*)?\)|\[([^\]\n]*)\])?/g;
+// Every image a rendered line shows, inline destinations verbatim and
+// reference labels resolved through `defs` (markdownReferenceDefinitions).
+function imageRefsInLine(line, defs) {
+  const out = [];
+  for (const m of String(line || '').matchAll(RENDERED_IMAGE_ANY_RE)) {
+    const alt = m[1];
+    if (m[2] !== undefined) { out.push({ alt: alt.trim(), src: m[2] }); continue; }
+    const label = contentGuardrails.normalizeReferenceLabel(m[3] ? m[3] : alt);
+    if (label && defs && defs.has(label)) out.push({ alt: alt.trim(), src: defs.get(label) });
+  }
+  return out;
+}
 
 // The body with every non-rendered region blanked (fenced/indented code,
 // code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
@@ -1835,15 +1851,21 @@ function blankJsxAndExpressions(text) {
 // removed) → link destinations / reference definitions / titles blanked with
 // images kept (a `![..]` nested in a link destination goes with it; one in a
 // link label renders and stays) → tags + MDX expressions.
+// `inList` (per line, from the shared scanner's list tracking) tells the
+// section scanner which blocks are list content; `defs` are the body's link
+// reference definitions, read BEFORE link blanking removes them, so a
+// reference-style image (`![alt][label]`) resolves to its destination.
 function renderedBodyView(body) {
-  const { text, depths } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+  const { text, depths, inList } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
   // Children of a container a reader may never see (<script>, <template>,
   // <div hidden>, closed <details>, …) are blanked by the guardrails'
   // visibility walker — the same judgement the attribution rules use.
+  const visible = contentGuardrails.blankHiddenContent(text);
+  const defs = contentGuardrails.markdownReferenceDefinitions(visible);
   const lines = blankJsxAndExpressions(
-    contentGuardrails.blankMarkdownLinkDestinations(contentGuardrails.blankHiddenContent(text), { keepImages: true }),
+    contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),
   ).split('\n');
-  return { lines, depths };
+  return { lines, depths, inList: inList || [], defs };
 }
 function renderedBodyLines(body) {
   return renderedBodyView(body).lines;
@@ -1851,8 +1873,9 @@ function renderedBodyLines(body) {
 
 function bodyImageRefs(body) {
   const out = [];
-  renderedBodyLines(body).forEach((line, index) => {
-    for (const m of line.matchAll(RENDERED_IMAGE_RE)) out.push({ alt: m[1].trim(), src: m[2], line: index });
+  const { lines, defs } = renderedBodyView(body);
+  lines.forEach((line, index) => {
+    for (const ref of imageRefsInLine(line, defs)) out.push({ ...ref, line: index });
   });
   return out;
 }
@@ -1893,13 +1916,15 @@ function scanBodySections(body, { title = '' } = {}) {
   // off the rendered view — fenced/indented code, code spans, comments and
   // <pre> are blank there, so a "## heading" inside a comment or a fence is
   // never a section and a code sample is never prose. Only TOP-LEVEL blocks
-  // are placement candidates: the rendered view strips quote markers and
-  // list indent, so a heading or paragraph counts only at quote depth 0 with
-  // its raw line at column 0 (an H2 inside a blockquote or a list item is
-  // neither a section nor a slot — an image inserted there would land
-  // outside the quote or break the list). Raw lines feed the lead text.
-  const { lines: rendered, depths } = renderedBodyView(body);
-  const topLevel = (i) => (depths[i] || 0) === 0 && !/^\s/.test(lines[i] || '');
+  // are placement candidates: a heading or paragraph counts only at quote
+  // depth 0 and outside list content (both read off the shared scanner's
+  // per-line depth / list tracking — an H2 inside a blockquote or a list
+  // item is neither a section nor a slot: an image inserted there would
+  // land outside the quote or break the list). A top-level block with 1–3
+  // leading spaces is still top-level (CommonMark). Raw lines feed the
+  // lead text.
+  const { lines: rendered, depths, inList, defs } = renderedBodyView(body);
+  const topLevel = (i) => (depths[i] || 0) === 0 && !inList[i];
   const sections = [];
   let cur = { heading: String(title || '').trim(), start: 0, intro: true, images: [] };
   let paraStart = -1;
@@ -1926,8 +1951,19 @@ function scanBodySections(body, { title = '' } = {}) {
       }
       continue;
     }
-    for (const m of line.matchAll(RENDERED_IMAGE_RE)) { cur.hasImage = true; cur.images.push(m[2]); }
+    for (const ref of imageRefsInLine(line, defs)) { cur.hasImage = true; cur.images.push(ref.src); }
     if (line.trim() === '') { closePara(i); continue; }
+    // A thematic break (`---`, `***`, `- - -`) is a divider, never prose: it
+    // closes the paragraph before it (the slot stays ABOVE the divider,
+    // inside the section it illustrates) and opens none — a section holding
+    // only a divider has no prose to generate from. A dashes/equals-only
+    // underline directly under a paragraph is a SETEXT heading in
+    // CommonMark, so that paragraph is heading text, not prose.
+    if (contentGuardrails.isThematicBreak(line) || (paraStart >= 0 && /^ {0,3}=+[ \t]*$/.test(line))) {
+      if (paraStart >= 0 && /^ {0,3}(?:-+|=+)[ \t]*$/.test(line)) paraStart = -1;
+      else closePara(i);
+      continue;
+    }
     if (paraStart < 0) paraStart = i;
   }
   closePara(rendered.length);
@@ -3898,6 +3934,7 @@ module.exports = {
     validateBodyImageRefs,
     scanBodySections,
     renderedBodyView,
+    imageRefsInLine,
     assertBodyImagesAtHead,
     legacyHeroRefs,
     imageDHash,

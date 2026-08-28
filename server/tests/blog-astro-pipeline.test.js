@@ -3938,6 +3938,78 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(res.reason).toMatch(/0 distinct in-article image\(s\)/);
   });
 
+  test('bodyImageRefs: reference-style images (full, collapsed, shortcut) resolve through the body\'s definitions; undefined labels and definitions inside code are not images; reference LINKS still blank (GH r9)', () => {
+    const body = [
+      '![technician][body]',
+      '![Collapsed Alt][]',
+      '![shortcut]',
+      '![nope][undefined]',
+      '![in-fence][fenced]',
+      '[a reference link][body] and [text](/x/) stay prose',
+      '',
+      '[body]: /images/blog/x/body-1.webp "Title"',
+      '[ collapsed   alt ]: </images/blog/x/body-2.webp>',
+      '[SHORTCUT]: /images/blog/x/body-3.webp',
+      '[body]: /images/blog/x/ignored-second-definition.webp',
+      '```',
+      '[fenced]: /images/blog/x/body-4.webp',
+      '```',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => [r.alt, r.src])).toEqual([
+      ['technician', '/images/blog/x/body-1.webp'],
+      ['Collapsed Alt', '/images/blog/x/body-2.webp'],
+      ['shortcut', '/images/blog/x/body-3.webp'],
+    ]);
+    // The section scanner sees the same pictures: a reference-style image marks its section illustrated.
+    const { sections } = AstroPublisher._internals.scanBodySections(`## A\n\nProse.\n\n![pic][body]\n\n## B\n\nMore.\n\n[body]: /images/blog/x/body-1.webp\n`, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.hasImage === true])).toEqual([['A', true], ['B', false]]);
+  });
+
+  test('validateBodyImageRefs: a reference-style image is validated like an inline one — hero via reference fails, uncommitted via reference fails, committed counts (GH r9)', async () => {
+    const { validateBodyImageRefs } = AstroPublisher._internals;
+    const heroSrc = '/images/blog/x/hero.webp';
+    const getFile = async (path) => (path === 'public/images/blog/x/body-1.webp' || path === 'public/images/blog/x/body-2.webp' ? { content: 'x' } : null);
+    const viaRef = (label, dest) => `## A\n\n![p][${label}]\n\n![q](/images/blog/x/body-2.webp)\n\n[${label}]: ${dest}\n`;
+    expect((await validateBodyImageRefs({ body: viaRef('h', heroSrc), heroSrc, getFile })).reason).toMatch(/embeds the hero image/);
+    expect((await validateBodyImageRefs({ body: viaRef('r', 'https://example.com/pic.jpg'), heroSrc, getFile })).reason).toMatch(/not committed/);
+    expect((await validateBodyImageRefs({ body: viaRef('m', '/images/blog/x/missing.webp'), heroSrc, getFile })).reason).toMatch(/not committed/);
+    expect(await validateBodyImageRefs({ body: viaRef('ok', '/images/blog/x/body-1.webp'), heroSrc, getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
+  test('bodyImageSlots: top-level H2s and paragraphs with 1–3 leading spaces are still top-level; real list children are not (GH r9)', () => {
+    const body = [
+      '  ## Indented heading', '', '   Indented prose, still a paragraph.', '',
+      '## Plain', '', 'Plain prose.', '',
+      '- item', '  ## Nested heading', '', '  Nested prose under the item.', '',
+      ' ## After list', '', ' After prose.',
+    ].join('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.filter((sec) => !sec.intro).map((sec) => sec.heading)).toEqual(['Indented heading', 'Plain', 'After list']);
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    const lines = body.split('\n');
+    expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['   Indented prose, still a paragraph.', 'Plain prose.', ' After prose.']);
+  });
+
+  test('bodyImageSlots: thematic breaks are dividers, never prose — the slot stays above the break, a divider-only section is ineligible, "- - -" is not a list; a setext underline makes heading text, not prose (GH r9)', () => {
+    const body = [
+      '## A', '', 'A prose.', '', '---', '',
+      '## Only divider', '', '***', '',
+      '## B', '', 'B prose.', '- - -', '',
+      '## C', '', 'Setext-looking text', '---', '',
+      '## D', '', 'D prose.', '', '___',
+    ].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    const byHeading = Object.fromEntries(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.lastProse == null ? null : lines[sec.lastProse - 1]]));
+    expect(byHeading).toEqual({ A: 'A prose.', 'Only divider': null, B: 'B prose.', C: null, D: 'D prose.' });
+    const slots = bodyImageSlots(body, 3, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['A', 'B', 'D']);
+    // Insertion lands ABOVE the divider, inside the section.
+    const out = insertBodyImages(body, slots.map((sl, i) => ({ ...sl, src: `/images/blog/x/body-${i + 1}.webp`, alt: sl.heading })));
+    expect(out).toContain('A prose.\n\n![A](/images/blog/x/body-1.webp)\n\n---');
+    expect(out).toContain('B prose.\n\n![B](/images/blog/x/body-2.webp)\n\n- - -');
+  });
+
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);
