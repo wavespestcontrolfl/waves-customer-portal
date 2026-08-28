@@ -48,6 +48,10 @@ const MAX_ATTEMPTS = 3;
 const CLAIM_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MIN = 10;
 const IDENTITY_BACKOFF_MIN = 60;
+// Deploy-forward is a property of the REVIEW: nothing older than this at
+// first sight ever enters the lane, whichever insert path (GBP, Places, a
+// fresh-sync rebuild that re-imports history) produced the row.
+const DEFAULT_MAX_QUEUE_AGE_HOURS = 48;
 // Clamp for reviews already past their jitter window at detection time.
 const OVERDUE_DELAY_MIN = 5;
 const OVERDUE_DELAY_MAX = 20;
@@ -79,6 +83,7 @@ function config() {
     delayMax,
     // Empty = every location with GBP credentials.
     locations,
+    maxQueueAgeHours: intEnv('REVIEW_AUTO_REPLY_MAX_AGE_HOURS', DEFAULT_MAX_QUEUE_AGE_HOURS, { min: 1, max: 24 * 30 }),
   };
 }
 
@@ -117,6 +122,9 @@ function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review
   if (dismissed) return {};
   if (hasRealReply(owner_reply)) return {};
   if (!locationAllowed(location_id, cfg)) return {};
+  const created = review_created_at ? new Date(review_created_at) : null;
+  if (!created || Number.isNaN(created.getTime())) return {};
+  if (now.getTime() - created.getTime() > cfg.maxQueueAgeHours * 3600000) return {};
   return {
     auto_reply_status: STATUS.QUEUED,
     auto_reply_due_at: computeDueAt(review_created_at, { now, cfg }).toISOString(),

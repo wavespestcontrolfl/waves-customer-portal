@@ -90,14 +90,16 @@ const BANNED_RE = new RegExp([
   // Rating solicitation / review editing.
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
-  '\\bsafe\\b', '\\bsafely\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
+  '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharmless\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
   '\\bguarantee[ds]?\\b', '\\bwarrant(?:y|ee)\\b',
   // Drying / curing / wait-before language of any form (fixed intervals are
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
   '\\b(?:wait|stay\\s+off|keep\\s+off|stay\\s+out|keep\\s+out|avoid)\\b[^.]{0,30}\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b',
   // Rank claims (claims-ledger rule) and competitor names.
-  "\\bwe(?:'re| are) the (?:best|#1|number one)\\b", '\\btop[-\\s]rated\\b', '\\b#1\\b',
+  // Rank / superiority language in ANY grammatical wrapper (claims-ledger rule).
+  '\\bbest\\b(?!\\s+(?:regards|wishes))', '\\bnumber\\s*one\\b', '#\\s?1\\b', '\\btop[-\\s]?(?:rated|notch|tier|choice|pick|ranked)\\b', '\\b(?:a|the)\\s+top\\s+(?:pest|lawn|company|team|choice|provider|service)\\b',
+  '\\bleading\\b', '\\bpremier\\b', '\\bunmatched\\b', '\\bunbeatable\\b', '\\bfinest\\b', '\\bmost\\s+trusted\\b', '\\bhighest[-\\s]rated\\b', '\\bsecond\\s+to\\s+none\\b',
   '\\b(?:terminix|orkin|truly nolen|massey|aptive|rentokil|hometeam|home team)\\b',
 ].join('|'), 'i');
 // Anything that reads as "we know something you told us privately".
@@ -129,6 +131,12 @@ const DATE_CLAIM_RE = /\b(?:yesterday|today|tomorrow|tonight|this (?:morning|aft
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.
 const SERVICE_CLAIM_RE = /\b(?:eliminat\w*|exterminat\w*|eradicat\w*|infest\w*|protect\w*|remov(?:ed|al|ing)?|controlled|colon(?:y|ies)|nests?|problems?|issues?|damage|mosquito(?:es)?|termites?|rodents?|rats?|mice|mouse|roach(?:es)?|ants?|spiders?|wasps?|fleas?|ticks?|bed ?bugs?|silverfish|earwigs?|scorpions?|treatments?|treated|treating|sprays?|sprayed|spraying|baits?|bait stations?|stations?|inspections?|inspected|exclusion|trapping|traps?|fungus|fungicide|chinch|sod|weeds?|fertiliz\w*|irrigation|turf|grass|yard|trees?|shrubs?|palms?|hedges?|wdo|quarterly|bi-?monthly|monthly|annual|yearly|plans?|programs?|membership|waveguard)\b/gi;
+// Visit-experience claims (timeliness, speed, communication) — only the
+// reviewer can vouch for these.
+const EXPERIENCE_CLAIM_RE = /\b(?:on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
+// A duration with a number is a specific fact; tenure buckets prove only a
+// floor. "10 years" needs the whole phrase in the review.
+const QUANTIFIED_TENURE_RE = /\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|many|several|couple of|few|multiple|decades?)\s+(?:\+\s*)?(?:years?|months?|seasons?|decades?)\b/gi;
 const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|long-?time|longtime|first visit|first time|new customer|recurring|regular|ongoing|again|since|every (?:month|quarter|visit))\b/gi;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
@@ -322,10 +330,22 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     ...(rel === 'first_visit' ? ['first visit', 'first time', 'new customer'] : []),
     ...(tenure === 'long_term' ? ['years', 'year', 'loyal', 'long-time', 'longtime', 'since'] : []),
   ]);
+  for (const term of body.match(QUANTIFIED_TENURE_RE) || []) {
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    if (!reviewLower.replace(/\s+/g, ' ').includes(t)) return 'unlisted_relationship_claim';
+  }
   for (const term of body.match(RELATIONSHIP_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (relAllowed.has(t) || reviewLower.includes(t) || reviewWords.has(t)) continue;
     return 'unlisted_relationship_claim';
+  }
+  // Visit-experience claims: the reviewer's words only (root-matched).
+  for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    const stem = stemOf(t.replace(/[- ]/g, ' '));
+    if (reviewLower.replace(/[- ]+/g, ' ').includes(t.replace(/[- ]+/g, ' '))) continue;
+    if (stem.length >= 4 && [...reviewWords].some((w) => { const ws = stemOf(w); return ws.startsWith(stem) || (stem.startsWith(ws) && ws.length >= 4); })) continue;
+    return 'unlisted_experience_claim';
   }
 
   // Non-repetition against the location's recent posted replies.
@@ -423,6 +443,7 @@ const FEEDBACK_FOR = {
   date_claim: 'stated a date or time the reviewer did not write',
   unlisted_service_claim: 'claimed a service, pest, or treatment the reviewer did not mention',
   unlisted_relationship_claim: 'claimed a relationship or tenure fact that is not in the review or account facts',
+  unlisted_experience_claim: 'described the visit (timing, speed, communication) in terms the reviewer did not use',
   repetitive_opening: 'opened the same way as a recent reply',
   repetitive_body: 'read too much like a recent reply',
   placeholder: 'contained a placeholder or bracket',

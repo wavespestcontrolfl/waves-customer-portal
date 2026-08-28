@@ -269,6 +269,12 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
   const review = await db('google_reviews').where({ id: reviewId }).first();
   if (!review || review.reviewer_name === '_stats') throw new ReviewReplyError(CODES.NOT_FOUND, 'Review not found', { status: 404 });
   if (!hasRealReply(review.review_reply)) throw new ReviewReplyError(CODES.HAS_REPLY, 'This review has no posted reply to retract', { status: 409 });
+  // Retract exists for replies the PIPELINE posted. A human's reply (or one
+  // the owner edited in Google, which closes the posted state) is edited or
+  // deleted through the editor, never through this shortcut.
+  if (review.auto_reply_status !== 'posted') {
+    throw new ReviewReplyError(CODES.STALE, 'Only an automatically posted reply can be retracted here — this reply is not (or no longer) the pipeline\'s.', { status: 409 });
+  }
   if (!gbp.configured || !(await gbp.isLocationConfigured(review.location_id))) {
     throw new ReviewReplyError(CODES.NOT_CONFIGURED, `Google Business Profile is not connected for ${review.location_id}`, { status: 503 });
   }
@@ -298,11 +304,14 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       }
       const liveReply = String(live?.reviewReply?.comment || '').trim();
       if (liveReply !== String(review.review_reply || '').trim()) {
-        if (liveReply) {
-          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
-            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
-        }
+        // Record what Google has AND close the posted state: the owner
+        // edited (or removed) the reply in Google, so it is no longer the
+        // pipeline's — a repeat Retract must not delete the human edit.
+        await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
+          .update(liveReply
+            ? { review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(), auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' }
+            : { review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' })
+          .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
         throw new ReviewReplyError(CODES.STALE, liveReply
           ? 'The reply on Google differs from the one shown here (edited in Google) — reload and check the current reply.'
           : 'There is no reply on Google to retract — reload.', { status: 409 });

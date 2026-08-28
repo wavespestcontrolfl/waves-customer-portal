@@ -258,6 +258,7 @@ describe('publishReviewReply — post-publish persistence failure', () => {
 describe('retractReviewReply', () => {
   test('deletes on Google under the lock, clears locally, audits', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
     const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' }, autoFields: { auto_reply_status: 'retracted' } });
     expect(r.googleDeleted).toBe(true);
@@ -271,24 +272,26 @@ describe('retractReviewReply', () => {
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(mockGbp.deleteReply).not.toHaveBeenCalled();
   });
-  test('P0: a reply edited directly in Google (unseen locally) is never deleted; the live text is recorded', async () => {
+  test('P0: a reply edited directly in Google (unseen locally) is never deleted; the live text is recorded and the posted state closes', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Edited in Google', updateTime: '2026-08-27T11:00:00Z' } });
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.STALE });
     expect(mockGbp.deleteReply).not.toHaveBeenCalled();
-    expect(state.rows[0].review_reply).toBe('Edited in Google');
-    // Matching live reply → delete proceeds.
-    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Edited in Google' } });
-    const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } });
-    expect(r.googleDeleted).toBe(true);
+    expect(state.rows[0]).toMatchObject({ review_reply: 'Edited in Google', auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' });
+    // A repeat Retract now refuses: the reply is the human's, not the pipeline's.
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.STALE });
+    expect(mockGbp.deleteReply).not.toHaveBeenCalled();
     // Read failure fails closed.
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockGbp.getReview.mockRejectedValueOnce(new Error('GBP 503'));
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
-    expect(mockGbp.deleteReply).toHaveBeenCalledTimes(1);
+    expect(mockGbp.deleteReply).not.toHaveBeenCalled();
   });
   test('a reply edited by someone else between confirm and lock is not deleted', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockLock.mockImplementationOnce(async (id, fn) => {
       // A fresh row object (the real DB returns a new row per read).
       state.rows = [{ ...state.rows[0], review_reply: 'Edited replacement posted first' }];
@@ -302,6 +305,7 @@ describe('retractReviewReply', () => {
   });
   test('deleted on Google but the local clear failed → PERSIST_FAILED, claim abandoned, no audit', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
@@ -313,6 +317,7 @@ describe('retractReviewReply', () => {
   });
   test('a stamped review keeps its recorded reply (evidence row)', async () => {
     state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
     mockLock.mockResolvedValueOnce({ blocked: true, missing: false });
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.MISSING });
     expect(state.rows[0].review_reply).toBe('Posted reply');

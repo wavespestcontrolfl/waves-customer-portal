@@ -167,6 +167,12 @@ describe('autoReplyInsertFields (merged into the sync INSERT)', () => {
     expect(f.auto_reply_status).toBe('queued');
     expect(new Date(f.auto_reply_due_at).getTime()).toBeGreaterThan(NOW.getTime());
   });
+  test('never queues a review older than the max queue age (fresh-sync rebuilds re-import history)', () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    expect(Runner.autoReplyInsertFields({ ...base, review_created_at: '2026-08-01T00:00:00Z' }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, review_created_at: null }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, review_created_at: '2026-08-26T20:00:00Z' }, { now: NOW }).auto_reply_status).toBe('queued');
+  });
   test('never queues _stats rows, dismissed rows, replied rows, or disabled locations', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     expect(Runner.autoReplyInsertFields({ ...base, reviewer_name: '_stats' })).toEqual({});

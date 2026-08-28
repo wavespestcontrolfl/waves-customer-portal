@@ -42,7 +42,7 @@ function grounding(over = {}) {
 }
 
 const good = (body) => `${body}\n\n${SIGN_OFF}`;
-const CLEAN = good('Hi Dana,\n\nGlad Marcus got out quickly and the ants are staying out of your kitchen. We will pass that along to him.');
+const CLEAN = good('Hi Dana,\n\nGlad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.');
 
 beforeEach(() => { mockDispatch.mockReset(); });
 
@@ -179,6 +179,26 @@ describe('verifyReplyText — public-surface safety net', () => {
     // Relationship claims need provenance too.
     expect(verify(good('Hi Dana, thanks for years of trusting us with the service.'), g)).toBe('unlisted_relationship_claim');
   });
+  test('visit-experience claims (timeliness, communication) need the reviewer\'s words', () => {
+    const g = grounding({ text: 'Great service!', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, glad the service hit the mark. Our team arrived on time and explained everything clearly.'), g)).toBe('unlisted_experience_claim');
+    const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
+    expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
+  });
+  test('quantified tenure needs the whole phrase in the review', () => {
+    const g = grounding({ text: '10/10 great service', mentionedTechNames: [], topics: [], account: { relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control'], city: null } });
+    expect(verify(good('Hi Dana, thank you for trusting us with the pest control for 10 years.'), g)).toBe('unlisted_relationship_claim');
+    expect(verify(good('Hi Dana, thank you for sticking with us over the years for the pest control.'), g)).toBeNull();
+    const g2 = grounding({ text: 'Ten years with them and still great.', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hi Dana, ten years is a long run and we are glad to still be the ones you call.'), g2)).toBeNull();
+  });
+  test('comparative/noun safety forms and rank language in any wrapper are rejected', () => {
+    expect(verify(good('Hi Dana, glad Marcus offered a safer option for the ants in your kitchen.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus put safety first with the ants in your kitchen.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus is proud to be on the best pest control team for your ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, thanks for choosing the number one team for the ants Marcus handled.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus and a top pest control team got the ants out.'))).toBe('banned_phrase');
+  });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana, glad Marcus got the ants handled before your HOA walk-through.'))).toBeNull();
@@ -206,7 +226,7 @@ describe('verifyReplyText — public-surface safety net', () => {
   test('non-repetition against recent posted replies', () => {
     const recent = [good('Hi Dana, glad Marcus got out quickly and the ants are staying out of your kitchen. Thanks.')];
     expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBe('repetitive_opening');
-    const recent2 = [good('Hello there, glad Marcus got out quickly and the ants are staying out of your kitchen. We will pass that along to him.')];
+    const recent2 = [good('Hello there, glad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.')];
     expect(verify(CLEAN, grounding(), { recentReplies: recent2 })).toBe('repetitive_body');
   });
   test('placeholders are rejected', () => {
