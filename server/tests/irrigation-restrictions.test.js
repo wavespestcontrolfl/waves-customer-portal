@@ -83,6 +83,11 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Sarasota' })).toBe('Sarasota'); // normalized
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Bradenton' })).toBe('Manatee'); // conflicting current city wins
     expect(resolveRestrictionCounty({ city: 'Lakewood Ranch' })).toBeNull(); // straddles Manatee/Sarasota
+    // ZIP outranks the USPS city: "Sarasota" at 34243 is Manatee County; a Lakewood Ranch ZIP resolves too.
+    expect(resolveRestrictionCounty({ city: 'Sarasota', zip: '34243' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ city: 'Lakewood Ranch', zip: '34202' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ city: 'Lakewood Ranch', zip: '34240' })).toBe('Sarasota');
+    expect(resolveRestrictionCounty({ county: 'Sarasota', zip: '34243' })).toBe('Manatee'); // stale profile vs current ZIP
     expect(resolveRestrictionCounty({ city: 'Parrish' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties

@@ -250,10 +250,15 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   if (plan.rainSensor && !omitSensorNote) {
     notes.push('Your rain sensor will skip a run on its own if we get a soaking.');
   }
-  if (plan.reasons.includes('forecast_unavailable') && plan.action === 'run') {
-    notes.push(plan.events > 1
-      ? 'We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
-      : 'We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — if we get ½" or more of rain before your run, skip it.');
+  // One soaking skips one run — on EVERY unconditional run plan, whatever
+  // the forecast said (an under-predicted storm is still ½" in the ground).
+  if (plan.action === 'run' && !plan.conditionalOnForecast) {
+    const lead = plan.reasons.includes('forecast_unavailable')
+      ? 'We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — '
+      : 'And if the forecast is wrong: ';
+    notes.push(lead + (plan.events > 1
+      ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
+      : 'if we get ½" or more of rain before your run, skip it.'));
   }
 
   return {
@@ -290,20 +295,25 @@ function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = 
     };
   }
   if (plan.conditionalOnForecast) {
+    // Same cycle the email names: minutes when a rate exists, otherwise the
+    // turf-zone / depth fallback — never a bare "one cycle" a customer could
+    // read as the whole controller program.
+    const cycle = minutes
+      ? `one cycle of ${minutes} per turf zone`
+      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
     return {
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
-        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
-        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan, restriction)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
+        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}, run ${cycle} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
+        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan, restriction)}, run ${cycle} only if less than ½" has fallen so far this week.`,
     };
   }
-  // No forecast was available when the plan was decided: the email carries
-  // a "skip after ½" of real rain" safeguard — the report must too.
-  const noForecastNote = plan.reasons.includes('forecast_unavailable')
-    ? (plan.events > 1
-      ? ' No rain forecast was available for this plan — before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not), skip that run.'
-      : ' No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.')
-    : '';
+  // One soaking skips one run — on every unconditional run plan (the email
+  // carries the same safeguard); the no-forecast case just says why.
+  const rainLead = plan.reasons.includes('forecast_unavailable') ? ' No rain forecast was available for this plan — ' : ' If the forecast is wrong: ';
+  const noForecastNote = rainLead + (plan.events > 1
+    ? 'before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not), skip that run.'
+    : 'if ½" or more of rain falls before your run, skip it.');
   return {
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
     detail: `${plan.events > 1 ? `On ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}` : `On ${permittedDayPhrase(plan, restriction)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,

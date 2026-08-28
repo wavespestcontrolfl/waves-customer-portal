@@ -144,13 +144,19 @@ describe('renderWeekPlanEmail', () => {
     expect(report.detail).not.toMatch(/permitted watering day|run one cycle/);
   });
 
-  test('report carries the no-forecast rain safeguard the email has', () => {
+  test('every unconditional run plan carries the soaking-rain override (email + report); the no-forecast case says why', () => {
     const one = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: null, ...SPRAY });
     expect(renderWeekPlanReport(one).detail).toContain('No rain forecast was available for this plan — if ½" or more of rain falls before your run, skip it.');
     const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
     expect(renderWeekPlanReport(two).detail).toContain('since your previous permitted watering day (skipped or not), skip that run');
+    // A dry forecast still gets the override — an under-predicted storm is still ½" in the ground.
     const withForecast = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, forecastRainInches: 0.1, ...SPRAY });
+    expect(renderWeekPlanReport(withForecast).detail).toContain('If the forecast is wrong: if ½" or more of rain falls before your run, skip it.');
     expect(renderWeekPlanReport(withForecast).detail).not.toContain('No rain forecast');
+    expect(renderWeekPlanEmail(withForecast, CTX).plan_note).toContain('And if the forecast is wrong: if we get ½" or more of rain before your run, skip it.');
+    // Conditional plans carry the check in the action line instead, and an events-only conditional names the turf-zone fallback cycle.
+    const condNoRate = buildWeekPlan({ targetInchesPerWeek: 1, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, runMinutes: 20, wateringDays: ['Mon'], systemType: [] });
+    expect(renderWeekPlanReport(condNoRate).detail).toContain('run one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones) only if');
   });
 
   test('unavailable plan → null (the sender keeps its pre-plan template)', () => {

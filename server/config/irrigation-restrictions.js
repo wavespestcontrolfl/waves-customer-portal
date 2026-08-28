@@ -56,7 +56,14 @@ const CITY_COUNTY = Object.freeze({
  * fertilizer ordinances), else a whole-county service city, else null
  * (coverage cannot be established).
  */
-function resolveRestrictionCounty({ county = null, profileCity = null, city = null } = {}) {
+const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS } = require('./county-zips');
+const ZIP_COUNTY = Object.freeze(Object.fromEntries([
+  ...MANATEE_ZIPS.map((z) => [z, 'Manatee']),
+  ...SARASOTA_ZIPS.map((z) => [z, 'Sarasota']),
+  ...CHARLOTTE_ZIPS.map((z) => [z, 'Charlotte']),
+]));
+
+function resolveRestrictionCounty({ county = null, profileCity = null, city = null, zip = null } = {}) {
   // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
   // the 1:1 turf profile describes the home it was written for, so when its
   // own city context DIVERGES from the customer's current city (moved
@@ -64,15 +71,18 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // decides — never the old property's order.
   const pCity = String(profileCity || '').trim().toLowerCase();
   const cCity = String(city || '').trim().toLowerCase();
-  const cityCounty = CITY_COUNTY[cCity] || null;
+  // The customer's CURRENT county: ZIP first (the tax/compliance county map —
+  // a USPS city of "Sarasota" at 34243 is Manatee), then a whole-county city.
+  const zip5 = String(zip || '').trim().slice(0, 5);
+  const currentCounty = ZIP_COUNTY[zip5] || CITY_COUNTY[cCity] || null;
   const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
   const profileCounty = norm(county);
   const profileDiverges = !!pCity && !!cCity && pCity !== cCity;
   // A profile with NO city context can still be stale: when the customer's
-  // current city maps to a different county, the current city wins.
-  const countyConflicts = !!profileCounty && !!cityCounty && profileCounty !== cityCounty;
+  // current ZIP/city maps to a different county, the current one wins.
+  const countyConflicts = !!profileCounty && !!currentCounty && profileCounty !== currentCounty;
   if (profileCounty && !profileDiverges && !countyConflicts) return profileCounty;
-  return cityCounty;
+  return currentCounty;
 }
 
 // Jurisdiction is REQUIRED on every policy (env overrides included): either
@@ -173,4 +183,4 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   };
 }
 
-module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, _lastLogged } };
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, validCoverage, parseEnvPolicy, coversCounty, CITY_COUNTY, ZIP_COUNTY, _lastLogged } };

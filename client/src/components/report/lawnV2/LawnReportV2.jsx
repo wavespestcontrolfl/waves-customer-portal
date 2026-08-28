@@ -705,7 +705,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
         <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           {aftercare && aftercare.watering ? (
             <div data-testid="lawn-week-plan-aftercare-note" style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
-              Today’s treatment comes first — follow the after-visit watering note below, then pick this week’s plan back up.
+              Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.
             </div>
           ) : null}
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{water.weekPlan.title}</div>
