@@ -204,21 +204,16 @@ function agentName() {
   return String(process.env.VOICE_AGENT_NAME || '').trim() || 'Sandy';
 }
 
-// FL §934.03 recorded-line disclosure + explicit AI disclosure, spoken by
-// Twilio TTS before the first caller turn. Kept here so the TwiML Bin and any
-// future in-app TwiML render the identical greeting. The agent introduces
-// herself by name (VOICE_AGENT_NAME, default Sandy) but the recorded-line +
-// automated-assistant disclosure is NOT dropped — the /voice backstop relies
-// on this greeting BEING the §934.03 disclosure (see twilio-voice-webhook.js).
-// VOICE_RELAY_GREETING overrides the whole line verbatim if the owner wants
-// different copy.
-// Owner-ruled opening (2026-08-28): "Waves, this is Sandy, how can I help you
-// this morning / afternoon / evening" — the day-part follows the ET clock at
-// render time. The recorded-line + automated-assistant disclosure sits between
-// the name and the question; it is not optional (see below).
-const DEFAULT_WELCOME_GREETING =
-  "Waves, this is Sandy. Just so you know, this call may be recorded, and you're " +
-  'speaking with our automated assistant. How can I help you {dayPart}?';
+// The relay greeting is Sandy's OPENER, not a legal notice (owner ruling
+// 2026-08-28): the recorded-line disclosure is carried by the greeting MP3
+// that plays BEFORE the relay on every production path (/voice staff-ring,
+// AI-answers-first — which now plays the MP3 too — and inside the language
+// vestibule). Nothing here mentions recording or AI. The identity rule stands
+// in the prompt instead: she never claims to be human, and answers honestly
+// when asked. VOICE_RELAY_GREETING overrides the line verbatim; the ONE guard
+// left is that an override may not CLAIM to be human — an identity lie is
+// discarded wholesale (refusing would strand live calls on a bad env value).
+const DEFAULT_WELCOME_GREETING = 'Waves, this is Sandy. How can I help you {dayPart}?';
 
 // ET day-part for the greeting: morning until noon, afternoon until 5 PM,
 // evening after — the same clock every other spoken-time rule uses.
@@ -231,78 +226,35 @@ function greetingDayPart(now = new Date()) {
   return 'this evening';
 }
 
-// ⚠️ THE GREETING *IS* THE FL §934.03 DISCLOSURE. twilio-voice-webhook.js relies
-// on this line carrying the recorded-line notice before the first caller turn —
-// the whole consent posture of the relay leg rests on it. A verbatim
-// VOICE_RELAY_GREETING override could therefore silently delete a legal
-// disclosure with an env-var edit, so the override is VALIDATED: it must itself
-// mention recording, and it must disclose the automated assistant. Anything
-// short of that gets the missing half appended rather than being rejected —
-// refusing would strand live calls on a bad env value.
-// ⭐ AFFIRMATIVE, AND NOT NEGATED. A keyword test alone accepted the exact
-// opposite of the disclosure it was guarding: "this call is not recorded;
-// you're speaking with a human assistant" contains both keywords and would
-// have passed verbatim, deleting BOTH required statements with an env edit.
-// So the override must positively state that the call is/may be recorded and
-// that the caller is speaking with an automated assistant — and any negation
-// of either fails the check, which appends the canonical line rather than
-// rejecting (refusing would strand live calls on a bad env value).
-const RECORDING_DISCLOSURE_RE = /\b(?:is|are|may\s+be|might\s+be|will\s+be|being|gets?)\s+record(?:ed|ing)\b/i;
-const AI_DISCLOSURE_RE = /\b(?:automated|virtual|AI|artificial)\b[^.!?]{0,30}\b(?:assistant|agent|receptionist)\b/i;
-// "nothing here is recorded" and "don't worry, … recorded" are negations too —
-// the list covers the denial words people actually reach for, not just "not".
-const DISCLOSURE_NEGATION_RE = /\b(?:not|never|isn'?t|aren'?t|won'?t|don'?t|doesn'?t|nothing|none|no)\b[^.!?]{0,40}\b(?:record(?:ed|ing)|automated|virtual|AI|bot|human)\b/i;
-// A positive claim to BE human needs no denial word to be false — "you're
-// speaking with a human assistant" is the identity lie stated affirmatively,
-// and it gets the same wholesale fallback as a negation.
-const HUMAN_CLAIM_RE = /\b(?:speaking (?:with|to)|talking (?:with|to)|this is|i'?m|i am)\b[^.!?]{0,25}\bhuman\b/i;
-const DISCLOSURE_SUFFIX = 'Just so you know, this call may be recorded, and you\'re speaking with our automated assistant.';
-
-// ── Spanish session (GATE_VOICE_SPANISH_MENU) ──────────────────────────────
-// The es-US relay leg's greeting IS the FL §934.03 + automated-assistant
-// disclosure for a caller who pressed 2 — it must carry both halves in
-// Spanish. Same validation doctrine as the English override: an affirmative
-// recording statement AND an automated-assistant statement, neither negated;
-// a negated/human-claiming override is DISCARDED, an incomplete one gets the
-// canonical Spanish suffix appended. The English regexes never match Spanish
-// copy, which is exactly why these arms exist (an unhandled Spanish override
-// would otherwise get the ENGLISH suffix appended — a bilingual mashup).
-const SPANISH_LANGUAGE = 'es-US';
-const DEFAULT_WELCOME_GREETING_ES =
-  'Hola, soy Sandy, de Waves Pest Control. Para su información, esta llamada puede ser grabada '
-  + 'y está hablando con nuestro asistente automatizado. ¿En qué puedo ayudarle hoy?';
-const DISCLOSURE_SUFFIX_ES = 'Para su información, esta llamada puede ser grabada y está hablando con nuestro asistente automatizado.';
-const RECORDING_DISCLOSURE_ES_RE = /\b(?:puede|podr[ií]a|va a|ser[áa]|est[áa] siendo|es|est[áa])\s+(?:ser\s+)?grabad[ao]s?\b/i;
-const AI_DISCLOSURE_ES_RE = /\b(?:asistente|agente|recepcionista)\b[^.!?]{0,30}\b(?:automatizad[ao]|virtual|artificial|IA)\b|\b(?:automatizad[ao]|virtual|artificial)\b[^.!?]{0,30}\b(?:asistente|agente|recepcionista)\b/i;
-const DISCLOSURE_NEGATION_ES_RE = /\b(?:no|nunca|jam[áa]s|nada|ning[uú]n[ao]?)\b[^.!?]{0,40}\b(?:grabad[ao]s?|grabando|graba|automatizad[ao]|virtual|artificial|humano|humana|persona)\b/i;
+// A positive claim to BE human is the identity lie — stated with or without a
+// denial word — and gets the canonical greeting instead.
+const HUMAN_CLAIM_RE = /\b(?:speaking (?:with|to)|talking (?:with|to)|this is|i'?m|i am)\b[^.!?]{0,25}\b(?:a )?(?:real )?(?:human|person|live agent|live person)\b/i;
 const HUMAN_CLAIM_ES_RE = /\b(?:habla|hablando|est[áa]\s+hablando|soy)\b[^.!?]{0,25}\b(?:humano|humana|persona\s+real|una\s+persona)\b/i;
 
+// ── Spanish session (GATE_VOICE_SPANISH_MENU) ──────────────────────────────
+// A press-2 caller may have cut the English greeting MP3 short, so the
+// Spanish opener keeps a one-clause recorded-line notice; no AI mention.
+const SPANISH_LANGUAGE = 'es-US';
+const DEFAULT_WELCOME_GREETING_ES = 'Waves, habla Sandy. Esta llamada puede ser grabada. ¿En qué puedo ayudarle hoy?';
+const RECORDING_DISCLOSURE_ES_RE = /\b(?:puede|podr[ií]a|va a|ser[áa]|est[áa] siendo|es|est[áa])\s+(?:ser\s+)?grabad[ao]s?\b/i;
+const RECORDING_NEGATION_ES_RE = /\b(?:no|nunca|jam[áa]s|nada|ning[uú]n[ao]?)\b[^.!?]{0,40}\b(?:grabad[ao]s?|grabando|graba)\b/i;
+const RECORDING_SUFFIX_ES = 'Esta llamada puede ser grabada.';
+
 function spanishWelcomeGreeting() {
+  const canonical = DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
   const override = String(process.env.VOICE_RELAY_GREETING_ES || '').trim();
-  if (!override) return DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
-  const negated = DISCLOSURE_NEGATION_ES_RE.test(override) || HUMAN_CLAIM_ES_RE.test(override);
-  if (!negated && RECORDING_DISCLOSURE_ES_RE.test(override) && AI_DISCLOSURE_ES_RE.test(override)) return override;
-  if (negated) return DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
-  return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX_ES}`;
+  if (!override) return canonical;
+  if (HUMAN_CLAIM_ES_RE.test(override) || RECORDING_NEGATION_ES_RE.test(override)) return canonical;
+  if (RECORDING_DISCLOSURE_ES_RE.test(override)) return override;
+  return `${override.replace(/\s*$/, '')} ${RECORDING_SUFFIX_ES}`;
 }
 
 function defaultWelcomeGreeting(now = new Date()) {
   const canonical = DEFAULT_WELCOME_GREETING.replace('Sandy', agentName()).replace('{dayPart}', greetingDayPart(now));
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
   if (!override) return canonical;
-  const negated = DISCLOSURE_NEGATION_RE.test(override) || HUMAN_CLAIM_RE.test(override);
-  if (!negated
-    && RECORDING_DISCLOSURE_RE.test(override)
-    && AI_DISCLOSURE_RE.test(override)) return override;
-  // ⭐ A FALSE DISCLOSURE IS DISCARDED, NOT PATCHED. Appending the canonical
-  // line to "this call is not recorded, you're speaking with a human" would
-  // make the caller hear both statements — a contradictory legal notice is no
-  // notice at all. Negation ⇒ the override is thrown away entirely and the
-  // canonical greeting speaks alone. Only a merely-INCOMPLETE override (no
-  // negation, a half missing) keeps its copy with the missing half appended —
-  // absent is fixable, false is not.
-  if (negated) return canonical;
-  return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX}`;
+  if (HUMAN_CLAIM_RE.test(override)) return canonical;
+  return override;
 }
 
 const DEFAULT_TTS_PROVIDER = 'ElevenLabs'; // matches the existing Waves voice-agent stack
@@ -386,11 +338,9 @@ function buildRelayTwiML({
   const attrs = [
     `url="${escapeXmlAttr(authedUrl)}"`,
     `welcomeGreeting="${escapeXmlAttr(welcomeGreeting)}"`,
-    // The welcomeGreeting IS the FL §934.03 recorded-line + automated-assistant
-    // disclosure. ConversationRelay defaults welcomeGreetingInterruptible to
-    // "any", so a caller who speaks immediately would cut the disclosure off
-    // before consent — force it to play in full. Agent turns stay interruptible
-    // (governed separately; not set here).
+    // The opener plays in full (ConversationRelay defaults to interruptible);
+    // it is one short sentence, and a Spanish opener carries the recorded-line
+    // clause. Agent turns stay interruptible (governed separately; not set here).
     'welcomeGreetingInterruptible="none"',
     `ttsProvider="${escapeXmlAttr(ttsProvider)}"`,
     `language="${escapeXmlAttr(language)}"`,
@@ -421,12 +371,10 @@ function buildRelayTwiML({
 module.exports = {
   RELAY_WS_PATH,
   DEFAULT_WELCOME_GREETING,
-  DISCLOSURE_SUFFIX,
   defaultWelcomeGreeting,
   greetingDayPart,
   SPANISH_LANGUAGE,
   DEFAULT_WELCOME_GREETING_ES,
-  DISCLOSURE_SUFFIX_ES,
   spanishWelcomeGreeting,
   agentName,
   DEFAULT_TTS_PROVIDER,
