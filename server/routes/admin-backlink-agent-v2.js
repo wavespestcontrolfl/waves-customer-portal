@@ -5,6 +5,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
+const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -297,9 +298,14 @@ router.patch('/prospects/:id', async (req, res, next) => {
     // (prospect-domain-lock) and is refused while another row for the domain is
     // already in active outreach — otherwise both are claimable by the worker.
     const result = await db.transaction(async (trx) => {
-      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page');
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type');
       if (!current) return { missing: true };
-      const entersOutreach = 'status' in patch && ACTIVE_OUTREACH_STATUSES.includes(patch.status) && !ACTIVE_OUTREACH_STATUSES.includes(current.status);
+      // "In outreach" = active-outreach status AND an outreach-lane link_type:
+      // a status flip OR a link_type change out of the signup lane can put a
+      // row in front of the outreach worker, and either is a board admission.
+      const inOutreach = (status, type) => ACTIVE_OUTREACH_STATUSES.includes(status) && !SIGNUP_TYPES.includes(type || '');
+      const entersOutreach = inOutreach('status' in patch ? patch.status : current.status, 'link_type' in patch ? patch.link_type : current.link_type)
+        && !inOutreach(current.status, current.link_type);
       if (entersOutreach) {
         const { inFlight } = await claimProspectDomain(trx, current.target_domain);
         if (inFlight && inFlight.id !== current.id) return { inFlight };

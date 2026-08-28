@@ -18,7 +18,7 @@ const { etDateString } = require('../../utils/datetime-et');
 
 const worker = require('./link-prospect-worker');
 const lockMod = require('./prospect-domain-lock');
-const { claimProspectDomain, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL } = lockMod;
+const { claimProspectDomain, lockProspectDomain, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL } = lockMod;
 
 // The worker's lane allowlists are canonical: signup-lane types are never
 // reopened into outreach, and a reopened row must carry a type the outreach
@@ -293,7 +293,12 @@ async function queueOne(loss, out, scoreMod) {
 async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   const domain = normalizeDomain(backlink.source_domain);
   if (!domain) return { resolved: 0 };
-  const q = trx || db;
+  // The placement move below (owner probe → target_page update) is a board
+  // write like any other: it runs under the shared per-domain lock inside a
+  // transaction — the caller's, or one opened here for a standalone call.
+  if (!trx) return db.transaction((t) => resolveRecoveredLink(backlink, now, { trx: t }));
+  const q = trx;
+  await lockProspectDomain(q, domain);
   // Only UNSENT rows close automatically: a 'sending' row has a Gmail send in
   // flight whose finalizer needs the token; sent/send_error rows are the
   // operator's reconciliation, not ours.

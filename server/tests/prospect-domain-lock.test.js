@@ -105,8 +105,11 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page')");
-    const iGate = block.indexOf("ACTIVE_OUTREACH_STATUSES.includes(patch.status) && !ACTIVE_OUTREACH_STATUSES.includes(current.status)");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type')");
+    const iGate = block.indexOf("&& !inOutreach(current.status, current.link_type)");
+    // a link_type change out of the signup lane (directory/citation/social → outreach type) is an admission too
+    expect(block).toMatch(/const inOutreach = \(status, type\) => ACTIVE_OUTREACH_STATUSES\.includes\(status\) && !SIGNUP_TYPES\.includes\(type \|\| ''\);/);
+    expect(block).toMatch(/inOutreach\('status' in patch \? patch\.status : current\.status, 'link_type' in patch \? patch\.link_type : current\.link_type\)/);
     const iLock = block.indexOf('claimProspectDomain(trx, current.target_domain)');
     const iUpdate = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).update(patch)");
     expect(iTrx).toBeGreaterThan(-1);
@@ -183,8 +186,15 @@ describe('every board writer takes the shared lock inside its check+insert trans
     expect(hits.length).toBeGreaterThanOrEqual(5);
   });
 
-  test('lost-link recovery uses the shared guard with the wider IN_FLIGHT set for insert AND reopen (no private lock string / SQL twin)', () => {
+  test('lost-link recovery uses the shared guard with the wider IN_FLIGHT set for insert AND reopen (no private lock string / SQL twin); resolveRecoveredLink locks the domain in a transaction before its placement move', () => {
     const s = src('services/seo/lost-link-recovery.js');
+    const rb = s.slice(s.indexOf('async function resolveRecoveredLink'));
+    const iTrx = rb.indexOf('if (!trx) return db.transaction((t) => resolveRecoveredLink(backlink, now, { trx: t }));');
+    const iLock = rb.indexOf('await lockProspectDomain(q, domain);');
+    const iProbe = rb.indexOf('findPlacementRow') >= 0 ? rb.indexOf('findPlacementRow') : rb.indexOf("whereIn('target_page', [...variants]).whereNot('id', row.id)");
+    expect(iTrx).toBeGreaterThan(-1);
+    expect(iLock).toBeGreaterThan(iTrx);
+    expect(iProbe).toBeGreaterThan(iLock);
     expect(s.match(/claimProspectDomain\(trx, domain, \{ statuses: IN_FLIGHT_STATUSES, lanes: 'all' \}\)/g)).toHaveLength(2);
     expect(s).not.toMatch(/pg_advisory_xact_lock/);
     expect(s).not.toMatch(/split_part\(split_part/);
