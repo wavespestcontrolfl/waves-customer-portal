@@ -49,6 +49,16 @@ const CODES = {
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
+// Total deadline for each Google call. The runner processes rows serially
+// under a fleet-wide cron lease; a request that connects but never completes
+// must fail (retryable) instead of holding every later row and tick.
+const GOOGLE_CALL_TIMEOUT_MS = Math.max(5000, parseInt(process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS, 10) || 30000);
+function withDeadline(promise, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
+  let timer;
+  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms); });
+  timer.unref?.();
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 /**
  * Resolve (and persist) the GBP review resource name when the row lacks one.
@@ -192,7 +202,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // read error — the row retries later.
         let live;
         try {
-          live = await gbp.getReview(resourceName, review.location_id);
+          live = await withDeadline(gbp.getReview(resourceName, review.location_id), 'GBP getReview');
         } catch (e) {
           throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
         }
@@ -236,7 +246,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
         }
       }
-      await gbp.replyToReview(resourceName, replyText, review.location_id);
+      await withDeadline(gbp.replyToReview(resourceName, replyText, review.location_id), 'GBP replyToReview');
       return true;
     });
   } catch (e) {
@@ -341,7 +351,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       // and deleting blind would destroy it. Fail closed on a read error.
       let live;
       try {
-        live = await gbp.getReview(resourceName, review.location_id);
+        live = await withDeadline(gbp.getReview(resourceName, review.location_id), 'GBP getReview');
       } catch (e) {
         throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before retracting: ${e.message}`, { status: 502, cause: e });
       }
@@ -359,7 +369,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
           ? 'The reply on Google differs from the one shown here (edited in Google) — reload and check the current reply.'
           : 'There is no reply on Google to retract — reload.', { status: 409 });
       }
-      await gbp.deleteReply(resourceName, review.location_id);
+      await withDeadline(gbp.deleteReply(resourceName, review.location_id), 'GBP deleteReply');
       return true;
     });
   } catch (e) {

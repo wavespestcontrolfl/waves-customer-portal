@@ -91,7 +91,7 @@ const BANNED_RE = new RegExp([
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
   '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharmless\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
-  '\\bguarantee\\w*\\b', '\\bwarrant(?:y|ies|ied|ee|eed)\\b',
+  '\\bguarantee\\w*\\b', '\\bwarrant\\w*\\b',
   // Drying / curing / wait-before language of any form (fixed intervals are
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
@@ -348,6 +348,12 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     return 'unlisted_experience_claim';
   }
 
+  // The mandated greeting, deterministically: "Hi <reviewer first name>,"
+  // or "Hello there," — nothing else may open a public reply.
+  const greetingOk = /^hello there,/i.test(body)
+    || (grounding.review.firstName && new RegExp(`^hi ${escapeRe(grounding.review.firstName)},`, 'iu').test(body));
+  if (!greetingOk) return 'missing_greeting';
+
   // Non-repetition against the location's recent posted replies.
   const opening = words.slice(0, 5).join(' ');
   for (const prior of recentReplies) {
@@ -447,6 +453,7 @@ const FEEDBACK_FOR = {
   repetitive_opening: 'opened the same way as a recent reply',
   repetitive_body: 'read too much like a recent reply',
   placeholder: 'contained a placeholder or bracket',
+  missing_greeting: 'did not open with "Hi <first name>," or "Hello there,"',
 };
 
 async function loadRecentPostedReplies(locationId, { conn = db, limit = RECENT_REPLIES_LIMIT } = {}) {

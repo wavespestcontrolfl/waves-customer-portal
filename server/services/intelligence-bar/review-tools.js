@@ -268,6 +268,7 @@ async function submitReviewReply(reviewId, replyText) {
   // This tool used to write review_reply locally and claim the reply would
   // "sync to Google" — it never did. Now it either reaches Google or errors.
   const { publishReviewReply, ReviewReplyError } = require('../review-reply/publisher');
+  let submitGuard = null;
   // reply_text is a MODEL-proposed tool argument: it may differ from the
   // verified draft the operator saw. Re-run the canonical verifier against
   // fresh grounding before anything reaches Google (fail closed).
@@ -281,6 +282,20 @@ async function submitReviewReply(reviewId, replyText) {
     const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
     const verdict = Drafter.verifyReplyText(replyText, grounding, { recentReplies });
     if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply, or post it from the Reviews page editor.`, code: 'verifier_reject', rejection: verdict };
+    // What was verified: the review + the derived account facts. Re-checked
+    // INSIDE the publish claim so a re-attribution / city correction between
+    // verification and the PUT cannot let a claim licensed by old facts post.
+    const { reviewFingerprint } = require('../review-reply/runner');
+    const { accountFingerprint, loadAccountFacts } = require('../review-reply/grounding');
+    const reviewFp = reviewFingerprint(review);
+    const accountFp = accountFingerprint(grounding.account);
+    submitGuard = async (fresh) => {
+      if (reviewFingerprint(fresh) !== reviewFp) return 'review changed since it was verified';
+      let current;
+      try { current = accountFingerprint(await loadAccountFacts(fresh.customer_id)); } catch { return 'account facts could not be re-read'; }
+      if (current !== accountFp) return 'account facts changed since it was verified';
+      return null;
+    };
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
     return { error: `Could not verify the reply before posting (${err.message}).`, code: 'verify_failed' };
@@ -296,6 +311,7 @@ async function submitReviewReply(reviewId, replyText) {
       // meanwhile.
       allowOverwrite: false,
       autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_claimed_until: null },
+      guard: submitGuard,
     });
     const review = await db('google_reviews').where('id', reviewId).first();
     logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId}`);

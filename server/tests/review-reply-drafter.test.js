@@ -108,6 +108,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and our warranties cover this.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we warrant the work Marcus did on the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants. We are the best in Sarasota.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, unlike Orkin, Marcus actually got the ants out.'))).toBe('banned_phrase');
   });
@@ -243,6 +244,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBe('repetitive_opening');
     const recent2 = [good('Hello there, glad Marcus got out fast and the ants are staying out of your kitchen. We will pass that along to him.')];
     expect(verify(CLEAN, grounding(), { recentReplies: recent2 })).toBe('repetitive_body');
+  });
+  test('the greeting is mandatory: "Hi <reviewer first name>," or "Hello there,"', () => {
+    expect(verify(good('Thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
+    expect(verify(good('Hey Dana, thanks for trusting Marcus with the ants in your kitchen.'))).toBe('missing_greeting');
+    expect(verify(good('Hello there, thanks for trusting Marcus with the ants in your kitchen.'))).toBeNull();
+    const g = grounding({ firstName: null, text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good('Hello there, thanks for the rating. Glad to be your pest and lawn team locally.'), g)).toBeNull();
   });
   test('placeholders are rejected', () => {
     expect(verify(good('Hi {first name}, Marcus is glad the ants are gone from your kitchen.'))).toBe('placeholder');

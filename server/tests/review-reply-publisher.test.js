@@ -208,6 +208,21 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
+  test('a Google call that never completes hits the total deadline → GOOGLE_FAILED (retryable), nothing recorded', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    jest.isolateModules(() => {});
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    const started = Date.now();
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(Date.now() - started).toBeLessThan(31000 + 5000);
+  });
+
   test('Google rejection → GOOGLE_FAILED, local row untouched', async () => {
     mockGbp.replyToReview.mockRejectedValueOnce(new Error('GBP replyToReview 403'));
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
