@@ -15,8 +15,7 @@
  *   suppression_<reason> (canonical messaging_suppression row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
  *   outside_call_window,
- *   pilot_requires_single_invoice, pilot_balance_below_minimum,
- *   pilot_balance_above_maximum, pilot_not_overdue_long_enough,
+ *   pilot_requires_single_invoice, pilot_not_overdue_long_enough,
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
  *   pilot_awaiting_microdeposit_verification,
  *   line_type_unknown, line_type_not_mobile, commercial_customer,
@@ -59,12 +58,15 @@ const FLAG_BLOCKED_CHANNELS = {
   do_not_text: ['sms'],
   do_not_email: ['email'],
   automated_voice_consent_revoked: ['voice'],
+  // Owner ruling 2026-08-28: customers known to pay by check are never
+  // called by the automated voice lane (texts/emails and human calls
+  // unaffected). Set via ops/agents/collections-flag.js.
+  pays_by_check: ['voice'],
 };
 
-// Voice pilot caps (owner-scoped): ONE invoice, $50.00–$500.00, 14–60 days
+// Voice pilot caps (owner-scoped): ONE invoice, ANY balance (owner ruling
+// 2026-08-28 removed the $50–$500 band), 14–60 days
 // overdue, ≥2 delivered dunning touches, mobile line, residential only.
-const PILOT_MIN_BALANCE_CENTS = 5000;
-const PILOT_MAX_BALANCE_CENTS = 50000;
 const PILOT_MIN_DAYS_OVERDUE = 14;
 const PILOT_MAX_DAYS_OVERDUE = 60;
 const PILOT_MIN_DUNNING_TOUCHES = 2;
@@ -472,8 +474,7 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
           if (eligible.length > 1) deny('pilot_requires_single_invoice');
         } else {
           const invoice = eligible[0];
-          if (result.eligibleBalanceCents < PILOT_MIN_BALANCE_CENTS) deny('pilot_balance_below_minimum');
-          if (result.eligibleBalanceCents > PILOT_MAX_BALANCE_CENTS) deny('pilot_balance_above_maximum');
+          // No balance band (owner ruling 2026-08-28): any amount is callable.
 
           // Overdue age is computed from due_date (created_at fallback — the
           // same reference the late-payment rails use), never status.
@@ -557,8 +558,6 @@ module.exports = {
   isWithinCallWindow,
   isSupervisedApprover,
   // Exported for tests / PR B reuse.
-  PILOT_MIN_BALANCE_CENTS,
-  PILOT_MAX_BALANCE_CENTS,
   PILOT_MIN_DAYS_OVERDUE,
   PILOT_MAX_DAYS_OVERDUE,
   PILOT_MIN_DUNNING_TOUCHES,

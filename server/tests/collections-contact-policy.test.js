@@ -447,24 +447,26 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect(result.denialReasons).toContain('pilot_requires_single_invoice');
   });
 
-  const balanceCases = [
-    ['49.99', 4999, ['pilot_balance_below_minimum']],
-    ['50.00', 5000, []],
-    ['500.00', 50000, []],
-    ['500.01', 50001, ['pilot_balance_above_maximum']],
-  ];
-  for (const [total, cents, expected] of balanceCases) {
-    test(`balance ${cents} cents → ${expected.length ? expected[0] : 'inside the band'}`, async () => {
+  // Owner ruling 2026-08-28: NO balance band — any amount is callable.
+  for (const [total, cents] of [['0.01', 1], ['49.99', 4999], ['500.01', 50001], ['1996.00', 199600]]) {
+    test(`balance ${cents} cents → callable (no band)`, async () => {
       armAllowedBaseline({ invoices: [invoiceRow({ total })] });
       const result = await evalVoice();
       expect(result.eligibleBalanceCents).toBe(cents);
-      for (const reason of expected) expect(result.denialReasons).toContain(reason);
-      if (!expected.length) {
-        expect(result.denialReasons).not.toContain('pilot_balance_below_minimum');
-        expect(result.denialReasons).not.toContain('pilot_balance_above_maximum');
-      }
+      expect(result.denialReasons).not.toEqual(expect.arrayContaining([expect.stringMatching(/pilot_balance/)]));
     });
   }
+
+  test('pays_by_check flag blocks the automated voice channel only (owner ruling 2026-08-28)', async () => {
+    armAllowedBaseline({ flags: [{ flag: 'pays_by_check', customer_id: 'cust-1', released_at: null }] });
+    const voice = await evalVoice();
+    expect(voice.allowed).toBe(false);
+    expect(voice.denialReasons).toContain('flag_pays_by_check');
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.pays_by_check).toEqual(['voice']);
+    armAllowedBaseline({ flags: [{ flag: 'pays_by_check', customer_id: 'cust-1', released_at: null }] });
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(sms.denialReasons).not.toContain('flag_pays_by_check');
+  });
 
   // now = Wed 2026-08-12 ET. Overdue age is COMPUTED from due_date.
   const overdueCases = [
