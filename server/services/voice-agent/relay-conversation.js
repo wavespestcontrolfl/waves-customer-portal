@@ -273,11 +273,16 @@ function bookingPromptAddendum() {
  * Phase-1 SYSTEM_PROMPT byte-for-byte (gate off ⇒ no behavior change).
  * The booking addendum appears only while GATE_VOICE_AI_BOOKING is ALSO on.
  */
-function buildBasePrompt(contextEnabled) {
-  if (!contextEnabled) return SYSTEM_PROMPT;
+function buildBasePrompt(contextEnabled, language = null) {
+  // Spanish session (GATE_VOICE_SPANISH_MENU — the caller pressed 2): the
+  // language addendum is appended LAST so it governs everything above it.
+  // No/English language ⇒ byte-identical to before.
+  const { isSpanish, LANGUAGE_ADDENDUM_ES } = require('./relay-language');
+  const langSuffix = isSpanish(language) ? '\n' + LANGUAGE_ADDENDUM_ES : '';
+  if (!contextEnabled) return SYSTEM_PROMPT + langSuffix;
   const base = SYSTEM_PROMPT.replace(PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT) + '\n' + contextPromptAddendum();
   const { isBookingEnabled } = require('./relay-booking');
-  return isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base;
+  return (isBookingEnabled() ? base + '\n' + bookingPromptAddendum() : base) + langSuffix;
 }
 
 // ── Voice profile (brand-voice Loop 2) ─────────────────────────────────────
@@ -509,6 +514,11 @@ class RelayConversation {
         },
       })
         .then((ctx) => { this._callerContext = this._callerContext || ctx; })
+        // Spanish session + CONFIDENT resolution (ANI matched the account's
+        // own number ⇒ tier 'full') ⇒ remember the preference on the customer.
+        // Never from ANI + press-2 alone: a redacted/contact-slot match is a
+        // shared number and does not speak for the account holder.
+        .then(() => this._persistLanguagePreference())
         .catch(() => {});
       const { loadOfficeHours } = require('./relay-context');
       this._officeHoursReady = loadOfficeHours()
@@ -543,6 +553,15 @@ class RelayConversation {
   }
 
   /** Speak a line to the caller (no-op on empty). Everything spoken is recorded. */
+  async _persistLanguagePreference() {
+    const { isSpanish, stampPreferredLanguage } = require('./relay-language');
+    if (!isSpanish(this.language)) return false;
+    const ctx = this._callerContext;
+    const customerId = ctx && ctx.tier === 'full' && ctx.customer && ctx.customer.id;
+    if (!customerId || this._callerVerified !== true) return false;
+    return stampPreferredLanguage(customerId, this.language);
+  }
+
   say(text) {
     const t = String(text || '').trim();
     if (t) {
@@ -564,7 +583,7 @@ class RelayConversation {
         logger.warn(`[voice-relay] call turn cap (${MAX_CALL_TURNS}) reached callSid=${this.callSid} — ending`);
         // Neutral copy ON PURPOSE — this line is spoken directly (no model in
         // the loop to consult CLOCK DATA), so it must be true at 2 AM too.
-        this.say('A Waves team member will follow up with you as soon as possible to take care of this. Thanks for calling!');
+        this.say(require('./relay-language').copy('turnCap', this.language));
         this._ending = true;
         try {
           if (this._endSession) this._endSession({ reason: 'turn_cap', captured: this.leadCaptured });
@@ -826,7 +845,7 @@ class RelayConversation {
 
   async _runLoop(callerText = null) {
     if (this.ended || !anthropic) {
-      if (!anthropic) this.say('Sorry, I am unable to help right now. A team member will call you back.');
+      if (!anthropic) this.say(require('./relay-language').copy('unavailable', this.language));
       return;
     }
     // Identity must be settled before the first model round: the tool ctx and
@@ -898,7 +917,7 @@ class RelayConversation {
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
     if (!this._systemBlocks) {
-      const basePrompt = buildBasePrompt(contextEnabled)
+      const basePrompt = buildBasePrompt(contextEnabled, this.language)
         + (contextEnabled && this._callerContext && this._callerContext.block
           ? `\n\n${this._callerContext.block}`
           : '');
@@ -959,12 +978,12 @@ class RelayConversation {
       } catch (err) {
         if (streamTimedOut) {
           logger.warn(`[voice-relay] model stream timeout (${STREAM_TIMEOUT_MS}ms) callSid=${this.callSid}`);
-          this.say('Sorry, that took a moment — could you say that again?');
+          this.say(require('./relay-language').copy('streamTimeout', this.language));
           return;
         }
         if (this._controller.signal.aborted) return; // barge-in; caller is talking
         logger.error(`[voice-relay] anthropic error callSid=${this.callSid}: ${err.message}`);
-        this.say('Sorry, I had trouble there. Could you say that again?');
+        this.say(require('./relay-language').copy('modelError', this.language));
         return;
       } finally {
         clearTimeout(streamTimer);
@@ -1037,7 +1056,7 @@ class RelayConversation {
     // simpler next question), and the lead/booking writes that did land are
     // already durable.
     logger.warn(`[voice-relay] hit MAX_TOOL_ROUNDS callSid=${this.callSid}`);
-    this.say("Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?");
+    this.say(require('./relay-language').copy('toolRounds', this.language));
     this._maybeEndAfterTurn();
   }
 

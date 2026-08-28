@@ -243,6 +243,34 @@ const DISCLOSURE_NEGATION_RE = /\b(?:not|never|isn'?t|aren'?t|won'?t|don'?t|does
 const HUMAN_CLAIM_RE = /\b(?:speaking (?:with|to)|talking (?:with|to)|this is|i'?m|i am)\b[^.!?]{0,25}\bhuman\b/i;
 const DISCLOSURE_SUFFIX = 'Just so you know, this call may be recorded, and you\'re speaking with our automated assistant.';
 
+// ── Spanish session (GATE_VOICE_SPANISH_MENU) ──────────────────────────────
+// The es-US relay leg's greeting IS the FL §934.03 + automated-assistant
+// disclosure for a caller who pressed 2 — it must carry both halves in
+// Spanish. Same validation doctrine as the English override: an affirmative
+// recording statement AND an automated-assistant statement, neither negated;
+// a negated/human-claiming override is DISCARDED, an incomplete one gets the
+// canonical Spanish suffix appended. The English regexes never match Spanish
+// copy, which is exactly why these arms exist (an unhandled Spanish override
+// would otherwise get the ENGLISH suffix appended — a bilingual mashup).
+const SPANISH_LANGUAGE = 'es-US';
+const DEFAULT_WELCOME_GREETING_ES =
+  'Hola, soy Sandy, de Waves Pest Control. Para su información, esta llamada puede ser grabada '
+  + 'y está hablando con nuestro asistente automatizado. ¿En qué puedo ayudarle hoy?';
+const DISCLOSURE_SUFFIX_ES = 'Para su información, esta llamada puede ser grabada y está hablando con nuestro asistente automatizado.';
+const RECORDING_DISCLOSURE_ES_RE = /\b(?:puede|podr[ií]a|va a|ser[áa]|est[áa] siendo|es|est[áa])\s+(?:ser\s+)?grabad[ao]s?\b/i;
+const AI_DISCLOSURE_ES_RE = /\b(?:asistente|agente|recepcionista)\b[^.!?]{0,30}\b(?:automatizad[ao]|virtual|artificial|IA)\b|\b(?:automatizad[ao]|virtual|artificial)\b[^.!?]{0,30}\b(?:asistente|agente|recepcionista)\b/i;
+const DISCLOSURE_NEGATION_ES_RE = /\b(?:no|nunca|jam[áa]s|nada|ning[uú]n[ao]?)\b[^.!?]{0,40}\b(?:grabad[ao]s?|grabando|graba|automatizad[ao]|virtual|artificial|humano|humana|persona)\b/i;
+const HUMAN_CLAIM_ES_RE = /\b(?:habla|hablando|est[áa]\s+hablando|soy)\b[^.!?]{0,25}\b(?:humano|humana|persona\s+real|una\s+persona)\b/i;
+
+function spanishWelcomeGreeting() {
+  const override = String(process.env.VOICE_RELAY_GREETING_ES || '').trim();
+  if (!override) return DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
+  const negated = DISCLOSURE_NEGATION_ES_RE.test(override) || HUMAN_CLAIM_ES_RE.test(override);
+  if (!negated && RECORDING_DISCLOSURE_ES_RE.test(override) && AI_DISCLOSURE_ES_RE.test(override)) return override;
+  if (negated) return DEFAULT_WELCOME_GREETING_ES.replace('Sandy', agentName());
+  return `${override.replace(/\s*$/, '')} ${DISCLOSURE_SUFFIX_ES}`;
+}
+
 function defaultWelcomeGreeting() {
   const override = String(process.env.VOICE_RELAY_GREETING || '').trim();
   if (!override) return DEFAULT_WELCOME_GREETING.replace('Sandy', agentName());
@@ -379,6 +407,10 @@ module.exports = {
   DEFAULT_WELCOME_GREETING,
   DISCLOSURE_SUFFIX,
   defaultWelcomeGreeting,
+  SPANISH_LANGUAGE,
+  DEFAULT_WELCOME_GREETING_ES,
+  DISCLOSURE_SUFFIX_ES,
+  spanishWelcomeGreeting,
   agentName,
   DEFAULT_TTS_PROVIDER,
   DEFAULT_LANGUAGE,

@@ -17,6 +17,11 @@ const DEFAULT_CALL_ROUTING_CONFIG = {
   answerFirstSchedule: { enabled: false, startHourET: 18, endHourET: 8, openDays: [] },
   agentEndpoint: '',
   agentTimeoutSec: 10,
+  // Spanish vestibule (GATE_VOICE_SPANISH_MENU): offer "press 2" on inbound
+  // calls and hand press-2 callers to the relay agent in es-US. spanishVoice
+  // is an OPTIONAL ElevenLabs voice id; blank = Twilio's default es-US voice.
+  spanishMenuEnabled: false,
+  spanishVoice: '',
 };
 
 function clampInt(value, min, max, fallback) {
@@ -66,6 +71,8 @@ function mergeCallRoutingConfig(value) {
     answerFirstSchedule: sanitizeSchedule(c.answerFirstSchedule),
     agentEndpoint: typeof c.agentEndpoint === 'string' ? c.agentEndpoint.trim() : '',
     agentTimeoutSec: clampInt(c.agentTimeoutSec, 5, 30, d.agentTimeoutSec),
+    spanishMenuEnabled: c.spanishMenuEnabled === true,
+    spanishVoice: typeof c.spanishVoice === 'string' ? c.spanishVoice.trim().slice(0, 64) : '',
   };
 }
 

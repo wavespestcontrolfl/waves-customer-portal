@@ -402,10 +402,19 @@ async function stampPreconnectScreen(callSid, value) {
   }
 }
 
-function appendVoicemailRecording(twiml) {
-  const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
-  twiml.play(voicemailAudio);
-  twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
+function appendVoicemailRecording(twiml, { language = null } = {}) {
+  if (/^es/i.test(String(language || ''))) {
+    // Spanish failover (GATE_VOICE_SPANISH_MENU): a caller who chose Spanish
+    // never hears English voicemail. The asset is optional — without it the
+    // Spanish <Say> alone precedes the recorder.
+    const spanishAudio = process.env.WAVES_VOICEMAIL_URL_ES;
+    if (spanishAudio) twiml.play(spanishAudio);
+    twiml.say(SPANISH_SAY, 'Su mensaje será grabado y transcrito.');
+  } else {
+    const voicemailAudio = process.env.WAVES_VOICEMAIL_URL || 'https://jet-wolverine-3713.twil.io/assets/waves-voicemail.mp3';
+    twiml.play(voicemailAudio);
+    twiml.say({ voice: SAY_VOICE }, 'Your message will be recorded and transcribed.');
+  }
   twiml.record({
     maxLength: 120,
     action: VOICEMAIL_COMPLETE_ACTION,
@@ -429,6 +438,94 @@ function queueVoiceMessageSync(callSid) {
 
 const AGENT_FALLBACK_ACTION = '/api/webhooks/twilio/agent-fallback';
 const RELAY_COMPLETE_ACTION = '/api/webhooks/twilio/relay-complete';
+
+// ── Spanish language vestibule (GATE_VOICE_SPANISH_MENU) ───────────────────
+// ONE implementation of the language-selection TwiML, used by every inbound
+// execution mode that can ultimately answer a customer (the staff-ring path
+// and the AI-answers-first path). The existing greeting <Play> sits INSIDE
+// the <Gather> so the key window overlaps audio the caller was already going
+// to hear; the one Spanish sentence follows it; `timeout` (which Twilio
+// starts only AFTER nested verbs finish) is short. A key press during
+// playback submits immediately. No key ⇒ the Gather falls through to the
+// next verb — exactly today's TwiML (actionOnEmptyResult stays false, so the
+// action is never hit on a timeout). Any key ⇒ Twilio POSTs Digits to
+// /voice?lang=menu; only '2' selects Spanish (see the contract in /voice).
+const LANGUAGE_MENU_ACTION = '/api/webhooks/twilio/voice?lang=menu';
+const LANGUAGE_MENU_TIMEOUT_SEC = 1;
+const SPANISH_MENU_PROMPT = 'Para español, oprima dos.';
+const SPANISH_SAY_VOICE = process.env.TWILIO_SAY_VOICE_ES || 'Polly.Lupe-Neural';
+const SPANISH_SAY = { language: 'es-US', voice: SPANISH_SAY_VOICE };
+
+// Whether THIS call may be offered the vestibule. Every leg of the decision
+// fails closed: gate on, owner switch on, a REACHABLE relay (Spanish is a
+// relay session — a dial-kind agent cannot run it), and never on a
+// re-entry (the menu is offered once per call).
+function languageVestibule({ routingConfig, handoffKind, reentry }) {
+  if (reentry) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('voiceSpanishMenu')) return null;
+  if (!routingConfig || routingConfig.spanishMenuEnabled !== true) return null;
+  if (handoffKind !== 'relay') return null;
+  return { relayUrl: String(routingConfig.agentEndpoint || '').trim(), voice: routingConfig.spanishVoice || null };
+}
+
+// Append the greeting to `twiml`: bare <Play> when no vestibule (byte-identical
+// to before), else the greeting + Spanish sentence inside the one <Gather>.
+// `greetingUrl` null (the answers-first relay path has no greeting MP3 — the
+// relay welcomeGreeting is its disclosure) renders the Gather with only the
+// Spanish sentence.
+function appendLanguageVestibule(twiml, { greetingUrl, vestibule }) {
+  if (!vestibule) {
+    if (greetingUrl) twiml.play(greetingUrl);
+    return false;
+  }
+  const gather = twiml.gather({
+    input: 'dtmf',
+    numDigits: 1,
+    timeout: LANGUAGE_MENU_TIMEOUT_SEC,
+    action: LANGUAGE_MENU_ACTION,
+    method: 'POST',
+  });
+  if (greetingUrl) gather.play(greetingUrl);
+  gather.say(SPANISH_SAY, SPANISH_MENU_PROMPT);
+  return true;
+}
+
+// The relay TwiML is a hand-built XML string (relay-protocol), so the
+// answers-first relay path splices the vestibule in through the SAME builder
+// (a throwaway VoiceResponse rendered and unwrapped) — never a second copy of
+// the Gather markup.
+function vestibuleInnerXml({ greetingUrl, vestibule }) {
+  const tmp = new VoiceResponse();
+  if (!appendLanguageVestibule(tmp, { greetingUrl, vestibule })) return '';
+  return tmp.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+}
+
+// Spanish relay leg for a caller who pressed 2: the SAME Sandy relay session
+// in es-US (Spanish greeting = the §934.03 + automated-assistant disclosure,
+// non-interruptible; Twilio's default es-US voice unless the owner set one;
+// <Parameter lang=es> rides into the setup frame → RelayConversation.language).
+function buildSpanishRelayTwiML({ vestibule, callSid }) {
+  const { buildRelayTwiML, spanishWelcomeGreeting, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
+  return buildRelayTwiML({
+    wsUrl: vestibule.relayUrl,
+    callSid,
+    action: RELAY_COMPLETE_ACTION,
+    language: SPANISH_LANGUAGE,
+    voice: vestibule.voice || null,
+    welcomeGreeting: spanishWelcomeGreeting(),
+    parameters: { lang: 'es' },
+  });
+}
+
+// The Gather action contract: only an exact '2' selects Spanish. Anything
+// else (other digit, '*', '#', multi-char, missing, malformed) = English
+// continuation, and the continuation never re-offers the vestibule.
+function spanishSelected(reqBody) {
+  const digits = reqBody && reqBody.Digits;
+  if (typeof digits !== 'string' && typeof digits !== 'number') return false; // arrays/objects never select
+  return String(digits).trim() === '2';
+}
 
 // Classify how the configured agent endpoint is reachable, so the live-routing
 // paths emit the right TwiML and never strand a call:
@@ -585,13 +682,19 @@ router.post('/voice', async (req, res) => {
     const screenReentry = req.query.screened === '1'
       ? 'passed'
       : (req.query.screenfail === '1' ? 'failed' : null);
+    // Language-vestibule re-entry (?lang=menu): Twilio POSTed a key press from
+    // the <Gather>. Never a first delivery, never re-screened, never re-offered
+    // the menu. Only an exact '2' selects Spanish; anything else continues in
+    // English exactly as the Gather timeout would have.
+    const langReentry = req.query.lang === 'menu';
+    const spanishChosen = langReentry && spanishSelected(req.body);
     let knownCaller = customerPhoneMatches.length > 0;
     // Service-contact slot phones (spouse/tenant — the canonical inbound
     // identity set) also bypass the screen. Checked only when it could
     // change the outcome (no primary match, B attestation, not a re-entry)
     // so the extra query never runs on ordinary calls; a check failure
     // fails OPEN — never challenge a caller because Postgres hiccupped.
-    if (!knownCaller && !screenReentry && /-B$/.test(String(req.body.StirVerstat || ''))) {
+    if (!knownCaller && !screenReentry && !langReentry && /-B$/.test(String(req.body.StirVerstat || ''))) {
       try {
         knownCaller = await knownCallerPhoneExists(db, From);
       } catch (err) {
@@ -599,7 +702,7 @@ router.post('/voice', async (req, res) => {
         knownCaller = true;
       }
     }
-    const screenDecision = screenReentry ? 'none' : preconnectScreenDecision({
+    const screenDecision = (screenReentry || langReentry) ? 'none' : preconnectScreenDecision({
       knownCaller,
       stirVerstat: req.body.StirVerstat,
       gateOn: isEnabled('callPreconnectScreen'),
@@ -762,6 +865,10 @@ router.post('/voice', async (req, res) => {
     // config read, so the staff simul-ring below is byte-for-byte unchanged.
     // Whole block is fail-open: any error continues to the normal flow.
     let ringTimeoutSec = 30;
+    // Language vestibule for THIS call (null = not offered). Decided inside the
+    // agent block because Spanish is a relay session: no agent gate/endpoint
+    // ⇒ no Spanish path ⇒ no menu. Falls open to null on any error.
+    let vestibule = null;
     try {
       if (isEnabled('voiceAiAgent')) {
         const routingConfig = await getCallRoutingConfig(db);
@@ -776,6 +883,26 @@ router.post('/voice', async (req, res) => {
         const agentReachable = handoffKind === 'relay' || handoffKind === 'dial';
         const backstopActive = agentReachable && routingConfig.noAnswerBackstopEnabled !== false;
         if (backstopActive) ringTimeoutSec = routingConfig.ringTimeoutSec || 30;
+        vestibule = languageVestibule({ routingConfig, handoffKind, reentry: langReentry });
+        // ── Spanish branch: the caller pressed 2 ──
+        // Eligibility is re-proven on the re-entry (gate + switch + reachable
+        // relay) — the menu is evidence of intent, not authority. If Spanish
+        // cannot start now, the call continues in English (fail open, logged).
+        if (spanishChosen) {
+          const spanishLeg = languageVestibule({ routingConfig, handoffKind, reentry: false });
+          if (spanishLeg) {
+            logger.info(`[voice] Spanish vestibule: press 2 → es-US relay for ${maskSid(CallSid)}`);
+            await db('call_log').where('twilio_call_sid', CallSid)
+              .update({
+                answered_by: 'ai_agent',
+                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ caller_language: 'es' })]),
+                updated_at: new Date(),
+              })
+              .catch((err) => logger.warn(`[voice] Spanish language stamp skipped for ${maskSid(CallSid)}: ${err.message}`));
+            return res.type('text/xml').send(buildSpanishRelayTwiML({ vestibule: spanishLeg, callSid: CallSid }));
+          }
+          logger.warn(`[voice] Spanish chosen but no Spanish session can start (${handoffKind}) for ${maskSid(CallSid)} — continuing in English`);
+        }
         const decision = decideVoiceRoute({ phase: 'initial', gateEnabled: true, config: routingConfig, now: new Date() });
         if (decision.action === 'agent' && agentReachable) {
           logger.info(`[voice] AI answers-first (${decision.reason}, ${handoffKind}) for ${maskSid(CallSid)}`);
@@ -787,12 +914,16 @@ router.post('/voice', async (req, res) => {
             // automated-assistant disclosure, so no separate greeting MP3 here.
             // CallSid binds the upgrade token to THIS call (relay-protocol):
             // the ws endpoint accepts no reusable credential.
-            return res.type('text/xml').send(buildRelayTwiML({
+            // Vestibule (when offered) precedes the <Connect> — same builder as
+            // every other path, spliced into the hand-built relay XML.
+            const relayXml = buildRelayTwiML({
               wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
-            }));
+            });
+            const inner = vestibuleInnerXml({ greetingUrl: null, vestibule });
+            return res.type('text/xml').send(inner ? relayXml.replace('<Response>', `<Response>${inner}`) : relayXml);
           }
           const agentTwiml = new VoiceResponse();
-          agentTwiml.play(greetingUrl); // FL §934.03 disclosure before the agent leg
+          appendLanguageVestibule(agentTwiml, { greetingUrl, vestibule }); // FL §934.03 disclosure before the agent leg
           appendAgentHandoff(agentTwiml, routingConfig, { callerId: From });
           return res.type('text/xml').send(agentTwiml.toString());
         }
@@ -800,6 +931,7 @@ router.post('/voice', async (req, res) => {
     } catch (agentErr) {
       logger.error(`[voice] answers-first routing failed; using normal flow: ${agentErr.message}`);
       ringTimeoutSec = 30;
+      vestibule = null;
     }
 
     // Mirror the Studio Flow's `forward_call` widget, but add callee
@@ -807,7 +939,7 @@ router.post('/voice', async (req, res) => {
     // Adam/Virginia's cell and steal the caller before Twilio reaches the
     // Waves-owned voicemail recorder.
     const twiml = new VoiceResponse();
-    twiml.play(greetingUrl);
+    appendLanguageVestibule(twiml, { greetingUrl, vestibule });
     const forwardNumbers = getFallbackForwardNumbers();
     if (forwardNumbers.length === 0) {
       logger.error('[voice] No inbound staff forward numbers configured; sending caller to Waves voicemail');
@@ -1007,13 +1139,24 @@ router.post('/relay-complete', async (req, res) => {
     // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
     // did NOT reach the agent, it went to voicemail. Reconcile before recording
     // so reporting doesn't show a failed relay call as AI-handled.
+    let language = null;
     if (callSid) {
+      // A caller who chose Spanish (stamped at the vestibule) gets Spanish
+      // voicemail — read BEFORE the reconcile so a read failure only costs
+      // the language, never the fallback.
+      language = await db('call_log').where('twilio_call_sid', callSid).first('metadata')
+        .then((row) => {
+          let meta = row && row.metadata;
+          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+          return meta && meta.caller_language ? String(meta.caller_language) : null;
+        })
+        .catch(() => null);
       await db('call_log').where('twilio_call_sid', callSid)
         .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
         .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
       queueVoiceMessageSync(callSid);
     }
-    appendVoicemailRecording(twiml);
+    appendVoicemailRecording(twiml, { language });
   }
   res.type('text/xml').send(twiml.toString());
 });
@@ -1762,6 +1905,14 @@ router.post('/call-status', async (req, res) => {
 router._test = {
   agentHandoffKind,
   appendAgentHandoff,
+  languageVestibule,
+  appendLanguageVestibule,
+  vestibuleInnerXml,
+  buildSpanishRelayTwiML,
+  spanishSelected,
+  appendVoicemailRecording,
+  SPANISH_MENU_PROMPT,
+  LANGUAGE_MENU_ACTION,
   buildPreconnectChallengeTwiML,
   findCustomerPhoneMatches,
   knownCallerPhoneExists,

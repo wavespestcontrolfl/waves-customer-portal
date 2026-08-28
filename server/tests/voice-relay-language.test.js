@@ -1,0 +1,108 @@
+/**
+ * relay-language — session-language plumbing for the inbound relay agent:
+ * the Spanish prompt addendum, the deterministic Spanish closes (English
+ * byte-identical), the Spanish greeting validation arms, and the
+ * confident-resolution-only preference stamp.
+ */
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../models/db', () => jest.fn());
+
+const db = require('../models/db');
+const { isSpanish, copy, COPY, LANGUAGE_ADDENDUM_ES, stampPreferredLanguage } = require('../services/voice-agent/relay-language');
+const { buildBasePrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
+const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, DISCLOSURE_SUFFIX_ES, defaultWelcomeGreeting, DEFAULT_WELCOME_GREETING } = require('../services/voice-agent/relay-protocol');
+
+afterEach(() => { delete process.env.VOICE_RELAY_GREETING_ES; delete process.env.VOICE_RELAY_GREETING; delete process.env.VOICE_AGENT_NAME; });
+
+test('isSpanish accepts es / es-US / es_MX only', () => {
+  expect(isSpanish('es')).toBe(true);
+  expect(isSpanish('es-US')).toBe(true);
+  expect(isSpanish('es_MX')).toBe(true);
+  expect(isSpanish('en-US')).toBe(false);
+  expect(isSpanish('est')).toBe(false);
+  expect(isSpanish(null)).toBe(false);
+});
+
+test('prompt: no/English language is byte-identical; Spanish appends the addendum LAST', () => {
+  expect(buildBasePrompt(false)).toBe(SYSTEM_PROMPT);
+  expect(buildBasePrompt(false, 'en-US')).toBe(SYSTEM_PROMPT);
+  const es = buildBasePrompt(false, 'es');
+  expect(es.startsWith(SYSTEM_PROMPT)).toBe(true);
+  expect(es.endsWith(LANGUAGE_ADDENDUM_ES)).toBe(true);
+  expect(LANGUAGE_ADDENDUM_ES).toMatch(/Speak ONLY in natural/);
+});
+
+test('deterministic closes: English strings are the prior literals verbatim; Spanish twins exist for every key', () => {
+  expect(copy('turnCap')).toBe('A Waves team member will follow up with you as soon as possible to take care of this. Thanks for calling!');
+  expect(copy('unavailable', 'en')).toBe('Sorry, I am unable to help right now. A team member will call you back.');
+  expect(copy('streamTimeout', null)).toBe('Sorry, that took a moment — could you say that again?');
+  expect(copy('modelError')).toBe('Sorry, I had trouble there. Could you say that again?');
+  expect(copy('toolRounds')).toBe("Sorry — that's taking me longer than it should. I've made a note for the team to follow up. Is there anything else I can help with?");
+  for (const key of Object.keys(COPY)) {
+    const es = copy(key, 'es-US');
+    expect(es).not.toBe(COPY[key].en);
+    expect(es).not.toMatch(/\b(sorry|team member|call you back)\b/i); // no English leaks
+  }
+  expect(() => copy('nope', 'es')).toThrow(/unknown copy key/);
+});
+
+describe('Spanish greeting validation arms', () => {
+  test('default carries both disclosure halves and the agent name', () => {
+    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
+    process.env.VOICE_AGENT_NAME = 'Marisol';
+    expect(spanishWelcomeGreeting()).toContain('soy Marisol');
+  });
+  test('a complete affirmative override is used verbatim', () => {
+    process.env.VOICE_RELAY_GREETING_ES = 'Hola, esta llamada puede ser grabada y habla con un asistente automatizado. ¿Cómo puedo ayudarle?';
+    expect(spanishWelcomeGreeting()).toBe(process.env.VOICE_RELAY_GREETING_ES);
+  });
+  test('an incomplete override gets the Spanish suffix — never the English one', () => {
+    process.env.VOICE_RELAY_GREETING_ES = 'Hola, gracias por llamar a Waves.';
+    const g = spanishWelcomeGreeting();
+    expect(g).toBe(`Hola, gracias por llamar a Waves. ${DISCLOSURE_SUFFIX_ES}`);
+    expect(g).not.toMatch(/may be recorded|automated assistant/);
+  });
+  test.each([
+    'Esta llamada no es grabada y habla con un asistente automatizado.',
+    'Esta llamada puede ser grabada y está hablando con una persona real.',
+    'Nunca grabamos; soy un asistente automatizado.',
+  ])('a negated / human-claiming override is discarded: %s', (bad) => {
+    process.env.VOICE_RELAY_GREETING_ES = bad;
+    expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
+  });
+  test('the English validator still treats Spanish copy as incomplete (why the Spanish arms exist)', () => {
+    process.env.VOICE_RELAY_GREETING = DEFAULT_WELCOME_GREETING_ES;
+    expect(defaultWelcomeGreeting()).not.toBe(DEFAULT_WELCOME_GREETING_ES);
+    expect(defaultWelcomeGreeting()).toContain('may be recorded');
+    delete process.env.VOICE_RELAY_GREETING;
+    expect(defaultWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING);
+  });
+});
+
+describe('stampPreferredLanguage', () => {
+  function chain(updateResult = 1) {
+    const q = {};
+    ['where', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+    q.update = jest.fn(async () => updateResult);
+    return q;
+  }
+  test('writes es empty-only on the given customer', async () => {
+    const q = chain(1);
+    expect(await stampPreferredLanguage('cust-1', 'es-US', { database: jest.fn(() => q) })).toBe(true);
+    expect(q.where).toHaveBeenCalledWith({ id: 'cust-1' });
+    expect(q.whereRaw).toHaveBeenCalledWith("COALESCE(preferred_language, '') = ''");
+    expect(q.update).toHaveBeenCalledWith({ preferred_language: 'es' });
+  });
+  test('no customer / not Spanish ⇒ no write', async () => {
+    const database = jest.fn(() => chain(1));
+    expect(await stampPreferredLanguage(null, 'es', { database })).toBe(false);
+    expect(await stampPreferredLanguage('cust-1', 'en-US', { database })).toBe(false);
+    expect(database).not.toHaveBeenCalled();
+  });
+  test('a prior preference is never clobbered (0 rows) and a DB error is non-blocking', async () => {
+    expect(await stampPreferredLanguage('cust-1', 'es', { database: jest.fn(() => chain(0)) })).toBe(false);
+    const q = chain(); q.update = jest.fn(async () => { throw new Error('boom'); });
+    expect(await stampPreferredLanguage('cust-1', 'es', { database: jest.fn(() => q) })).toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+});

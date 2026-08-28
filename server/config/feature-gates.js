@@ -491,6 +491,15 @@ const gates = {
   // disabled live with no deploy) via the `call_routing` system_settings row.
   voiceAiAgent: process.env.GATE_VOICE_AI_AGENT === 'true',
 
+  // Spanish language vestibule on inbound calls — "Para español, oprima dos"
+  // folded into the greeting; press 2 hands the call to the SAME Sandy relay
+  // agent in an es-US session. Customer-facing and on the live call path, so
+  // explicit opt-in in EVERY environment. Off ⇒ /voice TwiML is byte-identical
+  // to today (no <Gather> is rendered). Also requires voiceAiAgent + a reachable
+  // relay endpoint + `spanishMenuEnabled` in the call_routing settings row —
+  // the vestibule is never offered when no Spanish session could start.
+  voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
+
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
 
