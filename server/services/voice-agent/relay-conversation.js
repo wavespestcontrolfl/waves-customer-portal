@@ -95,6 +95,19 @@ try {
   anthropic = null;
 }
 
+// The gate-off pricing rule. Defined ONCE and referenced inside SYSTEM_PROMPT
+// below; buildBasePrompt(true) replaces this exact line with PRICE_LINE_CONTEXT.
+const PRICE_LINE_NO_CONTEXT =
+  '- You CANNOT quote prices on this call. If the caller asks about price, say you cannot give a'
+  + ' number over the phone but the office can put a written estimate together — then, BEFORE'
+  + ' promising anything, get their first and last name, email address, and full service street'
+  + ' address and call capture_lead with estimate_requested: true. Only if the tool result says the'
+  + ' request is queued may you tell them a written estimate will be sent (the office turns these'
+  + ' around quickly during business hours; you cannot see the clock on this call, so never say'
+  + ' whether the office is open now or promise a delivery time). If the tool says it could not be'
+  + ' queued, or the caller declines to give a missing detail, call capture_lead again WITHOUT'
+  + ' estimate_requested, say a team member will follow up — nothing stronger — and end normally.';
+
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
   // brand form on any customer surface (AGENTS.md; the greeting says the same).
@@ -109,15 +122,17 @@ const SYSTEM_PROMPT = [
   '  once you have the service address or at least the city/ZIP.',
   '- You CANNOT confirm or reserve an appointment, and you cannot take payment. Offering a',
   '  time is not booking it — a Waves team member calls back to lock it in. Say so.',
-  '- You CANNOT quote prices. If asked, say a team member will go over pricing on the callback.',
+  PRICE_LINE_NO_CONTEXT, // ONE source: the gate-on prompt replaces this exact line
   '',
   'How to talk:',
   '- Keep every reply to one or two short sentences. This is a phone call, not an essay.',
-  '- Be warm, plain-spoken, and efficient. No corporate filler.',
+  '- Calm, plain-spoken, and efficient — a steady front-desk voice, not a cheerleader. No',
+  '  exclamation-point energy, no hype, no gushing; one friendly beat is plenty. No corporate filler.',
   '- Gather, conversationally: their FIRST and LAST name, the full service street address (not',
   '  just the city/ZIP), an email address, and what is going on (the pest or lawn problem).',
   '  These four — full name, service address, and email — are what let the office work the',
-  '  lead, so ask for any you are still missing before you wrap up. The address also lets you',
+  '  lead, so ask for any you are still missing before you wrap up. They are the job even when',
+  '  the caller only wanted a price. The address also lets you',
   '  look up open times; a city/ZIP alone is enough to check availability but still ask for the',
   '  full street address.',
   '- Ask for the email naturally ("what is the best email for your confirmation?"). If the',
@@ -144,14 +159,20 @@ const SYSTEM_PROMPT = [
 
 // The exact Phase-1 line buildBasePrompt swaps out. Exported and pinned by a
 // test so a future prompt edit can't silently break the replacement.
-const PRICE_LINE_NO_CONTEXT =
-  '- You CANNOT quote prices. If asked, say a team member will go over pricing on the callback.';
-
 const PRICE_LINE_CONTEXT = [
   '- Prices: you may quote ONLY numbers the get_pricing tool returned on THIS call, stated',
   '  exactly as the tool reported them. Never negotiate, discount, round up or down, or',
   '  estimate a price yourself. If get_pricing says information is missing, ask the caller',
   '  for it and call the tool again. You still cannot take payment.',
+  '- If you cannot give a number for what they want, do not leave them empty-handed — but do not',
+  '  promise first: say the office can put a written estimate together, get their first and last',
+  '  name, email address, and full service street address, and call capture_lead with',
+  '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
+  '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
+  '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
+  '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
+  '  again WITHOUT estimate_requested, do not promise an estimate — say a team member will follow',
+  '  up — and end normally.',
 ].join('\n');
 
 function agentDisplayName() {
@@ -565,7 +586,7 @@ class RelayConversation {
    * caveat as relay-protocol.parsePrompt).
    */
   _maybeEndAfterTurn() {
-    if (!this.leadCaptured || !this._endSession || this._ending) return;
+    if (!this.leadCaptured || this._holdOpenForRetry || !this._endSession || this._ending) return;
     this._ending = true;
     try {
       this._endSession({ reason: 'agent_complete', captured: true });
@@ -884,9 +905,30 @@ class RelayConversation {
       // creates no lead for one, so the floor must still stand down (a second
       // attempt hits the same guard and creates nothing) while the record must
       // not claim a lead that does not exist.
-      markCaptured: ({ leadCreated = true } = {}) => {
+      // Estimate fields accumulate ACROSS captures on this call (hook P1): a
+      // retry that supplies only the missing email must not lose the name
+      // and address given on the first capture.
+      // Is the office open RIGHT NOW (ET)? true / false / null (unknown). The
+      // estimate-promise wording is decided from this in code (hook P1) and
+      // recorded on the artifact — never left to the model's reading of the
+      // clock block.
+      officeOpenNow: () => {
+        const { isOfficeOpenAt } = require('./relay-context');
+        return isOfficeOpenAt(convo._officeHours, new Date());
+      },
+      getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
+      noteEstimateFields: (fields = {}) => {
+        const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
+        convo._estimateFields = { ...(convo._estimateFields || {}), ...kept };
+      },
+      markCaptured: ({ leadCreated = true, holdOpen = false } = {}) => {
         this.leadCaptured = true;
         if (leadCreated === false) this._noLeadCreated = true;
+        // An INCOMPLETE estimate capture (hook P1): the floor is suppressed
+        // (something was recorded) but the call must stay open so the caller
+        // can supply the missing fields and capture_lead can run again. A
+        // later complete capture clears the hold.
+        this._holdOpenForRetry = holdOpen === true;
       },
       // Phase E: the model's own capture_lead summary becomes the call_log
       // call_summary at close (no extra model round trip on the live call).
@@ -1402,4 +1444,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };

@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { isSpanish, copy, COPY, LANGUAGE_ADDENDUM_ES } = require('../services/voice-agent/relay-language');
 const { buildBasePrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
-const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, DISCLOSURE_SUFFIX_ES, defaultWelcomeGreeting, DEFAULT_WELCOME_GREETING } = require('../services/voice-agent/relay-protocol');
+const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, DISCLOSURE_SUFFIX_ES, defaultWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
 
 afterEach(() => { delete process.env.VOICE_RELAY_GREETING_ES; delete process.env.VOICE_RELAY_GREETING; delete process.env.VOICE_AGENT_NAME; });
 
@@ -74,6 +74,6 @@ describe('Spanish greeting validation arms', () => {
     expect(defaultWelcomeGreeting()).not.toBe(DEFAULT_WELCOME_GREETING_ES);
     expect(defaultWelcomeGreeting()).toContain('may be recorded');
     delete process.env.VOICE_RELAY_GREETING;
-    expect(defaultWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING);
+    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Sandy\..*automated assistant\. How can I help you this (morning|afternoon|evening)\?$/);
   });
 });

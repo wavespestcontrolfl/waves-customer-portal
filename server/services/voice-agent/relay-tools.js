@@ -88,6 +88,13 @@ const TOOLS = [
           enum: ['phone', 'sms', 'email', 'unspecified'],
           description: 'How the caller asked to be reached, if they said. Omit when they did not say.',
         },
+        estimate_requested: {
+          type: 'boolean',
+          description: 'True when the caller asked about pricing and you could not give them a number on this call '
+            + 'and they want a written estimate. Do NOT promise one before calling this: the office needs first_name, '
+            + 'last_name, email and address_line1 to send it, and the tool result says whether the request was '
+            + 'queued or which of those is still missing.',
+        },
         do_not_contact_request: {
           type: 'boolean',
           description: 'True ONLY if the caller asked us to stop contacting them (or stop texting/emailing them). '
@@ -820,6 +827,73 @@ async function executeTool(name, input = {}, ctx = {}) {
         preferred_contact_method: input.preferred_contact_method || null,
         do_not_contact_request: input.do_not_contact_request === true,
       };
+      // ⭐ THE QUEUE ONLY ACCEPTS A DELIVERABLE REQUEST (hook P1). Prompts are
+      // not an enforcement boundary: without a name, an email and a service
+      // address the office cannot send anything, so an incomplete capture never
+      // authorizes the promise — the result names what is missing so the model
+      // collects it and calls again. Decided BEFORE the lead write so the lead
+      // artifact carries the truth in the shape the Leads UI already renders
+      // (extracted_data.quote_requested → "Quote requested on call",
+      // quote_promised → "Quote promised to caller").
+      const estimateRequested = input.estimate_requested === true;
+      // An email must be DELIVERABLE, not merely non-empty (hook P1): an
+      // ASR-garbled or syntactically invalid address is reported as missing.
+      const { isValidEmail } = require('../../utils/internal-email-recipients');
+      // Fields accumulate across captures on this call (hook P1): a retry that
+      // supplies only the missing piece keeps what earlier captures gave.
+      const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
+      // Whitespace-only is EMPTY (hook P1): a field must carry real text to
+      // count toward a deliverable request.
+      const nz = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
+      const emailNow = nz(extracted.email) && isValidEmail(nz(extracted.email)) ? nz(extracted.email) : null;
+      if (extracted.email && !emailNow) {
+        // A garbled/invalid email never reaches the lead (hook P1): the lead
+        // writer fills empty fields forward, so persisting it would give the
+        // office an address nothing can be sent to. Dropped here, reported as
+        // missing below when an estimate is in play.
+        logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
+        extracted.email = null;
+      }
+      const estimateFields = {
+        first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
+        last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
+        email: emailNow || nz(priorEstimateFields.email),
+        address_line1: nz(extracted.address_line1) || nz(priorEstimateFields.address_line1),
+        city: nz(extracted.city) || nz(priorEstimateFields.city),
+        zip: nz(extracted.zip) || nz(priorEstimateFields.zip),
+        // Service context accumulates too (hook P1): a retry that only adds
+        // the email must not file a card that has forgotten what they asked
+        // about.
+        requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
+        pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
+      };
+      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // The accumulated fields ALSO ride the lead write (hook P1): identity
+      // resolution (email match) and fill-forward must see the name/email/
+      // address the FIRST capture gave, not just this retry's new piece.
+      for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
+        if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
+      }
+      const estimateMissing = estimateRequested
+        ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
+        : [];
+      // The spoken turnaround is decided HERE, from the office clock, and
+      // travels with the artifact (hook P1): open ⇒ "usually about 15
+      // minutes" (urgent for staff); closed ⇒ "when the office opens";
+      // unknown ⇒ "as soon as possible". The model only ever repeats it.
+      // Gate OFF (no clock block, no office hours) can never earn the
+      // 15-minute wording (hook P1): only a context-enabled session that
+      // proves the office is open right now may say it.
+      const { isContextEnabled: contextOn } = require('./relay-context');
+      const officeOpen = contextOn() && typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
+      const spokenExpectation = officeOpen === true
+        ? 'about_15_minutes'
+        : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');
+      if (estimateRequested) {
+        extracted.quote_requested = true;
+        extracted.quote_promised = estimateMissing.length === 0;
+        if (extracted.quote_promised) extracted.quote_promised_expectation = spokenExpectation;
+      }
       // ⭐ AN EXPLICIT VERBAL OPT-OUT IS HONOURED, NOT JUST FILED.
       //
       // This used to land only in `leads.extracted_data` for a human to read.
@@ -1286,7 +1360,49 @@ async function executeTool(name, input = {}, ctx = {}) {
       // guard and creates nothing — but the record must not claim a lead that
       // does not exist, and the model must not be told one was saved.
       const leadCreated = Boolean(capturedLeadId);
-      if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated });
+      // An incomplete estimate capture keeps the call OPEN for the retry the
+      // result asks for (hook P1); a complete or non-estimate capture ends
+      // the call as before once the agent is done.
+      const holdOpen = estimateRequested && estimateMissing.length > 0;
+      if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated, holdOpen });
+      // ⭐ A PROMISED ESTIMATE NEEDS AN ARTIFACT (codex #3569). A new lead IS
+      // the artifact (the office works it). A lifecycle customer gets no lead,
+      // so the promise would otherwise rest on a call summary nobody is paged
+      // about — file the estimate-request card, and let the result below tell
+      // the model whether the promise may be spoken.
+      let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
+      if (estimateRequested && estimateMissing.length) {
+        estimateQueued = false;
+      } else if (estimateRequested) {
+        if (leadCreated) {
+          estimateQueued = true;
+        } else if (leadResult && leadResult.customerId) {
+          const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
+          const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
+            : { persisted: false };
+          estimateQueued = surfaced && surfaced.persisted === true;
+        } else {
+          estimateQueued = false;
+        }
+      }
+      const expectationCopy = {
+        about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
+        when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
+        as_soon_as_possible: 'Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.',
+      }[spokenExpectation];
+      const estimateNote = estimateQueued === true
+        ? ` The estimate request IS on the office queue. ${expectationCopy}`
+        : (estimateQueued === false
+          ? (estimateMissing.length
+            ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
+              + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
+              + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
+              + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
+              + 'and end the call normally.'
+            : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
+              + 'Waves team member will follow up, nothing stronger.')
+          : '');
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
         + `callSid=${ctx.callSid || 'n/a'}`
@@ -1329,14 +1445,22 @@ async function executeTool(name, input = {}, ctx = {}) {
           + 'nothing stronger.'
         : '';
       if (!leadCreated) {
+        if (estimateQueued === true) {
+          // The estimate request IS a request the office now holds — the
+          // generic "do not say a request was created" line would contradict
+          // it (hook P1), so this branch states exactly what exists.
+          return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
+            + 'none should be. The call and your summary are on their record.' + estimateNote
+            + ' Do not say an appointment was created.' + suppressionNote + pageCaveat;
+        }
         return 'Noted on this customer\'s account — this is an existing customer, so no new lead was created and '
           + 'none should be. The call and your summary are on their record for the office to review. Tell the caller '
           + 'a Waves team member will follow up, and do not say a new request or appointment was created.'
-          + suppressionNote + pageCaveat;
+          + suppressionNote + pageCaveat + estimateNote;
       }
       return 'Lead saved successfully. Let the caller know a Waves team member will follow up to confirm '
         + 'details and scheduling — set WHEN from the latest CLOCK DATA (never "shortly" while the office '
-        + 'is closed).' + suppressionNote + pageCaveat;
+        + 'is closed).' + suppressionNote + pageCaveat + estimateNote;
     }
 
     if (name === 'get_availability') {
