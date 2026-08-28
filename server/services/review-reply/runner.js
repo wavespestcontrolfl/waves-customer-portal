@@ -771,6 +771,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         autoFields: {
           auto_reply_status: STATUS.POSTED,
           auto_reply_reason: null,
+          // The attempted text is the pipeline's record of what posted (a
+          // human draft too), so reconciliation and Retract see it.
+          auto_reply_draft: existing,
+          auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt,
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
           auto_reply_claimed_until: null,
@@ -789,7 +793,17 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         throw err;
       }
       if (err instanceof ReviewReplyError && err.code === CODES.GOOGLE_UNCERTAIN) {
-        // Publisher parked it; never release back into the retry lane.
+        // Publisher parked it; never release back into the retry lane. Record
+        // the ATTEMPTED text (a human draft has no auto_reply_draft of its
+        // own) so the sync can recognise a landed PUT and close it as
+        // posted instead of an unrelated owner reply (codex r34).
+        await db('google_reviews').where({ id: reviewId }).update({
+          auto_reply_draft: existing,
+          auto_reply_version: row.auto_reply_version || null,
+          auto_reply_mode: row.auto_reply_mode || null,
+          auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(),
+          ...(humanDraft ? {} : { auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
+        }).catch(() => {});
         throw err;
       }
       if (err instanceof ReviewReplyError && [CODES.HAS_REPLY, CODES.MISSING, CODES.RACE].includes(err.code)) {

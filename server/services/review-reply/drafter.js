@@ -112,6 +112,9 @@ const BANNED_RE = new RegExp([
   // pesticide-safety assertion in softer clothes (codex r28).
   // Well-being / welfare / compromise family (codex r32): "won't compromise
   // your pets' well-being" is the same assertion.
+  // "Unaffected / untouched / no negative consequences" (codex r34): the
+  // outcome nouns and un-* adjectives are banned outright.
+  '\\bunaffected\\b', '\\buntouched\\b', '\\bunbothered\\b', '\\bunscathed\\b', '\\bunharmed\\b', '\\bunhurt\\b', '\\bintact\\b', '\\bconsequences?\\b', '\\bside[- ]?effects?\\b', '\\bafter[- ]?effects?\\b', '\\brepercussions?\\b', '\\bdownsides?\\b', '\\bdrawbacks?\\b', '\\b(?:negative|adverse|ill|bad|unwanted|harmful|lasting)\\s+(?:[\\w-]+\\s+){0,2}?(?:effects?|outcomes?|reactions?|impacts?|results?)\\b',
   '\\bcompromis\\w*\\b', '\\bwell[- ]?being\\b', '\\bwelfare\\b', '\\bwellness\\b', '\\bpeace\\s+of\\s+mind\\b',
   '\\bbenign\\b', '\\binnocuous\\b', '\\binert\\b', '\\bgentle\\b', '\\bmild\\b', '\\bnon[- ]?(?:harmful|lethal|hazardous|irritating|aggressive|invasive|toxic|poisonous)\\b', '\\blow[- ](?:risk|impact|toxicity|odou?r)\\b',
   // Suitability / tolerance framing in any wrapper ("suitable around pets",

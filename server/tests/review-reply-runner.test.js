@@ -1123,6 +1123,20 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
+  test('postNow of a human [DRAFT] whose PUT timed out records the attempted text, so the sync can close a landed write as POSTED (codex r34)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const human = 'Thanks Dana, the owner here — glad it went well.';
+    state.rows = [row({ id: 'hu', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] ' + human, auto_reply_draft: null })];
+    mockPublish.mockImplementationOnce(async ({ reviewId }) => { const r = state.rows.find((x) => x.id === reviewId); Object.assign(r, { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_claimed_until: null }); throw new ReviewReplyError('google_uncertain', 'timed out', { status: 502 }); });
+    await expect(Runner.postNow('hu', { type: 'admin' }, { expectedDraft: human })).rejects.toMatchObject({ code: 'google_uncertain' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: human });
+    expect(state.rows[0].auto_reply_drafted_at).toBeTruthy();
+    // The next sync sees the human text live on Google → ours, posted (Retract stays available).
+    expect(Runner.syncReplyFields(state.rows[0], { owner_reply: human, owner_reply_updated_at: '2026-08-27T15:00:00Z' }, { now: new Date('2026-08-27T15:05:00Z') }))
+      .toMatchObject({ review_reply: human, auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T15:00:00Z' });
+  });
+
   test('postNow does not re-verify a human [DRAFT] (the admin\'s own text is the payload)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const human = 'Hi Dana,\n\nThe owner wrote this.\n\nThe 🌊 Waves Pest Control Sarasota Team';

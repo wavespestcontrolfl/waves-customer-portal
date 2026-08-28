@@ -132,6 +132,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r34: unaffected / untouched / no negative consequences.
+    expect(verify(good('Hi Dana, Marcus got the ants and the treatments left your pets unaffected.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the treatments have no negative consequences for your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and your dogs came through untouched.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with no side effects for the kids.'))).toBe('banned_phrase');
     // codex r33: household / owner formulations.
     expect(verify(good('Hi Dana, Marcus got the ants and our treatments can be applied in households containing pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and our treatments are appropriate choices for pet owners.'))).toBe('banned_phrase');
