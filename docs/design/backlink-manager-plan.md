@@ -125,7 +125,7 @@ t.string('expected_indexability');                // indexable | noindex | unkno
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
 t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
 t.numeric('confidence', 3, 2);                    // 0–1
-t.integer('revision').notNullable().defaultTo(1);  // +1 ONLY when an approval-bound term changes (acquisition_type, submission_url, *_cost_cents, renewal_period, payment/legal flags, expected_rel); derived fields (confidence, investigation, last_investigated_at) do not bump it. Approvals bind to it (§3.6b)
+t.integer('revision').notNullable().defaultTo(1);  // +1 whenever ANY authority- or approval-relevant field changes: acquisition_type, submission_url, estimated_cost_cents, renewal_cost_cents, renewal_period, account_required, email_verification, payment_required, legal_attestation, agent_completable, expected_rel, link_type. Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
 t.string('authority_last_decided');               // informational copy of the latest §6 decision; NOT versioned, NOT approval-bound — the binding stamp lives on the placement
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
@@ -206,16 +206,17 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
-t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (revision bumps on every investigator/edit write)
+t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (bumps on any authority/approval-relevant field change — §3.2)
+t.boolean('payment_required').notNullable();  // copied from the path at approval time (same-row, so the CHECK below can see it)
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
-t.integer('approved_amount_cents');           // the ceiling the owner approved; CHECK: (path requires payment) ⇒ approved_amount_cents IS NOT NULL AND > 0 (safe integer) — a paid approval without a ceiling cannot exist
+t.integer('approved_amount_cents');           // the ceiling the owner approved; same-row CHECK (NOT payment_required OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
 t.timestamp('consumed_at');                   // set when the leased execution reports a terminal outcome
 ```
-`seo_link_acquisition_paths` gains `revision` (integer, +1 on every write). The claim predicate
+`seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
 invalidated, not consumed, and whose `path_revision` equals the path's current revision;
 the final-total guard compares `final_cents` to `approved_amount_cents` (+ tolerance) and
