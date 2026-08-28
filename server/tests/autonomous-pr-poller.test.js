@@ -718,6 +718,35 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.mergePr).not.toHaveBeenCalled();
   });
 
+  test('body-image contract at HEAD for a REFRESH run: the brief target wins over a draft canonical/page_url, exactly like publishRefresh (GH r8)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const briefUrl = 'https://www.wavespestcontrol.com/blog/legacy-post-a/';
+    const draftUrl = 'https://www.wavespestcontrol.com/blog/other-post-b/';
+    const refreshRun = makeRun({
+      action_type: 'refresh_existing_page',
+      brief_id: 'brief-r',
+      // The emitted draft still names blog B in every draft-derived slot resolveTargetForRun reads first.
+      draft_payload: JSON.stringify({ type: 'draft', page_url: draftUrl, target_url: draftUrl, frontmatter: { title: 'Refresh', canonical: draftUrl }, body: 'x' }),
+    });
+    setupDb({ pending: [refreshRun], briefs: [{ id: 'brief-r', target_url: briefUrl, target_keyword: 'k', city: 'Venice' }] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '1 distinct in-article image(s), minimum 2' });
+
+    const res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required/) });
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ actionType: 'refresh_existing_page', targetUrl: briefUrl }));
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    // The same precedence, unit-level: brief target → draft.page_url → null (draft.target_url / canonical are NOT publishRefresh inputs).
+    const { refreshTargetUrlForRun } = poller._internals;
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'brief-r', draft_payload: JSON.stringify({ page_url: draftUrl }) })).toBe(briefUrl);
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: null, draft_payload: JSON.stringify({ page_url: draftUrl, frontmatter: { canonical: briefUrl } }) })).toBe(draftUrl);
+    expect(await refreshTargetUrlForRun({ id: 'r', brief_id: 'missing', draft_payload: JSON.stringify({ target_url: draftUrl, frontmatter: { canonical: draftUrl } }) })).toBeNull();
+  });
+
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });

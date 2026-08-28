@@ -3872,6 +3872,19 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const written = fmModule.parse(gh.commitFiles.mock.calls[0][0].files[2].content).content;
     expect(written).toContain(`![shrub diseases](${heroSrc})`);
     expect(AstroPublisher._internals.countBodyImages(written)).toBe(3);
+    // Only that exact legacy reference is grandfathered: a refresh that swaps it for another post's
+    // hero (or a nonexistent /hero.webp) parks instead of shipping under the grandfather (GH r8).
+    gh.commitFiles.mockClear();
+    for (const swapped of ['/images/blog/other-post/hero.webp', '/images/blog/shrub-diseases-sarasota-fl/hero.webp']) {
+      let thrown;
+      try {
+        await AstroPublisher.publishRefresh({ ...draft, body: draft.body.replace(`![shrub diseases](${heroSrc})`, `![shrub diseases](${swapped})`) }, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+      } catch (err) { thrown = err; }
+      expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+      expect(thrown.message).toContain('embeds the hero image');
+      expect(thrown.message).toContain(swapped);
+    }
+    expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
   test('assertBodyImagesAtHead: refresh targets resolve like publishRefresh; non-blog targets are exempt; a route-matched flat legacy file is what gets checked (hook r14)', async () => {
@@ -3890,6 +3903,28 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     });
     const refresh = { actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', branch: 'content/refresh-x' };
     expect(await assertBodyImagesAtHead({ frontmatter: {}, ...refresh })).toEqual({ ok: true, reason: null });
+    // The grandfather covers ONLY the exact hero ref the live body carries: a head that swaps it for
+    // another post's hero (or an invented /hero.webp) is validated normally and withholds (GH r8).
+    for (const swapped of ['/images/blog/other-post/hero.webp', '/images/blog/shrub-diseases-sarasota-fl/hero.webp']) {
+      const swappedMd = headMd.replace(`![h](${heroSrc})`, `![h](${swapped})`);
+      gh.getFile.mockImplementation(async (path, ref) => {
+        if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? swappedMd : mainMd, sha: 'f' };
+        if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+        const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+        return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+      });
+      const res = await assertBodyImagesAtHead({ frontmatter: {}, ...refresh });
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/embeds the hero image/);
+      expect(res.reason).toContain(swapped);
+    }
+    expect(AstroPublisher._internals.legacyHeroRefs(`![h](${heroSrc})\n\n![x](/images/blog/a/hero.webp)\n\n![y](/images/blog/a/body-1.webp)\n\n![h2](${heroSrc})`, heroSrc)).toEqual([heroSrc, '/images/blog/a/hero.webp']);
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: ref === 'content/refresh-x' ? headMd : mainMd, sha: 'f' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: bytes.hero } };
+      const m = path.match(/shrub-diseases-sarasota-fl\/(body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
     // A non-blog target is exempt only once RESOLVED on the branch; unresolved fails closed (hook r15).
     gh.getFile.mockImplementationOnce(async (path, ref) => (ref === 'content/refresh-x' && path === 'src/content/services/pest-control-venice-fl.md' ? { content: '---\ntitle: S\n---\nService.', sha: 's' } : null));
     expect(await assertBodyImagesAtHead({ frontmatter: {}, actionType: 'refresh_existing_page', targetUrl: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', branch: 'content/refresh-x' })).toEqual({ ok: true, reason: 'non_blog_target' });

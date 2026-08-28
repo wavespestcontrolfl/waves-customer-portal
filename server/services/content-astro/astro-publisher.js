@@ -1737,7 +1737,7 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
   const getFile = (path) => gh.getFile(path, branch);
   let found = null;
   let label = '';
-  let ignoreHero = false;
+  let legacyHeroSrcs = [];
   if (actionType === 'refresh_existing_page') {
     // EXACTLY publishRefresh's target resolution (explicit file_path, else
     // URL → path, else the content_registry source path — a blog canonical
@@ -1749,10 +1749,12 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
     label = filePath || targetUrl || 'refresh target';
     if (!found) return { ok: false, reason: `refresh target ${label} not found on ${branch}` };
     if (!isBlogTarget(found.path)) return { ok: true, reason: 'non_blog_target' };
-    // Grandfather: the post on MAIN already embeds its hero in the body.
+    // Grandfather: ONLY the exact hero reference(s) the post on MAIN already
+    // embeds in its body — a hero ref the refresh introduces or changes is
+    // validated normally.
     const live = await resolveExistingAstroFile(found.path);
     if (live?.file?.content) {
-      try { const lp = fm.parse(live.file.content); ignoreHero = bodyEmbedsHero(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { ignoreHero = false; }
+      try { const lp = fm.parse(live.file.content); legacyHeroSrcs = legacyHeroRefs(lp?.content || '', lp?.data?.hero_image?.src); } catch (_) { legacyHeroSrcs = []; }
     }
   } else {
     // EXACTLY the file publishOrUpdatePage wrote: the route-matched existing
@@ -1778,7 +1780,7 @@ async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch, actionT
   const body = String(parsed?.content || '');
   const heroSrc = String(parsed?.data?.hero_image?.src || '');
   try {
-    const valid = await validateBodyImageRefs({ body, heroSrc, getFile, ignoreHero });
+    const valid = await validateBodyImageRefs({ body, heroSrc, getFile, legacyHeroSrcs });
     if (!valid.ok) return { ok: false, reason: valid.reason };
     if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
     const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc, getFile });
@@ -2016,10 +2018,13 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lea
 // a file committed at `getFile` (an invented path or remote URL would ship
 // as a broken image). Returns { ok, reason, distinct } — distinct = number
 // of distinct verified sources.
-// `ignoreHero`: a LIVE legacy post that already repeats its hero in the body
-// (the pre-2026 convention) is grandfathered on refresh — the hero ref is
-// excluded from the count and the checks instead of parking the refresh.
-async function validateBodyImageRefs({ body, heroSrc = '', getFile, ignoreHero = false }) {
+// `legacyHeroSrcs`: the exact hero reference(s) a LIVE legacy post already
+// repeats in its body (the pre-2026 convention), grandfathered on refresh —
+// those refs, by exact src, are excluded from the count and the checks
+// instead of parking the refresh. Any OTHER hero ref (another post's hero,
+// a changed or invented `/hero.*` path) is validated normally: the
+// grandfather covers what already ships, never what the refresh introduces.
+async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSrcs = [] }) {
   // A raw <img> is outside the writer's plain-Markdown subset: it renders a
   // picture the Markdown scan cannot see, so it can neither count toward the
   // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
@@ -2032,7 +2037,8 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, ignoreHero =
   }
   const hero = String(heroSrc || '');
   const isHeroRef = (src) => (hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src);
-  const refs = bodyImageRefs(body).filter((r) => !(ignoreHero && isHeroRef(String(r.src || ''))));
+  const grandfathered = new Set((Array.isArray(legacyHeroSrcs) ? legacyHeroSrcs : []).map((src) => String(src || '')).filter((src) => src && isHeroRef(src)));
+  const refs = bodyImageRefs(body).filter((r) => !grandfathered.has(String(r.src || '')));
   for (const ref of refs) {
     const src = String(ref.src || '');
     if (isHeroRef(src)) {
@@ -2047,18 +2053,24 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, ignoreHero =
   return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size, refs };
 }
 
-// The live body embeds its own hero (legacy convention) → refresh grandfathers it.
-function bodyEmbedsHero(body, heroSrc) {
+// The exact hero reference(s) the LIVE body embeds (legacy convention) →
+// refresh grandfathers those srcs and nothing else.
+function legacyHeroRefs(body, heroSrc) {
   const hero = String(heroSrc || '');
-  return bodyImageRefs(body).some((r) => (hero && r.src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(String(r.src || '')));
+  const out = new Set();
+  for (const r of bodyImageRefs(body)) {
+    const src = String(r.src || '');
+    if ((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)) out.add(src);
+  }
+  return [...out];
 }
 
 // `siblings` = already-resolved images with bytes (the freshly generated
 // hero) that every body image must differ from.
-async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], ignoreHero = false }) {
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [], legacyHeroSrcs = [] }) {
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
-  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), ignoreHero });
+  const valid = await validateBodyImageRefs({ body, heroSrc: frontmatter?.hero_image?.src, getFile: (path) => gh.getFile(path), legacyHeroSrcs });
   if (!valid.ok) {
     const err = new Error(`autonomous blog body images: draft for ${slug} ${valid.reason}`);
     err.code = 'BLOG_BODY_IMAGES_FAILED';
@@ -2763,7 +2775,8 @@ async function publishRefresh(draft, brief = {}) {
   // post lane: images the live body already carries are reused when their
   // section context is unchanged, the rest are generated and committed
   // beside the post; a live post that repeats its hero in the body (legacy
-  // convention) is grandfathered rather than parked. Blog targets only.
+  // convention) keeps THAT exact reference rather than parking — any other
+  // hero ref the draft introduces still parks. Blog targets only.
   let refreshImages = { body: newBody, files: [], newAlts: [] };
   if (refreshBlogTarget) {
     const heroSrc = String(nextFrontmatter?.hero_image?.src || '');
@@ -2774,7 +2787,7 @@ async function publishRefresh(draft, brief = {}) {
       existingFile: { path: filePath, file: existing },
       brief,
       siblings: heroSrc.startsWith('/') ? [{ label: 'hero', repoPath: `public${heroSrc}` }] : [],
-      ignoreHero: bodyEmbedsHero(oldBody, heroSrc),
+      legacyHeroSrcs: legacyHeroRefs(oldBody, heroSrc),
     });
     if (refreshImages.newAlts.length) {
       await assertComplianceClear({
@@ -3886,7 +3899,7 @@ module.exports = {
     scanBodySections,
     renderedBodyView,
     assertBodyImagesAtHead,
-    bodyEmbedsHero,
+    legacyHeroRefs,
     imageDHash,
     hammingDistance,
     committedImageBuffer,

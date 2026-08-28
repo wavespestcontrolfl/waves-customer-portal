@@ -244,6 +244,24 @@ async function briefCategorySignalsForRun(run) {
   return brief || {};
 }
 
+// The refresh HEAD body-image check must validate the file publishRefresh
+// actually rewrote. publishRefresh resolves its target as brief.target_url
+// FIRST, then draft.page_url (its brief.page_url step is never populated —
+// content_briefs has no such column) — NOT resolveTargetForRun's draft-first
+// order, which is the post-merge finalize/social URL: a refresh draft whose
+// emitted frontmatter.canonical still names blog B would have the check
+// validate B while the PR modified brief target A. A lookup error throws
+// (the caller withholds this tick); no URL → null → fails closed downstream.
+async function refreshTargetUrlForRun(run) {
+  const draft = parseJsonObject(run.draft_payload);
+  let briefUrl = '';
+  if (run.brief_id) {
+    const brief = await db('content_briefs').where('id', run.brief_id).first('target_url');
+    briefUrl = String(brief?.target_url || '').trim();
+  }
+  return briefUrl || String(draft.page_url || '').trim() || null;
+}
+
 async function resolveTargetForRun(run) {
   const target = targetForRun(run);
   if (target.url || !run.brief_id) return target;
@@ -974,8 +992,9 @@ async function maybeAutoMerge(run, pr) {
         brief: briefForImages,
         branch,
         actionType: run.action_type,
-        // Brief-aware target (publishRefresh takes brief.target_url first).
-        targetUrl: (await resolveTargetForRun(run)).url,
+        // publishRefresh's own precedence (brief.target_url, then
+        // draft.page_url) — new-post runs resolve by slug, no target.
+        targetUrl: run.action_type === 'refresh_existing_page' ? await refreshTargetUrlForRun(run) : null,
         filePath: draftForImages?.file_path || null,
       });
     } catch (err) {
@@ -1293,6 +1312,7 @@ module.exports = {
     targetForRun,
     spokeMergeBlockedByKillSwitch,
     resolveTargetForRun,
+    refreshTargetUrlForRun,
     deriveBlogRouteUrl,
     queueRowStillParked,
     finalizeMerged,
