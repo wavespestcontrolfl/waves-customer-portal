@@ -151,9 +151,13 @@ t.timestamp('superseded_at');
 // marks the old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
 // repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
 // purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`):
-// that placement stays PINNED to the old path (supersession of it is parked, `superseded_pending=true` on the old
-// path) until the purchase settles; the settled paid term is written against the old path's snapshot, and only then
-// is the placement repointed. Old terms can therefore never execute AND a settling checkout never lands on a
+// that placement stays PINNED to the old path: the old path is marked `superseded_by` = new path immediately (so no
+// NEW work can start on it), and the placement records `pending_path_id` = new path (durable FK on seo_link_prospects,
+// nullable) instead of being repointed; purchases/reconciliation are explicitly permitted to complete against a
+// superseded path (state-locked transitions check the purchase's own path_id, not "non-superseded"). When the
+// purchase settles, the settlement transaction writes the paid term from the purchase's snapshot, repoints
+// `path_id := pending_path_id`, clears it, and lets the bridge re-decide. After a restart the sweep finds every
+// placement with a non-null pending_path_id and no open purchase and finishes the repoint. Old terms can therefore never execute AND a settling checkout never lands on a
 // different path. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
 // Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
 // identity match the approval.
@@ -164,6 +168,7 @@ t.timestamp('superseded_at');
 ```js
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
+t.uuid('pending_path_id');       // → seo_link_acquisition_paths: the replacement path a superseded placement will be repointed to once its open post-exposure purchase settles (§3.2)
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
 t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
 t.text('source_detail');
