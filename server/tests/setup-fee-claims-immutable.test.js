@@ -26,10 +26,12 @@ describe('immutable setup-fee claim record', () => {
   });
 
   test('crash-resume authorization requires the record AND exact cents against the line', () => {
-    expect(dispatch).toMatch(/recordCents > 0 && recordCents === lineCents/);
-    expect(dispatch).toMatch(/WAVEGUARD_SETUP_FEE_ALLOWANCE = recordCents \/ 100;/);
+    const verdict = fs.readFileSync(path.join(__dirname, '..', 'services', 'completion-charge-verdict.js'), 'utf8');
+    expect(verdict).toMatch(/recordCents > 0 && recordCents === lineCents/);
+    expect(verdict).toMatch(/WAVEGUARD_SETUP_FEE_ALLOWANCE = recordCents \/ 100;/);
     // The editable line marker still never authorizes on its own.
     expect(dispatch).not.toMatch(/secure_claim === true\) wizardFrozenFeeLinked/);
+    expect(verdict).not.toMatch(/secure_claim === true\) wizardFrozenFeeLinked/);
   });
 
   test('no admin route writes the claims table (server-mint only)', () => {

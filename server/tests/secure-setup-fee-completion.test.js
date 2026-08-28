@@ -11,6 +11,8 @@ const fs = require('fs');
 const path = require('path');
 
 const dispatchSource = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
+
+const verdictSource = fs.readFileSync(path.join(__dirname, '..', 'services', 'completion-charge-verdict.js'), 'utf8');
 const invoiceSource = fs.readFileSync(path.join(__dirname, '../services/invoice.js'), 'utf8');
 
 describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () => {
@@ -65,14 +67,14 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // notes marker (Codex #2680: office edits survive markers).
     // The selection row may live on any series visit (parent or child) —
     // the allowance searches the whole series.
-    expect(dispatchSource).toMatch(/planChoiceSetupFeeSelected = !!\(await db\('appointment_card_requests'\)\s*\n\s*\.whereIn\('scheduled_service_id', db\('scheduled_services'\)\.select\('id'\)/);
-    expect(dispatchSource).toMatch(/\.where\(\{ selected_plan: 'per_application' \}\)/);
+    expect(verdictSource).toMatch(/planChoiceSetupFeeSelected = !!\(await conn\('appointment_card_requests'\)\s*\n\s*\.whereIn\('scheduled_service_id', conn\('scheduled_services'\)\.select\('id'\)/);
+    expect(verdictSource).toMatch(/\.where\(\{ selected_plan: 'per_application' \}\)/);
     // The allowance is a per-application concept — the appointment-card
     // one-time completion lane (2026-08-01) shares the rail but must never
     // widen its cap with a setup-fee allowance.
-    expect(dispatchSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
+    expect(verdictSource).toMatch(/if \(perApplicationBilling\s*&& \(acceptMintedInvoice \|\| planChoiceSetupFeeSelected \|\| wizardFrozenFeeLinked\)\s*&& setupLine\) \{/);
     // The bound itself is untouched: min(line, 99), line detected by text.
-    expect(dispatchSource).toMatch(/setupFeeAllowance = Math\.min\(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE\);/);
+    expect(verdictSource).toMatch(/setupFeeAllowance = Math\.min\(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE\);/);
   });
 });
 

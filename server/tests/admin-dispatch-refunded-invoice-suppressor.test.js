@@ -555,7 +555,8 @@ describe('completion route wiring (source contract)', () => {
   });
 
   test('helper excludes the full resolved vocabulary, not just void', () => {
-    expect(source).toMatch(/function completionSuppressorInvoiceLookup\(conn, where\) \{[\s\S]{0,300}\.whereNotIn\('status', InvoiceService\.CANCELLED_SERVICE_RESOLVED_STATUSES\)/);
+    const helperSource = fs.readFileSync(path.join(__dirname, '../services/completion-invoice-candidate.js'), 'utf8');
+    expect(helperSource).toMatch(/function completionSuppressorInvoiceLookup\(conn, where\) \{[\s\S]{0,300}\.whereNotIn\('status', InvoiceService\.CANCELLED_SERVICE_RESOLVED_STATUSES\)/);
   });
 });
 

@@ -68,6 +68,10 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
     expect(dispatch).not.toMatch(/setupLine\?\.secure_claim === true\) wizardFrozenFeeLinked/);
     expect(dispatch).not.toMatch(/secure_claim === true\) \{\s*\n\s*wizardFrozenFeeLinked/);
     expect(dispatch).not.toMatch(/WAVEGUARD_SETUP_FEE_ALLOWANCE = markedAmt/);
+    const verdict = fs.readFileSync(path.join(__dirname, '..', 'services', 'completion-charge-verdict.js'), 'utf8');
+    expect(verdict).not.toMatch(/setupLine\?\.secure_claim === true\) wizardFrozenFeeLinked/);
+    expect(verdict).not.toMatch(/secure_claim === true\) \{\s*\n\s*wizardFrozenFeeLinked/);
+    expect(verdict).not.toMatch(/WAVEGUARD_SETUP_FEE_ALLOWANCE = markedAmt/);
   });
 
   test('duplicate-draft refresh revalidates under the row lock before minting a handoff', () => {
