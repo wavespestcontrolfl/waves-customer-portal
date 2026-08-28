@@ -411,7 +411,11 @@ router.post('/:id/retract-reply', requireAdmin, async (req, res, next) => {
 // auto draft immediately (bypasses the jitter and shadow mode; a person asked).
 router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => {
   try {
-    const result = await AutoReply.postNow(req.params.id, { type: 'admin', adminUserId: req.technicianId || null });
+    const { expectedDraft } = req.body || {};
+    const result = await AutoReply.postNow(req.params.id, { type: 'admin', adminUserId: req.technicianId || null }, {
+      // The draft the page displayed (null = none). Omitted by older clients.
+      expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
+    });
     if (result.outcome !== 'posted') {
       // A 1-3★ / unrated review with no surfaced draft: the draft was just
       // created and parked; the person reads it, then posts it.

@@ -708,12 +708,23 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
  * produced. Low-rating rows may be posted this way because a human
  * asked.
  */
-async function postNow(reviewId, actor) {
+async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   const [row] = await claimDueRows({ limit: 1, force: reviewId });
   if (!row) throw new ReviewReplyError(CODES.LOCK_BUSY, 'This review is being processed — try again in a moment.', { status: 409 });
   if (hasRealReply(row.review_reply)) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
+  }
+  // Bind the click to the draft the admin actually SAW (hook P1): another
+  // admin or Agent Ops may have replaced the displayed draft before this
+  // request; inside the claim the current draft slot must equal it.
+  if (expectedDraft !== undefined) {
+    const shown = humanDraftOn(row)
+      || (row.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status) ? row.auto_reply_draft : null);
+    if (String(expectedDraft || '').trim() !== String(shown || '').trim()) {
+      await releaseClaim(row);
+      throw new ReviewReplyError(CODES.STALE, 'The draft on this review changed since the page was loaded — reload it and read the current draft first.', { status: 409 });
+    }
   }
   // The draft the admin is looking at wins: a human-written "[DRAFT]" first,
   // then the pipeline's own verified draft, else draft fresh.

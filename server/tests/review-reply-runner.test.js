@@ -1060,6 +1060,24 @@ describe('admin actions', () => {
     }
   });
 
+  test('postNow is bound to the draft the admin saw (hook P1): a replaced draft refuses with STALE and releases the claim', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ id: 'b', auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: 'Newer pipeline draft', review_reply: '[DRAFT] Newer pipeline draft', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' } })];
+    await expect(Runner.postNow('b', { type: 'admin' }, { expectedDraft: 'The draft the page showed' })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
+    // Human draft replaced by Agent Ops after the page loaded → same refusal.
+    state.rows = [row({ id: 'h', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Agent Ops rewrote this' })];
+    await expect(Runner.postNow('h', { type: 'admin' }, { expectedDraft: 'What the admin read' })).rejects.toMatchObject({ code: 'stale_claim' });
+    // Matching draft → publishes it; queued with no draft and null observed → proceeds.
+    state.rows = [row({ id: 'h2', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Agent Ops rewrote this' })];
+    const r = await Runner.postNow('h2', { type: 'admin' }, { expectedDraft: 'Agent Ops rewrote this' });
+    expect(r.outcome).toBe('posted');
+    state.rows = [row({ id: 'q' })];
+    const r2 = await Runner.postNow('q', { type: 'admin' }, { expectedDraft: null });
+    expect(r2.outcome).toBe('posted');
+  });
+
   test('postNow re-verifies a stored AUTO draft against current posted replies; a failing verdict drafts fresh', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const stored = 'Hi Dana,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Sarasota Team';

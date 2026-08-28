@@ -361,7 +361,11 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (action === "retract" && !window.confirm("Delete this reply on Google?")) return;
     setAutoBusy(true);
     try {
-      await onAutoReplyAction(review.id, action);
+      // Post now is bound to the draft this card displayed (null = none):
+      // the server refuses if a different draft is on the row by then.
+      await onAutoReplyAction(review.id, action, action === "post-now"
+        ? { expectedDraft: review.draftReply || (autoReply && autoReply.draft) || null }
+        : undefined);
       if (action === "retract") { setReplyText(""); setEditing(false); }
     } catch (e) {
       alert(`${action === "retract" ? "Retract" : action === "post-now" ? "Post now" : "Skip"} failed: ${e.message}`);
@@ -2121,11 +2125,11 @@ export default function ReviewsPage() {
   // Auto-reply pipeline actions: retract (delete on Google), post-now
   // (publish the pending draft immediately), skip (leave the pipeline). The
   // row's reply / autoReply state changes server-side, so reload the list.
-  const handleAutoReplyAction = async (reviewId, action) => {
+  const handleAutoReplyAction = async (reviewId, action, body) => {
     const path = action === "retract"
       ? `/admin/reviews/${reviewId}/retract-reply`
       : `/admin/reviews/${reviewId}/auto-reply/${action}`;
-    const result = await adminFetch(path, { method: "POST" });
+    const result = await adminFetch(path, body ? { method: "POST", body: JSON.stringify(body) } : { method: "POST" });
     // Post now on a 1-3★ / unrated review with no surfaced draft: the server
     // drafted + parked instead of posting; reload so the draft is rendered.
     if (result && result.drafted && result.message) alert(result.message);
