@@ -3965,6 +3965,24 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.hasImage === true])).toEqual([['A', true], ['B', false]]);
   });
 
+  test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![detail](</images/blog/foo/body-1.webp>)\n![spaced](</images/blog/foo/body 2.webp> "t")\n![plain](/images/blog/foo/body-3.webp)');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-1.webp', '/images/blog/foo/body 2.webp', '/images/blog/foo/body-3.webp']);
+    const getFile = async (path) => (path === 'public/images/blog/foo/body-1.webp' || path === 'public/images/blog/foo/body-3.webp' ? { content: 'x' } : null);
+    expect(await AstroPublisher._internals.validateBodyImageRefs({ body: '![a](</images/blog/foo/body-1.webp>)\n\n![b](/images/blog/foo/body-3.webp)', heroSrc: '/images/blog/foo/hero.webp', getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
+  test('validateBodyImageRefs: an authored image with empty alt text fails closed — it never counts toward the minimum (GH r10)', async () => {
+    const getFile = async () => ({ content: 'x' });
+    for (const body of ['![](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', '![   ](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', '![][r]\n\n![b](/images/blog/foo/body-2.webp)\n\n[r]: /images/blog/foo/body-1.webp']) {
+      const res = await AstroPublisher._internals.validateBodyImageRefs({ body, heroSrc: '/images/blog/foo/hero.webp', getFile });
+      expect(res.ok).toBe(false);
+      expect(res.reason).toMatch(/has no alt text/);
+      expect(res.reason).toContain('/images/blog/foo/body-1.webp');
+    }
+    expect(await AstroPublisher._internals.validateBodyImageRefs({ body: '![a](/images/blog/foo/body-1.webp)\n\n![b](/images/blog/foo/body-2.webp)', heroSrc: '/images/blog/foo/hero.webp', getFile })).toMatchObject({ ok: true, distinct: 2 });
+  });
+
   test('validateBodyImageRefs: a reference-style image is validated like an inline one — hero via reference fails, uncommitted via reference fails, committed counts (GH r9)', async () => {
     const { validateBodyImageRefs } = AstroPublisher._internals;
     const heroSrc = '/images/blog/x/hero.webp';

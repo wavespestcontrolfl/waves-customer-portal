@@ -1813,13 +1813,26 @@ function bodyImagesEnabled() {
 // picture only when its label has a definition in the body — an undefined
 // label is text, not an image.
 const RENDERED_IMAGE_ANY_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\](?:\(((?:[^()\s]|\([^()\s]*\))*)(?:\s[^)]*)?\)|\[([^\]\n]*)\])?/g;
-// Every image a rendered line shows, inline destinations verbatim and
+// An angle-bracketed inline destination (`](</images/a b.webp>)`, valid
+// CommonMark, may hold spaces) is rewritten to its equivalent bare form
+// (`](/images/a%20b.webp)`) BEFORE tag masking — `</images/…>` otherwise
+// reads as a closing HTML tag and is blanked. Same-line rewrite: line
+// indices hold. Bare destinations are percent-DECODED when resolved so the
+// committed-file check sees the real path.
+const ANGLE_DESTINATION_RE = /\]\(<([^<>\n]*)>/g;
+function normalizeAngleDestinations(text) {
+  return String(text || '').replace(ANGLE_DESTINATION_RE, (m, dest) => `](${dest.trim().replace(/ /g, '%20')}`);
+}
+function decodeDestination(src) {
+  try { return decodeURIComponent(src); } catch (_) { return src; }
+}
+// Every image a rendered line shows, inline destinations normalized and
 // reference labels resolved through `defs` (markdownReferenceDefinitions).
 function imageRefsInLine(line, defs) {
   const out = [];
   for (const m of String(line || '').matchAll(RENDERED_IMAGE_ANY_RE)) {
     const alt = m[1];
-    if (m[2] !== undefined) { out.push({ alt: alt.trim(), src: m[2] }); continue; }
+    if (m[2] !== undefined) { out.push({ alt: alt.trim(), src: decodeDestination(m[2]) }); continue; }
     const label = contentGuardrails.normalizeReferenceLabel(m[3] ? m[3] : alt);
     if (label && defs && defs.has(label)) out.push({ alt: alt.trim(), src: defs.get(label) });
   }
@@ -1860,7 +1873,7 @@ function renderedBodyView(body) {
   // Children of a container a reader may never see (<script>, <template>,
   // <div hidden>, closed <details>, …) are blanked by the guardrails'
   // visibility walker — the same judgement the attribution rules use.
-  const visible = contentGuardrails.blankHiddenContent(text);
+  const visible = normalizeAngleDestinations(contentGuardrails.blankHiddenContent(text));
   const defs = contentGuardrails.markdownReferenceDefinitions(visible);
   const lines = blankJsxAndExpressions(
     contentGuardrails.blankMarkdownLinkDestinations(visible, { keepImages: true }),
@@ -2079,6 +2092,12 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile, legacyHeroSr
     const src = String(ref.src || '');
     if (isHeroRef(src)) {
       return { ok: false, reason: `body embeds the hero image (${src}) — the layout renders the hero; body images must be distinct illustrations`, distinct: 0 };
+    }
+    // A required illustration must be accessible: an authored image with no
+    // alt text is not accepted toward the minimum (generated images always
+    // carry a vetted alt) — fail closed rather than ship `![](…)`.
+    if (!String(ref.alt || '').trim()) {
+      return { ok: false, reason: `body image ${src || 'with empty src'} has no alt text — every in-article image needs a descriptive alt`, distinct: 0 };
     }
     const committed = src.startsWith('/') && !src.includes('..') && /\.(webp|jpe?g|png|avif|gif|svg)$/i.test(src)
       && await getFile(`public${src}`);
