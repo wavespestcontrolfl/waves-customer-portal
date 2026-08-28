@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { signProviderToken, buildApnsPayload, classifyApnsResponse } = require('../services/apns');
+const { signProviderToken, buildApnsPayload, classifyApnsResponse, apnsCollapseId } = require('../services/apns');
 
 describe('apns provider token', () => {
   // Real ES256 keypair so we can verify the signature the way Apple would.
@@ -78,5 +78,14 @@ describe('classifyApnsResponse', () => {
     expect(r.ok).toBe(false);
     expect(r.expired).toBe(false);
     expect(r.reason).toBe('ServiceUnavailable');
+  });
+});
+
+describe('apnsCollapseId', () => {
+  test('mirrors the push tag so a redelivery replaces the banner; capped at 64 bytes; absent without a tag', () => {
+    expect(apnsCollapseId('waves-customer_missed_call-call-1')).toBe('waves-customer_missed_call-call-1');
+    expect(apnsCollapseId('x'.repeat(80))).toHaveLength(64);
+    expect(apnsCollapseId(undefined)).toBeNull();
+    expect(apnsCollapseId('')).toBeNull();
   });
 });

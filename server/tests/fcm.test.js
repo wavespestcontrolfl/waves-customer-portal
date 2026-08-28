@@ -56,3 +56,15 @@ describe('classifyFcmResponse', () => {
     expect(classifyFcmResponse(500, 'INTERNAL').expired).toBe(false);
   });
 });
+
+describe('buildFcmMessage — tag', () => {
+  test('a push tag becomes android.notification.tag (same-tag redelivery replaces the banner)', () => {
+    const m = buildFcmMessage('t', { title: 'T', body: 'B', tag: 'waves-customer_email_received-e1' });
+    expect(m.message.android.notification.tag).toBe('waves-customer_email_received-e1');
+    expect(m.message.android.notification.sound).toBe('default');
+  });
+  test('no tag = no android tag', () => {
+    const m = buildFcmMessage('t', { title: 'T', body: 'B' });
+    expect(m.message.android.notification.tag).toBeUndefined();
+  });
+});
