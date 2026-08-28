@@ -99,6 +99,15 @@ const PRIVATE_CHANNEL_RE = /\b(?:on the phone|when you called|you called|your ca
 const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit card|chargeback|complaint|dispute|cancel(?:led|lation)?)\b/i;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
+// "Hi Dana," / "Hello there," → the greeted first name (null for "there").
+const GREETING_RE = /^\s*(?:hi|hello|hey|dear)\s+([A-Za-z][A-Za-z'-]{1,20})\b/i;
+function greetingName(text) {
+  const m = String(text || '').match(GREETING_RE);
+  if (!m) return null;
+  const name = m[1];
+  return /^(?:there|again|all|everyone|friend|neighbor)$/i.test(name) ? null : name;
+}
+
 function normalizeWords(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9'\s]/g, ' ').split(/\s+/).filter(Boolean);
 }
@@ -184,9 +193,17 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   }
 
   // Provenance allowlist — names: only the reviewer's first name and tech
-  // names the reviewer wrote. Any other active technician's name is a leak.
-  for (const name of grounding.allow.forbiddenNames || []) {
-    if (new RegExp(`\\b${escapeRe(name)}\\b`).test(body)) return 'forbidden_name';
+  // names the reviewer wrote. Any other active technician's name, and any
+  // reviewer name seen in the recent replies the model was shown (their
+  // greetings), is a leak. Case-insensitive.
+  const allowedNames = new Set((grounding.allow.names || []).map((n) => n.toLowerCase()));
+  const knownNames = new Set([
+    ...(grounding.allow.forbiddenNames || []),
+    ...recentReplies.map((r) => greetingName(r)).filter(Boolean),
+  ].map((n) => n.toLowerCase()));
+  for (const name of knownNames) {
+    if (allowedNames.has(name)) continue;
+    if (new RegExp(`\\b${escapeRe(name)}\\b`, 'i').test(body)) return 'forbidden_name';
   }
   // Digits: only what the reviewer typed (plus the star rating itself).
   const allowedDigits = new Set([...(grounding.allow.digits || []), String(grounding.review.rating)]);
@@ -262,7 +279,12 @@ function buildUserText(grounding, recentReplies, feedback, { reviewOnly = false 
   }
   if (recentReplies.length) {
     lines.push('', 'RECENT REPLIES FROM THIS LOCATION (do NOT reuse their openings or phrasing):');
-    recentReplies.slice(0, RECENT_REPLIES_LIMIT).forEach((t, i) => lines.push(`${i + 1}. ${String(t).replace(/\s+/g, ' ').slice(0, 400)}`));
+    // Greeted names are redacted before the model sees them — a prior
+    // reviewer's name must never be available to copy into this reply.
+    recentReplies.slice(0, RECENT_REPLIES_LIMIT).forEach((t, i) => {
+      const redacted = String(t).replace(GREETING_RE, (m, name) => m.replace(name, '(name)'));
+      lines.push(`${i + 1}. ${redacted.replace(/\s+/g, ' ').slice(0, 400)}`);
+    });
   }
   if (feedback) {
     lines.push('', `YOUR PREVIOUS ATTEMPT WAS REJECTED: ${feedback}. Write a new reply that fixes this.`);
@@ -368,4 +390,5 @@ module.exports = {
   draftReviewReply,
   // tests
   splitReply,
+  greetingName,
 };

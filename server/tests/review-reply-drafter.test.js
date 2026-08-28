@@ -118,8 +118,21 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g = grounding({ text: 'I called about ants and Marcus came out the same day. When you called back it was fast.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus got out the same day when you called about the ants.'), g)).toBeNull();
   });
-  test('provenance: technician names the reviewer did not write are forbidden', () => {
+  test('provenance: technician names the reviewer did not write are forbidden (case-insensitive)', () => {
     expect(verify(good('Hi Dana, Marcus and Tyler are glad the ants are gone from your kitchen.'))).toBe('forbidden_name');
+    expect(verify(good('Hi Dana, Marcus and TYLER are glad the ants are gone from your kitchen.'))).toBe('forbidden_name');
+  });
+  test('provenance: a name greeted in a recent reply cannot be copied into this one', () => {
+    const recent = [good('Hi Priya, glad the wasps by the pool cage are handled. Thanks for having us.')];
+    expect(verify(good('Hi Priya, glad Marcus got the ants out of your kitchen so fast.'), grounding(), { recentReplies: recent })).toBe('forbidden_name');
+    expect(verify(CLEAN, grounding(), { recentReplies: recent })).toBeNull();
+    expect(Drafter.greetingName('Hello there, thanks')).toBeNull();
+    expect(Drafter.greetingName('Hey Priya, thanks')).toBe('Priya');
+  });
+  test('recent replies shown to the model have their greeted names redacted', () => {
+    const text = Drafter.buildUserText(grounding(), [good('Hi Priya, glad the wasps are handled.')], null);
+    expect(text).toContain('Hi (name), glad the wasps');
+    expect(text).not.toContain('Priya');
   });
   test('provenance: digits the reviewer did not type are rejected; the star rating is allowed', () => {
     expect(verify(good('Hi Dana, Marcus got the ants on his 2nd visit and they are gone.'))).toBe('unlisted_digits');

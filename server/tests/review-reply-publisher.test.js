@@ -181,6 +181,8 @@ describe('publishReviewReply', () => {
     state.rows[0].review_reply = null;
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.NOT_CONFIGURED });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'admin' }, requireGoogle: true }))
+      .rejects.toMatchObject({ code: CODES.NOT_CONFIGURED });
     expect(state.rows[0].review_reply).toBeNull();
   });
 });

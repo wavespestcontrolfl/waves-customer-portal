@@ -91,12 +91,13 @@ function updatedCount(updated) {
  * @param {boolean} [p.allowOverwrite=false]  humans may replace an existing Google reply; auto never does
  * @param {object} [p.autoFields]    extra google_reviews columns to stamp in the SAME conditional write (runner)
  * @param {object} [p.auditMeta]     activity_log metadata
+ * @param {boolean} [p.requireGoogle=false]  refuse the dev local-only save (callers that report "posted")
  * @param {(fresh: object) => (string|null)} [p.guard]  re-checked INSIDE the publish claim,
  *        immediately before the Google call, against a fresh row read: return a reason
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -129,7 +130,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   // behavior for HUMAN writers so the page still works. Automation never
   // fakes a post.
   if (!gbp.configured) {
-    if (isAuto) throw new ReviewReplyError(CODES.NOT_CONFIGURED, 'GBP is not configured — automated replies cannot post', { status: 503 });
+    if (isAuto || requireGoogle) throw new ReviewReplyError(CODES.NOT_CONFIGURED, 'Google Business Profile is not configured — the reply cannot be posted', { status: 503 });
     const updated = await db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')

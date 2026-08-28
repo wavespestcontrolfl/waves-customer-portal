@@ -207,12 +207,25 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockNotify.mock.calls.every((c) => c[3].metadata.needsAction === true)).toBe(true);
   });
 
-  test('MIN_STARS is configurable', async () => {
+  test('MIN_STARS can only raise the bar; 1-3★ stay human-only even if configured lower', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     process.env.REVIEW_AUTO_REPLY_MIN_STARS = '5';
     state.rows = [row({ star_rating: 4 })];
     await Runner.processDueAutoReplies();
     expect(state.rows[0].auto_reply_status).toBe('parked');
+    process.env.REVIEW_AUTO_REPLY_MIN_STARS = '1';
+    expect(Runner.config().minStars).toBe(4);
+    state.rows = [row({ id: 'r3', star_rating: 3 })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+    expect(mockPublish).not.toHaveBeenCalled();
+  });
+
+  test('publish calls always require a real Google post (no local-only "posted")', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(mockPublish.mock.calls[0][0].requireGoogle).toBe(true);
   });
 
   test('already replied on Google / removed / not due / claimed rows are skipped or untouched', async () => {
@@ -338,7 +351,7 @@ describe('admin actions', () => {
     const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
     expect(r.outcome).toBe('posted');
     expect(mockDraft).not.toHaveBeenCalled();
-    expect(mockPublish.mock.calls[0][0]).toMatchObject({ actor: { type: 'admin', adminUserId: 'u1' }, text: expect.stringContaining('Sorry') });
+    expect(mockPublish.mock.calls[0][0]).toMatchObject({ actor: { type: 'admin', adminUserId: 'u1' }, text: expect.stringContaining('Sorry'), requireGoogle: true });
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
   test('postNow with no draft drafts fresh and publishes even in shadow', async () => {

@@ -70,7 +70,9 @@ function config() {
     .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
   return {
     mode: mode(),
-    minStars: intEnv('REVIEW_AUTO_REPLY_MIN_STARS', 4, { min: 1, max: 5 }),
+    // Floor is 4: 1-3★ are human-only by owner ruling and cannot be
+    // configured into auto-posting; the setting can only RAISE the bar to 5.
+    minStars: intEnv('REVIEW_AUTO_REPLY_MIN_STARS', 4, { min: 4, max: 5 }),
     delayMin,
     delayMax,
     // Empty = every location with GBP credentials.
@@ -269,7 +271,8 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   }
 
   const rating = Number(merged.star_rating) || 0;
-  const humanOnly = rating === 0 || rating < cfg.minStars;
+  // Hard invariant, independent of config: unrated and 1-3★ never auto-post.
+  const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
 
   // Draft (grounding is public-safe by construction).
   const grounding = await buildReplyGrounding(merged, { techFirstNames });
@@ -328,6 +331,9 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       },
       auditMeta: { version: draft.version, mode: draft.mode, intent, reviewOnly: !!draft.reviewOnly },
       guard: claimGuard(row),
+      // Both cron and Post-now report "posted" = live on Google; a local-only
+      // save (no GBP creds) must surface as an error, never as posted.
+      requireGoogle: true,
     });
     await bell(merged, {
       title: intent === 'post_now' ? 'Review reply posted' : 'Auto-replied to a review',
@@ -422,6 +428,7 @@ async function postNow(reviewId, actor) {
         },
         auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
         guard: claimGuard(row),
+        requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };
     } catch (err) {
