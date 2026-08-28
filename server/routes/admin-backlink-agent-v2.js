@@ -4,6 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
+const { lockProspectDomain } = require('../services/seo/prospect-domain-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -251,19 +252,26 @@ router.post('/prospects', async (req, res, next) => {
     if (!domain) return res.status(400).json({ error: 'target_domain, target_url, or live_url is required' });
     if (!target_page) return res.status(400).json({ error: 'target_page (our money page) is required' });
 
-    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page }).first();
-    if (exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: exists.id });
-
-    const [row] = await db('seo_link_prospects').insert({
-      target_domain: domain, target_url: target_url || null, target_page,
-      anchor_planned: anchor_planned || null, link_type: link_type || null,
-      priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
-      // If the admin supplies a live_url, the link is already placed — seed it so the
-      // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
-      live_url: live_url || null,
-      ...(live_url ? { status: 'placed' } : {}),
-    }).returning('*');
-    res.json({ prospect: row });
+    // Existence check + insert under the per-domain board lock shared with the
+    // lost-link recovery lane (its domain-wide in-flight re-check only excludes
+    // writers holding the same lock) — and the 409 is no longer a TOCTOU guess.
+    const result = await db.transaction(async (trx) => {
+      await lockProspectDomain(trx, domain);
+      const exists = await trx('seo_link_prospects').where({ target_domain: domain, target_page }).first();
+      if (exists) return { exists };
+      const [row] = await trx('seo_link_prospects').insert({
+        target_domain: domain, target_url: target_url || null, target_page,
+        anchor_planned: anchor_planned || null, link_type: link_type || null,
+        priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
+        // If the admin supplies a live_url, the link is already placed — seed it so the
+        // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
+        live_url: live_url || null,
+        ...(live_url ? { status: 'placed' } : {}),
+      }).returning('*');
+      return { row };
+    });
+    if (result.exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: result.exists.id });
+    res.json({ prospect: result.row });
   } catch (err) { next(err); }
 });
 

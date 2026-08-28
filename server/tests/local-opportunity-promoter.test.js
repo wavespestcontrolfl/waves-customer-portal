@@ -7,6 +7,7 @@ const { HOME } = require('../services/seo/local-opportunity-promoter')._internal
 //   db('seo_link_prospects').insert(row)
 function fakeDb({ ownActive = [], existing = [] } = {}) {
   const inserts = [];
+  const locks = []; // [sql, bindings] of every advisory-lock raw call, in order
   const fn = (table) => {
     if (table === 'seo_backlinks') {
       return { where: () => ({ select: async () => ownActive.map((d) => ({ source_domain: d })) }) };
@@ -34,6 +35,11 @@ function fakeDb({ ownActive = [], existing = [] } = {}) {
     throw new Error(`unexpected table ${table}`);
   };
   fn._inserts = inserts;
+  fn._locks = locks;
+  // Each promote runs inside db.transaction(trx => ...) and takes the shared
+  // per-domain board lock through trx.raw before the insert.
+  fn.raw = async (sql, bind) => { locks.push([sql, bind]); };
+  fn.transaction = async (cb) => cb(fn);
   return fn;
 }
 
@@ -100,6 +106,22 @@ describe('local-opportunity-promoter.run', () => {
     const chamber = db._inserts.find((i) => i.target_domain === 'chamber.com');
     expect(chamber.link_type).toBe('directory');
     expect(chamber.contact_email).toBeNull();
+  });
+
+  test('every promote holds the shared per-domain board lock (same key as lost-link recovery) inside its transaction', async () => {
+    const db = fakeDb({ ownActive: ['owned.com'] });
+    await promoter.run({ db, discoverFn, scoreFn });
+    const keys = db._locks.map(([sql, bind]) => { expect(sql).toBe('SELECT pg_advisory_xact_lock(hashtext(?))'); return bind[0]; });
+    // one lock per insert, taken before it
+    expect(keys).toEqual(expect.arrayContaining(['lost_recovery:sponsora.org', 'lost_recovery:chamber.com']));
+    expect(keys.length).toBe(db._inserts.length);
+
+    // a dup still takes the lock first — the ON CONFLICT insert runs under it
+    const db2 = fakeDb({ ownActive: ['owned.com'], existing: [{ target_domain: 'sponsora.org', target_page: HOME }] });
+    const r = await promoter.run({ db: db2, discoverFn, scoreFn });
+    expect(r.dupes).toBe(1);
+    expect(db2._locks.map(([, b]) => b[0])).toContain('lost_recovery:sponsora.org');
+    expect(db2._locks.length).toBe(db2._inserts.length + 1);
   });
 
   test('dryRun writes nothing but still reports what it would promote', async () => {

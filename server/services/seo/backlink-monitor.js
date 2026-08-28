@@ -133,7 +133,7 @@ class BacklinkMonitor {
     }
     const seenKeys = new Set();
 
-    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0, unresolvedRecoveries = 0, respelled = 0;
+    let newCritical = 0, scanned = 0, relChanges = 0, recovered = 0, unresolvedRecoveries = 0, respelled = 0, merged = 0;
 
     for (const link of links) {
       const toxicity = this.scoreToxicity(link);
@@ -175,6 +175,22 @@ class BacklinkMonitor {
           respelled++;
           events.push(['respelled', { from: { source_url: existing.source_url, target_url: existing.target_url }, to: { source_url: link.url_from, target_url: link.url_to } }]);
         }
+        // Legacy twins: the pre-canonical scanner inserted one ACTIVE row per
+        // spelling, and the canonical grouping above exempts the whole group
+        // from missing-link handling while only the survivor is updated. Every
+        // other active row under this identity is retired as 'merged' (ledgered
+        // with the survivor's id) in the SAME transaction as the survivor's
+        // update — never left active to inflate totals, snapshots, velocity.
+        const key = linkKey(link.url_from, link.url_to);
+        const twins = (activeMap.get(key) || []).filter(r => r.id !== existing.id);
+        if (twins.length) activeMap.set(key, (activeMap.get(key) || []).filter(r => r.id === existing.id));
+        const retireTwins = async (q) => {
+          for (const t of twins) {
+            await q('seo_backlinks').where('id', t.id).update({ status: 'merged', miss_count: 0, updated_at: now });
+            await this.recordEvent(t.id, 'merged', { into: existing.id, source_url: t.source_url, target_url: t.target_url }, q);
+            merged++;
+          }
+        };
         if (wasLost) {
           // The recovery prospect queued for this link (still un-pitched) is now
           // moot. Its closure and the row's lost→active flip (+ ledger row) are
@@ -186,6 +202,7 @@ class BacklinkMonitor {
             await db.transaction(async (trx) => {
               await resolveRecoveredLink({ ...existing, source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to }, now, { trx });
               await this.transition(existing.id, patch, events, trx);
+              await retireTwins(trx);
             });
           } catch (err) {
             unresolvedRecoveries++;
@@ -195,9 +212,12 @@ class BacklinkMonitor {
           }
           recovered++;
           if (relChanged) relChanges++;
-        } else if (events.length) {
+        } else if (events.length || twins.length) {
           if (relChanged) relChanges++;
-          await this.transition(existing.id, patch, events);
+          await db.transaction(async (trx) => {
+            await this.transition(existing.id, patch, events, trx);
+            await retireTwins(trx);
+          });
         } else {
           await db('seo_backlinks').where('id', existing.id).update(patch);
         }
@@ -380,10 +400,10 @@ class BacklinkMonitor {
       snapshotOk = false; snapshotError = 'scan incomplete — snapshot skipped';
     }
 
-    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${respelled} respelled, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
+    logger.info(`Backlink scan: ${scanned} checked, ${newCritical} new critical, ${missed} missing, ${lostLinks.length} lost (verified), ${verifiedLive} survived crawl, ${unverified} unreachable, ${relChanges} rel changes, ${respelled} respelled, ${merged} twins merged, ${recovered} recovered, ${lostDomains.length} domains lost, ${recoveryQueued} queued for recovery (scanComplete: ${scanComplete})`);
     return {
       scanned, newCritical, scanComplete, missed,
-      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, respelled, recovered, unresolvedRecoveries,
+      lostCount: lostLinks.length, verifiedLive, unverified, relChanges, respelled, merged, recovered, unresolvedRecoveries,
       lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, recoveryQueued,
       ...(snapshot ? { snapshotOk, snapshotError } : {}),
     };

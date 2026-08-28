@@ -360,14 +360,32 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(increments.find(i => Array.isArray(i.ids) && i.ids.length === 2).ids).toEqual(['c298', 'c299']);
   });
 
-  test('two legacy rows under one canonical key are both seen by one report; neither is missed', async () => {
+  test('two legacy rows under one canonical key: the reported row survives, the twin is retired as merged (ledgered) in the same transaction; neither is missed', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
     const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
     const b = activeRow({ id: 'b', source_url: 'http://www.blog.example/post/', target_url: 'https://www.wavespestcontrol.com' });
-    const { increments } = scanWith({ items: [seen], active: [a, b], existingByUrl: { [a.source_url]: a } });
+    const { increments, updates, events } = scanWith({ items: [seen], active: [a, b], existingByUrl: { [a.source_url]: a } });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
-    expect(r).toEqual(expect.objectContaining({ missed: 0 }));
+    expect(r).toEqual(expect.objectContaining({ missed: 0, merged: 1 }));
     expect(increments).toEqual([]);
+    // survivor updated active; twin retired (not lost — no loss bell, no owed recovery) with a ledger row naming the survivor
+    expect(updates).toContainEqual({ ids: 'a', patch: expect.objectContaining({ status: 'active', source_url: a.source_url }) });
+    expect(updates).toContainEqual({ ids: 'b', patch: expect.objectContaining({ status: 'merged', miss_count: 0 }) });
+    expect(updates.find(u => u.ids === 'b').patch.status).not.toBe('lost');
+    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'b', event_type: 'merged', detail: JSON.stringify({ into: 'a', source_url: b.source_url, target_url: b.target_url }) }));
+    expect(db.transaction).toHaveBeenCalledTimes(1); // survivor update + twin retirement = one transaction
+  });
+
+  test('twin retirement rolls back with the survivor update: a failing ledger insert leaves the twin untouched', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
+    const b = activeRow({ id: 'b', source_url: 'http://www.blog.example/post/', target_url: 'https://www.wavespestcontrol.com' });
+    scanWith({ items: [seen], active: [a, b], existingByUrl: { [a.source_url]: a } });
+    const inner = db.transaction.getMockImplementation();
+    db.transaction = jest.fn(async (fn) => { try { return await inner(fn); } catch (e) { throw e; } });
+    const origImpl = db.getMockImplementation();
+    db.mockImplementation((table) => { if (table === 'seo_backlink_events') throw new Error('ledger down'); return origImpl(table); });
+    await expect(BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() })).rejects.toThrow('ledger down');
   });
 
   test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded) and its recovery prospect closed as live', async () => {

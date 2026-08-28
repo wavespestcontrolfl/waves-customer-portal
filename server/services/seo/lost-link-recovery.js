@@ -17,6 +17,7 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 
 const worker = require('./link-prospect-worker');
+const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
 
 // The worker's lane allowlists are canonical: signup-lane types are never
 // reopened into outreach, and a reopened row must carry a type the outreach
@@ -30,9 +31,8 @@ const IN_FLIGHT_STATUSES = new Set(['prospect', 'contacted', 'negotiating', 'pla
 // stale (verifier runs after the scan). Deferred, never a terminal skip.
 const STALE_WHEN_DOMAIN_DARK = new Set(['live', 'indexed']);
 
-function normalizeDomain(d) {
-  return String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^(www|mail)\./, '').replace(/[/:].*$/, '');
-}
+// Shared with every other board writer so they all lock the same key.
+const normalizeDomain = canonicalProspectDomain;
 // SQL twin of normalizeDomain() for the board's target_domain column, which the
 // admin route stores verbatim (www.example.com, a full URL, mixed case): every
 // board lookup here compares the canonical host, never the raw spelling. No
@@ -240,12 +240,13 @@ async function queueOne(loss, out, scoreMod) {
     // scoring/contact lookup above is slow): the unique (target_domain,
     // target_page) conflict is ignored and counted as a skip, never thrown.
     const inserted = await db.transaction(async (trx) => {
-      // Serialize recovery writers per canonical domain and RE-CHECK in-flight
-      // rows under the lock: the unique key is the textual (target_domain,
-      // target_page) pair, so a row filed for this domain under another Waves
-      // page or spelling during the slow scoring/contact lookup would not
-      // conflict — it would land beside this one, both claimable.
-      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lost_recovery:${domain}`]);
+      // Serialize ALL board writers per canonical domain (prospect-domain-lock:
+      // admin manual add, strategy agent, promoter take the same lock) and
+      // RE-CHECK in-flight rows under it: the unique key is the textual
+      // (target_domain, target_page) pair, so a row filed for this domain under
+      // another Waves page or spelling during the slow scoring/contact lookup
+      // would not conflict — it would land beside this one, both claimable.
+      await lockProspectDomain(trx, domain);
       const raced = await byDomain(trx('seo_link_prospects'), domain).whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
       if (raced && IN_FLIGHT_STATUSES.has(raced.status)) return { raced };
       return trx('seo_link_prospects').insert({
