@@ -111,6 +111,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850 }}>
+            <Icon name="card" size={14} strokeWidth={2} />
             Auto Pay
           </div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>
@@ -317,7 +318,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
   // Status dot is a live indicator (owner directive 2026-07-06): blinking
   // green = charges are running automatically, solid red = they are not.
   const themeMap = {
-    active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
+    active: { bg: PORTAL_BILLING.soft, border: PORTAL_BILLING.softBorder, dot: B.green, label: 'Active' },
     paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.red, label: 'Paused' },
     disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: B.red, label: 'Off' },
   };
@@ -507,12 +508,11 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
 
   return (
     <div data-glass="card" style={card}>
-      <style>{`@keyframes autopayDotPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.25); } }`}</style>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850 }}>
+              <Icon name="card" size={14} strokeWidth={2} />
               Auto Pay / {theme.label}
             </span>
           </div>

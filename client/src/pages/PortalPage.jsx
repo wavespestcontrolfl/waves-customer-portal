@@ -945,7 +945,7 @@ function PropertyScoreCard({ data, compact }) {
       <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
         {overall.score != null && <ScoreRing score={overall.score} size={72} stroke={6} />}
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={labelStyle}>Property Health</div>
+          <div style={labelStyle}><Icon name="house" size={14} strokeWidth={2} />Property Health</div>
           {deltaLine && (
             <div style={{ marginTop: 6, fontSize: 14, fontWeight: 700, color: overall.delta >= 0 ? B.green : B.orange }}>
               {deltaLine}
@@ -1099,12 +1099,16 @@ function RecommendationsCard({ data, customer }) {
     }
   };
 
-  const tierLadder = ['Bronze', 'Silver', 'Gold', 'Platinum'];
-  const tierIdx = tierLadder.indexOf(String(customer?.tier || ''));
-  const nextTier = tierIdx >= 0 ? tierLadder[tierIdx + 1] : null;
-  const nextTierLine = nextTier
-    ? `Adding a service moves you to WaveGuard ${nextTier} — ${Math.round((TIER_DISCOUNTS[nextTier] || 0) * 100)}% off ${nextTier === 'Silver' ? 'both services' : 'every plan service'}.`
-    : null;
+  // Tier line per card, from the SERVER-priced option's waveguardTier (the
+  // estimator's projection of the tier after adding that service) — never
+  // derived from customer.tier, which can be stale or tierless (pre-push
+  // P1, AGENTS.md estimator-authority rule). No projection → no claim.
+  const tierLineFor = (card) => {
+    const after = card?.option?.waveguardTier;
+    const pct = TIER_DISCOUNTS[after];
+    if (!after || !pct || after === customer?.tier) return null;
+    return `Adding this moves you to WaveGuard ${after} — ${Math.round(pct * 100)}% off ${after === 'Silver' ? 'both services' : 'every plan service'}.`;
+  };
   // Advice cards (irrigation nudges etc.) are out (owner 08-28) — this card
   // is for services the customer can ask about.
   const visibleCards = (data?.cards || []).filter((c) => c.kind !== 'advice');
@@ -1115,7 +1119,7 @@ function RecommendationsCard({ data, customer }) {
       <div style={{
         display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
       }}>
-        Recommended for your property
+        <Icon name="sparkles" size={14} strokeWidth={2} />Recommended for your property
       </div>
       <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
         {visibleCards.map((card) => {
@@ -1154,8 +1158,8 @@ function RecommendationsCard({ data, customer }) {
                   on advice cards. Offer cards say what adding a service does
                   to the WaveGuard tier instead — Bronze → Silver = 10% off
                   both services, and so on up the ladder. */}
-              {card.kind === 'offer' && nextTierLine && (
-                <div style={{ marginTop: 8, fontSize: 14, fontWeight: 800, color: B.glassNavy, lineHeight: 1.45 }}>{nextTierLine}</div>
+              {card.kind === 'offer' && tierLineFor(card) && (
+                <div style={{ marginTop: 8, fontSize: 14, fontWeight: 800, color: B.glassNavy, lineHeight: 1.45 }}>{tierLineFor(card)}</div>
               )}
               {(card.kind === 'offer' || card.kind === 'ask') && (
                 <div style={{ marginTop: 10 }}>
@@ -1636,7 +1640,7 @@ function OneTapPurchaseOverlay({ open, card, onClose, resume = null }) {
               </div>
               <div style={softBox}>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, }}>
-                  Terms
+                  <Icon name="clipboard" size={14} strokeWidth={2} />Terms
                 </div>
                 <div style={{ marginTop: 8, fontSize: 14, color: PORTAL_SHELL.body, lineHeight: 1.55, whiteSpace: 'pre-line' }}>
                   {init.terms?.text}
@@ -1827,7 +1831,7 @@ function PropertyAlertsCard({ data }) {
         <div style={{
           display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850,
         }}>
-          Property alerts
+          <Icon name="cloudRain" size={14} strokeWidth={2} />Property alerts
         </div>
         <div style={{ fontSize: 14, color: muted }}>Based on weather and your visit history</div>
       </div>
@@ -3030,7 +3034,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
                 <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
                   <ShellIconTile icon="star" tone="success" size={38} />
                   <div style={{ minWidth: 0 }}>
-                    <div style={dashboardLabel}>Visit Feedback</div>
+                    <div style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
                     <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>How was your visit?</div>
                     <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
                       {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
@@ -3219,7 +3223,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
         </section>
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={dashboardLabel}>At a glance</div>
+          <div style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
               annualPrepay
@@ -3283,7 +3287,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
               <ShellIconTile icon="clipboard" tone="success" size={38} />
               <div style={{ minWidth: 0 }}>
-                <div style={dashboardLabel}>Last Visit</div>
+                <div style={dashboardLabel}><Icon name="clock" size={14} strokeWidth={2} />Last Visit</div>
                 <div style={{ marginTop: 7, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{lastService.type || lastService.serviceType}</div>
                 <div style={{ marginTop: 2, fontSize: 14, color: muted }}>
                   {fmtDate(lastService.date, { weekday: 'short', month: 'short', day: 'numeric' })} · {lastService.technician || 'Waves Team'}
@@ -3329,7 +3333,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
             <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
               <ScoreRing score={lawnScore} size={56} stroke={5} />
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div style={dashboardLabel}>Lawn Health</div>
+                <div style={dashboardLabel}><Icon name="leaf" size={14} strokeWidth={2} />Lawn Health</div>
                 <div style={{ marginTop: 6, fontSize: 17, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
                   {lawnScore}% overall
                 </div>
@@ -3666,7 +3670,7 @@ function ServicesTab() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
-        <div style={sectionTitle}>Completed Visits</div>
+        <div style={sectionTitle}><Icon name="checkCircle" size={14} strokeWidth={2} />Completed Visits</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
           Visit history
         </div>
@@ -3692,7 +3696,7 @@ function ServicesTab() {
           two rows of loose chips (five types, then years, then the search
           box) read as clutter on a phone (owner 08-28). */}
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>Filter Visits</div>
+        <div style={sectionTitle}><Icon name="search" size={14} strokeWidth={2} />Filter Visits</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : '1fr 1fr 2fr', gap: 10, marginTop: 12 }}>
           <label style={{ display: 'block', minWidth: 0 }}>
             <div style={filterLabel}>Type</div>
@@ -3841,7 +3845,7 @@ function ServicesTab() {
                                 />
                               ) : (
                                 <div style={{ padding: 18 }}>
-                                  <div style={sectionTitle}>Service Report</div>
+                                  <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Service Report</div>
                                   <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{s.type}</div>
                                   <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
                                     {parseDate(s.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
@@ -4472,6 +4476,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
             background: subtle, border: '1px solid #E7E2D7',
           }}>
             <div style={{ ...sectionTitle, marginBottom: 8 }}>
+              <Icon name="bell" size={14} strokeWidth={2} />
               You'll hear from us
             </div>
             {[
@@ -4559,7 +4564,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       <section data-glass="card" style={{ ...card, padding: compact ? 20 : 24 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, alignItems: 'flex-start', flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
-            <div style={sectionTitle}>Upcoming Visits</div>
+            <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Upcoming Visits</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {upcomingOnly.length ? `${upcomingOnly.length} scheduled` : 'Schedule status'}
             </div>
@@ -4627,7 +4632,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       {/* Recent Completed Visits */}
       {recentCompleted.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20, marginTop: 4 }}>
-          <div style={sectionTitle}>Recent Visits</div>
+          <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Recent Visits</div>
           {recentCompleted.map(s => {
             const sDate = parseDate(s.date);
             return (
@@ -4660,7 +4665,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           above stays fully usable). */}
       {prefsError && !prefs && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}>Reminder Settings</div>
+          <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
           <div role="alert" style={{ marginTop: 10, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
             Your schedule is up to date, but notification preferences couldn&apos;t be loaded.
             <button data-glass-accent="" type="button" onClick={loadSchedule} style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 10, display: 'block' }}>Try again</button>
@@ -4670,7 +4675,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
       {prefs && (
         <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
-            <div style={sectionTitle}>Reminder Settings</div>
+            <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Reminder Settings</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Service notifications</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted }}>
               Texts to {formatPhoneDisplay(customer.phone)}{customer.email ? ` · Emails to ${customer.email}` : ''}
@@ -4832,7 +4837,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
           <div style={{ padding: '16px 18px', borderBottom: '1px solid #E7E2D7' }}>
             {propertyPrefs.length > 1 ? (
               <>
-                <div style={sectionTitle}>Property Notifications</div>
+                <div style={sectionTitle}><Icon name="bell" size={14} strokeWidth={2} />Property Notifications</div>
                 <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Notifications by property</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
                   Choose which service texts each property receives.
@@ -4840,7 +4845,7 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
               </>
             ) : (
               <>
-                <div style={sectionTitle}>Contacts</div>
+                <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Contacts</div>
                 <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>On-location contacts</div>
                 <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
                   Add anyone who should get appointment texts for this property — a spouse, partner, tenant, or property manager.
@@ -6052,7 +6057,7 @@ function BillingTab({ customer, refreshCustomer }) {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
           <div>
-            <div style={sectionTitle}>Plan Charges</div>
+            <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Plan Charges</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -6114,7 +6119,7 @@ function BillingTab({ customer, refreshCustomer }) {
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
-            <div style={sectionTitle}>Payment Methods</div>
+            <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Saved methods</div>
           </div>
           <button
@@ -6337,7 +6342,7 @@ function BillingTab({ customer, refreshCustomer }) {
 
       {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}>Credits</div>
+          <div style={sectionTitle}><Icon name="coins" size={14} strokeWidth={2} />Credits</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Adjustments</div>
           {totalCredits > 0 && (
             <div style={{
@@ -6408,7 +6413,7 @@ function BillingTab({ customer, refreshCustomer }) {
       )}
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>{currentYear} Summary</div>
+        <div style={sectionTitle}><Icon name="chart" size={14} strokeWidth={2} />{currentYear} Summary</div>
         <div style={{ marginTop: 8, fontSize: 28, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
           {money(ytdTotal)}
         </div>
@@ -6432,7 +6437,7 @@ function BillingTab({ customer, refreshCustomer }) {
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}>Payment History</div>
+            <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Payment History</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{historyDescription}</div>
           </div>
         </div>
@@ -6551,7 +6556,7 @@ function BillingTab({ customer, refreshCustomer }) {
       </div>
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>Billing Preferences</div>
+        <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Recipients</div>
 
         {billingPrefsLoadError && (
@@ -7566,7 +7571,7 @@ function PropertyTab({ customer }) {
               border: '1px solid #E7E2D7',
               boxSizing: 'border-box',
             }}>
-              <div style={{ ...sectionTitle, color: saveColor }}>Status</div>
+              <div style={{ ...sectionTitle, color: saveColor }}><Icon name="checkCircle" size={14} strokeWidth={2} />Status</div>
               <div style={{ marginTop: 3, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.ui }}>
                 {saveText}
               </div>
@@ -7737,7 +7742,7 @@ function PropertyTab({ customer }) {
                       <PillSelector value={pet.type} onChange={v => updatePet('type', v)} options={['Dog', 'Cat', 'Other'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
-                      <label style={labelStyle}>Location</label>
+                      <label style={labelStyle}><Icon name="map" size={14} strokeWidth={2} />Location</label>
                       <PillSelector value={pet.indoor} onChange={v => updatePet('indoor', v)} options={['Indoor', 'Outdoor', 'Both'].map(t => ({ value: t, label: t }))} />
                     </div>
                     <div>
@@ -8549,7 +8554,7 @@ function LearnTab({ customer }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
           <span style={iconTile}><Icon name={icon} size={18} strokeWidth={2} /></span>
           <div>
-            <div style={sectionTitle}>{title}</div>
+            <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{posts.length} item{posts.length === 1 ? '' : 's'}</div>
           </div>
         </div>
@@ -8616,7 +8621,7 @@ function LearnTab({ customer }) {
             border: '1px solid #E7E2D7',
             boxSizing: 'border-box',
           }}>
-            <div style={sectionTitle}>Your Plan</div>
+            <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Your Plan</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {activeTierName ? `WaveGuard ${tierName}` : 'No active WaveGuard plan'}
             </div>
@@ -8688,7 +8693,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
             <span style={iconTile}><Icon name="warning" size={18} strokeWidth={2} /></span>
             <div>
-              <div style={sectionTitle}>SWFL Alerts</div>
+              <div style={sectionTitle}><Icon name="megaphone" size={14} strokeWidth={2} />SWFL Alerts</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Local pest and lawn notices.</div>
             </div>
           </div>
@@ -8726,7 +8731,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
             <span style={iconTile}><Icon name="sparkles" size={18} strokeWidth={2} /></span>
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={sectionTitle}>{monthlyTip.month} Homeowner Tip</div>
+              <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />{monthlyTip.month} Homeowner Tip</div>
               <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
                 {monthlyTip.title}
               </div>
@@ -8757,7 +8762,7 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
             <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
             <div>
-              <div style={sectionTitle}>Waves Pest Control Blog</div>
+              <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{sortedBlogPosts.length} article{sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com</div>
             </div>
           </div>
@@ -8817,7 +8822,7 @@ function LearnTab({ customer }) {
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
               <span style={iconTile}><Icon name="message" size={18} strokeWidth={2} /></span>
               <div>
-                <div style={sectionTitle}>Pest & Lawn FAQ</div>
+                <div style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Pest & Lawn FAQ</div>
                 <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{totalFaqQuestions} answer{totalFaqQuestions === 1 ? '' : 's'} available</div>
               </div>
             </div>
@@ -9101,7 +9106,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     <section data-glass="card" style={{ ...card, padding: 20 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ minWidth: 0 }}>
-          <div style={sectionTitle}>WAVES AI</div>
+          <div style={sectionTitle}><Icon name="sparkles" size={14} strokeWidth={2} />WAVES AI</div>
           <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>Property-aware pricing</div>
           <div style={{ marginTop: 4, color: '#475569', fontSize: 14, lineHeight: 1.5 }}>
             Pricing is calculated from this property profile and your current Waves services.
@@ -10304,7 +10309,7 @@ function MyPlanTab({ customer, focusService }) {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, overflow: 'hidden' }}>
             <div style={{ padding: 20, borderBottom: '1px solid #E7E2D7' }}>
-              <div style={sectionTitle}>Included Services</div>
+              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Included Services</div>
               <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>
                 {activeTierName
                   ? `${numServices} recurring service${numServices > 1 ? 's' : ''}`
@@ -10526,7 +10531,7 @@ function MyPlanTab({ customer, focusService }) {
 
         <aside style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <section data-glass="card" style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}>Year At A Glance</div>
+            <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
             <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {displayedServices.map((svc) => {
@@ -10644,7 +10649,7 @@ function MyPlanTab({ customer, focusService }) {
               bond" CTA deep-links to this tab. */}
           {Array.isArray(termiteBonds) && termiteBonds.length > 0 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
-              <div style={sectionTitle}>Termite Bond</div>
+              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
               {termiteBonds.map((bond, index) => {
                 const renewalDiff = etDayDiff(bond.renewsAt);
                 const renewalPast = renewalDiff != null && renewalDiff < 0;
@@ -10695,7 +10700,7 @@ function MyPlanTab({ customer, focusService }) {
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
-              <div style={sectionTitle}>Loyalty</div>
+              <div style={sectionTitle}><Icon name="star" size={14} strokeWidth={2} />Loyalty</div>
               <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
                 {[
                   // Renewal-credit bullet removed: it promised a tenure-
@@ -10717,7 +10722,7 @@ function MyPlanTab({ customer, focusService }) {
 
           {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
-            <div style={sectionTitle}>Account Options</div>
+            <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
                 <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Pause My Plan</button>
@@ -11691,7 +11696,7 @@ function ServiceTracker() {
           any summary data would describe work that didn't happen */}
       {step === 7 && tracker.state !== 'cancelled' && summary && (
         <div data-glass="soft" style={{ ...subCardBase, background: GLASS_SUBTLE, borderColor: '#E7E2D7' }}>
-          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8 }}>Service summary</div>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginBottom: 8 }}><Icon name="clipboard" size={14} strokeWidth={2} />Service summary</div>
           {summary.productsApplied?.length > 0 && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ fontSize: 14, color: B.textBody, fontWeight: 600, marginBottom: 6 }}>Products</div>
@@ -12091,7 +12096,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 16, alignItems: 'stretch' }}>
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}>Share Link</div>
+          <div style={sectionTitle}><Icon name="share" size={14} strokeWidth={2} />Share Link</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Your referral code</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Send the link directly or copy it into your own message.
@@ -12143,7 +12148,7 @@ function ReferTab({ customer, onSwitchTab }) {
         </section>
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
-          <div style={sectionTitle}>Send Invite</div>
+          <div style={sectionTitle}><Icon name="smartphone" size={14} strokeWidth={2} />Send SMS Invite</div>
           <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Text a friend</div>
           <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             We will send a short referral text from {customerFirstName}.
@@ -12206,14 +12211,14 @@ function ReferTab({ customer, onSwitchTab }) {
               opacity: submitting || !form.name.trim() || !form.phone.trim() ? 0.65 : 1,
               cursor: submitting || !form.name.trim() || !form.phone.trim() ? 'not-allowed' : 'pointer',
             }}>
-              {submitting ? 'Sending...' : 'Send text invite'}
+              {submitting ? 'Sending...' : 'Send SMS invite'}
             </button>
           </form>
         </section>
       </div>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>Send Invite</div>
+        <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Send Email Invite</div>
         <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Email a friend</div>
         <div style={{ marginTop: 6, fontSize: 14, color: muted, lineHeight: 1.45 }}>
           We will send a branded referral email from Waves with your link and their new-customer offer.
@@ -12284,7 +12289,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}>Milestone</div>
+            <div style={sectionTitle}><Icon name="trophy" size={14} strokeWidth={2} />Milestone</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {milestoneMeta[currentMilestone]?.label || 'Getting started'}
             </div>
@@ -12316,7 +12321,7 @@ function ReferTab({ customer, onSwitchTab }) {
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
           <div>
-            <div style={sectionTitle}>Referral Activity</div>
+            <div style={sectionTitle}><Icon name="gift" size={14} strokeWidth={2} />Referral Activity</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
@@ -12400,7 +12405,7 @@ function ReferTab({ customer, onSwitchTab }) {
       </section>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={sectionTitle}>How It Works</div>
+        <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
@@ -13037,7 +13042,7 @@ function DocumentsTab({ customer, onSwitchTab }) {
         flexWrap: 'wrap',
       }}>
         <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
-          <div style={sectionTitle}>Document Request</div>
+          <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Document Request</div>
           <div style={{ marginTop: 6, fontSize: 20, color: B.glassNavy, fontWeight: 850 }}>Request paperwork from Waves</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Tell us what you need and we will upload it to your portal.
@@ -13207,7 +13212,7 @@ function DocumentSection({ section, items, emptyMessage, onDownload, onShare, on
             <Icon name={section.icon} size={17} strokeWidth={2} />
           </span>
           <span>
-            <span style={sectionTitle}>{section.label}</span>
+            <span style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />{section.label}</span>
             <span style={{ display: 'block', marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {items.length} document{items.length === 1 ? '' : 's'}
             </span>
@@ -13886,13 +13891,13 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
                       gap: 8,
                     }}>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
-                        <div style={sectionTitle}>Plan</div>
+                        <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Plan</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>
                           {activeTierName ? `WaveGuard ${tierName}` : 'No active plan'}
                         </div>
                       </div>
                       <div style={{ background: GLASS_SUBTLE, border: '1px solid rgba(255,255,255,0.65)', borderRadius: 8, padding: 10 }}>
-                        <div style={sectionTitle}>Last service</div>
+                        <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Last service</div>
                         <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.text, fontWeight: 850 }}>{lastServiceDateStr || 'Checking...'}</div>
                       </div>
                     </div>
@@ -13901,7 +13906,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               )}
 
               <section data-glass="card" style={{ ...card, padding: 16 }}>
-                <div style={sectionTitle}>Request type</div>
+                <div style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Request type</div>
                 <div style={helperText}>Pick the closest match so the right Waves team sees it first.</div>
                 <div style={{
                   display: 'grid',
@@ -13985,7 +13990,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
               {reschedulableVisits.length > 0 && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}>Reschedule online</div>
+                  <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Reschedule online</div>
                   <div style={helperText}>Move a visit yourself — each link opens that visit's scheduling page. Use the form below for anything else.</div>
                   <div style={{ display: 'grid', gap: 8, marginTop: 12 }}>
                     {reschedulableVisits.map(v => (
@@ -14050,7 +14055,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
               {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}>Priority</div>
+                  <div style={sectionTitle}><Icon name="zap" size={14} strokeWidth={2} />Priority</div>
                   <div style={helperText}>Routine is best for most issues. Use urgent for active interior activity or access-sensitive timing.</div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8, marginTop: 12 }}>
                     {[
@@ -14094,7 +14099,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
               {!pickerHandoffUrl && (
               <section data-glass="card" style={{ ...card, padding: 16 }}>
-                <label htmlFor="portal-request-description" style={sectionTitle}>Details</label>
+                <label htmlFor="portal-request-description" style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Details</label>
                 <div style={helperText}>
                   {selectedCategory
                     ? `Tell us what you are seeing for ${selectedCategory.label.toLowerCase()}.`
@@ -14143,7 +14148,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
 
               {isProblemCategory && !pickerHandoffUrl && (
                 <section data-glass="card" style={{ ...card, padding: 16 }}>
-                  <div style={sectionTitle}>Location</div>
+                  <div style={sectionTitle}><Icon name="map" size={14} strokeWidth={2} />Location</div>
                   <div style={helperText}>Select the area where the issue is happening.</div>
                   <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginTop: 12 }}>
                     {locationOptions.map(l => {
@@ -14179,7 +14184,7 @@ function ReportIssueOverlay({ open, onClose, onSubmitted, customer }) {
               <section data-glass="card" style={{ ...card, padding: 16 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
                   <div>
-                    <div style={sectionTitle}>Photos</div>
+                    <div style={sectionTitle}><Icon name="camera" size={14} strokeWidth={2} />Photos</div>
                     <div style={helperText}>Optional, up to {photoLimit}. Photos help the technician identify the issue before arrival.</div>
                   </div>
                   <div style={{ fontSize: 12, color: muted, fontWeight: 850, whiteSpace: 'nowrap' }}>{photos.length}/{photoLimit}</div>
