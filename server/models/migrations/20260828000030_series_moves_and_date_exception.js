@@ -104,16 +104,33 @@ exports.up = async function up(knex) {
              date_exception_at = l.last_moved_at,
              date_exception_cadence_date = l.first_original_date
         FROM (
-          SELECT scheduled_service_id,
-                 MIN(original_date) AS first_original_date,
-                 MAX(created_at)    AS last_moved_at
-            FROM reschedule_log
-           WHERE original_date IS NOT NULL
-             AND new_date IS NOT NULL
-             AND original_date <> new_date
-             AND COALESCE(initiated_by, '') <> 'auto_dispatch'
-             AND COALESCE(reason_code, '') NOT LIKE '%\\_series'
-           GROUP BY scheduled_service_id
+          -- Cadence position = the original_date of the FIRST logged move
+          -- (by created_at — the date the row deviated from), not the
+          -- calendar-smallest original_date: a visit first pushed back and
+          -- later pulled forward must not be positioned at its later slot.
+          SELECT f.scheduled_service_id,
+                 f.original_date AS first_original_date,
+                 m.last_moved_at
+            FROM (
+              SELECT DISTINCT ON (scheduled_service_id) scheduled_service_id, original_date
+                FROM reschedule_log
+               WHERE original_date IS NOT NULL
+                 AND new_date IS NOT NULL
+                 AND original_date <> new_date
+                 AND COALESCE(initiated_by, '') <> 'auto_dispatch'
+                 AND COALESCE(reason_code, '') NOT LIKE '%\\_series'
+               ORDER BY scheduled_service_id, created_at ASC, id ASC
+            ) f
+            JOIN (
+              SELECT scheduled_service_id, MAX(created_at) AS last_moved_at
+                FROM reschedule_log
+               WHERE original_date IS NOT NULL
+                 AND new_date IS NOT NULL
+                 AND original_date <> new_date
+                 AND COALESCE(initiated_by, '') <> 'auto_dispatch'
+                 AND COALESCE(reason_code, '') NOT LIKE '%\\_series'
+               GROUP BY scheduled_service_id
+            ) m ON m.scheduled_service_id = f.scheduled_service_id
         ) l
        WHERE s.id = l.scheduled_service_id
          AND s.is_recurring = true

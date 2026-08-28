@@ -13545,10 +13545,14 @@ function rescheduleReminderTime(date, window) {
   return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
 }
 
+// Returns true when the reminder row was synced, false when the sync failed
+// or handleReschedule reported no row (it resolves null on its failure
+// paths) — callers that record completion (applySeriesMoveEffects) stamp
+// only on true; single-visit callers keep their fire-and-forget contract.
 async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    await AppointmentReminders.handleReschedule(
+    const synced = await AppointmentReminders.handleReschedule(
       serviceId,
       rescheduleReminderTime(date, window),
       // This route sends its own reschedule SMS (below) rather than letting
@@ -13559,8 +13563,10 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // leaves the 24h reminder pending so the cron still reminds the customer.
       { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
+    return synced !== null;
   } catch (err) {
     logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -14091,13 +14097,14 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
     const remindersThisPass = !markers.reminders_synced_at;
+    let allRemindersSynced = true;
     if (remindersThisPass) {
       for (const occurrence of occurrences) {
         // expectSchedule: the reminder moves only if the visit still sits on
         // the slot THIS move recorded — a replayed/retried pass whose
         // occurrence was rescheduled again in between must not drag its
         // reminder back to the superseded slot.
-        await syncRescheduleReminder(
+        const synced = await syncRescheduleReminder(
           occurrence.id,
           occurrence.date,
           { start: occurrence.windowStart, end: occurrence.windowEnd },
@@ -14109,6 +14116,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             },
           },
         );
+        if (!synced) allRemindersSynced = false;
         const occurrenceGuards = await captureReminderGuards(occurrence.id);
         if (Array.isArray(occurrenceGuards)) {
           seriesReminderGuards.push(...occurrenceGuards);
@@ -14128,7 +14136,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
         }
       }
-      await stampMarker('reminders_synced_at');
+      // Completion means EVERY occurrence's reminder synced — a swallowed
+      // failure must leave the marker unstamped so the next retry re-runs
+      // the sync (handleReschedule is idempotent for already-synced rows).
+      if (allRemindersSynced) await stampMarker('reminders_synced_at');
+      else logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: one or more reminder syncs failed — reminders_synced_at left unstamped for retry`);
     }
 
     let notificationSent = false;
