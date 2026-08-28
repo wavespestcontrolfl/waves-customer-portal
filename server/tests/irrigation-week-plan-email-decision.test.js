@@ -122,7 +122,10 @@ describe('sweep — plan mode only on Monday', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '../services/irrigation-weekly-email.js'), 'utf8');
-    expect(src).toMatch(/const isMondayET = etParts\(now\)\.dayOfWeek === 1;/);
+    expect(src).toMatch(/const isMondayET = dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;/);
+    expect(require('../services/irrigation-weekly-email').PLAN_WINDOW_END_HOUR_ET).toBe(12);
+    // A late (legacy-path) retry still dedupes on the customer-week before sending.
+    expect(src).toMatch(/if \(weekPlanGate && !decision\.weekPlan\) \{[\s\S]{0,600}summary\.deduped \+= 1;\s*continue;/);
     expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
     // An UNKNOWN sent-check (unreadable table) falls back to the pre-plan email too.

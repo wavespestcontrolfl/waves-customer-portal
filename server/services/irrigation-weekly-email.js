@@ -61,6 +61,9 @@ const TEMPLATE_SETUP_SYSTEM = 'irrigation.weekly_setup_system';
 // GATE_IRRIGATION_WEEK_PLAN: one template whose subject/heading/action come
 // from THIS week's legal-first plan (irrigation-week-plan.js).
 const TEMPLATE_WEEK_PLAN = 'irrigation.weekly_plan';
+// Actionable plans send only before this ET hour on Monday (the sweep runs
+// ~7 a.m.); later retries fall back to the pre-plan templates.
+const PLAN_WINDOW_END_HOUR_ET = 12;
 // Confirm variant — we DO have a usable schedule, but a technician recorded
 // it rather than the customer entering it in the portal. The three advice
 // templates credit "the irrigation schedule you shared in your customer
@@ -1023,11 +1026,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
     plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0, claim_error: 0 },
   };
-  // Plan mode only on the plan week's MONDAY: a retry Tue–Sun cannot know
-  // whether the customer's assigned watering day has already passed under a
-  // one-day policy, so it must not send an actionable "this week" plan —
-  // those customers get the pre-plan templates (counted as late_retry).
-  const isMondayET = etParts(now).dayOfWeek === 1;
+  // Plan mode only inside the plan week's MONDAY MORNING window (the cron
+  // runs ~7 a.m. ET; PLAN_WINDOW_END_HOUR_ET closes it): a retry later on
+  // Monday — after a customer's permitted watering window may have passed —
+  // or Tue–Sun cannot know whether the assigned day is gone under a one-day
+  // policy, so it must not send an actionable "this week" plan. Those
+  // customers get the pre-plan templates (counted as late_retry).
+  const { dayOfWeek, hour } = etParts(now);
+  const isMondayET = dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;
   const weekPlanGate = isEnabled('irrigationWeekPlan');
   const weekPlanEnabled = weekPlanGate && isMondayET;
   const planAsOf = now;
@@ -1111,6 +1117,18 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         .slice(0, 16);
       const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
       const triggerEventId = `irrigation.weekly:${customer.id}:${weekEnding}`;
+
+      // One email per customer-week under the gate, plan or legacy: a late
+      // retry (plan mode off) must not send a second, contradicting email on
+      // a new recipient key after Monday's plan went out.
+      if (weekPlanGate && !decision.weekPlan) {
+        const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
+        const priorLegacyPath = alreadySentLegacyPath === true ? { state: 'sent' } : await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
+        if (alreadySentLegacyPath === true || priorLegacyPath.state === 'sent') {
+          summary.deduped += 1;
+          continue;
+        }
+      }
 
       if (decision.weekPlan) {
         const p = decision.weekPlan;
@@ -1524,5 +1542,6 @@ module.exports = {
   TEMPLATE_SETUP_SYSTEM,
   TEMPLATE_CONFIRM_SCHEDULE,
   TEMPLATE_WEEK_PLAN,
+  PLAN_WINDOW_END_HOUR_ET,
   _private: { forecastLine, rainSourceNote, lastCompletedWeekEnding, formatInches, monthFromYmd, resolveGrassType, customerGrassLabel, sanitizeFailureReason, buildScheduleAsk, buildScheduleNote, TECH_SCHEDULE_NOTE },
 };

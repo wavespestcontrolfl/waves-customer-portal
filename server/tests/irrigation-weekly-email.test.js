@@ -13,7 +13,9 @@ jest.mock('../models/db', () => {
   mockDb.raw = jest.fn((expr) => expr);
   return mockDb;
 });
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
+// The week-plan gate stays OFF here: these suites pin the legacy sweep
+// (plan mode has its own suites).
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn((gate) => gate !== 'irrigationWeekPlan') }));
 jest.mock('../services/email-template-library', () => ({
   sendTemplate: jest.fn(async () => ({ sent: true, message: { provider_message_id: 'sg-1', sent_at: '2026-07-06T11:00:00Z' } })),
   activeSuppressionsFor: jest.fn(async () => []),
@@ -411,7 +413,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('gate on + surplus week → sends cut_back with week-scoped idempotency key on the suppressible stream', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary).toMatchObject({ shadow: false, candidates: 1, sent: 1, failed: 0 });
 
@@ -432,7 +434,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('balanced week → the on-track email sends', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0.25, et0Inches: 1.6, dailyRain: [] });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).toHaveBeenCalledTimes(1);
@@ -443,7 +445,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('legacy lawn_type customer without a turf profile is scored against their real grass', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [{ ...CANDIDATE, grass_type: null, lawn_type: 'Argentine Bahia' }] }
@@ -462,7 +464,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('a provider error carrying an email address is logged redacted', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     const err = new Error('SendGrid 403: sender identity mismatch for dana@example.com');
     err.status = 403;
     EmailTemplateLibrary.sendTemplate.mockRejectedValue(err);
@@ -475,7 +477,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('deficit week with a target-covering forecast → on-track email, not add-water', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: 0, et0Inches: 1.6, dailyRain: [] });
     // 7 full days summing 1.4"; with the 1" schedule the projected week is
     // covered (the customer's irrigation is 1"/week vs the 1.25" target).
@@ -489,7 +491,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('incomplete rainfall window → nothing sends, rain_unknown counted, no forecast call is spent', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     fetchServiceWeekWeather.mockResolvedValue({ rainInches: null, et0Inches: null, dailyRain: null });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
@@ -499,7 +501,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('template-library dedupe (re-run same week) counts as deduped, not sent', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     EmailTemplateLibrary.sendTemplate.mockResolvedValue({ deduped: true });
     const summary = await runWeeklyIrrigationEmailSweep({ now: NOW });
     expect(summary.sent).toBe(0);
@@ -507,7 +509,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('the run cap counts ATTEMPTS, not successes — downstream failures cannot bypass it', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -525,7 +527,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('deduped and suppressed results refund the cap — they cannot starve the rest of the list', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -546,7 +548,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('a deduped result that DID reach the provider (webhook/supersede race) keeps its attempt', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
@@ -561,7 +563,7 @@ describe('runWeeklyIrrigationEmailSweep', () => {
   });
 
   test('per-customer failure is contained: one bad send does not abort the sweep', async () => {
-    isEnabled.mockReturnValue(true);
+    isEnabled.mockImplementation((gate) => gate !== 'irrigationWeekPlan'); // legacy sweep: plan gate off
     db.mockImplementation((table) => makeBuilder(
       String(table).startsWith('customers')
         ? { rows: [CANDIDATE, { ...CANDIDATE, id: 'cust-2', email: 'sam@example.com' }] }
