@@ -133,7 +133,10 @@ class BacklinkMonitor {
       if (!rowsByKey.has(k)) rowsByKey.set(k, []);
       rowsByKey.get(k).push(l);
     };
-    for (const l of allRows) indexRow(l);
+    // A 'merged' twin is never a lookup target: its spelling resolves to the
+    // survivor under the same canonical key, so a later report of the retired
+    // spelling can not flip the twin back to active and retire the survivor.
+    for (const l of allRows) if (l.status !== 'merged') indexRow(l);
     // Canonical lookup; an exact-spelling row wins over a respelled twin so a
     // legacy duplicate pair is never collapsed onto the wrong row; otherwise the
     // most recently checked row (the same order the SQL lookup used).
@@ -245,7 +248,11 @@ class BacklinkMonitor {
           await db('seo_backlinks').where('id', existing.id).update(patch);
           syncRow();
         }
-        for (const t of twins) t.status = 'merged';
+        if (twins.length) {
+          const twinIds = new Set(twins.map(t => t.id));
+          for (const t of twins) t.status = 'merged';
+          rowsByKey.set(key, (rowsByKey.get(key) || []).filter(r => !twinIds.has(r.id)));
+        }
       } else {
         record.first_seen = today;
         record.status = 'active';
@@ -314,10 +321,16 @@ class BacklinkMonitor {
 
       // Recovery is owed for every verified loss until it has been evaluated —
       // this scan's new losses PLUS earlier ones whose queueing errored (scorer /
-      // contact / DB hiccup) and were left un-stamped.
+      // contact / DB hiccup) and were left un-stamped. The ALERT is owed
+      // independently: a row whose recovery settled (stamped) but whose bell
+      // never rang — send failed, no sender configured — has neither a
+      // 'loss_alerted' nor a 'loss_alert_skipped' ledger row and is swept back
+      // in until one is written. Both stamps are in the ledger, so the two
+      // obligations can not mask each other.
       const owed = await db('seo_backlinks')
         .where('status', 'lost')
-        .whereNull('recovery_queued_at')
+        .where((qb) => qb.whereNull('recovery_queued_at')
+          .orWhereRaw("NOT EXISTS (SELECT 1 FROM seo_backlink_events e WHERE e.backlink_id = seo_backlinks.id AND e.event_type IN ('loss_alerted', 'loss_alert_skipped'))"))
         .whereIn('lost_reason', ['page_gone', 'link_removed'])
         .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
         .whereRaw("lost_at > now() - interval '90 days'")
@@ -353,7 +366,15 @@ class BacklinkMonitor {
       evaluated = lostLinks.concat(owed);
       const verdict = new Map(rollup.map(d => [d.domain, d]));
       const settled = evaluated.filter(l => { const v = verdict.get(comparableDomain(l.source_domain)); return v && !v.stillLinking && !v.alertable; }).map(l => l.id);
-      if (settled.length) await db('seo_backlinks').whereIn('id', settled).update({ recovery_queued_at: now });
+      if (settled.length) {
+        // Terminal for BOTH obligations: no recovery (stamp) and no bell
+        // ('loss_alert_skipped' — the domain was evaluated not alertable), so
+        // the owed sweep never re-evaluates these rows.
+        await db.transaction(async (trx) => {
+          await trx('seo_backlinks').whereIn('id', settled).update({ recovery_queued_at: now });
+          for (const id of settled) await this.recordEvent(id, 'loss_alert_skipped', { reason: 'domain not alertable' }, trx);
+        });
+      }
     } else {
       logger.info(`Backlink scan partial (${links.length}/${totalCount}) — loss detection skipped`);
     }

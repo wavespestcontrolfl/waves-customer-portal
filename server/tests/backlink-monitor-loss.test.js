@@ -25,6 +25,7 @@ function makeDb(handlers) {
       whereNotIn: jest.fn((col, vals) => { state.notIns.push([col, vals]); return b; }),
       whereNot: jest.fn((col, val) => { state.wheres.push(['NOT', col, val]); return b; }),
       whereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),
+      orWhereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),
       raw: jest.fn((sql, bind) => ({ __raw: sql, bind })),
       orderBy: jest.fn(() => b), orderByRaw: jest.fn(() => b), limit: jest.fn(() => b),
       select: jest.fn((...cols) => { state.select = cols; return done('select'); }),
@@ -713,6 +714,51 @@ describe('lost-link recovery', () => {
     } });
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'blog.example', target_url: 'https://wavespestcontrol.com/x/' }, new Date('2026-09-06T08:00:00Z'));
     expect(r).toEqual({ resolved: 0, superseded: 0, pending: 1 });
+  });
+
+  test('a retired twin\'s spelling reported later resolves to the SURVIVOR — the merged row is never a lookup target and never resurrected', async () => {
+    const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
+    const b = activeRow({ id: 'b', source_url: 'http://www.blog.example/post/', target_url: 'https://www.wavespestcontrol.com' });
+    // feed reports the canonical spelling first (retires b), then b's old spelling
+    const items = [
+      { url_from: a.source_url, url_to: a.target_url, domain_from: 'blog.example', domain_from_rank: 45, dofollow: true },
+      { url_from: b.source_url, url_to: b.target_url, domain_from: 'blog.example', domain_from_rank: 45, dofollow: true },
+    ];
+    const { updates } = scanWith({ items, active: [a, b] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 2, merged: 1, missed: 0 }));
+    const bUpdates = updates.filter(u => u.ids === 'b');
+    expect(bUpdates).toHaveLength(1);
+    expect(bUpdates[0].patch.status).toBe('merged'); // never flipped back to active
+    // the second report moved the SURVIVOR to b's spelling instead
+    expect(updates.filter(u => u.ids === 'a').map(u => u.patch.status)).toEqual(['active', 'active']);
+    expect(updates.filter(u => u.ids === 'a')[1].patch.source_url).toBe(b.source_url);
+
+    // and a merged row already in the table on load is not a lookup target either
+    const { updates: u2, inserts } = scanWith({ items: [items[1]], active: [a, { ...b, status: 'merged' }] });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(inserts).toHaveLength(0);
+    expect(u2.filter(u => u.ids === 'b')).toHaveLength(0);
+    expect(u2.find(u => u.ids === 'a').patch).toEqual(expect.objectContaining({ status: 'active', source_url: b.source_url }));
+  });
+
+  test('the owed sweep brings back rows whose recovery settled but whose bell never rang (ledger NOT EXISTS), and settled non-alertable domains get loss_alert_skipped so they never re-enter', async () => {
+    const recovery = jest.fn(async (losses) => ({ queued: losses.length, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const raws = [];
+    scanWith({ items: [seen], active: [], owed: [] });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = impl(table); if (table === 'seo_backlinks') { const o = b.orWhereRaw; b.orWhereRaw = (sql, bind) => { raws.push(sql); return o(sql, bind); }; } return b; });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery });
+    expect(raws.join(' ')).toMatch(/NOT EXISTS \(SELECT 1 FROM seo_backlink_events e WHERE e\.backlink_id = seo_backlinks\.id AND e\.event_type IN \('loss_alerted', 'loss_alert_skipped'\)\)/);
+
+    // a low-DR (not alertable) verified loss: settled → recovery stamp + loss_alert_skipped in one transaction
+    const crawl = jest.fn(async () => ({ found: false, status: 200 }));
+    const { events, updates } = scanWith({ items: [seen], active: [activeRow({ id: 'lowdr', miss_count: 1, domain_rating: 5 })] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: crawl, recoveryFn: recovery });
+    expect(r).toEqual(expect.objectContaining({ lostCount: 1, highValueLost: 0, alertedNew: 0 }));
+    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'lowdr', event_type: 'loss_alert_skipped' }));
+    expect(updates.some(u => u.patch && u.patch.recovery_queued_at)).toBe(true);
   });
 
   test('loss alert is DURABLE: an owed row with no loss_alerted ledger row rings (even though nothing was newly lost this scan), and rows are stamped only after the send succeeds', async () => {
