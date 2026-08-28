@@ -958,7 +958,15 @@ try {
 // so `npm run dev` still auto-migrates against the local DB. Run
 // `npm run db:migrate` manually if you want to migrate without
 // starting the dev server.
-httpServer.listen(PORT, () => {
+// Prime the catalog-name cache BEFORE accepting traffic so the first
+// requests already display real service identities instead of the lossy
+// regex fallback (service-catalog-names.js). Bounded: a slow/failed prime
+// falls back to today's behavior rather than delaying boot.
+const primeCatalogNames = config.nodeEnv === 'test'
+  ? Promise.resolve()
+  : require('./services/service-catalog-names').startCatalogNameRefresh(logger);
+
+primeCatalogNames.then(() => httpServer.listen(PORT, () => {
   const mem = process.memoryUsage();
   logger.info(`Waves API running on port ${PORT} | RSS: ${Math.round(mem.rss/1024/1024)}MB | Heap: ${Math.round(mem.heapUsed/1024/1024)}MB`);
   logger.info(`   Environment: ${config.nodeEnv} | Client: ${config.clientUrl}`);
@@ -1338,7 +1346,7 @@ httpServer.listen(PORT, () => {
       }
     }
   })();
-});
+}));
 
 // Graceful shutdown — Railway sends SIGTERM ~30s before forced kill on
 // deploy. Drain Socket.io connections first (clients see a clean
