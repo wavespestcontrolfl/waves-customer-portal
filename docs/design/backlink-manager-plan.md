@@ -133,7 +133,7 @@ t.string('provider_override');                    // per-path OWNER override of 
 t.string('expected_rel');                         // dofollow | nofollow | sponsored | unknown
 t.string('expected_indexability');                // indexable | noindex | unknown
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
-t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
+t.string('link_type').notNullable();              // board lane the placement will carry; CHECK (link_type IN CLAIMABLE_LINK_TYPES — editorial|resource|guest_post|haro|directory|citation|social) so a path can never qualify with a lane the worker cannot lease (§6.3 validity also asserts it)
 t.numeric('confidence', 3, 2);                    // 0–1
 t.integer('revision').notNullable().defaultTo(1);  // display/global counter: +1 whenever ANY in-place authority- or approval-relevant field changes (acquisition_type / submission_url changes supersede the row instead — see above)
 t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation
@@ -274,7 +274,10 @@ t.unique(['domain_id', 'touch_key']);
 `seo_link_domains.source` is first-touch attribution and is never overwritten; every feeder
 (including a repeat of the first) inserts a row here. §8 reports and learns per source from
 this table (a domain discovered by three feeders credits all three; "first-touch" and
-"any-touch" are both reportable), and recursive lineage follows `source_ref` chains here.
+"any-touch" are both reportable) — **but only touches recorded BEFORE the placement was
+acquired** (`seen_at < first_live_at`, and never `existing_backlink`, which is observational):
+a feeder that merely notices a link after it converted earns no attribution and cannot
+bias `P(live at D30 | source, path)`. Recursive lineage follows `source_ref` chains here.
 
 ### 3.5 Provenance enum (`seo_link_domains.source`, `seo_link_domain_sources.source`)
 
@@ -544,6 +547,7 @@ below is written per dimension; the set is stored in `seo_link_placement_authori
 if not all finite(domain.spam_score, score, path.confidence) → INVALID        # unenriched / uninvestigated
 if path.acquisition_type in (not_reproducible, unknown) → INVALID             # nothing to execute
 if path.last_investigated_at is null → INVALID
+if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shipped claim() filters on these lists; an unclaimable lane never gets authority
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
@@ -869,7 +873,10 @@ concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no re
 through the same gate as a **distinct claimable step**: the first send leaves the row
 `status='contacted'`, `outreach_status='sent'` (as shipped), so a follow-up is modelled on
 its own columns — `follow_up_due_at` (= sent + 10d), `follow_up_status`
-(`none|due|drafted|sent|skipped`), `follow_up_send_token` (its own idempotency claim, same
+(`none|due|drafted|sending|sent|send_error|skipped` — the same in-flight/ambiguous machine
+as the first send: `sending` under the claim, `send_error` when Gmail may have accepted but
+the response was lost, cleared only by the existing Sent-folder `reconcileSendError`
+path, never retried before it), `follow_up_send_token` (its own idempotency claim, same
 advisory-lock shape as the first send) — and leased with `claim(?type=outreach&mode=followup)`,
 whose predicate accepts `contacted` rows with `outreach_status='sent'`, `follow_up_status='due'`
 and the send authority still valid. One follow-up per placement, ever. It runs **with a
@@ -1031,7 +1038,11 @@ Provider selection per attempt = `COALESCE(path.provider_override, policy.prefer
   (or a loss event precedes the sample); `null` (unknown, excluded from learning) if no sample was
   taken inside the window — bracketing observations days apart never stand in for the
   sample, because a link can vanish and return between scans without a two-miss loss
-  event. The same rule replaces the imported-baseline test in §4 (imports predating scan
+  event. **Sampling is its own job, due-first and uncapped:** a nightly `link-d30-sampler`
+  (before the 04:30 ET verifier) selects every placement whose D30/D90 window is open and
+  unsampled, drains that set in batches, and records the sample; the retained verifier's
+  200-row `last_live_check` rotation is not relied on for it, so growth of the board never
+  starves the only success metric. The same rule replaces the imported-baseline test in §4 (imports predating scan
   coverage stay `null`). Stored on the placement (`d30_live`, `d90_live`, tri-state) — this is
   the only success metric that counts.
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
