@@ -212,12 +212,16 @@ jest.mock('../services/lead-estimate-link', () => ({
 }));
 // Gate values are fixed at module load; this passthrough lets the acceptance
 // -terms cases flip GATE_ESTIMATE_ACCEPTANCE_TERMS per test.
-const mockGateState = { acceptanceTerms: false };
+const mockGateState = { acceptanceTerms: false, acceptanceTermsRequired: false };
 jest.mock('../config/feature-gates', () => {
   const actual = jest.requireActual('../config/feature-gates');
   return {
     ...actual,
-    isEnabled: (gate) => (gate === 'estimateAcceptanceTerms' ? mockGateState.acceptanceTerms : actual.isEnabled(gate)),
+    isEnabled: (gate) => {
+      if (gate === 'estimateAcceptanceTerms') return mockGateState.acceptanceTerms;
+      if (gate === 'estimateAcceptanceTermsRequired') return mockGateState.acceptanceTermsRequired;
+      return actual.isEnabled(gate);
+    },
   };
 });
 jest.mock('../services/estimate-accepted-email', () => ({
@@ -1161,7 +1165,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     db.__state.tables.estimate_acceptances = [];
   }
 
-  afterEach(() => { mockGateState.acceptanceTerms = false; });
+  afterEach(() => { mockGateState.acceptanceTerms = false; mockGateState.acceptanceTermsRequired = false; });
 
   test('gate on + attested version: one verbatim record in the accept txn, estimate + customer stamped', async () => {
     mockGateState.acceptanceTerms = true;
@@ -1243,7 +1247,29 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(storedEstimate().terms_version == null).toBe(true);
   });
 
-  test('absent version (a pre-gate tab) accepts unrecorded; gate OFF records nothing', async () => {
+  test('acceptanceTermsApplyTo: cancel-anytime lanes only, fail closed', () => {
+    const { acceptanceTermsApplyTo } = require('../routes/estimate-public');
+    const pest = { recurring: { services: [{ name: 'Pest Control', service: 'pest_control', mo: 60 }] }, oneTime: { items: [] } };
+    const withData = (extra, result = pest) => ({ estimate_data: JSON.stringify({ result, ...extra }) });
+    expect(acceptanceTermsApplyTo(withData({}))).toBe(true);
+    expect(acceptanceTermsApplyTo({ estimate_data: { result: pest } })).toBe(true);
+    // Mapped termite rows.
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait' }] }, oneTime: { items: [] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    // Engine-shaped rows (result.lineItems / raw engineResult.lineItems).
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, lineItems: [{ service: 'termite_bond', bondTerm: 'annual' }] }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({ engineResult: { lineItems: [{ service: 'termite_trenching', description: 'Termidor trench' }] } }))).toBe(false);
+    // Commercial proposal: termite building line, or contractual terms.
+    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, buildings: [{ lineItems: [{ description: 'Termite bait stations', frequency: 'quarterly' }] }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({ proposal: { enabled: true, commercialTerms: { initialTermMonths: 12, paymentTerms: 'net30' } } }))).toBe(false);
+    // Fail closed: malformed / empty / non-object rows.
+    expect(acceptanceTermsApplyTo({ estimate_data: '{not json' })).toBe(false);
+    expect(acceptanceTermsApplyTo({ estimate_data: null })).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [] }, oneTime: { items: [] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: ['pest'] }, oneTime: { items: [] } }))).toBe(false);
+  });
+
+  test('absent version: accepts unrecorded under `true` (pre-gate tab), refused under `required`; gate OFF records nothing', async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
     conversionOk();
@@ -1251,6 +1277,16 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(preGate.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);
+
+    mockGateState.acceptanceTermsRequired = true;
+    seed({ id: 'est-terms-4r', token: 'tok-terms-4r-x012345678' });
+    EstimateConverter.convertEstimate.mockClear();
+    const required = await putAccept('tok-terms-4r-x012345678', {});
+    expect(required.status).toBe(409);
+    expect(required.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    mockGateState.acceptanceTermsRequired = false;
 
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });

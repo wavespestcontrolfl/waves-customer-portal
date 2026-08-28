@@ -1357,7 +1357,15 @@ const gates = {
   // Off ⇒ /data payload and the accept flow are byte-identical to today and
   // nothing is recorded (nothing was shown). Counsel reviews the copy once
   // before this flips. Kill switch: unset GATE_ESTIMATE_ACCEPTANCE_TERMS.
-  estimateAcceptanceTerms: process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS === 'true',
+  //
+  // Rollout is two-step on the same variable: `true` shows + records, and
+  // an accept that carries NO attestation (a tab loaded before the flip —
+  // legacy SSR page or the previous bundle) still accepts unrecorded, so no
+  // live tokenized flow is stranded; `required` (flip once every open tab
+  // has had time to reload) refuses an unattested accept with the
+  // reloadable 409 too, so every acceptance under the gate has its record.
+  estimateAcceptanceTerms: ['true', 'required'].includes(process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS),
+  estimateAcceptanceTermsRequired: process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS === 'required',
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to

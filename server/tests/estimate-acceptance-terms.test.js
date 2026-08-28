@@ -87,6 +87,14 @@ describe('GATE_ESTIMATE_ACCEPTANCE_TERMS', () => {
     process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS = 'true';
     jest.resetModules();
     expect(require('../config/feature-gates').isEnabled('estimateAcceptanceTerms')).toBe(true);
+    expect(require('../config/feature-gates').isEnabled('estimateAcceptanceTermsRequired')).toBe(false);
+  });
+
+  test('`required` = on + attestation required', () => {
+    process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS = 'required';
+    jest.resetModules();
+    expect(require('../config/feature-gates').isEnabled('estimateAcceptanceTerms')).toBe(true);
+    expect(require('../config/feature-gates').isEnabled('estimateAcceptanceTermsRequired')).toBe(true);
   });
 });
 

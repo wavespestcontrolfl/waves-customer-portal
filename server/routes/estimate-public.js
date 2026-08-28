@@ -255,26 +255,40 @@ async function registerAcceptedEstimateAppointmentReminder({
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 /**
- * Acceptance terms apply to cancel-anytime lanes only. Termite / WDO work is
- * governed by its own signed agreement (contracts lane), so an estimate
- * carrying any termite/WDO row gets NO acceptance line and NO record (GH
- * Codex P1: the line's "Cancel anytime" would contradict that agreement).
- * Scans the persisted recurring + one-time rows with the route's own
- * termite classifiers plus a name guard for WDO inspections.
+ * Acceptance terms apply to cancel-anytime lanes only (GH Codex P1 ×2).
+ * - Termite / WDO work is governed by its own signed agreement (contracts
+ *   lane): an estimate carrying any termite/WDO row anywhere it can live —
+ *   mapped recurring/one-time rows, engine `lineItems` (result or raw
+ *   engineResult), or a commercial proposal's buildings/programs — gets NO
+ *   acceptance line and NO record.
+ * - An authored commercial proposal with contractual `commercialTerms`
+ *   (initial term, cancellation notice) is governed by those terms.
+ * FAIL CLOSED: malformed or empty estimate data ⇒ no terms (showing
+ * "cancel anytime / no contract" to an estimate we cannot classify is the
+ * failure to avoid; the accept still works, just unrecorded).
  */
 function acceptanceTermsApplyTo(estimate) {
   let d = estimate?.estimate_data;
   if (typeof d === 'string') {
-    try { d = JSON.parse(d); } catch { d = null; }
+    try { d = JSON.parse(d); } catch { return false; }
   }
-  const result = d?.result && typeof d.result === 'object' ? d.result : (d || {});
+  if (!d || typeof d !== 'object') return false;
+  const result = d.result && typeof d.result === 'object' ? d.result : d;
+  const proposal = d.proposal && typeof d.proposal === 'object' ? d.proposal : null;
+  if (proposal?.enabled === true && proposal.commercialTerms && typeof proposal.commercialTerms === 'object') return false;
+  const list = (v) => (Array.isArray(v) ? v : []);
   const rows = [
-    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
-    ...(Array.isArray(result?.oneTime?.items) ? result.oneTime.items : []),
+    ...list(result?.recurring?.services),
+    ...list(result?.oneTime?.items),
+    ...list(result?.lineItems),
+    ...list(d.engineResult?.lineItems),
+    ...list(proposal?.buildings).flatMap((b) => list(b?.lineItems)),
+    ...list(proposal?.programs),
   ];
+  if (!rows.length) return false;
   return !rows.some((r) => {
-    if (!r || typeof r !== 'object') return false;
-    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''}`.toLowerCase();
+    if (!r || typeof r !== 'object') return true;
+    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''} ${r.description || ''}`.toLowerCase();
     return /termite|\bwdo\b|wood[- ]destroying/.test(names)
       || String(recurringServiceKey(r) || '').includes('termite')
       || isTermiteBondRow(r)
@@ -8775,17 +8789,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       && acceptanceTermsApplyTo(estimate);
     const recordAcceptanceTerms = acceptanceTermsActive
       && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
-    // Only a STALE attestation is refused: the tab rendered an older copy
+    // A STALE attestation is always refused: the tab rendered an older copy
     // than this server records, so it must reload and read the current line.
-    // An ABSENT attestation accepts unrecorded (GH Codex r1+r2 P0): a tab
-    // loaded before the gate flipped — legacy SSR page, the previous React
-    // bundle, a second tab racing a rollout — never rendered any terms and
-    // cannot be recorded as accepting them; refusing it would strand a live
-    // tokenized flow with no recovery. Every post-gate client attests (the
-    // page sends the served version), so the record is complete for every
-    // customer who actually saw the line. Nothing is ever recorded without
-    // an attestation.
-    if (acceptanceTermsActive && acceptedTermsVersion && !recordAcceptanceTerms) {
+    // An ABSENT attestation is a tab loaded before the gate flipped (legacy
+    // SSR page, the previous React bundle) that never rendered any terms and
+    // cannot be recorded as accepting them. Under `true` it accepts
+    // unrecorded so no live tokenized flow is stranded (GH Codex r1+r2 P0);
+    // under `required` (flipped once open tabs have had time to reload) it
+    // gets the same reloadable 409, so every acceptance has its record
+    // (pre-push Codex P1). Nothing is ever recorded without an attestation.
+    const acceptanceTermsRequired = acceptanceTermsActive
+      && featureGates.isEnabled('estimateAcceptanceTermsRequired');
+    if (acceptanceTermsActive && !recordAcceptanceTerms
+      && (acceptedTermsVersion || acceptanceTermsRequired)) {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
@@ -24048,3 +24064,6 @@ module.exports.estimateTreeShrubKnobSignal = require('../services/estimate-tree-
 // lawn PriceCard renders beside its per-application price.
 module.exports.measuredBasisForSection = measuredBasisForSection;
 module.exports.attachMeasuredBasis = attachMeasuredBasis;
+// Test hook (acceptance-terms lane 2026-08-28): which estimates get the
+// cancel-anytime acceptance line at all.
+module.exports.acceptanceTermsApplyTo = acceptanceTermsApplyTo;
