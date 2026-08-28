@@ -1962,7 +1962,7 @@ async function createSelfBooking(payload = {}) {
       }
       const srcEst = (estimate && String(estimate.id) === srcEstIdStr)
         ? estimate
-        : await db('estimates').where('id', srcEstIdStr).first('id', 'customer_id', 'customer_phone', 'customer_email');
+        : await db('estimates').where('id', srcEstIdStr).first('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'terms_version');
       if (srcEst) {
         sourceEstimateRow = srcEst;
       } else {
@@ -2049,10 +2049,13 @@ async function createSelfBooking(payload = {}) {
       }
       if (owned) {
         sourceEstimateId = srcEstIdStr;
-        // A customer-less accepted estimate (phoneless one-time accept) now
-        // has a proven owner: attach its acceptance record + terms stamp.
-        const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
-        await attachAcceptanceOwnership(db, { estimateId: srcEstIdStr, customerId: custId });
+        // A customer-less ACCEPTED estimate with a recorded acceptance
+        // (phoneless one-time accept) now has a proven owner: attach its
+        // acceptance record + terms stamp. Only that case touches the DB.
+        if (!sourceEstimateRow.customer_id && sourceEstimateRow.status === 'accepted' && sourceEstimateRow.terms_version) {
+          const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
+          await attachAcceptanceOwnership(db, { estimateId: srcEstIdStr, customerId: custId });
+        }
       } else {
         logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} does not belong to booking customer ${custId} — booking proceeds unlinked`);
       }
