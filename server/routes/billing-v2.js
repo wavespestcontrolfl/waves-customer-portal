@@ -864,7 +864,20 @@ router.delete('/cards/:id', async (req, res, next) => {
       }
     });
 
-    if (outcome) return res.status(outcome.status).json(outcome.body);
+    if (outcome) {
+      // Make the refusal observable (owner ask 2026-08-28): audit only, not
+      // guard input — written after the transaction, best-effort. The
+      // firsts watch (payment-method-firsts-watch) reports the first one.
+      if (outcome.body?.code === 'autopay_method_in_use') {
+        void logAutopay(req.customerId, 'removal_refused', {
+          paymentMethodId: outcome.body.autopay?.methodId || null,
+          details: { source: 'portal_delete', paused: !!outcome.body.autopay?.paused },
+        }).catch((logErr) => {
+          logger.warn(`[billing-v2] removal_refused log failed for customer ${req.customerId}: ${logErr.message}`);
+        });
+      }
+      return res.status(outcome.status).json(outcome.body);
+    }
 
     // Lifecycle notice (gated inside the sender). The row is gone — pass
     // the snapshot. Under the guard a removed method was never in charge,

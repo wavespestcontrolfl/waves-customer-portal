@@ -628,6 +628,23 @@ function initScheduledJobs() {
   setTimeout(bookingFunnelCanaryTick, 90 * 1000);
   cron.schedule('37 */6 * * *', bookingFunnelCanaryTick, { timezone: 'America/New_York' });
 
+  // BOOT (+120s, then EVERY 6H at :49) — payment-method guard "firsts" watch
+  // (#3556 rollout, owner ask 2026-08-28): one ops email the first time the
+  // removal guard refuses a detach and the first time each negative Auto Pay
+  // lifecycle email goes out. Markers in system_settings make each notice
+  // one-time across restarts; the tick retires itself once all three are
+  // recorded. Kill switch PM_GUARD_FIRSTS_WATCH=off. runExclusive so a deploy
+  // overlap can't double-email the same first.
+  const pmGuardFirstsTick = async () => {
+    try {
+      await runExclusive('pm-guard-firsts-watch', () => require('./payment-method-firsts-watch').runPaymentMethodFirstsWatch());
+    } catch (err) {
+      logger.error(`[pm-guard-firsts] tick failed: ${err.message}`);
+    }
+  };
+  setTimeout(pmGuardFirstsTick, 120 * 1000);
+  cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {
