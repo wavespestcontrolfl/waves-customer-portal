@@ -405,7 +405,7 @@ auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; fre
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
-auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; DB-backed count of seo_link_attempts action IN (submit, create_account) for the ET day, checked inside the locked claim and again immediately before each submit; 0 ⇒ no automated submissions)
+auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day, counted together with completed submissions — and released/converted by the report or the lease sweep; re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
 owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
@@ -477,7 +477,9 @@ listing-style paths) and, for signup-lane paths, **one placement per GBP locatio
 (`location_key`, from `config/locations.js` — the existing runner's per-location identity,
 preserved), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
 `source` = the domain's first-touch source, `link_type` = the path's lane) if none exists
-for that (domain, page), runs the §6.3 decision, stamps `authority` on the **placement**
+for that **(domain, page, location_key)** — the same triple `findPlacementRow` matches and the
+unique key enforces, so a second GBP location is never suppressed by the first — runs the
+§6.3 decision, stamps `authority` on the **placement**
 (the path only receives the informational `authority_last_decided`, which does not bump its
 revision — so approval never invalidates itself), and advances the registry: `AUTO_*` → `agent_state='ready_to_acquire'` (the row is
 now leasable); `OWNER_*` → `awaiting_owner` (registry stays `qualified` until approval, which
@@ -845,9 +847,12 @@ learned from attempt outcomes). Outreach: `OutreachProvider` = drafter + `link-p
 - **Verification** is unchanged and authoritative: verifier (crawl + DataForSEO, scan-tracked
   rows only), indexer (`site:` SERP), profile cross-link, `first_live_at`, `is_dofollow` read
   from live `rel`. A provider report never sets `live`.
-- **D30 survival** = placement `live`/`indexed` at `first_live_at + 30d` (and again at D90).
-  Derived nightly from `last_live_check` + `seo_backlink_events`; stored on the placement
-  (`d30_live`, `d90_live`) — this is the only success metric that counts.
+- **D30 survival** = the link provably active AT `first_live_at + 30d` (and again at D90):
+  the same bracketing rule as the imported baseline in §4 — a verified observation (verifier
+  live check or scan) strictly before the cutoff, one on/after it, and no `lost`/`merged`
+  event between them; a link absent at the cutoff that recovered before the nightly job ran
+  is NOT d30_live. Derived nightly; stored on the placement (`d30_live`, `d90_live`, tri-state
+  true/false/null=unknown) — this is the only success metric that counts.
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
   and per `domain` into `seo_link_learning` (small table, replaced each night). The scorer reads
   them:
@@ -968,10 +973,12 @@ unset its gate; budget kill = the issuer program's limit.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
 - **Footprint** — daily caps on sends (§6.4, inside the sender lock) and on submissions
-  (`auto_submission_daily_cap`: a DB-backed per-ET-day count over `seo_link_attempts`,
-  enforced in the locked claim and re-checked immediately before every submit, so repeated
-  manual runs or several providers can never add disjoint batches past the cap — the
-  runner's `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
+  (`auto_submission_daily_cap`: the locked claim **reserves a slot** — an attempt row
+  `outcome='slot_reserved'` for the ET day, written under the claim's advisory lock and
+  counted with completed submissions, converted by the report or released by the lease
+  sweep — so several leased providers cannot all observe room before any attempt is
+  recorded; re-checked immediately before every submit. The runner's
+  `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
   one conversation per inbox
   (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
