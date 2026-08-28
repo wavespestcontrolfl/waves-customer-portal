@@ -58,11 +58,16 @@ const FLAG_BLOCKED_CHANNELS = {
   do_not_text: ['sms'],
   do_not_email: ['email'],
   automated_voice_consent_revoked: ['voice'],
-  // Owner ruling 2026-08-28: customers known to pay by check are never
-  // called by the automated voice lane (texts/emails and human calls
-  // unaffected). Set via ops/agents/collections-flag.js.
-  pays_by_check: ['voice'],
+  // Owner ruling 2026-08-28: customers known to pay by check get NO
+  // late-payment outreach — no automated call, no late-payment text or
+  // email. Pre-visit balance reminders and human calls are unaffected
+  // (see FLAG_LATE_PAYMENT_ONLY). Set via ops/agents/collections-flag.js.
+  pays_by_check: ['voice', 'sms', 'email'],
 };
+// Flags whose sms/email block applies ONLY to the late_payment purpose —
+// the customer still gets ordinary balance reminders; only dunning stops.
+// Voice is always blocked for these (the automated lane is dunning-only).
+const FLAG_LATE_PAYMENT_ONLY = new Set(['pays_by_check']);
 
 // Voice pilot caps (owner-scoped): ONE invoice, ANY balance (owner ruling
 // 2026-08-28 removed the $50–$500 band), 14–60 days
@@ -315,7 +320,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     for (const row of flags) {
       const blocked = FLAG_BLOCKED_CHANNELS[row.flag];
       // Unknown flag string = fail closed on every channel.
-      if (!blocked || blocked.includes(channel)) deny(`flag_${row.flag}`);
+      if (!blocked || blocked.includes(channel)) {
+        if (blocked && FLAG_LATE_PAYMENT_ONLY.has(row.flag) && !isVoiceLike(channel) && purpose !== 'late_payment') continue;
+        deny(`flag_${row.flag}`);
+      }
     }
 
     // ── Canonical suppression list (codex gh-r1) ────────────────────────

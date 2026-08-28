@@ -457,15 +457,25 @@ describe('voice pilot caps (purpose late_payment)', () => {
     });
   }
 
-  test('pays_by_check flag blocks the automated voice channel only (owner ruling 2026-08-28)', async () => {
-    armAllowedBaseline({ flags: [{ flag: 'pays_by_check', customer_id: 'cust-1', released_at: null }] });
+  test('pays_by_check blocks the automated call AND late-payment texts/emails, but not ordinary balance reminders (owner ruling 2026-08-28)', async () => {
+    const withFlag = () => armAllowedBaseline({ flags: [{ flag: 'pays_by_check', customer_id: 'cust-1', released_at: null }] });
+    withFlag();
     const voice = await evalVoice();
     expect(voice.allowed).toBe(false);
     expect(voice.denialReasons).toContain('flag_pays_by_check');
-    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.pays_by_check).toEqual(['voice']);
-    armAllowedBaseline({ flags: [{ flag: 'pays_by_check', customer_id: 'cust-1', released_at: null }] });
-    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'late_payment', now: WED_11AM_EDT });
-    expect(sms.denialReasons).not.toContain('flag_pays_by_check');
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.pays_by_check).toEqual(['voice', 'sms', 'email']);
+    for (const channel of ['sms', 'email']) {
+      withFlag();
+      const late = await ContactPolicy.evaluate('cust-1', { channel, purpose: 'late_payment', now: WED_11AM_EDT });
+      expect(late.denialReasons).toContain('flag_pays_by_check');
+      withFlag();
+      const reminder = await ContactPolicy.evaluate('cust-1', { channel, purpose: 'balance_reminder', now: WED_11AM_EDT });
+      expect(reminder.denialReasons).not.toContain('flag_pays_by_check');
+    }
+    // manual (human) calls are not blocked by this flag
+    withFlag();
+    const manual = await ContactPolicy.evaluate('cust-1', { channel: 'manual_call', purpose: 'late_payment', now: WED_11AM_EDT });
+    expect(manual.denialReasons).not.toContain('flag_pays_by_check');
   });
 
   // now = Wed 2026-08-12 ET. Overdue age is COMPUTED from due_date.
