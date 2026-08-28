@@ -541,13 +541,32 @@ function inferLinkReason(url) {
   return 'hub';
 }
 
+// A link whose label or "(" gap crosses a PARAGRAPH boundary — a blank
+// line, an ATX heading, a thematic break, a list-item opener, a blockquote
+// marker, or an HTML/MDX block opener on the continuation line — renders as
+// text under CommonMark, so it cannot count toward the required service /
+// city links (the completion gate's rendered-link walk applies the same
+// rule with full quote-depth tracking; here the quote case is judged
+// conservatively — a missed link raises the missing-link P1, never hides it).
+const PARAGRAPH_BOUNDARY_LINE_RE = /^[ \t]*$|^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S|<(?:[A-Z][A-Za-z0-9_.]*|\/?(?:address|article|aside|blockquote|details|dialog|div|dl|fieldset|figcaption|figure|footer|form|h[1-6]|header|hr|li|main|nav|ol|p|pre|script|section|style|table|tbody|td|textarea|tfoot|th|thead|tr|ul)|!--)(?:[ \t]|\/?>|$|>))/;
+function crossesParagraph(fragment) {
+  const lines = String(fragment || '').split('\n');
+  return lines.slice(1).some((line) => PARAGRAPH_BOUNDARY_LINE_RE.test(line));
+}
+
 function extractMarkdownLinkItems(markdown = '') {
   const out = [];
   const seen = new Set();
-  const re = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\]\(\s*(\/[^)\s#?]+\/?)(?:[#?][^)]*)?\)/g;
+  // Whitespace inside the syntax may include newlines; the tail after the
+  // destination may not (the closing ")" must sit on the destination's
+  // line or the link is not a link).
+  const re = /(?<!(?<!\\)(?:\\\\)*!)\[((?:[^\[\]]|\[[^\[\]]*\])+)\](\(\s*)(\/[^)\s#?]+\/?)(?:[#?][^)\n]*)?\)/g;
   let match;
   while ((match = re.exec(String(markdown || ''))) !== null) {
-    const url = normalizeUrl(match[2]);
+    // The gap is judged with the destination's line attached — its
+    // continuation line is where a boundary would sit.
+    if (crossesParagraph(match[1]) || crossesParagraph(match[2] + match[3])) continue;
+    const url = normalizeUrl(match[3]);
     if (!url || seen.has(url)) continue;
     seen.add(url);
     out.push({ anchorText: cleanText(match[1]), url });

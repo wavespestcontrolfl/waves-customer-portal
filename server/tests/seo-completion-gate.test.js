@@ -1422,6 +1422,67 @@ describe('seo-completion-gate', () => {
       });
       expect(crossed.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
     }
+    // A reference DEFINITION whose label (or the newline before its
+    // destination) crosses a paragraph boundary registers nothing —
+    // the later reference renders as text.
+    for (const body of [
+      '[cta\n\nlabel]: /contact/\n\n[Get a Termite Estimate][cta label] x.',
+      '[cta\n- label]: /contact/\n\n[Get a Termite Estimate][cta label] x.',
+      '[cta]:\n# /contact/\n\n[Get a Termite Estimate][cta] x.',
+    ]) {
+      const brokenDef = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(brokenDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    }
+    const wrappedDef = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[cta\nlabel]: /contact/\n\n[Get a Termite Estimate][cta label] x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(wrappedDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // Contact-led anchors are actionable CTAs — the same verb set the
+    // service-page request-led classifier uses.
+    for (const body of [
+      '[Contact Waves for a Termite Estimate](/contact/) x.',
+      '[Text Us for a Termite Quote](/contact/) x.',
+      '[Call for Your Termite Estimate](/contact/) x.',
+    ]) {
+      const contactLed = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(contactLed.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+      expect(contactLed.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    }
+
+    // HTML anchor wording is judged as SEEN — a definitely-hidden
+    // descendant does not supply the estimate wording; merely styled copy
+    // is still visible.
+    const hiddenSpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<a href="/contact/"><span hidden>Get a Termite Estimate</span>Click here</a> x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(hiddenSpan.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    expect(hiddenSpan.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const ariaHidden = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<a href="/contact/"><span aria-hidden="true">Get a Termite Estimate</span></a> x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(ariaHidden.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const styledSpan = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<a href="/contact/"><span class="cta">Get a Termite Estimate</span></a> x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(styledSpan.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
     for (const body of [
       '> [Get a Termite Estimate](\n> /contact/) x.',
       '[Get a Termite Estimate](/contact/ "Book\nnow") x.',

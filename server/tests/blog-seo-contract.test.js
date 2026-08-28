@@ -5,7 +5,7 @@ const {
   inferContentCluster,
   validateBlogSeoContract,
 } = require('../services/content/blog-seo-contract');
-const { inferLinkReason } = require('../services/content/blog-seo-contract')._internals;
+const { inferLinkReason, extractMarkdownLinks } = require('../services/content/blog-seo-contract')._internals;
 
 function draft(overrides = {}) {
   return {
@@ -200,6 +200,21 @@ describe('blog SEO contract helpers', () => {
     expect(inferContentCluster({ keyword: 'WDO inspection Florida' })).toBe('wdo_wdi');
     expect(inferContentCluster({ keyword: 'Taexx in-wall pest control' })).toBe('taexx_in_wall');
     expect(inferContentCluster({ keyword: 'chinch bugs vs drought stress in Bradenton lawns' })).toBe('lawn_turf');
+  });
+
+  test('body links that cross a paragraph boundary do not count as included links', () => {
+    // A blank line, heading, list opener, blockquote marker, or HTML block
+    // opener inside the label or after "(" ends the paragraph — CommonMark
+    // renders text, not a link — so the required service/city link is
+    // still MISSING. A single soft-wrap newline still links.
+    expect(extractMarkdownLinks('[Pest Control](\n\n/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest\n\nControl](/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](\n> /pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](\n# /pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest\n- Control](/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a\n\n)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](\n/pest-control/)')).toEqual(['/pest-control/']);
+    expect(extractMarkdownLinks('[Pest\nControl](/pest-control/)')).toEqual(['/pest-control/']);
   });
 
   test('classifies city-service URLs by pattern, not a fixed city whitelist', () => {

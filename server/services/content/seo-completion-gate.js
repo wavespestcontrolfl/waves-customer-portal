@@ -355,7 +355,11 @@ const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|wa
 // please/click-to lead-in) or appears as an INFINITIVE invitation
 // ("…page to reserve service"); a subordinate verb with its own subject
 // ("…customers get after an inspection") is still prose.
-const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)`;
+// Contact verbs are ONE source for the actionable-anchor test and the
+// service-page request-led classifier — "Contact Waves for a Termite
+// Estimate" / "Text Us for a Quote" are CTAs in both.
+const CONTACT_VERB_SOURCE = 'call|contact|text';
+const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|${CONTACT_VERB_SOURCE}|click|visit|open|tap|reach|talk|see|view|learn)`;
 // Invitation-shaped conversion anchors ("Ready for Your Free Estimate?",
 // "Need a Termite Estimate?", "Want a Quote?", "Looking for an Estimate?")
 // carry no leading verb yet are plainly CTAs — accepted for PRESENCE only.
@@ -545,6 +549,30 @@ function extractLinks(body) {
   // CommonMark label matching is case-insensitive with internal whitespace
   // collapsed — normalize both the definition and the reference the same way.
   const label = (l) => String(l || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // A label cannot cross a PARAGRAPH boundary — a blank line (a blank
+  // quote line included), an ATX heading, a thematic break, a list-item
+  // opener (bullet, or ordered numbered 1), or a line that DEEPENS the
+  // blockquote context (the quote interrupts the paragraph) ends the
+  // paragraph, so "[Get a Termite" + blank line (or "> Estimate](…)")
+  // renders no link and must not satisfy CTA presence. Same-depth quoted
+  // continuation and lazy continuation still soft-wrap.
+  // An HTML BLOCK opener that can interrupt a paragraph (CommonMark HTML
+  // block types 1–6: the flow-element tag list, script/pre/style/textarea,
+  // comments, processing instructions, declarations, CDATA) and an MDX
+  // COMPONENT opener (PascalCase JSX tag at the start of a line) end the
+  // paragraph too — "[Get a Termite" + "<div></div>" + "Estimate](…)"
+  // renders no link. Type-7 (any other complete tag on its own line)
+  // cannot interrupt a paragraph and is NOT a boundary.
+  const HTML_FLOW_OPENER_RE = /^ {0,3}<(?:\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)|(?:script|pre|style|textarea)(?:[ \t]|>|$)|!--|\?|![a-z]|!\[CDATA\[)/i;
+  const MDX_FLOW_COMPONENT_RE = /^ {0,3}<[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*(?:[ \t]|\/?>|$)/;
+  const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
+    if (lineQuoteDepth > openQuoteDepth) return true;
+    if (!line.trim()) return true;
+    if (HTML_FLOW_OPENER_RE.test(line) || MDX_FLOW_COMPONENT_RE.test(line)) return true;
+    // A setext UNDERLINE ("===", "---") turns the line above into a
+    // heading — the paragraph ends there too.
+    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
+  };
   // Duplicate definitions: CommonMark resolves references against the FIRST
   // definition of a label; later repeats are inert.
   const defs = new Map();
@@ -573,9 +601,24 @@ function extractLinks(body) {
     }
     return depth === 0;
   };
+  // A definition's LABEL (and the single newline allowed before its
+  // destination) obeys the same paragraph boundaries as a link label —
+  // "[cta\n\nlabel]: /contact/" registers nothing, so a later
+  // "[…][cta label]" renders as text.
+  const defCrossesBoundary = (mt) => {
+    const openDepth = depthAtPos(mt.index);
+    for (let k = 0; k < mt[0].length; k += 1) {
+      if (mt[0][k] !== '\n') continue;
+      const abs = mt.index + k + 1;
+      const le = sMd.indexOf('\n', abs);
+      if (labelBoundaryLine(sMd.slice(abs, le === -1 ? undefined : le), openDepth, depthAtPos(abs))) return true;
+    }
+    return false;
+  };
   while ((m = def.exec(sMd)) !== null) {
     if (!defTail.test(m[3])) continue;
     if (!balancedBareDest(m[2])) continue;
+    if (defCrossesBoundary(m)) continue;
     const key = label(m[1]);
     if (!defs.has(key)) defs.set(key, dest(m[2]));
     consumed.push([m.index, m.index + m[0].length]);
@@ -591,30 +634,6 @@ function extractLinks(body) {
     let n = 0;
     while (i - 1 - n >= 0 && str[i - 1 - n] === '\\') n += 1;
     return n % 2 === 1;
-  };
-  // A label cannot cross a PARAGRAPH boundary — a blank line (a blank
-  // quote line included), an ATX heading, a thematic break, a list-item
-  // opener (bullet, or ordered numbered 1), or a line that DEEPENS the
-  // blockquote context (the quote interrupts the paragraph) ends the
-  // paragraph, so "[Get a Termite" + blank line (or "> Estimate](…)")
-  // renders no link and must not satisfy CTA presence. Same-depth quoted
-  // continuation and lazy continuation still soft-wrap.
-  // An HTML BLOCK opener that can interrupt a paragraph (CommonMark HTML
-  // block types 1–6: the flow-element tag list, script/pre/style/textarea,
-  // comments, processing instructions, declarations, CDATA) and an MDX
-  // COMPONENT opener (PascalCase JSX tag at the start of a line) end the
-  // paragraph too — "[Get a Termite" + "<div></div>" + "Estimate](…)"
-  // renders no link. Type-7 (any other complete tag on its own line)
-  // cannot interrupt a paragraph and is NOT a boundary.
-  const HTML_FLOW_OPENER_RE = /^ {0,3}<(?:\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)|(?:script|pre|style|textarea)(?:[ \t]|>|$)|!--|\?|![a-z]|!\[CDATA\[)/i;
-  const MDX_FLOW_COMPONENT_RE = /^ {0,3}<[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*(?:[ \t]|\/?>|$)/;
-  const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
-    if (lineQuoteDepth > openQuoteDepth) return true;
-    if (!line.trim()) return true;
-    if (HTML_FLOW_OPENER_RE.test(line) || MDX_FLOW_COMPONENT_RE.test(line)) return true;
-    // A setext UNDERLINE ("===", "---") turns the line above into a
-    // heading — the paragraph ends there too.
-    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
   };
   const balancedLabelEnd = (str, open, openQuoteDepth, depthAt) => {
     let depth = 0;
@@ -799,9 +818,15 @@ function extractLinks(body) {
   const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?(?<![\w-])href\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a\s*>/gi;
   // Nested-tag stripping is quote-aware too — an inner tag's quoted
   // attribute may contain ">" (`<span title="1 > 0">`).
+  // Anchor wording is judged as SEEN: text inside a definitely-hidden
+  // descendant (`<span hidden>`, aria-hidden, display:none, <template>…)
+  // is blanked before the tags are stripped, so "<span hidden>Get a
+  // Termite Estimate</span>Click here" is the anchor "Click here".
+  const { blankDefinitelyHiddenContent } = require('./content-guardrails');
+  const seenText = (inner) => (typeof blankDefinitelyHiddenContent === 'function' ? blankDefinitelyHiddenContent(inner) : inner);
   while ((m = html.exec(s)) !== null) {
     if (inAttrValue(m.index)) continue;
-    links.push({ anchor: m[6].replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
+    links.push({ anchor: seenText(m[6]).replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
   }
   // CommonMark AUTOLINKS (`<https://…>`) render as live links whose anchor
   // is the bare URL — first-party ones canonicalize through dest(). A
@@ -1008,7 +1033,7 @@ const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+
 // /termite-control/) — the estimate/quote wording rule covers it too.
 // Descriptive service links (bare noun phrases, prose references,
 // editorial "Get ready …" shapes) stay exempt.
-const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE}|call|contact|text)\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
+const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE}|${CONTACT_VERB_SOURCE})\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
 const ESTIMATE_KW_RE = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
 // A destination is a SERVICE or CITY page when the contract's link-reason
 // heuristic says so OR when it matches the canonical city-service route

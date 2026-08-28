@@ -168,12 +168,23 @@ function opensHiddenContent(tag) {
 // NESTING-AWARE: a regex stopping at the first </span> left the tail of a
 // hidden block visible (Codex r9 P0). Walk to the MATCHING close tag.
 function blankHiddenContent(str) {
+  return blankContentWhere(str, opensHiddenContent);
+}
+// Same walk with the CERTAINTY-only predicate: text a browser definitely
+// never shows (`hidden`, aria-hidden, display:none / visibility:hidden,
+// natively hidden containers). Used where the caller must judge the text
+// as SEEN — a CTA anchor's visible wording — without discarding merely
+// styled copy.
+function blankDefinitelyHiddenContent(str) {
+  return blankContentWhere(str, opensDefinitelyHidden);
+}
+function blankContentWhere(str, opens) {
   const text = String(str || '');
   const out = text.split('');
   const tags = [...eachTag(text)];
   for (let t = 0; t < tags.length; t += 1) {
     const tag = tags[t];
-    if (tag.isClose || tag.selfClosing || !opensHiddenContent(tag)) continue;
+    if (tag.isClose || tag.selfClosing || !opens(tag)) continue;
     let depth = 1;
     let endIdx = -1;
     for (let u = t + 1; u < tags.length; u += 1) {
@@ -4500,6 +4511,9 @@ module.exports = {
   extractRawMarkdownTables,
   blankNonRenderedMarkdown,
   blankNonRenderedMarkdownWithDepths,
+  // certainty-only hidden-text blanker — the completion gate judges HTML
+  // CTA anchors by their VISIBLE wording.
+  blankDefinitelyHiddenContent,
   // entity decoder (fail-closed, sentinel for control chars) — consumed by
   // seo-completion-gate so CTA anchors are classified as RENDERED text.
   decodeEntitiesForScan,
