@@ -136,9 +136,10 @@ describe('renderWeekPlanReport', () => {
 describe('decideWeekPlan (server glue)', () => {
   test('feeds the advice engine\'s target/applied into the runtime and pins the policy by `now`', () => {
     const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6, referenceEt0InchesWeek: 1.6 });
-    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, grassType: 'st_augustine', et0Inches: 1.6, forecastRainInches: 0.3, ...SPRAY, county: 'Manatee', now: new Date('2026-08-28T12:00:00Z') });
+    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, forecastRainInches: 0.3, ...SPRAY, county: 'Manatee', now: new Date('2026-08-28T12:00:00Z') });
     expect(restriction.maxDaysPerWeek).toBe(1);
-    expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek); // same month → same target
+    expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek); // same month, same ET₀ → same target
+    expect(decisionInputs.targetBasis).toBe('forecast_et0');
     expect(decisionInputs.planMonth).toBe(8);
     expect(plan.carryoverInches).toBe(0.5);
     expect(plan.action).toBe('run');
@@ -161,12 +162,19 @@ describe('decideWeekPlan (server glue)', () => {
   test('the plan\'s season and target come from the ET month of NOW, not the completed week', () => {
     // Completed week ended in March (cool); the plan is for early April (shoulder).
     const lastWeek = buildIrrigationAdvice({ grassType: 'st_augustine', month: 3, irrigationInchesPerWeek: 0.5, rainfallInches7d: 0.1, referenceEt0InchesWeek: 1.0 });
-    const { plan, decisionInputs } = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', et0Inches: 1.0, ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    const { plan, decisionInputs } = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', forecastEt0Inches: 1.0, ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
     expect(decisionInputs.planMonth).toBe(4);
     expect(plan.season).toBe('shoulder');
     expect(plan.reasons).not.toContain('cool_season');
     expect(plan.targetInches).toBe(0.75); // 1.0 × 0.8 × 0.9 shoulder Kc, quarter-rounded
     expect(decisionInputs.lastWeekTargetInches).toBe(lastWeek.recommendedInchesPerWeek);
+    // No forecast ET₀ → the seasonal target for the plan month, never last week's ET₀.
+    const seasonal = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    expect(seasonal.decisionInputs.targetBasis).toBe('seasonal');
+    expect(seasonal.plan.targetInches).toBe(1); // 1.25 × 0.75 shoulder multiplier
+    // A hot week ahead after a cool completed week sizes from the hot week.
+    const hot = decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', forecastEt0Inches: 1.8, ...SPRAY, county: 'Manatee', now: new Date('2026-04-02T12:00:00Z') });
+    expect(hot.plan.targetInches).toBe(1.25);
     // Late March NOW → cool season, "every 10–14 days" copy allowed.
     expect(decideWeekPlan({ advice: lastWeek, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-03-30T12:00:00Z') }).plan.season).toBe('cool');
   });

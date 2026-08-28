@@ -31,7 +31,7 @@ const {
   runWeeklyIrrigationEmailSweep,
   buildWeeklyEmailDecision,
   findEligibleCustomers,
-  fetchUpcomingWeekRainForecast,
+  fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,
@@ -314,28 +314,33 @@ describe('forecastLine', () => {
   });
 });
 
-describe('fetchUpcomingWeekRainForecast', () => {
+describe('fetchUpcomingWeekForecast', () => {
   // The module caches by coordinates — every case uses distinct coords.
-  const okJson = (precipitation_sum) => ({ ok: true, json: async () => ({ daily: { precipitation_sum } }) });
+  const okJson = (precipitation_sum, et0_fao_evapotranspiration) => ({ ok: true, json: async () => ({ daily: { precipitation_sum, ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration } : {}) } }) });
 
   test('a full 7-day window sums to inches', async () => {
-    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toBe(1.2);
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5.08, 5.08, 5.08, 5.08, 5.08, 5.08, 5.08]));
+    // rain summed in inches; ET₀ arrives in mm → 35.56 mm = 1.4"
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toEqual({ rainInches: 1.2, et0Inches: 1.4 });
+    expect(String(global.fetch.mock.calls[0][0])).toContain('daily=precipitation_sum%2Cet0_fao_evapotranspiration');
   });
 
   test('a SHORT window (Open-Meteo 200 with a partial series) is unknown, not "little rain"', async () => {
     global.fetch = jest.fn(async () => okJson([0.1, 0.2, 0.3]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.02, longitude: -81.02 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.02, longitude: -81.02 })).resolves.toBe(null);
   });
 
   test('a null day inside the window is unknown', async () => {
     global.fetch = jest.fn(async () => okJson([0.1, 0, null, 0.5, 0, 0.3, 0.05]));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
+    // A missing/partial ET₀ series leaves et0Inches null without dropping the rain window.
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5, 5, 5]));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.05, longitude: -81.05 })).resolves.toEqual({ rainInches: 1.2, et0Inches: null });
   });
 
   test('a non-2xx response fails soft to null', async () => {
     global.fetch = jest.fn(async () => ({ ok: false }));
-    await expect(fetchUpcomingWeekRainForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.04, longitude: -81.04 })).resolves.toBe(null);
   });
 });
 

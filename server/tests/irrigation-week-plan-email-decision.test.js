@@ -17,7 +17,7 @@ const BASE = {
   firstName: 'Sam', grassType: 'st_augustine', weekEnding: '2026-08-23', et0Inches: 1.6,
   rainfallInches7d: 0.6, forecastRainInches: 0.3, irrigationSystem: true, irrigationInchesPerWeek: 2,
   irrigationRunMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], irrigationSystemType: ['spray'],
-  weekPlanEnabled: true, county: 'Manatee', now: NOW,
+  weekPlanEnabled: true, county: 'Manatee', forecastEt0Inches: 1.6, now: NOW,
 };
 
 describe('weekly email decision — plan mode', () => {
@@ -57,7 +57,7 @@ describe('weekly email decision — plan mode', () => {
     process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule' });
     let d;
     try {
-      d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, rainfallInches7d: 1.5, now: new Date('2026-01-19T12:00:00Z') });
+      d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, forecastEt0Inches: 0.8, rainfallInches7d: 1.5, now: new Date('2026-01-19T12:00:00Z') });
     } finally {
       delete process.env.IRRIGATION_RESTRICTION_POLICY;
     }

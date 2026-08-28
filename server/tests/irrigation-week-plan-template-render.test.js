@@ -28,14 +28,14 @@ function seedRows() {
 const BASE = {
   firstName: 'Dana', grassType: 'st_augustine', weekEnding: '2026-08-23', et0Inches: 1.6,
   irrigationSystem: true, irrigationRunMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], irrigationSystemType: ['spray'],
-  weekPlanEnabled: true, county: 'Sarasota', now: NOW,
+  weekPlanEnabled: true, county: 'Sarasota', forecastEt0Inches: 1.6, now: NOW,
 };
 
 describe('irrigation.weekly_plan template', () => {
   test.each([
     ['plan_run', { irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 0.3 }],
     ['plan_conditional', { irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 1.4 }],
-    ['plan_hold', { irrigationInchesPerWeek: null, rainfallInches7d: 1.5, forecastRainInches: 0.1, weekEnding: '2026-01-18', et0Inches: 0.8, now: new Date('2026-01-19T12:00:00Z') }],
+    ['plan_hold', { irrigationInchesPerWeek: null, rainfallInches7d: 1.5, forecastRainInches: 0.1, weekEnding: '2026-01-18', et0Inches: 0.8, forecastEt0Inches: 0.8, now: new Date('2026-01-19T12:00:00Z') }],
   ])('%s renders with no unresolved placeholders', (reason, water) => {
     // January is outside the checked-in order's window — configure a
     // year-round policy so the hold case has a legal ceiling to plan under.

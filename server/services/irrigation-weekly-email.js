@@ -236,7 +236,7 @@ function monthFromYmd(ymd) {
 const _forecastCache = new Map();
 const FORECAST_TTL_MS = 6 * 60 * 60 * 1000; // 6h — one cron sweep reuses freely
 
-async function fetchUpcomingWeekRainForecast({ latitude, longitude } = {}) {
+async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
   const lat = numberOrNull(latitude);
   const lon = numberOrNull(longitude);
   if (lat == null || lon == null) return null;
@@ -247,7 +247,10 @@ async function fetchUpcomingWeekRainForecast({ latitude, longitude } = {}) {
   const url = new URL('https://api.open-meteo.com/v1/forecast');
   url.searchParams.set('latitude', String(lat));
   url.searchParams.set('longitude', String(lon));
-  url.searchParams.set('daily', 'precipitation_sum');
+  // Rain for the conditional-run copy; FAO ET₀ so the WEEK-AHEAD plan is
+  // sized from the week ahead's demand, not the completed week's (GH codex
+  // r3 on #3565). ET₀ arrives in mm whatever the precipitation unit.
+  url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
   url.searchParams.set('forecast_days', '7');
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
@@ -269,7 +272,16 @@ async function fetchUpcomingWeekRainForecast({ latitude, longitude } = {}) {
       if (n == null) return null;
       total += n;
     }
-    const value = Math.round(total * 100) / 100;
+    const rainInches = Math.round(total * 100) / 100;
+    // ET₀ is optional: a missing/partial series leaves it null (the plan then
+    // falls back to the seasonal target) without discarding the rain window.
+    let et0Inches = null;
+    const et0Days = payload?.daily?.et0_fao_evapotranspiration;
+    if (Array.isArray(et0Days) && et0Days.length === 7 && et0Days.every((v) => numberOrNull(v) != null)) {
+      const mm = et0Days.reduce((sum, v) => sum + Number(v), 0);
+      et0Inches = Math.round((mm / 25.4) * 100) / 100;
+    }
+    const value = { rainInches, et0Inches };
     _forecastCache.set(key, { at: Date.now(), value });
     return value;
   } catch (err) {
@@ -336,6 +348,8 @@ function buildWeeklyEmailDecision({
   forecastRainInches = null,
   // GATE_IRRIGATION_WEEK_PLAN, read by the sweep and passed in so this
   // decision stays pure; `now` pins the restriction policy in tests.
+  // Week-ahead ET₀ (inches, from the forecast) — sizes the plan's target.
+  forecastEt0Inches = null,
   // Jurisdiction for the restriction policy (resolveRestrictionCounty).
   county = null,
   weekPlanEnabled = false,
@@ -598,7 +612,7 @@ function buildWeeklyEmailDecision({
     const { plan, restriction, decisionInputs } = decideWeekPlan({
       advice,
       grassType,
-      et0Inches,
+      forecastEt0Inches,
       lastWeekRainInches: rainfallInches7d,
       forecastRainInches,
       runMinutes: irrigationRunMinutes,
@@ -1028,11 +1042,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         else summary.skipped.unknown += 1;
         continue;
       }
-      const forecastRainInches = await fetchUpcomingWeekRainForecast({
+      const upcoming = await fetchUpcomingWeekForecast({
         latitude: customer.latitude,
         longitude: customer.longitude,
       });
-      decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches });
+      const forecastRainInches = upcoming ? upcoming.rainInches : null;
+      const forecastEt0Inches = upcoming ? upcoming.et0Inches : null;
+      decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches });
       // Defensive recheck — today the forecast only reroutes a deficit to the
       // on-track template (still a send), but a no-send here must be counted.
       if (!decision.shouldSend) {
@@ -1414,7 +1430,7 @@ module.exports = {
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
   hasLawnServiceEvidence,
-  fetchUpcomingWeekRainForecast,
+  fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
   TEMPLATE_ON_TRACK,

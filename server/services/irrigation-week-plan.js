@@ -52,12 +52,13 @@ function minutesPhrase(plan) {
  * is buildIrrigationAdvice()'s output for LAST week (applied inches, target,
  * rainKnown) — it feeds carryover only. The plan is for the week AHEAD, so
  * its target and season come from the ET month of `now`, not from the
- * completed week's date (an early-April plan must not read as cool season).
+ * completed week's date (an early-April plan must not read as cool season),
+ * and its target from FORECAST ET₀ (else the seasonal lookup).
  */
 function decideWeekPlan({
   advice,
   grassType = null,
-  et0Inches = null,
+  forecastEt0Inches = null,
   lastWeekRainInches = null,
   forecastRainInches = null,
   runMinutes = null,
@@ -70,7 +71,10 @@ function decideWeekPlan({
 } = {}) {
   const restriction = currentRestrictionPolicy(now, { county });
   const planMonth = etParts(now).month;
-  const targetInchesPerWeek = recommendedFromEt0(et0Inches, grassType, planMonth)
+  // The week AHEAD's demand: forecast ET₀ when the forecast carried it, else
+  // the seasonal target for this month — never the completed week's ET₀ (a
+  // cool, cloudy week must not size a hot week's plan).
+  const targetInchesPerWeek = recommendedFromEt0(forecastEt0Inches, grassType, planMonth)
     ?? recommendedInchesPerWeek(grassType, planMonth);
   const plan = buildWeekPlan({
     targetInchesPerWeek,
@@ -99,7 +103,8 @@ function decideWeekPlan({
     forecastRainInches,
     planMonth,
     grassType,
-    et0Inches,
+    forecastEt0Inches,
+    targetBasis: recommendedFromEt0(forecastEt0Inches, grassType, planMonth) != null ? 'forecast_et0' : 'seasonal',
     runMinutes: runtime.runMinutes,
     wateringDays: runtime.wateringDays,
     headTypes: runtime.headTypes,
