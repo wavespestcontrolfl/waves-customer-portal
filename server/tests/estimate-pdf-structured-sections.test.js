@@ -197,3 +197,32 @@ describe('estimate-pdf structured sections (fallback parity)', () => {
     expect(text).not.toContain('CUSTOMER RESPONSIBILITIES');
   });
 });
+
+describe('pdfkit fallback — recorded acceptance block', () => {
+  const ACCEPTANCE = {
+    recordId: 'ACC-ABCD1234',
+    termsVersion: 'v2026-09',
+    termsText: 'Accepting authorizes these services at the price shown.\nServices — until you cancel. No contract.\nAccepting — counts as your signature.',
+    acceptedAt: '2026-08-28T10:35:00Z',
+    ipMasked: '203.0.x.x',
+    device: 'iPhone · Safari',
+  };
+
+  test('prints the verbatim recorded text + stamp when a record is supplied', async () => {
+    const buffer = await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, { acceptance: ACCEPTANCE });
+    const text = extractPdfText(buffer);
+    expect(text).toContain('SERVICE & PAYMENT AUTHORIZATION');
+    expect(text).toContain('Accepting authorizes these services at the price shown.');
+    expect(text).toContain('Accepting');
+    expect(text).toContain('Terms v2026-09');
+    expect(text).toContain('Record ACC-ABCD1234');
+    expect(text).toContain('IP 203.0.x.x');
+  });
+
+  test('renders exactly as before when no record is supplied', async () => {
+    const buffer = await buildEstimateProposalPDFBuffer(STRUCTURED_ESTIMATE, {});
+    const text = extractPdfText(buffer);
+    expect(text).not.toContain('SERVICE & PAYMENT AUTHORIZATION');
+    expect(text).not.toContain('Accepted electronically');
+  });
+});

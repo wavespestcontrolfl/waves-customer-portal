@@ -347,9 +347,70 @@ async function runBondRenewalSweep() {
   return { sent };
 }
 
-async function runDailySweeps() {
-  const bond = await runBondRenewalSweep();
-  return { bondRenewalsSent: bond.sent };
+// Acceptance copy catch-up (GATE_ESTIMATE_ACCEPTANCE_TERMS; pre-push Codex
+// P1): the accept route's post-commit onboarding email — which carries the
+// promised copy of the accepted terms — is fire-and-forget, so a crash or a
+// provider failure between commit and send would leave a recorded
+// acceptance with no emailed copy. Every estimate_acceptances row in the
+// look-back window with no sent-ish email_messages row for its key gets the
+// send re-attempted here: the stable key first (a sent-but-unlogged race
+// dedupes harmlessly), then — when that key is wedged on a failed/blocked
+// row — a day-scoped retry key, exactly the bond-renewal pattern above.
+const ACCEPTANCE_COPY_LOOKBACK_DAYS = 14;
+const ACCEPTANCE_COPY_SETTLE_MINUTES = 30; // give the post-commit send time to land
+const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
+
+async function runAcceptanceCopySweep() {
+  if (!(await db.schema.hasTable('estimate_acceptances'))) return { sent: 0, checked: 0 };
+  const now = Date.now();
+  const rows = await db('estimate_acceptances')
+    .where('accepted_at', '>=', new Date(now - ACCEPTANCE_COPY_LOOKBACK_DAYS * 86400000))
+    .where('accepted_at', '<=', new Date(now - ACCEPTANCE_COPY_SETTLE_MINUTES * 60000))
+    .orderBy('accepted_at', 'asc')
+    .select('estimate_id', 'customer_id');
+  const seen = new Set();
+  let sent = 0;
+  let checked = 0;
+  for (const row of rows) {
+    if (seen.has(row.estimate_id)) continue;
+    seen.add(row.estimate_id);
+    checked += 1;
+    const baseKey = `estimate.accepted_onboarding:${row.estimate_id}`;
+    try {
+      const delivered = await db('email_messages')
+        .where('idempotency_key', 'like', `${baseKey}%`)
+        .whereIn('status', SENT_ISH)
+        .first('id');
+      if (delivered) continue;
+      const wedged = await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'estimate_data');
+      if (!estimate) continue;
+      const { sendEstimateAcceptedOnboarding } = require('./estimate-accepted-email');
+      const EstimateConverter = require('./estimate-converter');
+      let estData = estimate.estimate_data;
+      if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
+      const firstService = (EstimateConverter.recurringServicesFromEstimateData(estData || {})[0]
+        || EstimateConverter.estimateOneTimeItemsFromData(estData || {})[0]) || null;
+      const result = await sendEstimateAcceptedOnboarding({
+        customerId: row.customer_id || estimate.customer_id || null,
+        estimateId: estimate.id,
+        serviceLabel: firstService?.name || firstService?.label || 'service',
+        appointment: null,
+        idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
+      });
+      if (result?.sent) sent += 1;
+    } catch (err) {
+      logger.error(`[lifecycle-sweeps] acceptance copy resend failed for estimate ${row.estimate_id}: ${err.message}`);
+    }
+  }
+  if (sent) logger.info(`[lifecycle-sweeps] re-sent ${sent} acceptance copy email(s) (${checked} checked)`);
+  return { sent, checked };
 }
 
-module.exports = { runDailySweeps, runBondRenewalSweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };
+async function runDailySweeps() {
+  const bond = await runBondRenewalSweep();
+  const acceptanceCopies = await runAcceptanceCopySweep();
+  return { bondRenewalsSent: bond.sent, acceptanceCopiesSent: acceptanceCopies.sent };
+}
+
+module.exports = { runDailySweeps, runBondRenewalSweep, runAcceptanceCopySweep, syncTermiteBonds, _private: { termYearsFrom, termYearsForVisit, displayDate } };

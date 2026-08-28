@@ -72,7 +72,11 @@ async function acceptanceNoteFor(estimateId) {
   return `You accepted electronically${when} (terms ${row.terms_version}). What you accepted: \u201c${line || ''}\u201d${terms.length ? ` ${terms.join(' \u00b7 ')}` : ''}`;
 }
 
-async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment } = {}) {
+// `idempotencyKey` is overridable ONLY by the daily catch-up sweep
+// (lifecycle-email-sweeps runAcceptanceCopySweep): the stable per-estimate
+// key dedupes the normal post-commit send; a retry after a failed/blocked
+// row needs a day-scoped key, same pattern as the bond renewal sweep.
+async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, idempotencyKey } = {}) {
   try {
     if (!estimateId) return null;
     // Recipient: the linked customer, else the estimate's own contact — a
@@ -104,7 +108,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       },
       recipientType: 'customer',
       recipientId: customerId || null,
-      idempotencyKey: `estimate.accepted_onboarding:${estimateId}`,
+      idempotencyKey: idempotencyKey || `estimate.accepted_onboarding:${estimateId}`,
       triggerEventId: `estimate.accepted_onboarding:${estimateId}`,
       categories: ['estimate_accepted_onboarding'],
       // SendGrid 4xx bodies can echo the recipient address — keep provider

@@ -504,10 +504,47 @@ function termsBlock(ctx, proposal, totals, y) {
   return y;
 }
 
+// The recorded acceptance (GATE_ESTIMATE_ACCEPTANCE_TERMS): the verbatim
+// line + terms the customer tapped Accept under and the when / version /
+// device of the tap. Same block the browser-rendered document prints, so a
+// pdfkit fallback never produces an accepted document without its record.
+function acceptanceBlock(ctx, acceptance, y) {
+  if (!acceptance || !acceptance.termsText) return y;
+  const { doc } = ctx;
+  const lines = String(acceptance.termsText).split('\n').map((l) => l.trim()).filter(Boolean);
+  y = ensureSpace(ctx, y, 26);
+  y = sectionLabel(doc, 'Service & payment authorization', L, y);
+  for (const line of lines) {
+    doc.fontSize(9).font('Helvetica').fillColor(BODY);
+    const lineH = doc.heightOfString(line, { width: W, lineGap: 1.5 });
+    y = ensureSpace(ctx, y, lineH + 6);
+    doc.fontSize(9).font('Helvetica').fillColor(BODY);
+    doc.text(line, L, y, { width: W, lineGap: 1.5 });
+    y += lineH + 6;
+  }
+  const at = acceptance.acceptedAt ? new Date(acceptance.acceptedAt) : null;
+  const when = at && !Number.isNaN(at.getTime())
+    ? at.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' })
+    : '';
+  const meta = [
+    `Accepted electronically${when ? ` · ${when}` : ''}`,
+    acceptance.termsVersion ? `Terms ${acceptance.termsVersion}` : null,
+    acceptance.device || null,
+    acceptance.ipMasked ? `IP ${acceptance.ipMasked}` : null,
+    acceptance.recordId ? `Record ${acceptance.recordId}` : null,
+  ].filter(Boolean).join(' · ');
+  y = ensureSpace(ctx, y, 14);
+  doc.fontSize(8).font('Helvetica').fillColor(MUTED).text(meta, L, y, { width: W });
+  return y + 14;
+}
+
 /**
  * @param {object} estimate
  * @param {object} res  stream sink
- * @param {{ billsPerApplication?: boolean }} [billing]
+ * @param {{ billsPerApplication?: boolean, acceptance?: object|null }} [billing]
+ *   `acceptance` = the customer-facing acceptance record (route helper
+ *   acceptanceRecordForEstimate) for an accepted estimate recorded under
+ *   GATE_ESTIMATE_ACCEPTANCE_TERMS; absent ⇒ rendered exactly as before.
  *   Resolved by services/estimate-proposal-billing.js — the LIVE billing lane,
  *   because persisted snapshot flags freeze at send time (codex #3120 r2).
  *   Defaults false, which renders exactly as this document did before the
@@ -565,6 +602,7 @@ function generateEstimateProposalPDF(estimate, res, billing = {}) {
   y = responsibilitiesBlock(ctx, proposal.customerResponsibilities, y);
   y = totalsBlock(ctx, totals, y + 4);
   y = termsBlock(ctx, proposal, totals, y + 8);
+  acceptanceBlock(ctx, billing?.acceptance || null, y + 8);
 
   footerBar(doc, ctx.tagline);
   doc.end();

@@ -311,6 +311,36 @@ function acceptanceTermsApplyTo(estimate) {
   });
 }
 
+/**
+ * Customer-facing acceptance record for an accepted estimate whose
+ * terms_version proves one was committed — served on /data (page + browser
+ * document) and handed to the pdfkit fallback so no accepted document lacks
+ * it. Deliberately NOT gated: the gate governs display/collection going
+ * forward, never evidence already recorded. Masks the IP to two octets and
+ * reduces the user-agent to a family label. Null when there is none.
+ */
+async function acceptanceRecordForEstimate(estimate) {
+  if (!estimate || estimate.status !== 'accepted' || !estimate.terms_version) return null;
+  try {
+    const row = await db('estimate_acceptances')
+      .where({ estimate_id: estimate.id })
+      .orderBy('accepted_at', 'desc')
+      .first();
+    if (!row) return null;
+    return {
+      recordId: `ACC-${String(row.id).slice(0, 8).toUpperCase()}`,
+      termsVersion: row.terms_version,
+      termsText: row.terms_text,
+      acceptedAt: row.accepted_at,
+      ipMasked: acceptanceTerms.maskIpForCustomer(row.ip),
+      device: acceptanceTerms.deviceLabelFromUserAgent(row.user_agent),
+    };
+  } catch (e) {
+    logger.warn(`[estimate-acceptance] record read failed for estimate ${estimate.id}: ${e.message}`);
+    return null;
+  }
+}
+
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
     .toString().split(',')[0].trim().slice(0, 64);
@@ -22642,7 +22672,12 @@ router.get('/:token/pdf', estimatePdfLimiter, async (req, res, next) => {
     // persisted snapshot flags freeze at send time and would let this document
     // contradict the estimate the customer is looking at.
     const { resolveProposalBillingContext } = require('../services/estimate-proposal-billing');
-    generateEstimateProposalPDF(estimate, res, await resolveProposalBillingContext(estimate));
+    generateEstimateProposalPDF(estimate, res, {
+      ...(await resolveProposalBillingContext(estimate)),
+      // The recorded acceptance rides the fallback too (pre-push Codex P1):
+      // a downloaded accepted document must never omit its record.
+      acceptance: await acceptanceRecordForEstimate(estimate),
+    });
   } catch (err) { next(err); }
 });
 
@@ -23571,27 +23606,7 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // telemetry on a PDF.
     const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
       && acceptanceTermsApplyTo(estimate);
-    let acceptanceRecord = null;
-    if (estimate.status === 'accepted' && estimate.terms_version) {
-      try {
-        const row = await db('estimate_acceptances')
-          .where({ estimate_id: estimate.id })
-          .orderBy('accepted_at', 'desc')
-          .first();
-        if (row) {
-          acceptanceRecord = {
-            recordId: `ACC-${String(row.id).slice(0, 8).toUpperCase()}`,
-            termsVersion: row.terms_version,
-            termsText: row.terms_text,
-            acceptedAt: row.accepted_at,
-            ipMasked: acceptanceTerms.maskIpForCustomer(row.ip),
-            device: acceptanceTerms.deviceLabelFromUserAgent(row.user_agent),
-          };
-        }
-      } catch (e) {
-        logger.warn(`[estimate-data] acceptance record read failed for estimate ${estimate.id}: ${e.message}`);
-      }
-    }
+    const acceptanceRecord = await acceptanceRecordForEstimate(estimate);
 
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
