@@ -34,7 +34,7 @@ function makeDbMock() {
 const IN_WALL = {
   path: 'src/content/blog/pest-control/in-wall-pest-control.mdx',
   url: '/pest-control/in-wall-pest-control/',
-  body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
+  body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\nBuilders install Taexx during framing. The Taexx tubes run inside the walls, and most owners never see Taexx work.\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
 };
 const BENIGN = {
   path: 'src/content/blog/pest-control/seasonal-ant-pressure.md',

@@ -7,23 +7,25 @@
  */
 const gate = require('../services/content/topic-targeting-gate');
 
-const post = (slug, title, extra = '', headings = []) => ({
+const post = (slug, title, extra = '', headings = [], prose = 'Intro prose that mentions Tampa and Florida everywhere but is NOT a targeting field.') => ({
   path: `src/content/blog${slug.replace(/\/$/, '')}.mdx`,
   url: slug,
-  body: `---\ntitle: ${JSON.stringify(title)}\nslug: ${slug}\nmeta_description: ${JSON.stringify(extra)}\nprimary_keyword: ${JSON.stringify(title.toLowerCase())}\nsecondary_keywords:\n  - ${JSON.stringify(`${title.toLowerCase()} cost`)}\ncategory: ${slug.split('/')[1]}\n---\n\nIntro prose that mentions taexx tampa florida everywhere but is NOT a targeting field.\n\n${headings.map((h) => `## ${h}`).join('\n\n')}\n`,
+  body: `---\ntitle: ${JSON.stringify(title)}\nslug: ${slug}\nmeta_description: ${JSON.stringify(extra)}\nprimary_keyword: ${JSON.stringify(title.toLowerCase())}\nsecondary_keywords:\n  - ${JSON.stringify(`${title.toLowerCase()} cost`)}\ncategory: ${slug.split('/')[1]}\n---\n\n${prose}\n\n${headings.map((h) => `## ${h}`).join('\n\n')}\n`,
 });
 
 // A miniature of the live corpus: the in-wall post names Taexx in meta +
 // several headings (owner); a roach guide names bug bombs twice (not an
-// owner); a mosquito post is built around bifenthrin (owner, other category).
+// owner); a mosquito post is built around In2Care (owner, other category).
 const CORPUS = [
   post('/pest-control/in-wall-pest-control/', "So…You're Pumping Pesticides Into Your Walls on Purpose?",
     'What Taexx in-wall pest control actually pumps into your walls.',
-    ['What Is Taexx Pest Control?', 'So What Is the Taexx System Actually Doing?', 'Already Have Taexx? No Judgment.']),
+    ['What Is Taexx Pest Control?', 'So What Is the Taexx System Actually Doing?', 'Already Have Taexx? No Judgment.'],
+    'Builders install Taexx during framing. The Taexx tubes run inside the walls, and most owners never see Taexx work.'),
   post('/pest-control/get-rid-of-cockroaches/', 'How to Get Rid of Cockroaches', 'Roach control that works.',
     ['Do bug bombs work?', 'Why bug bombs make roaches spread']),
-  post('/mosquito/professional-mosquito-treatment/', 'Professional Mosquito Treatment', 'Bifenthrin barrier sprays explained.',
-    ['What bifenthrin does', 'How long bifenthrin lasts', 'Bifenthrin and pollinators']),
+  post('/mosquito/professional-mosquito-treatment/', 'Professional Mosquito Treatment', 'In2Care station programs explained.',
+    ['What In2Care does', 'How long In2Care lasts', 'In2Care and pollinators'],
+    'Each In2Care station holds a larvicide. Mosquitoes visit the In2Care trap and carry it onward.'),
   // "drywood" is generic vocabulary: four termite posts are built around it.
   post('/termite/drywood-termites-sarasota/', 'Drywood Termites in Sarasota', 'Drywood termite signs.', ['Drywood frass', 'Drywood swarmers', 'Drywood treatment']),
   post('/termite/drywood-termites-venice/', 'Drywood Termites in Venice', 'Drywood termite signs.', ['Drywood frass', 'Drywood swarmers', 'Drywood treatment']),
@@ -159,17 +161,17 @@ describe('evaluate — entity ownership (the #490 shape)', () => {
     const r = gate.evaluate(blog({ query: 'do bug bombs work for roaches', title: 'Do Bug Bombs Actually Work?', slug: '/pest-control/do-bug-bombs-work/' }), { corpus: CORPUS });
     expect(r.ok).toBe(true);
   });
-  test('ownership is scoped to the category (a termite bifenthrin post does not collide with the mosquito owner)', () => {
-    const termite = gate.evaluate(blog({ query: 'bifenthrin pre-treatment', title: 'How Long a Builder Bifenthrin Pre-Treat Lasts', slug: '/termite/bifenthrin-pretreat/' }), { corpus: CORPUS });
+  test('ownership is scoped to the category (a termite In2Care post does not collide with the mosquito owner)', () => {
+    const termite = gate.evaluate(blog({ query: 'in2care pre-treatment', title: 'How Long a Builder In2Care Pre-Treat Lasts', slug: '/termite/in2care-pretreat/' }), { corpus: CORPUS });
     expect(termite.ok).toBe(true);
-    const mosquito = gate.evaluate(blog({ query: 'bifenthrin mosquito spray', title: 'Bifenthrin Mosquito Spray', slug: '/mosquito/bifenthrin-mosquito-spray/' }), { corpus: CORPUS });
+    const mosquito = gate.evaluate(blog({ query: 'in2care mosquito stations', title: 'In2Care Mosquito Stations', slug: '/mosquito/in2care-mosquito-stations/' }), { corpus: CORPUS });
     expect(mosquito.ok).toBe(false);
     expect(mosquito.findings[0].owners).toEqual(['/mosquito/professional-mosquito-treatment/']);
   });
   test('category can come from the engine service key when no slug is pinned; unknown category compares against all', () => {
-    const viaService = gate.evaluate(blog({ query: 'bifenthrin pre-treatment', service: 'termite' }), { corpus: CORPUS });
+    const viaService = gate.evaluate(blog({ query: 'in2care pre-treatment', service: 'termite' }), { corpus: CORPUS });
     expect(viaService.ok).toBe(true);
-    const unknown = gate.evaluate(blog({ query: 'bifenthrin pre-treatment' }), { corpus: CORPUS });
+    const unknown = gate.evaluate(blog({ query: 'in2care pre-treatment' }), { corpus: CORPUS });
     expect(unknown.ok).toBe(false);
   });
   test('the owner itself is exempt (pinned slug == owner slug)', () => {
@@ -219,25 +221,25 @@ describe('corpus parsing', () => {
 });
 
 describe('entity rarity is judged within the candidate category', () => {
-  const post = (url, title, extra = '') => ({ url, body: `---\ntitle: ${title}\nslug: ${url}\nprimary_keyword: ${title.toLowerCase()}\n---\n${extra}` });
-  // "bait" is common across the whole corpus (4 posts) but only ONE termite
-  // post is built around it — a global count hides that owner.
+  const post = (url, title, extra = '') => ({ url, body: `---\ntitle: ${title}\nslug: ${url}\nprimary_keyword: ${title.toLowerCase()}\n---\nTechnicians place Advion where pests travel. Most Advion placements last a season.\n${extra}` });
+  // "Advion" is a proper noun common across the whole corpus (4 posts) but
+  // only ONE termite post is built around it — a global count hides that owner.
   const corpus = [
-    post('/termite/termite-bond/', 'Termite Bait Stations and the Bond', '## How bait stations work\n## When bait beats liquid\n'),
-    post('/pest-control/ant-bait-basics/', 'Ant Bait Basics'),
-    post('/pest-control/roach-bait-gel/', 'Roach Bait Gel Explained'),
-    post('/pest-control/rodent-bait-safety/', 'Rodent Bait Safety With Pets'),
+    post('/termite/advion-termite-bait/', 'Advion Termite Bait Stations', '## How Advion stations work\n## When Advion beats liquid\n'),
+    post('/pest-control/advion-ant-gel/', 'Advion Ant Gel Basics'),
+    post('/pest-control/advion-roach-gel/', 'Advion Roach Gel Explained'),
+    post('/pest-control/advion-rodent-safety/', 'Advion Rodent Safety With Pets'),
   ];
 
   test('same-category owner is found even when the token is common corpus-wide', () => {
-    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'bait station cost', service: 'termite' }, { corpus });
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'advion station cost', service: 'termite' }, { corpus });
     expect(r.ok).toBe(false);
     expect(r.findings[0].code).toBe(gate.CODES.CANNIBALIZES_EXISTING);
-    expect(r.findings[0].owners).toEqual(['/termite/termite-bond/']);
+    expect(r.findings[0].owners).toEqual(['/termite/advion-termite-bait/']);
   });
 
   test('unknown candidate category falls back to corpus-wide rarity (conservative pool, global frequency)', () => {
-    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'bait station cost' }, { corpus });
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'advion station cost' }, { corpus });
     expect(r.ok).toBe(true);
     expect(r.entity_owners).toEqual([]);
   });
@@ -247,8 +249,8 @@ describe('entity rarity is judged within the candidate category', () => {
     const a = gate._internals.dfForCategory(index, 'termite');
     const b = gate._internals.dfForCategory(index, 'termite');
     expect(a).toBe(b);
-    expect(a.get('bait')).toBe(1);
-    expect(index.df.get('bait')).toBe(4);
+    expect(a.get('advion')).toBe(1);
+    expect(index.df.get('advion')).toBe(4);
   });
 });
 
@@ -378,5 +380,32 @@ describe('evaluateDraftTargeting / evaluateBlogPostRow', () => {
     for (const t of ['ask virginia about your plan', 'Meet Virginia', 'Virginia: Our Office Manager', 'thanks virginia', 'call virginia']) {
       expect(gate.classifyGeoScope(t).scope).toBe('none');
     }
+  });
+});
+
+describe('entity identity = proper noun in body prose (uncapped audit 2026-08-27; measured on the live corpus)', () => {
+  const owner = (url, title, prose) => ({ url, body: `---\ntitle: ${title}\nslug: ${url}\nprimary_keyword: ${title.toLowerCase()}\n---\n${prose}\n## ${title} basics\n## Why ${title.split(' ')[0]} matters\n` });
+  test('an ordinary rare word a post is built around does NOT become an owned entity (Seasonal Ant Pressure vs Seasonal Roach Pressure)', () => {
+    const corpus = [owner('/pest-control/seasonal-ant-pressure/', 'Seasonal Ant Pressure', 'Ants surge when the seasonal rains start; the pressure follows the water.')];
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'seasonal roach pressure', title: 'Seasonal Roach Pressure in Sarasota Homes', slug: '/pest-control/seasonal-roach-pressure/' }, { corpus });
+    expect(r.ok).toBe(true);
+  });
+  test('species, chemicals, and months are not entities; a capitalized brand is', () => {
+    const corpus = [
+      owner('/pest-control/get-rid-of-clover-mites/', 'Clover Mites', 'Tiny red mites gather on sunny walls; the mites do not bite.'),
+      owner('/lawn-care/december-lawn-care/', 'December Lawn Care', 'Growth slows by December, and by late December the lawn is nearly dormant.'),
+      owner('/termite/termidor-treatment/', 'Termidor Treatment', 'Applicators trench and apply Termidor along the slab. A Termidor barrier lasts years.'),
+    ];
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'rat mites bradenton', title: 'Rat Mites in Bradenton Homes' }, { corpus }).ok).toBe(true);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'december pest control', title: 'December Pest Control Checklist for Venice' }, { corpus }).ok).toBe(true);
+    const brand = gate.evaluate({ actionType: 'new_supporting_blog', query: 'termidor cost', title: 'What Termidor Costs in Sarasota', slug: '/termite/termidor-cost/' }, { corpus });
+    expect(brand.ok).toBe(false);
+    expect(brand.findings[0].entities).toEqual(['termidor']);
+    const index = gate.indexCorpus(corpus);
+    expect([...index.properNouns]).toEqual(['termidor']);
+  });
+  test('a brand with no prose mentions (headings only) is not an entity — the signal is prose capitalization', () => {
+    const corpus = [{ url: '/pest-control/x/', body: '---\ntitle: Taexx Basics\nslug: /pest-control/x/\nprimary_keyword: taexx basics\n---\n## Taexx one\n## Taexx two\n## Taexx three\n' }];
+    expect(gate.indexCorpus(corpus).properNouns.size).toBe(0);
   });
 });

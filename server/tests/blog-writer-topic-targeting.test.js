@@ -7,7 +7,7 @@
 const IN_WALL = {
   file: 'src/content/blog/pest-control/in-wall-pest-control.mdx',
   url: '/pest-control/in-wall-pest-control/',
-  body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
+  body: "---\ntitle: 'So…You’re Pumping Pesticides Into Your Walls on Purpose?'\nslug: /pest-control/in-wall-pest-control/\nmeta_description: What Taexx in-wall pest control actually pumps into your walls.\nprimary_keyword: in wall pest control\ncategory: pest-control\n---\n\nBuilders install Taexx during framing. The Taexx tubes run inside the walls, and most owners never see Taexx work.\n\n## What Is Taexx Pest Control?\n\n## So What Is the Taexx System Actually Doing?\n\n## Already Have Taexx? No Judgment.\n",
 };
 
 function makeDbMock({ post = null, updateResult = 1 } = {}) {
@@ -27,12 +27,13 @@ function makeDbMock({ post = null, updateResult = 1 } = {}) {
   return dbMock;
 }
 
-// Termite post that owns "bait" in its category; "bait" is common across
-// pest-control posts, so only a same-category frequency finds the owner.
-const TERMITE_BAIT = { url: '/termite/termite-bait-stations/', body: '---\ntitle: Termite Bait Stations Explained\nslug: /termite/termite-bait-stations/\nprimary_keyword: termite bait stations\ncategory: termite\n---\n## How bait stations work\n## When bait beats liquid\n' };
-const PEST_BAITS = ['ant-bait-basics', 'roach-bait-gel', 'rodent-bait-safety'].map((leaf) => ({
+// Termite post built around "Advion" (a proper noun); Advion is also named
+// across pest-control posts, so only a same-category frequency finds the owner.
+const ADVION_PROSE = 'Technicians place Advion where pests travel. Most Advion placements last a season.';
+const TERMITE_ADVION = { url: '/termite/advion-termite-bait/', body: `---\ntitle: Advion Termite Bait Stations\nslug: /termite/advion-termite-bait/\nprimary_keyword: advion termite bait stations\ncategory: termite\n---\n${ADVION_PROSE}\n## How Advion stations work\n## When Advion beats liquid\n` };
+const PEST_ADVION = ['advion-ant-gel', 'advion-roach-gel', 'advion-rodent-safety'].map((leaf) => ({
   url: `/pest-control/${leaf}/`,
-  body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n`,
+  body: `---\ntitle: ${leaf.replace(/-/g, ' ')}\nslug: /pest-control/${leaf}/\nprimary_keyword: ${leaf.replace(/-/g, ' ')}\ncategory: pest-control\n---\n${ADVION_PROSE}\n`,
 }));
 
 function load({ ideas = [], corpus = [IN_WALL], corpusError = null, post = null, updateResult = 1 }) {
@@ -65,10 +66,10 @@ describe('blog-writer idea lane — topic-targeting gate', () => {
     expect(dbMock._inserts.map((r) => r.slug)).toEqual(['ghost-ants-sarasota-kitchens']);
   });
 
-  test('ownership is judged in the category the idea TAG maps to (termite bait idea vs a termite owner, despite pest-control bait posts)', async () => {
+  test('ownership is judged in the category the idea TAG maps to (termite Advion idea vs a termite owner, despite pest-control Advion posts)', async () => {
     const { writer } = load({
-      ideas: [{ title: 'Bait Station Costs for Sarasota Homes', keyword: 'bait station cost', tag: 'Termites', slug: 'bait-station-costs-sarasota', city: 'Sarasota' }],
-      corpus: [IN_WALL, TERMITE_BAIT, ...PEST_BAITS],
+      ideas: [{ title: 'Advion Station Costs for Sarasota Homes', keyword: 'advion station cost', tag: 'Termites', slug: 'advion-station-costs-sarasota', city: 'Sarasota' }],
+      corpus: [IN_WALL, TERMITE_ADVION, ...PEST_ADVION],
     });
     await expect(writer.generateNewIdeas(1)).resolves.toEqual([]);
   });

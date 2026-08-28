@@ -70,6 +70,20 @@ function tokenize(text) {
 }
 
 const RARE_ENTITY_DF_MAX = 3;
+// Entity IDENTITY (uncapped audit 2026-08-27, measured on the live corpus):
+// token rarity alone made "december", "yellow", "crazy", "mites" owned
+// entities and would have blocked ~15% of the live posts as new candidates.
+// A brand/product/system name is written as a proper noun in body prose —
+// Taexx / Termidor / Sentricon / Advion / Pestie score 1.00 capitalized
+// mid-sentence across the corpus; every ordinary word scored ≤ 0.40. Species
+// and chemicals are lowercase and are the uniqueness gate's concern, not this
+// one's. Months/days are capitalized too and are excluded by name.
+const PROPER_NOUN_MIN_RATIO = 0.8;
+const PROPER_NOUN_MIN_MENTIONS = 2;
+const CALENDAR_TOKENS = new Set([
+  'january', 'february', 'march', 'april', 'june', 'july', 'august', 'september', 'october', 'november', 'december',
+  'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday',
+]);
 // An owner must be BUILT AROUND the entity — it appears at least this many
 // times across the owner's targeting fields (title / slug / keywords / meta /
 // headings). Calibrated 2026-08-27 against the live 255-post corpus: the
@@ -411,8 +425,51 @@ function entityTokens(text) {
  * document frequency, so a caller evaluating many candidates pays for the
  * parse once.
  */
+// Body prose only (no frontmatter, headings, code, link targets, or markup),
+// for the proper-noun measurement — headings are Title Case and would count
+// every word as capitalized.
+function proseOf(body) {
+  let rest = String(body || '');
+  try { ({ content: rest } = parseFrontmatter(rest)); } catch { rest = ''; }
+  return rest
+    .replace(/^#.*$/gm, ' ')
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/`[^`]*`/g, ' ')
+    .replace(/\]\([^)]*\)/g, ']')
+    .replace(/<[^>]+>/g, ' ');
+}
+
+// tok → { cap, low }: how often the token appears capitalized vs lowercase
+// mid-sentence (sentence starts and list bullets are skipped) across the
+// whole corpus' prose.
+const PROSE_WORD_RE = /(^|[.!?]\s+|\n\s*|[^\w'’-])([A-Za-z][A-Za-z0-9'’-]{2,})/g;
+function accumulateProperNounStats(prose, stats) {
+  const re = new RegExp(PROSE_WORD_RE.source, 'g');
+  let m;
+  while ((m = re.exec(prose)) !== null) {
+    const pre = m[1];
+    const word = m[2];
+    const sentenceStart = pre === '' || /[.!?]\s+$/.test(pre) || /\n\s*$/.test(pre) || /[-*]\s$/.test(pre);
+    if (sentenceStart) continue;
+    const tok = word.toLowerCase().replace(/[’']/g, '');
+    const s = stats.get(tok) || { cap: 0, low: 0 };
+    if (/^[A-Z]/.test(word)) s.cap++; else s.low++;
+    stats.set(tok, s);
+  }
+}
+
+function properNounsFrom(stats) {
+  const out = new Set();
+  for (const [tok, s] of stats) {
+    const n = s.cap + s.low;
+    if (n >= PROPER_NOUN_MIN_MENTIONS && s.cap / n >= PROPER_NOUN_MIN_RATIO && !CALENDAR_TOKENS.has(tok)) out.add(tok);
+  }
+  return out;
+}
+
 function indexCorpus(corpus = []) {
   const posts = [];
+  const nounStats = new Map();
   for (const item of corpus) {
     if (!item || typeof item.body !== 'string') continue;
     const fields = parseTargetingFields(item.body);
@@ -421,8 +478,9 @@ function indexCorpus(corpus = []) {
     const url = normalizeSlug(item.url || fields.slug);
     const category = String(fields.category || categoryFromSlug(url) || '').toLowerCase() || null;
     posts.push({ url, title: fields.title, path: item.path || item.file || null, category, counts });
+    accumulateProperNounStats(proseOf(item.body), nounStats);
   }
-  return { posts, df: documentFrequency(posts), dfByCategory: new Map() };
+  return { posts, df: documentFrequency(posts), dfByCategory: new Map(), properNouns: properNounsFrom(nounStats) };
 }
 
 function documentFrequency(posts) {
@@ -492,7 +550,8 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // its title ("Your New Home Came With Taexx"). Framing words in titles
   // ("actual", "explained") never trip it — an owner must be BUILT AROUND
   // the token (≥ OWNER_MIN_OCCURRENCES across its own targeting fields).
-  const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
+  const properNouns = idx.properNouns || new Set();
+  const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' ')).filter((tok) => properNouns.has(tok));
   for (const tok of tokens) {
     const n = df.get(tok) || 0;
     if (n < 1 || n > RARE_ENTITY_DF_MAX) continue;
@@ -533,5 +592,6 @@ module.exports = {
   CODES,
   RARE_ENTITY_DF_MAX,
   OWNER_MIN_OCCURRENCES,
+  PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { CONTEXT_PLACE_NAMES, parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { CONTEXT_PLACE_NAMES, proseOf, parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
