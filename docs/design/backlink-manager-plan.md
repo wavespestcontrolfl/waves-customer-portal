@@ -279,8 +279,11 @@ CSV rows. Steps, all idempotent:
   (`source='existing_backlink'`, `status='live'`, `live_url=source_url`,
   `backlink_id`, `first_live_at = seo_backlinks.first_seen`, `target_page` =
   `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
-  it like any placement (D30/D90 compute from `first_live_at`, so links older than 30 days
-  are simply `d30_live=true` at ingestion); the path is
+  it like any placement — but **D30/D90 are never inferred from age**: for an imported link
+  they are set only if `seo_backlink_events`/scan history proves the link was active at the
+  cutoff (no `lost` event before it and a scan observation on or after it); otherwise they
+  stay `null` (= unknown, excluded from learning) — a link that vanished and returned, or
+  predates scan coverage, must not teach the scorer that its path "survives"; the path is
   `seo_link_acquisition_paths` with `acquisition_type` mapped from the link's classified
   `link_type` (directory/citation → `self_service_free` or `self_service_account`,
   editorial/resource → `editorial_outreach`/`resource_outreach`, else `unknown` pending the
@@ -605,8 +608,13 @@ and `send_error` reconciliation are the shipped `link-prospect-outreach.js`; its
 is that the cap check inside its existing advisory-lock claim transaction enforces
 `min(policy.auto_outreach_daily_cap, LINK_OUTREACH_DAILY_CAP)` for auto-sends (owner-approved
 sends keep the hard cap only) — the policy cap is never checked outside that lock, so
-concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no
-reply) go through the same gate.
+concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no reply) go
+through the same gate **with a fail-closed reply check**: today the sender stores only a
+Gmail thread reference and detects nothing, so step 4 adds, inside the locked send claim, a
+Gmail thread reconciliation (`threads.get` on `outreach_thread_ref`; any message not from
+`contact@` = a reply) and skips the follow-up on a reply, a bounce, or a lookup
+error/timeout (parked for the owner, never sent by default). A follow-up is never sent
+without a successful lookup proving silence.
 
 The 56 drafts from June are the first batch through this mandate (self-disqualifying and
 national-magazine drafts fail the lint/score floor; the Sunrise cluster dedupes by domain
