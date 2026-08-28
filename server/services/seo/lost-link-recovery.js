@@ -305,7 +305,14 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
     .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
     .whereNull('outreach_sent_at');
   const rows = await candidates().select('id', 'target_page');
-  if (!Array.isArray(rows) || !rows.length) return { resolved: 0, superseded: 0 };
+  if (!Array.isArray(rows) || !rows.length) return { resolved: 0, superseded: 0, pending: 0 };
+  // Every per-row write repeats the unsent guards ATOMICALLY (as markLive does):
+  // a send can flip the row to outreach_status='sending' between the read and
+  // the write, and clearing its token then would strand the Gmail finalizer.
+  // A 0-row update = the row moved on; it is left for reconciliation (pending).
+  const unsentRow = (id) => q('seo_link_prospects').where({ id, status: 'prospect' })
+    .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
+    .whereNull('outreach_sent_at');
 
   // The row's target identity must FOLLOW the link that returned: the daily
   // verifier validates live_url against the row's target_page, so a
@@ -318,13 +325,13 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   const returnedPage = targetPageOf(backlink.target_url);
   const variants = new Set(targetPageVariants(backlink.target_url));
   const closeNote = `\nLost-link recovery closed ${etDateString(now)}: the link reappeared on its own (no outreach needed).`;
-  let resolved = 0, superseded = 0;
+  let resolved = 0, superseded = 0, pending = 0;
   for (const row of rows) {
     const samePage = variants.has(row.target_page);
     const owner = samePage ? null
       : await byDomain(q('seo_link_prospects'), domain).whereIn('target_page', [...variants]).whereNot('id', row.id).first('id', 'status');
     if (owner) {
-      const n = await q('seo_link_prospects').where({ id: row.id, status: 'prospect' }).update({
+      const n = await unsentRow(row.id).update({
         status: 'rejected',
         backlink_id: backlink.id || null,
         claimed_at: null, claimed_by: null,
@@ -332,10 +339,10 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
         notes: q.raw("COALESCE(notes, '') || ?", [`${closeNote} Placement for ${returnedPage} is tracked by prospect ${owner.id} (${owner.status}); this recovery row is superseded.`]),
         updated_at: now,
       });
-      superseded += n || 0;
+      if (n) superseded += n; else pending++;
       continue;
     }
-    const n = await q('seo_link_prospects').where({ id: row.id, status: 'prospect' }).update({
+    const n = await unsentRow(row.id).update({
       status: 'live',
       ...(samePage ? {} : { target_page: returnedPage }),
       live_url: backlink.source_url,
@@ -348,10 +355,10 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
       notes: q.raw("COALESCE(notes, '') || ?", [samePage ? closeNote : `${closeNote} Target page moved ${row.target_page} → ${returnedPage} to follow the returned link.`]),
       updated_at: now,
     });
-    resolved += n || 0;
+    if (n) resolved += n; else pending++;
   }
-  if (resolved || superseded) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${resolved} recovery prospect(s) closed as live, ${superseded} superseded`);
-  return { resolved, superseded };
+  if (resolved || superseded || pending) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${resolved} recovery prospect(s) closed as live, ${superseded} superseded, ${pending} moved on concurrently (left for reconciliation)`);
+  return { resolved, superseded, pending };
 }
 
 module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf, targetPageVariants, TARGET_DOMAIN_CANONICAL_SQL } };

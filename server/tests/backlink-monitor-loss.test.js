@@ -655,7 +655,7 @@ describe('lost-link recovery', () => {
       return 1;
     } });
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
-    expect(r).toEqual({ resolved: 2, superseded: 0 });
+    expect(r).toEqual({ resolved: 2, superseded: 0, pending: 0 });
     const sel = ops[0];
     expect(sel.op).toBe('select');
     expect(sel.wheres[0][0]).toEqual({ status: 'prospect' });
@@ -669,6 +669,11 @@ describe('lost-link recovery', () => {
     expect(updates).toHaveLength(2);
     const same = updates.find(u => u.wheres[0][0].id === 'p-same'), sib = updates.find(u => u.wheres[0][0].id === 'p-sib');
     expect(same.wheres[0][0]).toEqual({ id: 'p-same', status: 'prospect' }); // conditional per row
+    // …and the unsent guards are repeated ATOMICALLY on every write (a send may have started since the read)
+    for (const u of updates) {
+      expect(u.raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
+      expect(u.nulls).toContain('outreach_sent_at');
+    }
     expect(same.payload).toEqual(expect.objectContaining({ status: 'live', backlink_id: 'bl-1' }));
     expect(same.payload.target_page).toBeUndefined(); // same page: identity untouched
     expect(same.payload.first_live_at.__raw).toBe('COALESCE(first_live_at, ?)'); // original first-live history preserved
@@ -684,18 +689,30 @@ describe('lost-link recovery', () => {
   test('resolveRecoveredLink: when another board row already owns (domain, returned page), the sibling recovery row is closed as SUPERSEDED (rejected + note), never left live under a wrong target', async () => {
     const ops = [];
     makeDb({ seo_link_prospects: (op, st) => {
-      ops.push({ op, wheres: st.wheres, payload: st.payload });
+      ops.push({ op, wheres: st.wheres, raws: st.raws, nulls: st.nulls, payload: st.payload });
       if (op === 'select') return [{ id: 'p-sib', target_page: 'https://www.wavespestcontrol.com/y/' }];
       if (op === 'first') return { id: 'p-owner', status: 'live' };
       return 1;
     } });
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'blog.example', target_url: 'https://wavespestcontrol.com/x/' }, new Date('2026-09-06T08:00:00Z'));
-    expect(r).toEqual({ resolved: 0, superseded: 1 });
+    expect(r).toEqual({ resolved: 0, superseded: 1, pending: 0 });
     const upd = ops.find(o => o.op === 'update');
     expect(upd.wheres[0][0]).toEqual({ id: 'p-sib', status: 'prospect' });
+    expect(upd.raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
+    expect(upd.nulls).toContain('outreach_sent_at');
     expect(upd.payload).toEqual(expect.objectContaining({ status: 'rejected', backlink_id: 'bl-1', outreach_status: 'none', outreach_send_token: null }));
     expect(upd.payload.target_page).toBeUndefined();
     expect(upd.payload.notes.bind[0]).toMatch(/tracked by prospect p-owner \(live\); this recovery row is superseded/);
+  });
+
+  test('resolveRecoveredLink: a row whose send started after the candidate read (0-row guarded update) is left pending for reconciliation, never clobbered', async () => {
+    makeDb({ seo_link_prospects: (op) => {
+      if (op === 'select') return [{ id: 'p-sending', target_page: 'https://www.wavespestcontrol.com/x/' }];
+      if (op === 'first') return null;
+      return 0; // the guarded UPDATE matched nothing: outreach_status flipped to 'sending' meanwhile
+    } });
+    const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'blog.example', target_url: 'https://wavespestcontrol.com/x/' }, new Date('2026-09-06T08:00:00Z'));
+    expect(r).toEqual({ resolved: 0, superseded: 0, pending: 1 });
   });
 
   test('loss alert is DURABLE: an owed row with no loss_alerted ledger row rings (even though nothing was newly lost this scan), and rows are stamped only after the send succeeds', async () => {
