@@ -1572,6 +1572,16 @@ describe('prb-r18', () => {
     // retry (and other outreach) is not fenced by a phantom contact.
     expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(2);
     expect(ContactLedger.markSendFailed).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'ledger-sms-1' }), expect.objectContaining({ code: 'covered_by_credit', never_contacted: true }));
+    // The release stamp is checked with one retry; if it cannot be made durable the latch stays CLOSED.
+    convo.payLinkSent = false;
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest);
+    ContactLedger.markSendFailed.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+    const stuck = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(stuck).toMatch(/cannot be re-offered on this call/);
+    expect(stuck).toMatch(/do NOT say the account is settled/);
+    expect(convo.payLinkSent).toBe(true); // latch NOT re-opened behind a phantom contact
+    ContactLedger.markSendFailed.mockResolvedValue(true);
     // An INCOMPLETE remainder read is never "settled" either.
     convo.payLinkSent = false;
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });

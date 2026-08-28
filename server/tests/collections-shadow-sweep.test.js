@@ -516,6 +516,19 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
 
 // r6: outage safety + merge hygiene.
 describe('r6: evaluation errors preserve, duplicate live cases self-heal', () => {
+  test('a balance_read_incomplete denial (resolver blip) does NOT lapse the standing case either', async () => {
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['balance_read_incomplete', 'pilot_insufficient_dunning_history'] });
+    const lapse = chain({ result: [] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] })],
+      collection_cases: [chain({ result: [] }), lapse],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesLapsed).toBe(0);
+    expect(lapse.update).not.toHaveBeenCalled();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a policy_evaluation_error (transient outage) does NOT lapse the standing case', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['policy_evaluation_error'] });
     const retireSelect = chain({ result: [] });

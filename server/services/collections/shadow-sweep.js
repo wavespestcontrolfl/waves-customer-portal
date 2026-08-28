@@ -159,8 +159,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
         // A transient evaluation ERROR is unknown, not a denial (codex r6):
         // during a DB/Stripe blip every customer would read denied and the
         // retirement pass would lapse EVERY valid case + dismiss its card.
-        // Preserve the case; only definitive denials lapse.
-        if (verdict.denialReasons.includes('policy_evaluation_error')) {
+        // Preserve the case; only definitive denials lapse. An INCOMPLETE
+        // balance read (a payer-resolve / dunning-stop lookup blip) is the
+        // same kind of unknown (gh r5): the call is denied, the case stays.
+        if (verdict.denialReasons.some((r) => r === 'policy_evaluation_error' || r === 'balance_read_incomplete')) {
           stillEligible.add(customerId);
         }
         continue;

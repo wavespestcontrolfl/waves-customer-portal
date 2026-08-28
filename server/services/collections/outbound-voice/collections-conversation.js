@@ -1608,8 +1608,17 @@ class CollectionsConversation {
         // No SMS went out: the reservation above must not stand as a
         // contact (gh r1) — it would trip the any-channel 24h window on the
         // retry and suppress other outreach. never_contacted rows are
-        // excluded from the policy's recent-contact read.
-        await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: 'covered_by_credit', never_contacted: true });
+        // excluded from the policy's recent-contact read. The stamp is
+        // best-effort, so it is CHECKED with one retry (gh r5, same pattern
+        // as origination): if it cannot be made durable the latch stays
+        // CLOSED — a retry would only be refused by the phantom contact.
+        const stamp = { stage: 'send_via_sms', code: 'covered_by_credit', never_contacted: true };
+        let released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) {
+          logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${entry.id} callSid=${this.callSid} — pay link stays closed this call`);
+          return 'No text was sent: account credit covered that invoice in full, but the link cannot be re-offered on this call. Say the office will follow up on any remaining balance — do NOT state a figure and do NOT say the account is settled.';
+        }
         let refreshed;
         try {
           refreshed = await this._refreshBalance();
