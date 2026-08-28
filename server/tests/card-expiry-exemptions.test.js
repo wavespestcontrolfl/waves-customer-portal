@@ -28,24 +28,37 @@ describe('isCardExpiryExemptMethod', () => {
 });
 
 describe('cardExpiryAlertResolvableCustomerIds', () => {
-  test('fully exempt customers always; partially covered ones only when none of their expiring cards will be charged', () => {
+  // window ends on (2026, 9): a charged card is "beyond" only when it expires after September 2026
+  const WINDOW = { year: 2026, month: 9 };
+  test('fully exempt customers always; partially covered ones only when EVERY charged method is a bank row or a card valid beyond the window', () => {
     const e = ex(['c-full'], [
-      ['c-other-card', new Set(['pm-hold'])], // charge on a card that is not expiring
-      ['c-charged', new Set(['pm-exp'])],     // charge on the expiring card itself
+      ['c-beyond', new Set(['pm-late'])],          // card expires after the window
+      ['c-edge', new Set(['pm-edge'])],            // expires IN the window's last month → still actionable
+      ['c-expired', new Set(['pm-old'])],          // expired before the window (absent from any expiring query)
+      ['c-bank', new Set(['pm-bank'])],
+      ['c-mixed', new Set(['pm-late', 'pm-old'])],
+      ['c-norow', new Set(['pm-missing'])],
+      ['c-malformed', new Set(['pm-bad'])],
       ['c-unresolved', null],
-      ['c-no-expiring', new Set(['pm-z'])],   // nothing of theirs is expiring at all
+      ['c-empty', new Set()],
     ]);
-    const expiring = [
-      { id: 'pm-autopay', customer_id: 'c-other-card' },
-      { id: 'pm-exp', customer_id: 'c-charged' },
-      { id: 'pm-u', customer_id: 'c-unresolved' },
-      { id: 'pm-n', customer_id: 'c-nobody' },
+    const rows = [
+      { id: 'pm-late', method_type: 'card', exp_month: '10', exp_year: '2026' },
+      { id: 'pm-edge', method_type: null, exp_month: '9', exp_year: '26' },
+      { id: 'pm-old', method_type: 'card', exp_month: '7', exp_year: '2026' },
+      { id: 'pm-bank', method_type: 'us_bank_account', exp_month: null, exp_year: null },
+      { id: 'pm-bad', method_type: 'card', exp_month: '13', exp_year: '2027' },
     ];
-    expect([...cardExpiryAlertResolvableCustomerIds(e, expiring)].sort()).toEqual(['c-full', 'c-no-expiring', 'c-other-card']);
+    expect([...cardExpiryAlertResolvableCustomerIds(e, rows, WINDOW)].sort()).toEqual(['c-bank', 'c-beyond', 'c-full']);
   });
-  test('malformed / empty input → only the fully exempt set', () => {
-    expect([...cardExpiryAlertResolvableCustomerIds(ex(['c1']), undefined)]).toEqual(['c1']);
-    expect(cardExpiryAlertResolvableCustomerIds(null, []).size).toBe(0);
-    expect([...cardExpiryAlertResolvableCustomerIds({ customerIds: new Set(['c1']) }, [])]).toEqual(['c1']);
+  test('legacy 2-digit years normalize (+2000) — a 12/32 card is beyond the window', () => {
+    const e = ex([], [['c1', new Set(['pm-legacy'])]]);
+    expect([...cardExpiryAlertResolvableCustomerIds(e, [{ id: 'pm-legacy', exp_month: '12', exp_year: '32' }], WINDOW)]).toEqual(['c1']);
+  });
+  test('malformed / missing input → only the fully exempt set', () => {
+    expect([...cardExpiryAlertResolvableCustomerIds(ex(['c1'], [['c2', new Set(['pm-late'])]]), undefined, WINDOW)]).toEqual(['c1']);
+    expect([...cardExpiryAlertResolvableCustomerIds(ex(['c1'], [['c2', new Set(['pm-late'])]]), [{ id: 'pm-late', exp_month: '10', exp_year: '2026' }], {})]).toEqual(['c1']);
+    expect(cardExpiryAlertResolvableCustomerIds(null, [], WINDOW).size).toBe(0);
+    expect([...cardExpiryAlertResolvableCustomerIds({ customerIds: new Set(['c1']) }, [], WINDOW)]).toEqual(['c1']);
   });
 });

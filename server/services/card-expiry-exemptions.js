@@ -45,27 +45,43 @@ function isCardExpiryExemptMethod(exemptions, customerId, paymentMethodId) {
   return !charged.has(String(paymentMethodId));
 }
 
+const BANK_METHOD_TYPES = new Set(['ach', 'us_bank_account', 'bank', 'bank_account']);
+
+// A charged method that gives the operator nothing to act on: a bank row
+// (no card expiry), or a card whose well-formed expiry is strictly LATER
+// than the (year, month) the caller's warning window ends on. Malformed or
+// missing expiry → actionable (fail toward the alert staying open).
+function chargedMethodBeyondWindow(row, year, month) {
+  if (!row) return false;
+  if (BANK_METHOD_TYPES.has(String(row.method_type || '').toLowerCase())) return true;
+  const expMonth = Number(row.exp_month);
+  const rawYear = Number(row.exp_year);
+  const expYear = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
+  if (!Number.isInteger(expMonth) || expMonth < 1 || expMonth > 12 || !Number.isInteger(expYear)) return false;
+  return expYear > year || (expYear === year && expMonth > month);
+}
+
 /**
  * Customers whose open payment_expiry alerts have nothing left to act on:
  * the fully exempt ones, plus covered customers with a charge coming
- * (resolved methods) none of whose CURRENTLY expiring cards will be
- * charged. `expiringCards` = this run's expiring rows ({ id, customer_id }).
- * An unresolved charge vector (null) never qualifies — every card warns.
- * Alerts carry no payment-method identity, so a customer with ANY
- * expiring card still to be charged keeps every alert (fail toward the
- * operator seeing it).
+ * (resolved methods) EVERY one of whose charged methods is a bank row or a
+ * card valid beyond the warning window's last (year, month). Judged from
+ * the charged methods' own rows (`chargedMethodRows`: payment_methods
+ * { id, method_type, exp_month, exp_year }) — never from absence in an
+ * expiring-cards query, which cannot see a card that expired before the
+ * window (hook P1). A charged method with no row, an unresolved vector
+ * (null), or any malformed expiry keeps the customer's alerts open.
+ * Alerts carry no payment-method identity, so this is all-or-nothing per
+ * customer (fail toward the operator seeing it).
  */
-function cardExpiryAlertResolvableCustomerIds(exemptions, expiringCards = []) {
+function cardExpiryAlertResolvableCustomerIds(exemptions, chargedMethodRows = [], { year, month } = {}) {
   const out = new Set(exemptions?.customerIds instanceof Set ? [...exemptions.customerIds].map(String) : []);
   if (!(exemptions?.chargeMethodIdsByCustomer instanceof Map)) return out;
-  const chargedExpiring = new Set();
-  for (const card of expiringCards || []) {
-    if (card?.customer_id == null) continue;
-    if (!isCardExpiryExemptMethod(exemptions, card.customer_id, card.id)) chargedExpiring.add(String(card.customer_id));
-  }
+  if (!Number.isInteger(year) || !Number.isInteger(month)) return out;
+  const rowById = new Map((chargedMethodRows || []).filter((r) => r?.id != null).map((r) => [String(r.id), r]));
   for (const [customerId, methodIds] of exemptions.chargeMethodIdsByCustomer) {
-    if (!(methodIds instanceof Set)) continue;
-    if (!chargedExpiring.has(String(customerId))) out.add(String(customerId));
+    if (!(methodIds instanceof Set) || !methodIds.size) continue;
+    if ([...methodIds].every((id) => chargedMethodBeyondWindow(rowById.get(String(id)), year, month))) out.add(String(customerId));
   }
   return out;
 }

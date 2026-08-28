@@ -1023,23 +1023,46 @@ describe('getCardExpiryExemptions — account credit that fully settles the invo
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
-  test('the balance is consumed visit by visit: the first visit in the window is covered, the second charges the card', async () => {
-    const calls = route({
-      terms: coveredAlways(['c-prepaid']),
-      visits: [baseVisit({ id: 'v1', scheduled_date: TODAY }), baseVisit({ id: 'v2', scheduled_date: TOMORROW })],
-      // each visit's OWN bound invoice (the lookup is the object-form where)
-      invoices: (own) => {
-        const bound = (own.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'scheduled_service_id' in c[1]) || [])[1];
-        return openInvoice({ id: `inv-${bound?.scheduled_service_id || 'v1'}`, scheduled_service_id: bound?.scheduled_service_id || 'v1' });
-      },
-      customers: withCredit('120.00'),
-    });
-    const ex = await getCardExpiryExemptions(HORIZON);
+  // each visit's OWN bound invoice (the lookup is the object-form where)
+  const perVisitInvoices = (bind = {}) => (own) => {
+    const bound = (own.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'scheduled_service_id' in c[1]) || [])[1];
+    const visitId = bound?.scheduled_service_id || 'v1';
+    return openInvoice({ id: `inv-${visitId}`, scheduled_service_id: bind[visitId] || visitId });
+  };
+  const twoVisits = () => [baseVisit({ id: 'v1', scheduled_date: TODAY }), baseVisit({ id: 'v2', scheduled_date: TOMORROW })];
+
+  test('credit is unreserved and completion order is not guaranteed → coverage is judged against the SUM of the window\'s invoices (hook P1)', async () => {
+    // 120 balance, two 120 invoices: whichever completes first drains it → BOTH stay charges
+    route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices(), customers: withCredit('120.00') });
+    let ex = await getCardExpiryExemptions(HORIZON);
     expect([...ex.customerIds]).toEqual([]);
     expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1']));
-    // date order is the projection's completion order
-    expect(calls.visits).toEqual(expect.arrayContaining([
-      ['orderBy', [{ column: 'ss.scheduled_date', order: 'asc' }, { column: 'ss.id', order: 'asc' }]],
-    ]));
+    // 240 covers both in any order → no charge at all
+    route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices(), customers: withCredit('240.00') });
+    ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual(['c-prepaid']);
+  });
+
+  test('a NON-charging visit still consumes credit at completion (the apply runs before any rail) → counts toward the sum', async () => {
+    // v1's invoice is bound to another visit → pay-link only, no card rail,
+    // but completion still applies credit to it; v2 charges unless the
+    // balance covers both
+    route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices({ v1: 'v-other' }), customers: withCredit('120.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices({ v1: 'v-other' }), customers: withCredit('240.00') });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('a pending MINT anywhere in the window (unbounded credit consumption) disables coverage for the customer', async () => {
+    // v1 has a reused 120 invoice, v2 mints → even a huge balance cannot prove v1 stays covered
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: twoVisits(),
+      invoices: (own) => {
+        const bound = (own.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'scheduled_service_id' in c[1]) || [])[1];
+        return bound?.scheduled_service_id === 'v1' ? openInvoice() : [];
+      },
+      customers: withCredit('9999.00'),
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 });

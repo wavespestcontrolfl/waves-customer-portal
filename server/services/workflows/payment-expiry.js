@@ -217,11 +217,25 @@ class PaymentExpiry {
     }
     // Stale-alert reconciliation: a customer with no charge coming on any
     // card, or (hook P1) a covered customer whose forthcoming charge rides
-    // a card that is NOT among this run's expiring rows — their open alert
-    // is about a card nothing will charge. Alerts carry no method
-    // identity, so a customer with any expiring card still to be charged
-    // keeps every alert.
-    const exemptIds = cardExpiryAlertResolvableCustomerIds(exemptions, expiringCards);
+    // only cards valid BEYOND this window (judged from those cards' own
+    // rows — an already-expired charged card is absent from this run's
+    // expiring query and must keep its alert). Alerts carry no method
+    // identity, so any charged card still inside the window keeps every
+    // alert; a failed row read keeps every partially covered customer's.
+    let chargedMethodRows = [];
+    const chargedMethodIds = [...exemptions.chargeMethodIdsByCustomer.values()]
+      .flatMap((ids) => (ids instanceof Set ? [...ids] : []));
+    if (chargedMethodIds.length) {
+      try {
+        chargedMethodRows = await db('payment_methods')
+          .whereIn('id', chargedMethodIds)
+          .select('id', 'method_type', 'exp_month', 'exp_year');
+      } catch (rowErr) {
+        logger.warn(`Payment expiry: charged-method read failed, keeping partially covered customers' alerts: ${rowErr.message}`);
+        chargedMethodRows = [];
+      }
+    }
+    const exemptIds = cardExpiryAlertResolvableCustomerIds(exemptions, chargedMethodRows, { year: nextYear, month: nextMonth });
     let prepayExempt = 0;
 
     // The skip below only prevents FUTURE alerts — an alert created before
