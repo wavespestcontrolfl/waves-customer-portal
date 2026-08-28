@@ -590,7 +590,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(sibUpdate.update.mock.calls[0][0]).not.toHaveProperty('technician_id');
     // …and WITHOUT a window: a windowless row carries no occupancy, so the
     // placeholder and this occurrence never both occupy the window.
-    expect(sibUpdate.update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null });
+    expect(sibUpdate.update.mock.calls[0][0]).toMatchObject({ window_start: null, window_end: null, time_window: null, window_display: null });
     // …and is flagged so route callers park the admin-review notification.
     const occurrences = result.rescheduledOccurrences;
     expect(occurrences).toHaveLength(2);

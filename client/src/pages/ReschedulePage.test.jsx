@@ -221,13 +221,14 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.getByText('1:00 PM–3:00 PM')).toBeInTheDocument();
   });
 
-  it('v2: a SERIES_PROJECTION 409 steers to a different day — never the "just taken" retry loop', async () => {
-    // The commit refused the DAY (a shifted future occurrence of the plan
-    // would double-book) — retrying the same day can only refuse again, so
-    // the generic "just taken" copy would loop the customer.
+  it('v2: a SERIES_PROJECTION 409 steers to another time or day — never the "just taken" retry loop', async () => {
+    // The commit refused the chosen WINDOW (a shifted future occurrence of
+    // the plan would double-book at that time) — retrying the same slot can
+    // only refuse again, so the generic "just taken" copy would loop the
+    // customer; another time or day may clear it.
     stubFetch({
       post: jsonResponse({
-        error: 'That day doesn\'t work with this plan\'s upcoming visits — pick a different day',
+        error: 'That time doesn\'t work with this plan\'s upcoming visits — try another time or day',
         code: 'SLOT_TAKEN',
         subcode: 'SERIES_PROJECTION',
       }, 409),

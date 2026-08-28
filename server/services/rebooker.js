@@ -1405,11 +1405,11 @@ class SmartRebooker {
               // double-booking — and so is a far-out one whose occupant is
               // anything but a seeded placeholder (isSeededPlaceholderRow).
               // Abort all-or-none. subcode lets customer
-              // surfaces explain that the DAY doesn't fit the plan, instead
-              // of the misleading "that time was just taken" retry loop
+              // surfaces explain that the WINDOW doesn't fit the plan (another
+              // time may), instead of the misleading "just taken" retry loop
               // (code stays SLOT_TAKEN — rain-out and admin callers branch
               // on it and must keep working unchanged).
-              throw Object.assign(new Error('That day doesn\'t work with this plan\'s upcoming visits — pick a different day'), {
+              throw Object.assign(new Error('That time doesn\'t work with this plan\'s upcoming visits — try another time or day'), {
                 statusCode: 409,
                 isOperational: true,
                 code: 'SLOT_TAKEN',
@@ -1429,6 +1429,13 @@ class SmartRebooker {
               sibClashBeyondHorizon = true;
               updateData.window_start = null;
               updateData.window_end = null;
+              // Legacy presentation fields too: seeded children inherit the
+              // parent's time_window, and customer-facing context / route
+              // reorder fall back to window_display → time_window when
+              // window_start is null — left alone they would keep promising
+              // the abandoned time.
+              updateData.time_window = null;
+              updateData.window_display = null;
               // Expiry was derived from the timed window above — recompute
               // for the windowless row (helper applies its windowless default).
               updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, null);

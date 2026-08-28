@@ -1278,12 +1278,14 @@ export default function ReschedulePage() {
         } else {
           await load();
         }
-        // SERIES_PROJECTION: the DAY conflicts with this plan's upcoming
-        // visits (a shifted future occurrence would double-book), so "just
-        // taken — try again" would loop the customer through the same
-        // refusal. Steer to a different day instead.
+        // SERIES_PROJECTION: the chosen WINDOW conflicts with this plan's
+        // upcoming visits (a shifted future occurrence at that time would
+        // double-book), so "time just taken — try again" would loop the
+        // customer through the same refusal. The clash is window-specific —
+        // another time on the same day can clear it — so steer to another
+        // time or day, never "this day is out".
         setSubmitError(body.subcode === 'SERIES_PROJECTION'
-          ? 'That day doesn\'t work with your plan\'s upcoming visits — please pick a different day, or text us and we\'ll sort it out.'
+          ? 'That time doesn\'t work with your plan\'s upcoming visits — please try another time or day, or text us and we\'ll sort it out.'
           : 'That time was just taken — here are the latest open times.');
         return;
       }
