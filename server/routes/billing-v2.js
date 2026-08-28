@@ -859,7 +859,8 @@ router.delete('/cards/:id', async (req, res, next) => {
       // lock, never from the removed row's stale flag (GH codex r1 P1).
       if (wasEnabled) {
         const after = await trx('customers').where({ id: req.customerId }).first('autopay_enabled');
-        autopayDisabled = !after?.autopay_enabled;
+        // Only explicit false is a transition (nullable rule) — GH codex r4 hook P1.
+        autopayDisabled = after?.autopay_enabled === false;
       }
     });
 
