@@ -426,6 +426,16 @@ max_spam_score               = 10
 
 ### 6.3 Decision (pure function, unit-tested; recorded on the placement)
 
+**Payment and communication are independent authorities.** The decision returns a SET of
+required authorities, one per dimension the path touches: `payment` (when
+`payment_required`), `communication` (when the path is an outreach/content type), and
+`execution` (everything else: free/account/human-step). A paid guest post therefore needs
+BOTH an `AUTO_PAID_WITHIN_POLICY`/`OWNER_PAYMENT` decision AND an
+`AUTO_OUTREACH`/`OWNER_OUTREACH` decision with its exact-draft approval; the claim,
+reservation and send/submit steps require every dimension's gate/approval to be satisfied
+before the irreversible action, and `DENY`/`INVALID` in any dimension wins. The pseudocode
+below is written per dimension; `authority` on the placement stores the set.
+
 ```
 # 1a. VALIDITY — non-overrideable. Not policy: data and money that cannot be acted on by
 #     anyone, including the owner. "Acquire anyway" never reaches these rows.
@@ -449,13 +459,13 @@ if path.acquisition_type in (membership, association, sponsorship) and policy.me
 # Policy thresholds are compared ONLY when explicitly configured: `configured(x)` = x is a
 # finite number (not null/undefined/NaN). JS compares `5 >= null` as true, so a null
 # threshold must never reach a comparison — an unconfigured AUTO capability is simply absent.
-if path.payment_required:
+if path.payment_required:                               # PAYMENT dimension
     if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents) and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
        and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
        and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
        and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
     else → OWNER_PAYMENT
-if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # guest posts / content go through the outreach mandate (draft lint, commitment checks, owner review) — never AUTO_FREE/ACCOUNT
+if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # COMMUNICATION dimension — evaluated in ADDITION to payment, never instead of it; guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
     → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
                       else OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
@@ -975,9 +985,14 @@ unset its gate; budget kill = the issuer program's limit.
 - **Footprint** — daily caps on sends (§6.4, inside the sender lock) and on submissions
   (`auto_submission_daily_cap`: the locked claim **reserves a slot** — an attempt row
   `outcome='slot_reserved'` for the ET day, written under the claim's advisory lock and
-  counted with completed submissions, converted by the report or released by the lease
-  sweep — so several leased providers cannot all observe room before any attempt is
-  recorded; re-checked immediately before every submit. The runner's
+  counted with completed submissions — so several leased providers cannot all observe room
+  before any attempt is recorded; re-checked immediately before every submit. **Submission
+  is idempotency-guarded like a purchase:** immediately before the irreversible call the
+  provider flips the attempt `slot_reserved → submitting` (durable, conditional on the
+  lease); a `submitting` attempt is never released by the sweep — if the worker dies before
+  reporting, the sweep parks it as `submit_ambiguous`, the placement is excluded from
+  re-claim, and reconciliation (the daily verifier / domain reconcile finding the profile, or
+  the owner card) settles it; only a `slot_reserved` attempt whose lease expired is released. The runner's
   `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
   one conversation per inbox
   (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
