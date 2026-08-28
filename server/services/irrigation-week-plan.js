@@ -24,7 +24,8 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
-const { queuedRowInFlight } = require('./email-template-library');
+const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS } = require('./email-template-library');
+const { stampedAddressDiverges, premiseStampConflicts } = require('./stamped-address');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
@@ -301,7 +302,8 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  * decision the SENT email was built from.
  *   persistWeekPlan()       before the send: ATOMIC CLAIM — insert, or
  *                           replace an existing UNSENT row only when no
- *                           other worker holds a live lease on it; a SENT
+ *                           other worker holds a live lease on it (lease =
+ *                           the email library's queued-row lease); a SENT
  *                           row is never touched. Only the claimant sends.
  *   markWeekPlanSent()      after the provider accepts: stamp sent_at on the
  *                           row whose decision_hash matches — a stale row
@@ -332,7 +334,11 @@ function decisionHash(plan, decisionInputs = {}) {
     .digest('hex');
 }
 
-const CLAIM_LEASE_MINUTES = 15;
+// The send claim expires on the SAME clock as the email library's queued-row
+// lease (QUEUED_IN_FLIGHT_MS): once the library would reclaim an abandoned
+// queued row, a retry must be able to reclaim the snapshot too — otherwise a
+// Monday retry in the gap sends nothing and the week is lost.
+const CLAIM_LEASE_SECONDS = Math.max(1, Math.round(QUEUED_IN_FLIGHT_MS / 1000));
 
 /**
  * Pre-send write AND send claim, in one statement: insert the row, or
@@ -367,7 +373,7 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
         `irrigation_week_plans.sent_at IS NULL AND (
            irrigation_week_plans.claim_token = ?
            OR irrigation_week_plans.claimed_at IS NULL
-           OR irrigation_week_plans.claimed_at < now() - interval '${CLAIM_LEASE_MINUTES} minutes'
+           OR irrigation_week_plans.claimed_at < now() - interval '${CLAIM_LEASE_SECONDS} seconds'
          )`,
         [token],
       )
@@ -420,6 +426,38 @@ function hashFromCategories(raw) {
  * never from a return shape or an exception, and stamps only the row whose
  * hash the record names.
  */
+// A 'failed' row is ambiguous when the provider may have accepted the
+// message: it carries a provider id, OR it is recent enough that the
+// library's post-send bookkeeping (which writes the provider id in the same
+// update that can throw) may have failed after acceptance and the delivery
+// webhook has not yet repaired it. Past that window with no id it is a
+// definite pre-provider rejection, retryable through the library's own path.
+const FAILED_AMBIGUITY_MS = 30 * 60 * 1000;
+function failedIsAmbiguous(row, now = Date.now()) {
+  if (row.provider_message_id) return true;
+  const at = row.updated_at ? new Date(row.updated_at).getTime() : NaN;
+  return Number.isFinite(at) && now - at < FAILED_AMBIGUITY_MS;
+}
+
+/**
+ * Does a sent snapshot bind to the premise a report is for? The plan was
+ * decided for the HOME recorded on the snapshot; a service at any other
+ * premise — rental, mid-week move, another unit in the building — must not
+ * carry it. Used by the report build AND its cache signature, so an address
+ * change re-keys cached PDFs.
+ */
+function planBindsToService(snapshot, service) {
+  const home = snapshot?.decisionInputs?.home || null;
+  if (!home) return true;
+  const serviceStamp = { service_address_line1: service?.address_line1, service_address_line2: service?.address_line2, service_address_city: service?.city, service_address_zip: service?.zip };
+  const homeStamp = { service_address_line1: home.addressLine1, service_address_line2: home.addressLine2, service_address_city: home.city, service_address_zip: home.zip };
+  const diverges = stampedAddressDiverges({
+    service_address_line1: service?.address_line1, service_address_city: service?.city, service_address_zip: service?.zip,
+    customer_address_line1: home.addressLine1, customer_city: home.city, customer_zip: home.zip,
+  });
+  return !(diverges || premiseStampConflicts(serviceStamp, homeStamp));
+}
+
 async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   // Customer/week scope (trigger_event_id) — recipient-independent, so a
   // delivery made before an email change is still found; the recipient key
@@ -427,7 +465,7 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   const where = triggerEventId ? { trigger_event_id: triggerEventId } : (idempotencyKey ? { idempotency_key: idempotencyKey } : null);
   if (!where) return { state: null, decisionHash: null };
   try {
-    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id', 'queued_at');
+    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id', 'queued_at', 'updated_at');
     if (!rows || !rows.length) return { state: null, decisionHash: null };
     // 'failed' splits on whether the provider ever accepted the message: a
     // failed row WITH a provider_message_id is a post-provider bookkeeping
@@ -444,7 +482,7 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
       const status = String(row.status || '').toLowerCase();
       if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
       if (status === 'blocked') return 'blocked';
-      if (status === 'failed') return row.provider_message_id ? 'pending' : 'failed';
+      if (status === 'failed') return failedIsAmbiguous(row) ? 'pending' : 'failed';
       if (status === 'queued') return queuedRowInFlight(row) ? 'pending' : 'stale';
       return 'pending';
     };
@@ -557,7 +595,8 @@ module.exports = {
   hasSentWeekPlan,
   discardUnsentWeekPlan,
   weekPlanDeliveryState,
+  planBindsToService,
   planCategory,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase, failedIsAmbiguous, CLAIM_LEASE_SECONDS },
 };

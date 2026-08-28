@@ -1283,6 +1283,7 @@ module.exports = {
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
   queuedRowInFlight,
+  QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
   publishVersion,
   sendTemplate,

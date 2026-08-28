@@ -47,8 +47,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
-const { stampedAddressDiverges, premiseStampConflicts } = require('../stamped-address');
+const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService } = require('../irrigation-week-plan');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2045,8 +2044,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
       // loadCurrentWeekPlan already returns null once the policy it was
       // decided under is no longer in force, so its identity is the stamp.
+      // …and only when the snapshot binds to THIS premise: an address change
+      // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
       const snapshot = await loadCurrentWeekPlan(service.customer_id);
-      weekPlanSentAt = snapshot?.sentAt ? new Date(snapshot.sentAt).toISOString() : null;
+      weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, service) ? new Date(snapshot.sentAt).toISOString() : null;
       irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
     }
   } catch {
@@ -2602,18 +2603,9 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     // address (stamped, else the customer's current mirror) must be that
     // home — a mid-week move makes the stamp match the NEW address while
     // the snapshot's weather and county belong to the old one.
-    // Full PREMISE identity, unit included: two units in one building are
-    // different homes (premiseStampConflicts — a one-sided unit diverges).
-    const home = snapshot?.decisionInputs?.home || null;
-    const serviceStamp = { service_address_line1: service.address_line1, service_address_line2: service.address_line2, service_address_city: service.city, service_address_zip: service.zip };
-    const homeStamp = home ? { service_address_line1: home.addressLine1, service_address_line2: home.addressLine2, service_address_city: home.city, service_address_zip: home.zip } : null;
-    const servicedElsewhere = !!home && (
-      stampedAddressDiverges({
-        service_address_line1: service.address_line1, service_address_city: service.city, service_address_zip: service.zip,
-        customer_address_line1: home.addressLine1, customer_city: home.city, customer_zip: home.zip,
-      })
-      || premiseStampConflicts(serviceStamp, homeStamp)
-    );
+    // Full PREMISE identity, unit included (planBindsToService — the same
+    // predicate the cache signature applies).
+    const servicedElsewhere = !!snapshot && !planBindsToService(snapshot, service);
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });

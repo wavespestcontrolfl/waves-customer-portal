@@ -285,7 +285,9 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(calls.merged.claim_token).toBe('tok-1');
     expect(calls.whereRaw).toMatch(/sent_at IS NULL/);
     expect(calls.whereRaw).toMatch(/claim_token = \?/);
-    expect(calls.whereRaw).toMatch(/claimed_at < now\(\) - interval '15 minutes'/);
+    // Lease = the email library's queued-row lease (2 minutes), never a longer private clock.
+    expect(_private.CLAIM_LEASE_SECONDS).toBe(120);
+    expect(calls.whereRaw).toMatch(/claimed_at < now\(\) - interval '120 seconds'/);
     expect(calls.bindings).toEqual(['tok-1']);
     expect(calls.insert.sent_at).toBeNull();
     // Another worker's live lease → nothing returned → not claimed, no hash.
@@ -338,7 +340,7 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
     ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
   ])('status %s → %s', async (status, expected) => {
-    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null, queued_at: new Date().toISOString() }]);
+    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null, queued_at: new Date().toISOString(), updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
     const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });
     expect(r.state).toBe(expected);
     expect(r.decisionHash).toBe('abc123');
@@ -359,10 +361,12 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'stale', decisionHash: 'h' });
   });
 
-  test('a failed row the provider had ACCEPTED (provider_message_id set) is ambiguous → pending; without one it is a retryable failure', async () => {
-    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: 'sg-123' }]);
+  test('a failed row is ambiguous (pending) when the provider may have accepted it — an id, or recent enough that bookkeeping may have failed after acceptance; an OLD id-less failure is retryable', async () => {
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: 'sg-123', updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' });
-    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null }]);
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null, updated_at: new Date(Date.now() - 5 * 60 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' }); // inside the webhook-repair window
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null, updated_at: new Date(Date.now() - 3 * 3600 * 1000).toISOString() }]);
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'failed', decisionHash: 'h' });
   });
 
