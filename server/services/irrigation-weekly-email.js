@@ -133,14 +133,17 @@ function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches =
   const haveClause = have.length ? ` — ${joinList(have)} — ` : ' for you, ';
   const reason = derived?.reason || 'missing_minutes';
 
-  // Toggle conflict: this branch is only reachable with the toggle off when
+  // System-off conflict: only reachable with irrigation_system = false when
   // a technician's first-hand observation says a system exists (hasSystem).
-  // The blocker is the switch, not a missing field — complete inputs (or an
-  // explicit inches entry) suppressed by the toggle must never be described
-  // as absent (GH codex P1 on #3478 r13).
+  // The blocker is the stored flag, not a missing field — complete inputs
+  // (or an explicit inches entry) suppressed by it must never be described
+  // as absent (GH codex P1 on #3478 r13). The portal toggle is retired
+  // (2026-08-27, every row flipped on), so the flag is staff-side only and
+  // the ask routes the customer to us rather than to a control that no
+  // longer exists.
   if (toggleOff) {
     const scheduleOnFile = explicitInches != null || derived?.inchesPerWeek != null || have.length > 0;
-    return `Our technician noted an in-ground sprinkler system at your property, but your portal has the irrigation system switched off${scheduleOnFile ? ", so the schedule on file isn't being counted" : ''}. If the system is running, switch it on under Irrigation in your portal ${SETUP_CLOSER} If it truly is off, you're all set — we'll plan around the rain alone.`;
+    return `Our technician noted an in-ground sprinkler system at your property, but your account has the irrigation system marked off${scheduleOnFile ? ", so the schedule on file isn't being counted" : ''}. If the system is running, reply to this email and we'll mark it on ${SETUP_CLOSER} If it truly is off, you're all set — we'll plan around the rain alone.`;
   }
 
   // Inputs complete but unconvertible — the two declines that are not about
