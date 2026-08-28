@@ -27,40 +27,35 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 
 const TRIGGER_BELL_ALLOWLIST = new Set([
-  'new_lead',
-  'sms_reply',
-  // A reschedule/away text with a visit still armed is time-critical — its
-  // 'schedule' category is silenced-by-default, so the key must ring here.
-  'appointment_reschedule_intent',
-  'customer_voicemail_callback',
-  // An email from someone on the customer list — same class as sms_reply.
-  'customer_email_received',
-  'payment_failed',
-  'bill_payment_error',
-  // Owner ruling 2026-08-28: the bell is for what Adam ACTS on today, and
-  // push follows the bell (one routing decision per event). Removed from the
-  // ring list — silent on BOTH surfaces by default: twilio_failure (infra;
-  // the canaries' direct internal_alert SMS to the owner is unaffected) and
-  // estimate_deposit_reconcile_needed (deposit ledger mismatch). Both are
-  // re-enabled together through the 'system' category override.
+  // Owner ruling 2026-08-28: bell, push banner and app badge are for
+  // CUSTOMER COMMUNICATION only — a customer reaching us by any channel.
+  // Everything else (money failures, billing proposals, applications,
+  // internal/system) is silent by default and owner-overridable.
+  'new_lead',                       // a prospect reaching out (form, call, chat, calculator)
+  'sms_reply',                      // a customer texted
+  'customer_email_received',        // a customer emailed
+  'customer_voicemail_callback',    // a customer left a voicemail
+  'appointment_reschedule_intent',  // a customer texted a reschedule / away note
 ]);
+
 
 const TRIGGER_BELL_DENYLIST = new Set([
   'payment_succeeded',
   'payment_refunded',
   'dashboard_alert',
   'internal_admin_alert',
+  // Shares the new_lead category but is an applicant, not a customer.
+  'new_job_application',
 ]);
+
 
 const CATEGORY_BELL_ALLOWLIST = new Set([
   'new_lead',
   'inbound_sms',
   'inbound_email',
   'voicemail_callback',
-  'payment',
-  'billing',
-  'dispute',
 ]);
+
 
 // Fixed list of silenced-by-default categories the owner may re-enable via
 // the 'category:<cat>' pseudo-keys in notification_preferences. Also the
@@ -73,8 +68,12 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // notification category, add it to one of the two lists (and to
 // BELL_CATEGORY_LABELS in client PushSettingsV2.jsx if it lands here).
 const OVERRIDABLE_CATEGORIES = [
-  // Owner ruling 2026-08-28: no longer ring by default (accepted estimates
-  // still ring via their explicit bell:true site tag).
+  // Owner ruling 2026-08-28: customer communication only. These no longer
+  // ring by default (accepted estimates still ring via their explicit
+  // bell:true site tag — a customer accepting is a customer acting).
+  'payment',
+  'billing',
+  'dispute',
   'estimate_converted',
   'estimate_measurement_review',
   'alert',

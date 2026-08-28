@@ -108,35 +108,39 @@ describe('NotificationService.create under the bell policy', () => {
     expect(result).toEqual({ id: null, suppressed: true, reason: 'bell_policy' });
   });
 
-  test('gate on: allowlisted category (billing exception) still rings', async () => {
+  test('gate on: allowlisted category (inbound_sms) rings; billing is silent by default (owner ruling 2026-08-28)', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n2' }]);
     mockTables({ notifications, notification_preferences: chainMock([]) });
 
-    const result = await NotificationService.notifyAdmin(
-      'billing', 'Card number heard on a recorded call', 'PCI event body',
-    );
-
+    const result = await NotificationService.notifyAdmin('inbound_sms', 'SMS from a customer', 'body');
     expect(notifications.insert).toHaveBeenCalled();
     expect(result).toEqual({ id: 'n2' });
+
+    const silenced = await NotificationService.notifyAdmin(
+      'billing', 'Card number heard on a recorded call', 'PCI event body',
+    );
+    expect(silenced.suppressed).toBe(true);
   });
 
-  test('gate on: trigger denylist beats the category allowlist (payment_succeeded FYI)', async () => {
+  test('gate on: trigger denylist beats the category allowlist (new_job_application)', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n3' }]);
     mockTables({ notifications, notification_preferences: chainMock([]) });
 
+    // new_job_application shares the new_lead category but is denylisted:
+    // an applicant is not a customer (owner ruling 2026-08-28).
     const silenced = await NotificationService.notifyAdmin(
-      'payment', 'Payment received', '$50.00 from customer',
-      { metadata: { triggerKey: 'payment_succeeded' } },
+      'new_lead', 'New job application', 'Applicant',
+      { metadata: { triggerKey: 'new_job_application' } },
     );
     expect(notifications.insert).not.toHaveBeenCalled();
     expect(silenced.suppressed).toBe(true);
 
-    // …while payment_failed (allowlisted trigger, same category) rings.
+    // …while new_lead (allowlisted trigger, same category) rings.
     const rang = await NotificationService.notifyAdmin(
-      'payment', 'Payment failed', '$50.00 — customer',
-      { metadata: { triggerKey: 'payment_failed' } },
+      'new_lead', 'New lead submitted', 'Prospect',
+      { metadata: { triggerKey: 'new_lead' } },
     );
     expect(notifications.insert).toHaveBeenCalledTimes(1);
     expect(rang).toEqual({ id: 'n3' });
@@ -203,7 +207,7 @@ describe('NotificationService.create under the bell policy', () => {
     mockTables({ notifications, notification_preferences: prefs });
 
     // Static allowlist still rings…
-    const rang = await NotificationService.notifyAdmin('dispute', 'Dispute opened: $80', 'body');
+    const rang = await NotificationService.notifyAdmin('voicemail_callback', 'Voicemail — a customer', 'body');
     expect(rang).toEqual({ id: 'n7' });
     // …and static default-deny still silences. Notifications never throw.
     const silenced = await NotificationService.notifyAdmin('payout', 'Payout deposited: $10', 'body');
@@ -468,12 +472,14 @@ describe('bellAllowed decision order', () => {
       .resolves.toBe(false);
   });
 
-  test('customer_email_received rings (allowlisted like sms_reply); retired categories are silenced', async () => {
+  test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    await expect(bellPolicy.bellAllowed({ category: 'inbound_email', triggerKey: 'customer_email_received' }))
-      .resolves.toBe(true);
-    await expect(bellPolicy.bellAllowed({ category: 'estimate_converted' })).resolves.toBe(false);
-    await expect(bellPolicy.bellAllowed({ category: 'estimate_measurement_review' })).resolves.toBe(false);
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
+      await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
+    }
+    for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['new_lead', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
+      await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
+    }
   });
 });
 
