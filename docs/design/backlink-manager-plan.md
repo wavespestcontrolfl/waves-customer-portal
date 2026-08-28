@@ -163,8 +163,9 @@ t.timestamps(true, true);
 ```js
 t.uuid('id').primary(); t.uuid('domain_id').notNullable();
 t.string('source').notNullable(); t.text('source_detail'); t.uuid('source_ref');
+t.text('touch_key').notNullable();   // `${source}:${source_ref || normalized source_detail || '-'}` — non-null so a recurring feeder is idempotent (Postgres UNIQUE treats NULLs as distinct)
 t.timestamp('seen_at').notNullable().defaultTo(knex.fn.now());
-t.unique(['domain_id', 'source', 'source_detail']);
+t.unique(['domain_id', 'touch_key']);
 ```
 `seo_link_domains.source` is first-touch attribution and is never overwritten; every feeder
 (including a repeat of the first) inserts a row here. §8 reports and learns per source from
@@ -281,7 +282,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `DENY`
+`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_OVERRIDE` · `DENY`
 
 **Paid is an attribute of a path; it is not a workflow state.** The level is *computed* from
 the path's attributes and the policy at decision time, then stamped for the audit trail.
@@ -296,6 +297,7 @@ monthly_paid_budget          = 500
 max_auto_purchase            = 50
 auto_paid_min_score          = 80
 auto_paid_min_d30_confidence = 0.6
+min_score                    = 60        (floor for ANY action, auto or owner-routed)
 membership_requires_owner    = true
 legal_attestation_requires_owner = true
 min_path_confidence          = 0.6
@@ -305,6 +307,14 @@ max_spam_score               = 10
 ### 6.3 Decision (pure function, unit-tested; recorded on the placement)
 
 ```
+# 1. Fail-closed quality floors — evaluated FIRST, before any AUTO_* or OWNER_* branch.
+#    A row that fails a floor is DENY regardless of who would have acted; owner override is
+#    the explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE, never DENY→AUTO.
+if domain.spam_score > policy.max_spam_score
+   or path.confidence < policy.min_path_confidence
+   or score < policy.min_score
+   or path.acquisition_type in (not_reproducible, unknown) → DENY
+# 2. Authority (only reached by rows that passed every floor)
 if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
 if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
 if path.payment_required:
@@ -313,10 +323,11 @@ if path.payment_required:
     else → OWNER_PAYMENT
 if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
     → AUTO_OUTREACH if score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
-if path.account_required → AUTO_ACCOUNT if auto_account_creation else OWNER_PAYMENT-style park
-if spam/score/confidence below floors → DENY
+if path.account_required → AUTO_ACCOUNT if auto_account_creation else awaiting_owner (OWNER_ACCOUNT)
 else → AUTO_FREE
 ```
+The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
+including one per floor proving DENY beats every AUTO_* and OWNER_* branch.
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
@@ -330,7 +341,8 @@ inferred).** Every paid step, auto or owner-approved, is a row:
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
-t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}` — one purchase per placement per ET month
+t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation ended voided / reconciled_not_charged
+t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}:${generation}`
 t.decimal('amount', 10, 2).notNullable(); t.string('authority').notNullable();
 t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
@@ -341,8 +353,14 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
   → `month_spend = SUM(amount) WHERE budget_month = <ET month> AND state IN (reserved, charged, ambiguous, reconciled_charged)`
-  → if `month_spend + amount ≤ monthly_paid_budget` insert the `reserved` row (the unique
-  `idempotency_key` makes a concurrent duplicate a no-op) → commit. Only a committed
+  → **open-purchase check**: if any row for `(prospect_id, path_id, budget_month)` is in
+  `reserved`, `submitting`, `ambiguous`, `charged` or `reconciled_charged` → no new
+  reservation (409; nothing to retry until it settles). Otherwise `generation` = 1 + the highest
+  ended generation (`voided` / `reconciled_not_charged`) → if `month_spend + amount ≤
+  monthly_paid_budget` insert the `reserved` row (the unique `idempotency_key` makes a
+  concurrent duplicate a no-op) → commit. So a pre-submission failure (voided) can be retried
+  in the same month as a new generation, while anything that may have reached the merchant
+  never can. Only a committed
   reservation unlocks the card details to the provider. Two workers can never both pass the
   check; the lock is per ET budget month (`link_budget:<budget_month>`), so the policy month
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
