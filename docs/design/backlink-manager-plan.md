@@ -100,6 +100,7 @@ t.string('agent_state').notNullable().defaultTo('new');
 //   ready_to_acquire = ≥1 placement stamped AUTO_* or approved and still 'prospect'   (stays/returns here while ANY authorized placement is pending — e.g. a second GBP location)
 //   acquiring        = ≥1 placement leased OR `placed` (submitted, awaiting the Judge's verification) and none pending-unleased
 //   acquired         = ≥1 placement live/indexed and no authorized placement pending
+//   watching         = NO placement live/indexed, none authorized-pending, and ≥1 placement lapsed (renewal not re-authorized) or lost with a recheck scheduled — never set directly by a single placement's lapse
 // Claimability is decided per PLACEMENT (§7): the registry must merely not be new/investigating/not_reproducible/rejected/watching.
 t.integer('score');                               // Waves Link Score (§8), recomputed on enrichment/D30
 t.text('score_reasons');                          // human-readable why (shown on the registry row)
@@ -446,7 +447,13 @@ purpose); `existing_backlink` is reserved for rows actually imported from `seo_b
 The verbatim legacy value is kept in `source_detail` as `legacy:<value>`; the enum is a
 CHECK, so the mapping is exhaustive with that fallback) and a path
 (`acquisition_type` mapped from `link_type`: outreach lanes → `resource_outreach`/
-`editorial_outreach`, directory/citation/social → `self_service_account`; `submission_url =
+`editorial_outreach`, directory/citation/social → `self_service_account`; the path's
+NOT NULL `link_type` is the legacy value when it is already in `CLAIMABLE_LINK_TYPES`, else
+**normalized before the insert** — null, `forum`, `comment`, `unknown` and any other value →
+`resource`, the descriptive lane (the verbatim value kept as `legacy_link_type:<value>` in
+`source_detail`), and the prospect row's own `link_type` is backfilled to the same normalized
+value in the same migration so placement and path agree — the migration never writes a path
+that would fail the §3.2 CHECK, so it cannot abort deployment on a legacy null; `submission_url =
 target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
 low; `last_investigated_at = null` so the investigator refreshes it) and is linked via
 `domain_id`/`path_id`. No claim-predicate change ships before this backfill has run; the
@@ -881,8 +888,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   Intentional renewals are produced by a **renewal job** that, `renewal_lead_days` (default 21)
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
-  under the same lock/budget/idempotency rules — or lets the listing lapse
-  (`agent_state='watching'`) if the policy no longer authorizes it. A merchant that cannot sell
+  under the same lock/budget/idempotency rules — or lets **that placement** lapse
+  (placement `renewal_status='lapsed'`, `watch_recheck_at` set; its verified `live`/`indexed`
+  status is untouched until the verifier proves a loss) if the policy no longer authorizes
+  it. A lapse never writes the domain's `agent_state` directly: the aggregate is recomputed
+  across ALL placements by the §3.1 rule, so it becomes `watching` only when no sibling
+  placement is live/indexed or authorized-pending — one lapsed location never makes a
+  sibling's authorized placement unclaimable or hides an independently live one. A merchant that cannot sell
   a one-off renewal stays on the refusal path above (`auto_renew_unavoidable`): the renewal job
   never mints for it, owner-approved or not; the owner renews manually outside the system and
   records it through the manual settlement form (`manual_charged` purchase row + `human`
@@ -898,8 +910,15 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **A reservation is charged against the month it is submitted in.** The
   `reserved → submitting` transition (under the budget lock) first compares the row's
   `budget_month` with the current ET month; if the month has rolled over since reservation,
-  the row is `voided` and a fresh reservation is attempted under the **new** month's lock and
-  budget (same idempotency rules, new `budget_month`) before anything continues — a
+  the row is `voided` (`outcome='budget_month_rollover'`). Because a voided purchase advances
+  the generation and an approval binds to the prior `instance_key` (§3.3b), what follows
+  depends on the payment authority: for `AUTO_PAID_WITHIN_POLICY` a fresh **next-generation**
+  reservation is attempted immediately under the **new** month's lock and budget (same
+  idempotency rules, new `budget_month`, new `generation`) before anything continues; for
+  `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` nothing is re-reserved — the placement is re-parked
+  `awaiting_owner` with a fresh-generation approval card and the prior approval is marked
+  `invalidated_reason='budget_month_rollover'` (never replayed), so the owner approves the
+  new instance before any card exists — a
   reservation can never consume last month's ledger while the card is used this month, so the
   two months' ceilings cannot stack.
 - **`submitting` before the external call — non-retryable.** Immediately after that
@@ -993,7 +1012,11 @@ its own columns — `follow_up_due_at` (= sent + 10d), `follow_up_status`
 as the first send: `sending` under the claim, `send_error` when Gmail may have accepted but
 the response was lost, cleared only by the existing Sent-folder `reconcileSendError`
 path, never retried before it), `follow_up_send_token` (its own idempotency claim, same
-advisory-lock shape as the first send) — and leased with `claim(?type=outreach&mode=followup)`,
+advisory-lock shape as the first send), `follow_up_attempted_at` (stamped at claim time under
+the same lock exactly like `outreach_attempted_at`; the retained `dailySendCount` is extended
+to count it — `(outreach_attempted_at >= since)::int + (follow_up_attempted_at >= since)::int +
+prior attempts` — so a follow-up consumes the policy cap and the hard cap like an initial
+send and initial + follow-up sends can never exceed the daily limit) — and leased with `claim(?type=outreach&mode=followup)`,
 whose predicate accepts `contacted` rows with `outreach_status='sent'`, `follow_up_status='due'`
 and the send authority still valid. One follow-up per placement, ever. It runs **with a
 fail-closed reply check**: today the sender stores only a
@@ -1045,8 +1068,11 @@ together:
   re-decides; the path's lane
   gate is on (**`GATE_LINK_AUTHORITY` for ANY `AUTO_*` stamp — the kill switch is checked at
   claim and again immediately before every irreversible action: submit, send, mint — not
-  only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
-  `GATE_LINK_PAYMENTS` for the PAYMENT-dimension claims only — reservation, `mode=payment`,
+  only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach
+  SEND claims only (`mode=send`/`mode=followup`) — `mode=draft` is exempt from the send gate
+  exactly as it is from the authority clause and requires `GATE_OUTREACH_DRAFTER` instead (the
+  shipped drafter gate is intentionally independent of the send valve, `feature-gates.js`, so
+  drafts exist for owner review before sending is armed), `GATE_LINK_PAYMENTS` for the PAYMENT-dimension claims only — reservation, `mode=payment`,
   `mode=renewal`, mint and payment submit — never for a send or a free/account execution
   step on a path that happens to be paid (communication and payment are independent), and
   additionally `GATE_LINK_AUTO_PAID` only when the stamped payment authority is
@@ -1198,8 +1224,13 @@ that cannot complete it. Outreach: `OutreachProvider` = drafter + `link-prospect
   coverage stay `null`). Stored on the placement (`d30_live`, `d90_live`, tri-state) — this is
   the only success metric that counts.
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
-  and per `domain` into `seo_link_learning` (small table, replaced each night). The scorer reads
-  them:
+  and per `domain` into `seo_link_learning` (small table, replaced each night). The
+  per-`(source, acquisition_type)` aggregate reads ONLY placements whose acquisition Waves
+  executed: rows with `source='existing_backlink'`, placements whose current path has
+  `baseline=true`, and placements with no successful `seo_link_attempts` row tied to that
+  path are excluded — they may feed the per-`domain` aggregate (a statement about the host,
+  not the path), so an imported baseline with a real sampled D30 never credits an acquisition
+  type Waves never used. The scorer reads them:
 
 ```
 Expected Link Value  ≈ quality(DR, traffic, spam, relevance)
