@@ -88,8 +88,15 @@ const BANNED_RE = new RegExp([
   '\\bdiscount(?:s|ed)?\\b', '\\bfree\\b(?!\\s+to\\b)', '\\bcoupons?\\b', '\\bgift\\s*cards?\\b', '\\brewards?\\b',
   '\\bwaiv\\w*\\b', '\\bat\\s+no\\s+(?:cost|charge)\\b', '\\bno[- ]cost\\b', '\\bno\\s+charge\\b', '\\bfree\\s+of\\s+charge\\b', '\\bwithout\\s+charge\\b', "\\b(?:won't|will\\s+not|not)\\s+(?:be\\s+)?charg\\w*\\b", '\\bcomp(?:ed|ing|s)?\\b', '\\bon\\s+us\\b',
   '\\bcredits?\\b', '\\bcomplimentary\\b', '\\bprizes?\\b', '\\braffles?\\b', '\\bgiveaways?\\b', '\\bin\\s+exchange\\b', '\\bon\\s+the\\s+house\\b',
+  // Euphemistic incentives (codex r62): price breaks, special deals, "take
+  // something off", "earned you a little something", perks, promos.
+  '\\bprice\\s+breaks?\\b', '\\bspecial\\s+(?:deal|offer|rate|price|pricing|treat|gift|bonus)s?\\b', '\\bdeals?\\b', '\\bsavings?\\b', '\\bsave\\s+(?:you\\s+)?(?:\\$|\\d|some|money|a\\s+(?:bit|little|few))', '\\b(?:take|knock|shave|chop|cut)\\s+(?:[\\w$%-]+\\s+){0,3}?off\\b', '\\bearned?\\s+(?:you|yourself)\\s+(?:a|an|some)\\b', '\\ba\\s+little\\s+something\\b', '\\bsomething\\s+(?:special|extra|nice|small)\\s+(?:for|waiting|coming|on)\\b', '\\bwaiting\\s+for\\s+you\\b', '\\bthank[- ]you\\s+(?:gift|bonus|treat|perk)s?\\b', '\\bbonus(?:es)?\\b', '\\bperks?\\b', '\\bfreebies?\\b', '\\bvouchers?\\b', '\\bpromo\\w*\\b', '\\bmarkdowns?\\b', '\\bcheaper\\b', '\\breduced\\s+(?:rate|price|fee)s?\\b', '\\bhalf[- ](?:off|price)\\b', '\\b\\d+\\s*%\\s*off\\b', '\\bpercent\\s+off\\b', '\\bon\\s+the\\s+house\\b', '\\bour\\s+treat\\b', '\\bfor\\s+sharing\\s+(?:this|your)\\s+review\\b', '\\bbecause\\s+of\\s+(?:this|your)\\s+review\\b',
   // Rating solicitation / review editing.
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
+  // Indirect solicitations (codex r62): "earn five stars from you next
+  // time", "consider a five-star rating", "we deserve five stars".
+  '\\b(?:earn|earning|deserv|merit|consider|reconsider|revisit|upgrad|bump|improv|round\\s+up|hop\\w+\\s+for|aim\\w*\\s+for|shoot\\w*\\s+for|work\\w*\\s+(?:toward|towards|for)|go\\w*\\s+for)\\w*\\b[^.]{0,40}\\b(?:stars?|rating|★|five)\\b',
+  '\\b(?:five|5)[- ]?stars?\\b[^.]{0,30}\\b(?:next\\s+time|from\\s+you|someday|one\\s+day|in\\s+the\\s+future|down\\s+the\\s+road)\\b', '\\bnext\\s+time\\b[^.]{0,40}\\b(?:stars?|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
   '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharm\\w*\\b', '\\brisk\\w*\\b',
   // No-injury / no-threat assertions in ANY grammatical wrapper ("cannot
@@ -139,8 +146,8 @@ const BANNED_RE = new RegExp([
   // "<protected subject> sailed | breezed | came | got | made it through …" (codex r52).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:sail|breez|cruis|coast|came|come|got|get|made\\s+it|went|go|pull|power|walk)\\w*\\s+(?:right\\s+|straight\\s+)?through\\b', '\\b(?:sailed|breezed|cruised|coasted)\\s+(?:right\\s+)?through\\b',
   // "<protected subject> came out | emerged | ended up | turned out | were … okay | fine | unharmed …" (codex r58).
-  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:came\\s+out|come\\s+out|emerg\\w*|end(?:ed|s)?\\s+up|turn(?:ed|s)?\\s+out|wound\\s+up|pull(?:ed|s)?\\s+through|were|are|was|is|remain\\w*|stay\\w*|seem\\w*|look\\w*|felt|feel\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:okay|ok|fine|alright|all\\s+right|unharmed|unscathed|unaffected|untouched|unbothered|unfazed|untroubled|great|good|well|happy|comfortable|content|relaxed|calm|intact|normal|themselves|like\\s+themselves|usual|the\\s+same|at\\s+ease|settled|none\\s+the\\s+worse|no\\s+worse|a-?ok)\\b',
-  '\\bnone\\s+the\\s+worse\\b',
+  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:came\\s+out|come\\s+out|emerg\\w*|end(?:ed|s)?\\s+up|turn(?:ed|s)?\\s+out|wound\\s+up|pull(?:ed|s)?\\s+through|were|are|was|is|remain\\w*|stay\\w*|seem\\w*|look\\w*|felt|feel\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:okay|ok|fine|alright|all\\s+right|unharmed|unscathed|unaffected|untouched|unbothered|unfazed|untroubled|great|good|well|happy|comfortable|content|relaxed|calm|intact|normal|themselves|like\\s+themselves|usual|the\\s+same|at\\s+ease|settled|none\\s+the\\s+worse|none\\s+the\\s+wiser|no\\s+worse|a-?ok)\\b',
+  '\\bnone\\s+the\\s+worse\\b', '\\bnone\\s+the\\s+wiser\\b',
   // "<subject> weathered | withstood | endured | survived | took | handled … the treatment" and
   // "in stride / like champs / without a fuss" (codex r60).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,2}?(?:weather|withst|endur|surviv|brav|shrug|took|take|taking|handl|cop|manag|tolerat|lived|live|rode|ride|breez|sail)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:treatments?|sprays?|services?|visits?|applications?|products?|it|this|that|everything|things)\\b',
@@ -149,6 +156,9 @@ const BANNED_RE = new RegExp([
   '\\b(?:at|by|around|near|before|past)\\s+the\\s+(?:\\d+[- ]?|half[- ]?|quarter[- ]?|one[- ]|two[- ]|three[- ]|an?\\s+)?(?:minute|min|hour|hr|day)s?[- ]?(?:mark|point|line)\\b',
   // "a breeze / a walk in the park / no sweat / painless …" (codex r56).
   '\\b(?:a\\s+breeze|a\\s+walk\\s+in\\s+the\\s+park|no\\s+sweat|a\\s+non[- ]?(?:event|issue)|smooth\\s+sailing|painless\\w*|effortless\\w*|a\\s+piece\\s+of\\s+cake|a\\s+cinch|no\\s+big\\s+deal|nothing\\s+to\\s+it|a\\s+snap|a\\s+doddle|child.s\\s+play)\\b',
+  // "<duration> before | until | then … access resumed", "once <duration> had passed" (codex r62).
+  '\\b(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\b[^.]{0,30}\\b(?:before|until|till|then|and\\s+then|prior\\s+to|ahead\\s+of)\\b[^.]{0,30}\\b(?:access\\w*|reopen\\w*|resum\\w*|return\\w*|re-?enter\\w*|back|ready|usable|available|open|normal)\\b',
+  '\\b(?:once|after|when|as\\s+soon\\s+as)\\s+(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\s+(?:had\\s+|have\\s+|has\\s+)?(?:passed|elapsed|went\\s+by|gone\\s+by|were\\s+up|was\\s+up|are\\s+up|is\\s+up)\\b',
   // "<duration> later / afterwards" is a fixed interval in any position (codex r56).
   '\\b(?:(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|half[- ]?hour|quarter[- ]hour|\\d+[- ]?(?:min|hr)s?)\\s+(?:later|afterwards?|on|thereafter|down\\s+the\\s+(?:road|line))\\b',
   // "easy | gentle | light | kind | soft | mild | nice on <protected subject>" (codex r53).

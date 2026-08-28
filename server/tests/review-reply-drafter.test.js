@@ -139,6 +139,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r62: "none the wiser" + euphemistic incentives + indirect solicitations.
+    expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we have a price break waiting for you because of this review. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, this review has earned you a little something. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we hope to earn five stars from you next time. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we hope you will consider a five-star rating next time. Marcus got the ants.'))).toBe('banned_phrase');
     // codex r61: "didn't slow your pets down".
     expect(verify(good("Hello there, glad the pest treatment didn't slow your pets down."), gpets)).toBe('banned_phrase');
     // codex r60: "weathered the treatment well" / "in stride" + by-the-mark / no-later-than intervals.
@@ -185,6 +191,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad everyone returned after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed by the 30-minute mark after the pest treatment.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed no later than 30 minutes after the pest treatment.'), g30)).toBe('banned_phrase');
+    // codex r62: elapsed-before-re-entry.
+    expect(verify(good('Hi Dana, it took 30 minutes before access resumed after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, access resumed once 30 minutes had passed.'), g30)).toBe('banned_phrase');
     // codex r61: hedged intervals.
     expect(verify(good('Hi Dana, glad access resumed in about an hour after the pest treatment.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad the yard was ready after roughly 30 minutes.'), g30)).toBe('banned_phrase');
