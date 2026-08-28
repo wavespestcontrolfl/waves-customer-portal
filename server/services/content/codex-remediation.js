@@ -1291,6 +1291,11 @@ async function validateAutonomousRunGates(fixedMarkdown, run, deps = {}) {
       if (valid.distinct < pub.BODY_IMAGE_MIN) {
         return { ok: false, reason: `body images: fix leaves ${valid.distinct} distinct in-article image(s), minimum ${pub.BODY_IMAGE_MIN} — the generated body images must be preserved` };
       }
+      // Distinct PICTURES, not just distinct paths — the same dHash contract
+      // the publisher applied, re-run over the branch's bytes.
+      const srcs = [...new Set(pub.bodyImageRefs(draft.body).map((r) => r.src))];
+      const pictures = await pub.assertDistinctPictures({ srcs, heroSrc, getFile: (path) => gh.getFile(path, prHeadRef) });
+      if (!pictures.ok) return { ok: false, reason: `body images: ${pictures.reason}` };
     }
 
     return { ok: true, comparisonResult };

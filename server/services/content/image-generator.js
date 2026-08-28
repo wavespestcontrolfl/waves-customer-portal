@@ -137,7 +137,14 @@ function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
 // alt BEFORE the hero exists; publishers overwrite it with this at
 // generation time (astro-publisher stamps it alongside the hero src).
 function buildAltText({ title, topic, keyword, city, mode = 'blog-hero' } = {}) {
-  const subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  let subject = String(keyword || topic || title || 'pest control and lawn care service').trim().replace(/\s+/g, ' ');
+  // Body images are generated from heading + section lead; the alt describes
+  // the same context (a generic heading alone tells a screen reader nothing).
+  if (mode === 'blog-body' && keyword && topic && topic !== keyword) {
+    const lead = String(topic).trim().replace(/\s+/g, ' ');
+    const clipped = lead.length > 140 ? `${lead.slice(0, 140).replace(/\s+\S*$/, '')}…` : lead;
+    subject = `${String(keyword).trim()} — ${clipped}`.replace(/[.!?]+$/, '');
+  }
   const setting = city
     ? `a sunny ${city}-area Southwest Florida home with palm trees and sandy soil`
     : 'a sunny Southwest Florida home with palm trees and tropical landscaping';

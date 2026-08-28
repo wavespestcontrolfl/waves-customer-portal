@@ -1663,9 +1663,9 @@ function hammingDistance(a, b) {
 // returns base64 for files < 1 MB — every hero/body WebP is far under). Null
 // when unavailable; callers then treat the image as unverifiable for the
 // near-duplicate check and regenerate rather than reuse blind.
-async function committedImageBuffer(repoPath) {
+async function committedImageBuffer(repoPath, getFile = (path) => gh.getFile(path)) {
   try {
-    const file = await gh.getFile(repoPath);
+    const file = await getFile(repoPath);
     const b64 = file?.raw?.content;
     if (!b64) return null;
     const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
@@ -1674,6 +1674,26 @@ async function committedImageBuffer(repoPath) {
     logger.warn(`[astro-publisher] could not read committed image ${repoPath}: ${err.message}`);
     return null;
   }
+}
+
+// Picture-level half of the body-image contract, shared with remediation:
+// every referenced image (fetched via `getFile`, e.g. on the PR branch) must
+// differ visually from the hero and from each other. Returns { ok, reason }.
+async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
+  const seen = [];
+  const hero = String(heroSrc || '');
+  if (hero.startsWith('/')) {
+    const buf = await committedImageBuffer(`public${hero}`, getFile);
+    if (buf) seen.push({ label: 'hero', hash: await imageDHash(buf) });
+  }
+  for (const src of srcs) {
+    const buf = await committedImageBuffer(`public${src}`, getFile);
+    if (!buf) return { ok: false, reason: `image bytes unavailable for ${src}` };
+    const dup = await nearDuplicateOf(buf, seen);
+    if (dup.label) return { ok: false, reason: `${src} is a near-duplicate of ${dup.label} — body images must be distinct pictures` };
+    seen.push({ label: src, hash: dup.hash });
+  }
+  return { ok: true, reason: null };
 }
 
 async function nearDuplicateOf(buffer, siblings) {
@@ -3679,6 +3699,7 @@ module.exports = {
     imageDHash,
     hammingDistance,
     committedImageBuffer,
+    assertDistinctPictures,
     BODY_IMAGE_SHOTS,
     NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,

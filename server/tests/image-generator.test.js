@@ -74,6 +74,18 @@ describe('sizeFor', () => {
   });
 });
 
+describe('buildAltText', () => {
+  const { buildAltText } = _internals;
+  test('blog-body fallback alt carries heading + section lead, clipped; hero alt unchanged (GH r3)', () => {
+    const alt = buildAltText({ keyword: 'What to expect', topic: 'The technician sweeps eaves and treats entry points first.', mode: 'blog-body' });
+    expect(alt).toMatch(/illustrating What to expect — The technician sweeps eaves and treats entry points first\.$/);
+    const long = buildAltText({ keyword: 'H', topic: 'word '.repeat(60).trim(), mode: 'blog-body' });
+    expect(long.length).toBeLessThan(260);
+    expect(long).toMatch(/…\.$/);
+    expect(buildAltText({ keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/illustrating k\.$/);
+  });
+});
+
 describe('buildPrompt', () => {
   test('includes title + city when present', () => {
     const p = buildPrompt({ title: 'Pest Control Bradenton', city: 'Bradenton', mode: 'blog-hero' });

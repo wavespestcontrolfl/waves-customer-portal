@@ -1248,7 +1248,11 @@ describe('validateAutonomousRunGates', () => {
     const spy = jest.spyOn(fg, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
     try {
       const seen = [];
-      const gh = { getFile: async (path, ref) => { seen.push([path, ref]); return path.startsWith('public/images/blog/x/body-') ? { sha: 'ok' } : null; } };
+      // Distinct bytes per path (body-1 ≠ body-2) so the picture-level check passes where intended.
+      const sharp = require('sharp');
+      const png = async (seed) => { const w = 32; const h = 32; const raw = Buffer.alloc(w * h * 3); for (let i = 0; i < raw.length; i++) raw[i] = ((i * (seed * 7 + 3)) + (Math.floor(i / 3) % w) * seed * 9) % 256; return (await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer()).toString('base64'); };
+      const bytes = { 'public/images/blog/x/body-1.webp': await png(1), 'public/images/blog/x/body-2.webp': await png(2) };
+      const gh = { getFile: async (path, ref) => { seen.push([path, ref]); return bytes[path] ? { sha: 'ok', raw: { content: bytes[path] } } : null; } };
       const deps = { ...goodDeps(), gh, prHeadRef: 'content/autonomous-x' };
       const one = '---\ntitle: T\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n![a again](/images/blog/x/body-1.webp)';
       const res = await rem.validateAutonomousRunGates(one, RUN_REF, deps);
@@ -1265,6 +1269,9 @@ describe('validateAutonomousRunGates', () => {
       expect((await rem.validateAutonomousRunGates(ghost, RUN_REF, deps)).reason).toMatch(/not committed/);
       // No PR head ref → fail closed.
       expect((await rem.validateAutonomousRunGates(two, RUN_REF, { ...deps, prHeadRef: null })).reason).toMatch(/PR head ref unavailable/);
+      // Two distinct PATHS holding the same PICTURE are rejected (GH r3) — hashed on the PR branch.
+      const samePic = { ...deps, gh: { getFile: async (path) => (bytes[path] ? { sha: 'ok', raw: { content: bytes['public/images/blog/x/body-1.webp'] } } : null) } };
+      expect((await rem.validateAutonomousRunGates(two, RUN_REF, samePic)).reason).toMatch(/near-duplicate of \/images\/blog\/x\/body-1\.webp/);
     } finally { spy.mockRestore(); }
     // Gate off: no recount.
     expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);
