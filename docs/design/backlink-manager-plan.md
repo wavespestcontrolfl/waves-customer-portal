@@ -497,7 +497,16 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   `/sponsors`, `/advertise`, `/directory`, `/resources`, `/contact`, `/signup`, `/register`)
   — capped at ~8 fetches per domain.
 - **Reasoning:** one `WORKHORSE`-tier call through `server/services/llm/call.js` (never a
-  hardcoded model id) with a strict JSON schema = the path fields in §3.2 plus
+  hardcoded model id) with a strict JSON schema = the path fields in §3.2 **except every
+  `*_cost_cents` field** — the model never emits an amount: it returns the quoted price and
+  renewal text verbatim (`price_text`, `renewal_price_text`, each with the page URL it was read
+  from) and the investigator derives `estimated_cost_cents` / `renewal_cost_cents`
+  deterministically with the shipped `price-scan/extract.parsePriceText()` (strict: a range,
+  a percentage, a promo badge or an empty string parses to null) → `Math.round(n * 100)`
+  integer cents; an unparseable quote leaves the cents null, which §6.3's validity step turns
+  into INVALID for a `payment_required` path until an owner enters the amount on the card —
+  a hallucinated or mis-scaled number can therefore never reach authority, an approval, or a
+  budget reservation — plus
   `confidence` and `reasons`, and — for any `payment_required` path — the `merchant_binding`
   (checkout origin + processor host + processor merchant/account id read from the observed
   checkout chain; a paid path without a resolvable recipient identity is written with a null
