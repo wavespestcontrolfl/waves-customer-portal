@@ -122,7 +122,7 @@ t.string('acquisition_type').notNullable();
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
 t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none
-t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; required (non-null, with a merchant_account_id or an issuer-lockable descriptor) before a paid path can be qualified; the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
+t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; nullable: a paid path MAY qualify without a valid binding — it then can only ever be decided payment=OWNER_MANUAL_PAYMENT (§6.3) and never reaches an automated reservation (fail-closed there); when present, the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
@@ -185,7 +185,7 @@ t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-l
 t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
 t.text('source_detail');
 t.date('paid_through');           // end of the term the last `charged` purchase bought (ET calendar day, copied from the purchase row)
-t.date('renews_at');              // = the settling purchase row's own `paid_through` (date, ET) (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
+t.date('renews_at');              // = the settling purchase row's own `paid_through` (date, ET); written on `charged`, `reconciled_charged` AND `manual_charged` (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
@@ -428,8 +428,11 @@ step-4 predicate treats a legacy row exactly like a new one (it still needs inve
 bridge → authority before any send).
 
 **Feeders that call the same endpoint** (as jobs, not UI):
-- **Competitor-gap ingestion** — every `seo_competitor_backlinks` domain not yet in the
-  registry (the 7,553). Weekly after the Sunday scan; `source='competitor_gap'`.
+- **Competitor-gap ingestion** — EVERY `seo_competitor_backlinks` domain (the 7,553) through
+  the deduping intake: an unknown host inserts a registry row, a known host only adds the
+  idempotent `competitor_gap` touch to `seo_link_domain_sources` — so any-touch attribution
+  and D30 learning for this source are never lost to prior discovery. Weekly after the
+  Sunday scan.
 - **Existing profile** — every active, scan-tracked `seo_backlinks` row → a registry domain
   (`source='existing_backlink'`, `agent_state='acquired'`) **plus** a placement and a path,
   so the baselines are real rows, not a flag: the placement is `seo_link_prospects`
@@ -484,8 +487,9 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   hardcoded model id) with a strict JSON schema = the path fields in §3.2 plus
   `confidence` and `reasons`, and — for any `payment_required` path — the `merchant_binding`
   (checkout origin + processor host + processor merchant/account id read from the observed
-  checkout chain; the schema requires it, and a paid path without a resolvable recipient
-  identity is written `agent_completable=false` so it can only be an owner step). Price/
+  checkout chain; a paid path without a resolvable recipient identity is written with a null
+  binding and qualifies normally — its payment dimension can only ever be
+  `OWNER_MANUAL_PAYMENT`, §6.3). Price/
   renewal text is quoted verbatim into `investigation`.
   `not_reproducible` is a first-class answer (a competitor's editorial mention, a
   private partnership) and closes the domain honestly instead of leaving it "unknown".
@@ -493,7 +497,11 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   (`qualified` / `not_reproducible` / `watching` when the path exists but is closed today).
 - **Cost discipline:** ~8 fetches + 1 LLM call per domain; batch of N per run
   (`LINK_INVESTIGATOR_BATCH`, default 50); `owner_seed` jumps the queue. Re-investigate on
-  `watch_recheck_at`, on a failed attempt, or after 90 days.
+  `watch_recheck_at`, on a failed attempt, or after 90 days. The selector is path-based, not
+  only domain-based: it also takes every path with `last_investigated_at IS NULL` (baseline
+  imports on `acquired` domains included) and re-investigates it without touching the
+  domain's aggregate `agent_state`, so an imported baseline gets its promised first pass and
+  can become a real, reproducible path for recursive discovery.
 
 This step is what turns the gap table into an **acquisition inventory**. Nothing enters the
 acquisition queue without a path row with `confidence ≥ policy.min_path_confidence`.
@@ -649,7 +657,11 @@ revision — so approval never invalidates itself), and then **recomputes the re
 aggregate rules; `rejected` ONLY when no placement is authorized, pending, awaiting the owner
 or acquired (a single `DENY` beside an approved sibling never rejects the domain); `INVALID`
 on every placement → back to `investigating`. Per-placement outcomes are stored on the
-placement (`OWNER_*` → `awaiting_owner` + card; `DENY` → reasons + override affordance). The job is
+placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a communication dimension decided
+`OWNER_OUTREACH` while no draft exists yet: that placement stays `prospect` with no card so
+the draft-only claim (`mode=draft`, which leases `prospect` rows regardless of authority) can
+produce the draft; the bridge re-decides once the draft exists and only then parks it for
+the send approval; `DENY` → reasons + override affordance). The job is
 idempotent and re-runs the decision whenever ANY §6.3 input changes — policy, path
 revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
 evidence, month spend — for already-bridged placements too: a stale stamp is replaced (or a
@@ -693,6 +705,7 @@ t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
 t.jsonb('merchant_binding');                        // IMMUTABLE at reservation, copied from the path: { checkout_origin, processor: { host, merchant_account_id? }, issuer_merchant_descriptor? }. NULLABLE only for `manual_charged` rows (the owner paid outside the system; the receipt is the record). For AUTOMATED purchases it is REQUIRED and must satisfy ONE of two enforcement modes, fail-closed: (a) `processor.merchant_account_id` present — validated immediately before mint AND before submit against the LIVE checkout (origin + the merchant/account id read from the live session/form); or (b) `issuer_merchant_descriptor` present AND the issuer actually minted the single-use card locked to that descriptor (`issuer_lock_applied=true` recorded at mint) — then the live check validates origin only. A processor HOST alone never binds anything; neither mode satisfiable ⇒ `instrument_unavailable` (pre-exposure void) and the path routes to OWNER_MANUAL_PAYMENT
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
+t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms the merchant/descriptor lock is on the card); descriptor-only enforcement mode requires it = true before the card is exposed — a null/false value after mint is `ambiguous`-safe: the card is closed and the row voided before exposure
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
@@ -999,7 +1012,10 @@ together:
 - **Paid outreach after the send: `claim(?mode=payment)`.** Once a paid outreach placement
   is `contacted`/`negotiating` and the publisher exposes a checkout, the payment step is
   leased through a payment-specific predicate keyed to the placement's open, unleased
-  `initial` reservation (created by the bridge when the payment dimension is satisfied):
+  `initial` reservation — created ONLY at that moment (the runner/owner marks the placement
+  `ready_for_payment` when the publisher exposes a checkout), never at bridge time, so a
+  publisher who never replies holds no budget and no open-purchase guard; a pre-checkout
+  reservation does not exist by construction:
   placement in (`contacted`, `negotiating`), communication dimension `satisfied_at` set,
   payment dimension authorized, no `submitting`/`ambiguous` purchase; the initial send is
   never claimable again through this mode. The `deterministic_runner` is the only eligible
