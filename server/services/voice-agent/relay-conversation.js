@@ -583,7 +583,7 @@ class RelayConversation {
    * caveat as relay-protocol.parsePrompt).
    */
   _maybeEndAfterTurn() {
-    if (!this.leadCaptured || !this._endSession || this._ending) return;
+    if (!this.leadCaptured || this._holdOpenForRetry || !this._endSession || this._ending) return;
     this._ending = true;
     try {
       this._endSession({ reason: 'agent_complete', captured: true });
@@ -902,9 +902,14 @@ class RelayConversation {
       // creates no lead for one, so the floor must still stand down (a second
       // attempt hits the same guard and creates nothing) while the record must
       // not claim a lead that does not exist.
-      markCaptured: ({ leadCreated = true } = {}) => {
+      markCaptured: ({ leadCreated = true, holdOpen = false } = {}) => {
         this.leadCaptured = true;
         if (leadCreated === false) this._noLeadCreated = true;
+        // An INCOMPLETE estimate capture (hook P1): the floor is suppressed
+        // (something was recorded) but the call must stay open so the caller
+        // can supply the missing fields and capture_lead can run again. A
+        // later complete capture clears the hold.
+        this._holdOpenForRetry = holdOpen === true;
       },
       // Phase E: the model's own capture_lead summary becomes the call_log
       // call_summary at close (no extra model round trip on the live call).

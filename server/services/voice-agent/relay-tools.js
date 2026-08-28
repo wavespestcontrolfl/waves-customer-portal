@@ -836,11 +836,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // (extracted_data.quote_requested → "Quote requested on call",
       // quote_promised → "Quote promised to caller").
       const estimateRequested = input.estimate_requested === true;
+      // An email must be DELIVERABLE, not merely non-empty (hook P1): an
+      // ASR-garbled or syntactically invalid address is reported as missing.
+      const { isValidEmail } = require('../../utils/internal-email-recipients');
       const estimateMissing = estimateRequested
         ? [
-          ['first_name', extracted.first_name], ['last_name', extracted.last_name],
-          ['email', extracted.email], ['address_line1', extracted.address_line1],
-        ].filter(([, v]) => !v).map(([k]) => k)
+          ['first_name', !!extracted.first_name], ['last_name', !!extracted.last_name],
+          ['email', !!extracted.email && isValidEmail(String(extracted.email).trim())],
+          ['address_line1', !!extracted.address_line1],
+        ].filter(([, ok]) => !ok).map(([k]) => k)
         : [];
       if (estimateRequested) {
         extracted.quote_requested = true;
@@ -1312,7 +1316,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       // guard and creates nothing — but the record must not claim a lead that
       // does not exist, and the model must not be told one was saved.
       const leadCreated = Boolean(capturedLeadId);
-      if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated });
+      // An incomplete estimate capture keeps the call OPEN for the retry the
+      // result asks for (hook P1); a complete or non-estimate capture ends
+      // the call as before once the agent is done.
+      const holdOpen = estimateRequested && estimateMissing.length > 0;
+      if (typeof ctx.markCaptured === 'function') ctx.markCaptured({ leadCreated, holdOpen });
       // ⭐ A PROMISED ESTIMATE NEEDS AN ARTIFACT (codex #3569). A new lead IS
       // the artifact (the office works it). A lifecycle customer gets no lead,
       // so the promise would otherwise rest on a call summary nobody is paged

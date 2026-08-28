@@ -346,9 +346,11 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     test('an INCOMPLETE capture never queues (hook P1): the result names the missing fields, no card, no promise', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockClear();
-      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat' }, { from: '+19415551234', callSid: 'CA-est6' });
+      const markCaptured = jest.fn();
+      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat' }, { from: '+19415551234', callSid: 'CA-est6', markCaptured });
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       expect(out).toMatch(/NOT queued yet — still missing: last_name, email, address_line1/);
+      expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true })); // call stays open for the retry
       expect(out).toMatch(/Do NOT promise a written estimate yet/);
       expect(out).not.toMatch(/IS on the office queue/);
       // a NEW lead is not an estimate artifact either when the capture is incomplete
@@ -358,6 +360,21 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect(out2).not.toMatch(/IS on the office queue/);
       // requested but NOT promised — the lead shows "Quote requested on call" only
       expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_requested: true, quote_promised: false }), expect.anything());
+    });
+    test('a malformed email counts as MISSING — never authorizes the promise', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-3', created: true });
+      const markCaptured = jest.fn();
+      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat at example dot com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est8', markCaptured });
+      expect(out).toMatch(/still missing: email/);
+      expect(out).not.toMatch(/IS on the office queue/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: false }), expect.anything());
+      expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true }));
+    });
+    test('a complete capture does not hold the call open', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-4', created: true });
+      const markCaptured = jest.fn();
+      await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est9', markCaptured });
+      expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ leadCreated: true, holdOpen: false }));
     });
     test('not requested ⇒ result unchanged (no estimate note either way)', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
