@@ -78,6 +78,13 @@ const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok
 // same way a bare "yes" does, so alone it stays loud. Bare affirmatives
 // (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
 const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
+// A closer must carry at least one GRATITUDE/sign-off token. Affirmatives
+// ("Sounds good", "Great", "Perfect", "Will do", "Got it") can answer an
+// operational question ("does 9am work?") exactly like a bare "yes", so on
+// their own they stay loud; "Sounds good, thanks!" is a closer (hook P1).
+// Context-aware quieting of bare affirmatives is the drafter's job (it sees
+// the thread), not this context-free grammar's.
+const STRONG_CLOSER_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|i\s+appreciate|we\s+appreciate|(?:you'?re\s+)?welcome|my\s+pleasure|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|you\s+(?:too|as\s+well)|cheers)`, 'iu');
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
 // you guys!"). Only KNOWN addressees qualify — the people customers actually
@@ -104,10 +111,10 @@ function isCourtesyOnly(body) {
   if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
   if (/[?]/.test(raw)) return false;
   const stripped = raw.replace(ACK_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
-  if (!stripped) return true; // acknowledgement-emoji-only
+  if (!stripped) return true; // acknowledgement-emoji-only (👍 🙏 ❤️ — never an answer to a yes/no question)
   if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
   if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
-  if (WEAK_ONLY_RE.test(stripped)) return false;
+  if (WEAK_ONLY_RE.test(stripped) || !STRONG_CLOSER_RE.test(stripped)) return false;
   if (COURTESY_ONLY_RE.test(stripped)) return true;
   const named = COURTESY_WITH_NAME_RE.exec(stripped);
   return Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, ''));
