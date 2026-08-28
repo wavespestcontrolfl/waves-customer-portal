@@ -499,6 +499,16 @@ describe('caller wiring (source)', () => {
     expect(moveIdx).toBeGreaterThan(policyIdx);
   });
 
+  test('the IB reschedule tool refuses a gated cadence date move instead of moving one row (until its series path lands)', () => {
+    const src = read('../services/intelligence-bar/tools.js');
+    const fn = src.indexOf('async function rescheduleAppointment(input)');
+    const refuse = src.indexOf("code: 'COLLECTIVE_MOVE_REQUIRED'", fn);
+    const write = src.indexOf('scheduled_date: dateStr,', fn);
+    expect(refuse).toBeGreaterThan(fn);
+    expect(refuse).toBeLessThan(write);
+    expect(src.slice(fn, refuse)).toContain('collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr');
+  });
+
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {
     // Quick Move's single call opts out ONLY after an explicit series attempt
     // (wantsSeriesShift) — with the older series gate off, the choke point decides.

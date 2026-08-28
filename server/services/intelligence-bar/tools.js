@@ -1782,6 +1782,22 @@ async function rescheduleAppointment(input) {
   if (win.error) return { error: win.error };
 
   const oldDate = appt.scheduled_date;
+  // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this tool moves ONE
+  // row directly and cannot shift the sister visits, so with the gate on a
+  // DATE move of a cadence visit is refused rather than silently applied
+  // per-visit (refuse-don't-drop — the same contract update-details keeps
+  // for gated scopes). The Intelligence Bar series path (preview card +
+  // rebooker choke point + series effects) lands in the follow-up PR.
+  {
+    const { collectiveMoveGateOn } = require('../rebooker');
+    const oldDateStr = oldDate instanceof Date ? oldDate.toISOString().slice(0, 10) : String(oldDate || '').slice(0, 10);
+    if (collectiveMoveGateOn() && appt.is_recurring === true && dateStr !== oldDateStr) {
+      return {
+        error: 'This visit is part of a recurring plan — with collective moves on, its future visits follow every date move. Move it from Dispatch or the Edit appointment modal for now; Intelligence Bar series moves arrive in a follow-up. Nothing was changed.',
+        code: 'COLLECTIVE_MOVE_REQUIRED',
+      };
+    }
+  }
 
   // Preserve the original visit's window length when a new start is given.
   // Persisting only window_start against a stale window_end collapses the

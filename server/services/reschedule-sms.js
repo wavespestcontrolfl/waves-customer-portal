@@ -182,8 +182,6 @@ class RescheduleSMS {
     // the failed-send re-arm below, the windowless ones an operator card.
     let shiftedSiblings = [];
     let shiftedTimedSiblings = [];
-    let siblingReminderGuards = [];
-    let siblingGuardReadFailed = false;
     if (selectedOption && !alreadyOnSlot) {
       try {
         smsMoveResult = await SmartRebooker.reschedule(
@@ -231,33 +229,24 @@ class RescheduleSMS {
         }
         // A date reply on a cadence visit shifted the future series through
         // the collective choke point: sync each shifted sibling's reminder
-        // to its own new date/kept window (same silent sync the web
-        // rescheduler runs — reschedule-public.js). Windowless occurrences
-        // had their reminder pre-closed in the move trx.
+        // to its own new date/kept window. NOT coverDueWindows — the
+        // confirmation below describes the anchor visit only, so a sibling
+        // inside a due window must still get its ordinary reminder (same
+        // contract as the Quick Move sibling sync); expectSchedule keeps the
+        // sync off a sibling that moved again meanwhile. Windowless
+        // occurrences had their reminder pre-closed in the move trx.
         for (const occ of shiftedTimedSiblings) {
           try {
             const AppointmentReminders = require('./appointment-reminders');
+            const occDate = String(occ.date).split('T')[0];
+            const occStart = String(occ.windowStart).slice(0, 5);
             await AppointmentReminders.handleReschedule(
               occ.id,
-              `${String(occ.date).split('T')[0]}T${String(occ.windowStart).slice(0, 5)}`,
-              { sendNotification: false, coverDueWindows: true },
+              `${occDate}T${occStart}`,
+              { sendNotification: false, expectSchedule: { date: occDate, windowStart: occStart } },
             );
           } catch (err) {
             logger.warn(`[reschedule-sms] series reminder sync failed for ${occ.id}: ${err.message}`);
-          }
-        }
-        // Pre-send guard snapshot per shifted sibling (same contract as the
-        // anchor's below): a failed confirmation re-arms each sibling only
-        // against the row state THIS reply synced — a concurrent newer
-        // reschedule of a sibling keeps its own covered/sent flags.
-        if (shiftedTimedSiblings.length) {
-          try {
-            siblingReminderGuards = await db('appointment_reminders')
-              .whereIn('scheduled_service_id', shiftedTimedSiblings.map((occ) => occ.id))
-              .select('id', 'scheduled_service_id', 'appointment_time', 'updated_at');
-          } catch (guardErr) {
-            siblingGuardReadFailed = true;
-            logger.warn(`[reschedule-sms] sibling reminder-guard snapshot read failed for ${pending.scheduled_service_id} (${guardErr.message}) — a blocked send will re-arm the siblings unguarded`);
           }
         }
         // Shifted siblings that went WINDOWLESS (projected window held a
@@ -413,38 +402,7 @@ class RescheduleSMS {
                 .where('updated_at', reminderGuard.updated_at)
                 .update(rearmUpdate);
             }
-          }
-          // The shifted siblings were synced with coverDueWindows above and
-          // the confirmation that was to cover them never went out — re-arm
-          // each sibling's still-reachable windows, guarded on its pre-send
-          // snapshot exactly like the anchor (unguarded by service id only
-          // when that snapshot read failed, mirroring the anchor's fallback).
-          for (const occ of shiftedTimedSiblings) {
-            const guard = siblingReminderGuards.find((g) => String(g.scheduled_service_id) === String(occ.id));
-            if (guard) {
-              const sibRearm = rearmUpdateFor(guard.appointment_time);
-              if (!sibRearm) continue;
-              await db('appointment_reminders')
-                .where({ id: guard.id })
-                .where('suppressed_by_sibling', false)
-                .where('cancelled', false)
-                .where('appointment_time', guard.appointment_time)
-                .where('updated_at', guard.updated_at)
-                .update(sibRearm);
-            } else if (siblingGuardReadFailed) {
-              const sibRearm = rearmUpdateFor(parseETDateTime(
-                `${String(occ.date).split('T')[0]}T${String(occ.windowStart).slice(0, 5)}`,
-              ));
-              if (!sibRearm) continue;
-              logger.warn(`[reschedule-sms] re-arming sibling ${occ.id} reminders WITHOUT the pre-send snapshot guard (snapshot read had failed)`);
-              await db('appointment_reminders')
-                .where({ scheduled_service_id: occ.id })
-                .where('suppressed_by_sibling', false)
-                .where('cancelled', false)
-                .update(sibRearm);
-            }
-          }
-          if (reminderGuardReadFailed) {
+          } else if (reminderGuardReadFailed) {
             // The pre-send snapshot READ failed (this is not the row-missing
             // case — that skips below), so the re-arm can't be scoped by the
             // pre-send row state. Fall back to the pre-guard re-arm scoped as
