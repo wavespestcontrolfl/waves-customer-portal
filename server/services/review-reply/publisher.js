@@ -131,6 +131,7 @@ function liveReviewChanged(live, row) {
     || (!!liveName && liveName !== String(row.reviewer_name || '').trim().toLowerCase());
 }
 
+const RECONCILE_PARK_REASONS = new Set(['google_uncertain', 'persist_failed']);
 async function recordLiveOwnerReply(reviewId, live, fresh) {
   const liveReply = String(live?.reviewReply?.comment || '').trim();
   if (!liveReply) return;
@@ -145,18 +146,25 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
   // (codex r49): row locked, facts re-read, mismatch → parked for a person.
   const { syncReplyFields, validatePromotionAccountFacts, notifyReviewEditedAfterPost } = require('./runner');
   let parkedPromotion = null;
+  let promoted = false;
   await db.transaction(async (trx) => {
     const locked = (await trx('google_reviews').where({ id: reviewId }).forUpdate().first()) || fresh || {};
     const base = syncReplyFields({ ...locked, publish_claimed_until: null }, { owner_reply: liveReply, owner_reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() });
     const fields = await validatePromotionAccountFacts(locked, base, { conn: trx });
+    const wasReconcilePark = locked.auto_reply_status === 'parked' && RECONCILE_PARK_REASONS.has(locked.auto_reply_reason);
     const n = await trx('google_reviews').where({ id: reviewId }).whereNull('missing_since').update({ ...fields, auto_reply_claimed_until: null });
-    if ((Array.isArray(n) ? n.length : n) > 0 && fields.auto_reply_status === 'parked' && fields.auto_reply_reason === 'review_edited_after_post') parkedPromotion = locked;
+    const wrote = (Array.isArray(n) ? n.length : n) > 0;
+    if (wrote && fields.auto_reply_status === 'parked' && fields.auto_reply_reason === 'review_edited_after_post') parkedPromotion = locked;
+    if (wrote && fields.auto_reply_status === 'posted' && wasReconcilePark) promoted = true;
   }).catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
   // A landed write that parked (review / account facts moved since the
   // draft) needs a person: the retrying edited-after-post bell (codex r54).
   if (parkedPromotion) {
     await notifyReviewEditedAfterPost({ id: reviewId }, { location_id: parkedPromotion.location_id, star_rating: parkedPromotion.star_rating, cause: 'edit' });
   }
+  // `promoted`: a reconciliation park (google_uncertain / persist_failed)
+  // whose earlier PUT turned out to be live was just recorded as posted.
+  return { promoted };
 }
 
 async function recordLiveOwnerReplyRemoved(reviewId, fresh) {
@@ -367,7 +375,15 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         if (liveReply) {
-          await recordLiveOwnerReply(reviewId, live, fresh);
+          const rec = await recordLiveOwnerReply(reviewId, live, fresh);
+          // A landed earlier attempt is now OURS (posted): tell the caller so
+          // Post now reports success and the card reloads with Retract
+          // (codex r69) instead of a 409 over a reply we own.
+          if (rec?.promoted) {
+            const e = new ReviewReplyError(CODES.HAS_REPLY, 'The earlier attempt had already landed on Google — the reply is now recorded as posted.', { status: 409 });
+            e.reconciled = true;
+            throw e;
+          }
           throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }
         // The LIVE review itself must still be the one the reply was drafted

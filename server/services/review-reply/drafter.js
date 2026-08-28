@@ -87,6 +87,8 @@ const FIRST_PERSON_SINGULAR_RE = /\b(?:I|I'm|I've|I'd|I'll|my|me|mine)\b/i;
 // fractions, "a dozen", and EVERY spelled-out number 1–99 (thirty-five,
 // forty-two), not an enumerated few.
 const DURATION_COUNT = '\\d+(?:\\.\\d+)?|a\\s+few|a\\s+couple(?:\\s+of)?|several|(?:a|one|half\\s+a|two|three)\\s+dozen|dozens\\s+of|(?:one[- ]|a\\s+)?half(?:\\s+of)?\\s+an?|one[- ]half|(?:three[- ])?quarters?\\s+of\\s+an?|one[- ]and[- ]a[- ]half|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?|an?(?:\\s+(?:full|whole|good|solid|mere|quick|short|brief|single))?';
+// A complete duration phrase: "<count> minutes", "a half-hour", "quarter-hour", "30min".
+const DURATION_PHRASE = `(?:${DURATION_COUNT})[- ]+(?:minutes?|mins?|hours?|hrs?|days?)|(?:one[- ]|a\\s+)?half[- ]?(?:an?[- ])?hour|(?:three[- ])?quarter[- ]hour|\\d+[- ]?(?:min|hr)s?`;
 const BANNED_RE = new RegExp([
   // Incentives of every flavor (Google review policy).
   '\\bdiscount(?:s|ed)?\\b', '\\bfree\\b(?!\\s+to\\b)', '\\bcoupons?\\b', '\\bgift\\s*cards?\\b', '\\brewards?\\b',
@@ -212,6 +214,8 @@ const BANNED_RE = new RegExp([
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
   '\\b(?:wait|stay\\s+off|keep\\s+off|stay\\s+out|keep\\s+out|avoid)\\b[^.]{0,30}\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b',
+  // outcome → duration → treatment: "access resumed a half-hour after the pest treatment" (codex r69).
+  `\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|reopen\\w*|resum\\w*|access\\w*|re-?enter\\w*|re-?entry|return\\w*|available|allowed\\s+back|welcome\\s+back|let\\s+\\w+\\s+(?:out|back|in)|went\\s+back|go\\s+back|came\\s+back|come\\s+back|were\\s+back|was\\s+back)\\b[^.]{0,30}?\\b(?:${DURATION_PHRASE})\\b`,
   // "<duration> was all the wait needed", "<duration> of downtime", "<duration> off the lawn" (codex r66).
   '\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:waits?|waiting|wait\\s+time|downtime|down\\s+time|delay|hold[- ]?off|keep[- ]?out|stay[- ]?out|keep[- ]?off|stay[- ]?off|off\\s+the\\s+(?:lawn|grass|yard|turf|floors?)|out\\s+of\\s+the\\s+(?:house|home|yard|rooms?|area)|away\\s+from|before\\s+(?:re-?entering|going\\s+back|letting|coming\\s+back))\\b',
   // …and any fixed post-treatment interval in indirect form (codex r45):
@@ -227,7 +231,7 @@ const BANNED_RE = new RegExp([
   '\\b(?:terminix|orkin|truly nolen|massey|aptive|rentokil|hometeam|home team)\\b',
 ].join('|'), 'i');
 // Anything that reads as "we know something you told us privately".
-const PRIVATE_CHANNEL_RE = /\b(?:on the phone|when you called|you called|your call|your text|text message|texted|our records|our notes|our files|transcript|recording|voicemail|your account|invoice|billing|payment|balance|autopay|card on file|you mentioned to (?:our|the) (?:office|team))\b/i;
+const PRIVATE_CHANNEL_RE = /\b(?:on the phone|when you called|you called|your call|your text|text message|texted|our records|our notes|our files|transcript|recording|voicemail|your account|invoice|billing|payment|balance|autopay|card on file|you mentioned to (?:our|the) (?:office|team)|our (?:conversation|chat|discussion|talk)|(?:conversation|chat|discussion|talk)s? with you|(?:speaking|spoke|talking|talked|chatting|chatted|catching up|caught up) with you|(?:discuss|discussed|discussing) with you|we discussed|you told us|you let us know|you shared with us|you explained|when we (?:spoke|talked|chatted|met)|nice (?:speaking|talking|chatting) with you|great (?:speaking|talking|chatting) with you)\b/i;
 const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit card|chargeback|complaint|dispute|cancel(?:led|lation)?)\b/i;
 // Capitalized words a reply may carry without provenance from the review.
 // Words that legitimately open a sentence in a short thank-you reply (name-

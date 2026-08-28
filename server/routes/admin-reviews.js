@@ -466,7 +466,10 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
       }
       return res.status(409).json({ error: `Could not post: ${result.reason || result.outcome}`, outcome: result.outcome, reason: result.reason || null });
     }
-    res.json({ success: true, outcome: result.outcome, mode: result.mode || null });
+    res.json({
+      success: true, outcome: result.outcome, mode: result.mode || null, reconciled: !!result.reconciled,
+      ...(result.reconciled ? { message: 'The earlier attempt had already landed on Google — the reply is now recorded as posted. You can read or retract it here.' } : {}),
+    });
   } catch (err) { sendReplyError(res, err, next); }
 });
 

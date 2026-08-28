@@ -692,6 +692,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // A transient account-facts read failure inside the claim is not a
     // person's action: retry it like a Google failure (codex r28).
     const transientStale = code === CODES.STALE && err.message.includes(ACCOUNT_READ_FAILED);
+    // The live GET found our own earlier (uncertain) PUT and the publisher
+    // recorded it as posted (codex r69): that IS the posted outcome — the
+    // row already carries posted + our reply, the claim is cleared.
+    if (code === CODES.HAS_REPLY && err.reconciled) return { outcome: 'posted', reconciled: true, mode: draft.mode };
     if (!transientStale && (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE)) {
       // Not ours any more (a human replied / skipped / dismissed, or Google
       // removed it) — record and stop; never retry over a person's action.

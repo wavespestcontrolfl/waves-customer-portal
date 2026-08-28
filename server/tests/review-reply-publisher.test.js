@@ -444,7 +444,9 @@ describe('publishReviewReply', () => {
     mockAccountFacts.mockReset().mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     mockNotify.mockClear();
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
+    const parkedErr = await publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } }).catch((e) => e);
+    expect(parkedErr).toMatchObject({ code: CODES.HAS_REPLY });
+    expect(parkedErr.reconciled).toBeUndefined();
     expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
     // codex r54: the parked promotion rings the retrying edited-after-post bell.
     expect(mockNotify).toHaveBeenCalledTimes(1);
@@ -453,7 +455,8 @@ describe('publishReviewReply', () => {
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' };
     mockAccountFacts.mockReset().mockResolvedValue({ city: 'Venice', tenure: 'new' });
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
-    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
+    // codex r69: the promotion is reported to the caller (Post now → success + reload).
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY, reconciled: true });
     expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'posted', auto_reply_reason: null });
     mockAccountFacts.mockReset().mockResolvedValue(null);
   });

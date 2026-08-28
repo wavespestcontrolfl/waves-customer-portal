@@ -148,6 +148,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
     expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r69: outcome → duration → treatment ordering + fabricated conversational contact.
+    expect(verify(good('Hello there, we are glad access resumed a half-hour after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad everyone was back inside forty minutes after the pest treatment.'), gpets)).toBe('banned_phrase');
+    const gsvc2 = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we appreciated our conversation about your pest service.'), gsvc2)).toBe('private_channel');
+    expect(verify(good('Hello there, we enjoyed speaking with you about the pest service.'), gsvc2)).toBe('private_channel');
     // codex r68: "no worse off", arbitrary spelled-out durations, promise-shaped guarantees.
     expect(verify(good('Hello there, the treatment left your pets no worse off.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, we are glad access resumed after thirty-five minutes following the pest treatment.'), gpets)).toBe('banned_phrase');

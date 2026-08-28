@@ -1212,6 +1212,17 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied' });
   });
 
+  test('publisher HAS_REPLY flagged reconciled (our earlier uncertain PUT was live) → posted outcome, row NOT marked skipped (codex r69)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const e = new ReviewReplyError('already_replied', 'landed', { status: 409 }); e.reconciled = true;
+    mockPublish.mockImplementationOnce(async () => { state.rows[0] = { ...state.rows[0], auto_reply_status: 'posted', auto_reply_reason: null, review_reply: 'Landed text', auto_reply_claimed_until: null }; throw e; });
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'posted', review_reply: 'Landed text' });
+    expect(state.rows[0].auto_reply_reason).not.toBe('already_replied');
+  });
+
   test('location without GBP credentials: the draft is produced (shadow value, human parks), publishing defers with the draft kept', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
