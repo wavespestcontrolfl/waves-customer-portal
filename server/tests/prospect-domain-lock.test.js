@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { lockProspectDomain, canonicalProspectDomain, LOCK_PREFIX } = require('../services/seo/prospect-domain-lock');
+const { lockProspectDomain, claimProspectDomain, canonicalProspectDomain, LOCK_PREFIX, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, TARGET_DOMAIN_CANONICAL_SQL } = require('../services/seo/prospect-domain-lock');
 
 describe('prospect-domain-lock helper', () => {
   test('key = lost_recovery:<canonical host> — scheme, www/mail, path, port, case all collapse to one key', async () => {
@@ -28,6 +28,29 @@ describe('prospect-domain-lock helper', () => {
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
+  test('claimProspectDomain: lock FIRST, then the domain-wide probe (canonical host SQL, status set) — in-flight row returned, else null', async () => {
+    const order = []; let captured = null;
+    const q = { whereRaw: jest.fn((sql, bind) => { captured = [sql, bind]; order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { captured.push([col, vals]); return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })) };
+    const trx = Object.assign(jest.fn(() => q), { raw: jest.fn(async () => { order.push('lock'); }) });
+    const r = await claimProspectDomain(trx, 'https://WWW.Blog.Example/');
+    expect(order).toEqual(['lock', 'probe']);
+    expect(r).toEqual({ domain: 'blog.example', inFlight: { id: 'p1', status: 'contacted', target_page: '/x' } });
+    expect(captured[0]).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
+    expect(captured[1]).toEqual(['blog.example']);
+    expect(captured[2]).toEqual(['status', [...ACTIVE_OUTREACH_STATUSES]]);
+    // the SQL twin compiles with exactly one binding (no bare '?' eaten by knex.raw)
+    const knex = require('knex')({ client: 'pg' });
+    const c = knex('seo_link_prospects').whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']).toSQL().toNative();
+    expect(c.bindings).toEqual(['blog.example']);
+
+    // a row outside the requested set does not count (recovery widens the set to IN_FLIGHT)
+    q.first.mockResolvedValueOnce({ id: 'p2', status: 'live', target_page: '/y' });
+    await expect(claimProspectDomain(trx, 'blog.example')).resolves.toEqual({ domain: 'blog.example', inFlight: null });
+    q.first.mockResolvedValueOnce({ id: 'p2', status: 'live', target_page: '/y' });
+    await expect(claimProspectDomain(trx, 'blog.example', { statuses: IN_FLIGHT_STATUSES })).resolves.toEqual(expect.objectContaining({ inFlight: expect.objectContaining({ id: 'p2' }) }));
+    expect(IN_FLIGHT_STATUSES).toEqual(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
+  });
+
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {
     const { _test } = require('../services/seo/lost-link-recovery');
     for (const s of ['WWW.Blog.Example/', 'https://blog.example:443/x', 'mail.blog.example']) {
@@ -43,13 +66,16 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.post('/prospects'"), s.indexOf("router.patch('/prospects/:id'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iLock = block.indexOf('lockProspectDomain(trx, domain)');
+    const iLock = block.indexOf('claimProspectDomain(trx, domain)');
+    const iRefuse = block.indexOf('if (inFlight) return { inFlight };');
     const iExists = block.indexOf("trx('seo_link_prospects').where({ target_domain: domain, target_page }).first()");
     const iInsert = block.indexOf("trx('seo_link_prospects').insert(");
     expect(iTrx).toBeGreaterThan(-1);
     expect(iLock).toBeGreaterThan(iTrx);
-    expect(iExists).toBeGreaterThan(iLock);
+    expect(iRefuse).toBeGreaterThan(iLock);
+    expect(iExists).toBeGreaterThan(iRefuse);
     expect(iInsert).toBeGreaterThan(iExists);
+    expect(block).toMatch(/result\.inFlight\) return res\.status\(409\)/);
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/); // nothing on the board outside the trx
   });
 
@@ -57,11 +83,13 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('services/seo/backlink-strategy-tools.js');
     const block = s.slice(s.indexOf("case 'create_link_prospects'"), s.indexOf("case 'list_prospects'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iLock = block.indexOf('lockProspectDomain(trx, domain)');
+    const iLock = block.indexOf('claimProspectDomain(trx, domain)');
+    const iRefuse = block.indexOf('if (inFlight) return false;');
     const iRecheck = block.indexOf("trx('seo_link_prospects').where({ target_domain: domain, target_page: p.target_page }).first('id')");
     const iInsert = block.indexOf("trx('seo_link_prospects').insert(");
     expect(iLock).toBeGreaterThan(iTrx);
-    expect(iRecheck).toBeGreaterThan(iLock);
+    expect(iRefuse).toBeGreaterThan(iLock);
+    expect(iRecheck).toBeGreaterThan(iRefuse);
     expect(iInsert).toBeGreaterThan(iRecheck);
     expect(block).toMatch(/if \(!landed\) \{ duplicates\.push\(domain\); skipped\+\+; continue; \}/);
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)\.insert/);
@@ -70,16 +98,42 @@ describe('every board writer takes the shared lock inside its check+insert trans
   test('local-opportunity promoter: lock precedes the ON CONFLICT insert on the trx', () => {
     const s = src('services/seo/local-opportunity-promoter.js');
     const iTrx = s.indexOf('db.transaction(async (trx)');
-    const iLock = s.indexOf('lockProspectDomain(trx, cand.domain)');
+    const iLock = s.indexOf('claimProspectDomain(trx, cand.domain)');
+    const iRefuse = s.indexOf('if (inFlight) return [];');
     const iInsert = s.indexOf("trx('seo_link_prospects').insert(");
     expect(iLock).toBeGreaterThan(iTrx);
-    expect(iInsert).toBeGreaterThan(iLock);
+    expect(iRefuse).toBeGreaterThan(iLock);
+    expect(iInsert).toBeGreaterThan(iRefuse);
     expect(s).not.toMatch(/\bdb\('seo_link_prospects'\)\.insert/);
   });
 
-  test('lost-link recovery uses the shared helper (no private lock string)', () => {
+  test('deep-harvest script: guard → pair re-check → insert on the trx', () => {
+    const s = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'backlink-deep-harvest.js'), 'utf8');
+    const iTrx = s.indexOf('db.transaction(async (trx)');
+    const iLock = s.indexOf('claimProspectDomain(trx, s.candidate.domain)');
+    const iDup = s.indexOf("trx('seo_link_prospects').where({ target_domain: s.candidate.domain, target_page: targetPage }).first()");
+    const iInsert = s.indexOf("trx('seo_link_prospects').insert(");
+    expect(iLock).toBeGreaterThan(iTrx);
+    expect(iDup).toBeGreaterThan(iLock);
+    expect(iInsert).toBeGreaterThan(iDup);
+    expect(s).not.toMatch(/\bdb\('seo_link_prospects'\)\.insert/);
+  });
+
+  test('no seo_link_prospects writer anywhere bypasses the guard', () => {
+    const { execSync } = require('child_process');
+    const root = path.join(__dirname, '..', '..');
+    const hits = execSync(`grep -rln "seo_link_prospects').insert" server scripts --include='*.js' | grep -v /tests/`, { cwd: root }).toString().trim().split('\n');
+    for (const f of hits) {
+      const src = fs.readFileSync(path.join(root, f), 'utf8');
+      expect({ file: f, guarded: /claimProspectDomain\(trx, /.test(src) }).toEqual({ file: f, guarded: true });
+    }
+    expect(hits.length).toBeGreaterThanOrEqual(5);
+  });
+
+  test('lost-link recovery uses the shared guard with the wider IN_FLIGHT set for insert AND reopen (no private lock string / SQL twin)', () => {
     const s = src('services/seo/lost-link-recovery.js');
-    expect(s).toMatch(/lockProspectDomain\(trx, domain\)/);
+    expect(s.match(/claimProspectDomain\(trx, domain, \{ statuses: IN_FLIGHT_STATUSES \}\)/g)).toHaveLength(2);
     expect(s).not.toMatch(/pg_advisory_xact_lock/);
+    expect(s).not.toMatch(/split_part\(split_part/);
   });
 });

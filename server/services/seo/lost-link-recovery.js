@@ -17,7 +17,8 @@ const logger = require('../logger');
 const { etDateString } = require('../../utils/datetime-et');
 
 const worker = require('./link-prospect-worker');
-const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-domain-lock');
+const lockMod = require('./prospect-domain-lock');
+const { claimProspectDomain, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL } = lockMod;
 
 // The worker's lane allowlists are canonical: signup-lane types are never
 // reopened into outreach, and a reopened row must carry a type the outreach
@@ -26,19 +27,15 @@ const { lockProspectDomain, canonicalProspectDomain } = require('./prospect-doma
 const NON_OUTREACH_TYPES = new Set(worker.SIGNUP_TYPES);
 const OUTREACH_TYPES = new Set(worker.OUTREACH_TYPES);
 // Board states that mean "someone is already on this" — never reopened here.
-const IN_FLIGHT_STATUSES = new Set(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
+// Recovery excludes EVERY board row for the domain (see prospect-domain-lock).
+const IN_FLIGHT_STATUSES = new Set(lockMod.IN_FLIGHT_STATUSES);
 // Board says the link is up, monitor says the domain is dark: the board is
 // stale (verifier runs after the scan). Deferred, never a terminal skip.
 const STALE_WHEN_DOMAIN_DARK = new Set(['live', 'indexed']);
 
 // Shared with every other board writer so they all lock the same key.
 const normalizeDomain = canonicalProspectDomain;
-// SQL twin of normalizeDomain() for the board's target_domain column, which the
-// admin route stores verbatim (www.example.com, a full URL, mixed case): every
-// board lookup here compares the canonical host, never the raw spelling. No
-// bare '?' (knex binding slot).
-const TARGET_DOMAIN_CANONICAL_SQL = "split_part(split_part(regexp_replace(regexp_replace(regexp_replace(lower(btrim(target_domain)), '^https://', ''), '^http://', ''), '^(www|mail)\\.', ''), '/', 1), ':', 1)";
-const byDomain = (q, domain) => q.whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain]);
+// byDomain / TARGET_DOMAIN_CANONICAL_SQL come from prospect-domain-lock (one canonical host everywhere).
 
 // Canonical board form of a Waves target page. The board's unique key is
 // textual (target_domain, target_page) and existing rows use both
@@ -159,9 +156,8 @@ async function queueOne(loss, out, scoreMod) {
       // daily verifier can restore the row to live between our read and this
       // write — a 0-row update means it is no longer lost, not reopened.
       const reopened = await db.transaction(async (trx) => {
-        await lockProspectDomain(trx, domain);
-        const raced = await byDomain(trx('seo_link_prospects'), domain).whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
-        if (raced && IN_FLIGHT_STATUSES.has(raced.status)) return { raced };
+        const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES });
+        if (raced) return { raced };
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
           priority: 'high',
@@ -254,15 +250,14 @@ async function queueOne(loss, out, scoreMod) {
     // scoring/contact lookup above is slow): the unique (target_domain,
     // target_page) conflict is ignored and counted as a skip, never thrown.
     const inserted = await db.transaction(async (trx) => {
-      // Serialize ALL board writers per canonical domain (prospect-domain-lock:
-      // admin manual add, strategy agent, promoter take the same lock) and
-      // RE-CHECK in-flight rows under it: the unique key is the textual
-      // (target_domain, target_page) pair, so a row filed for this domain under
-      // another Waves page or spelling during the slow scoring/contact lookup
-      // would not conflict — it would land beside this one, both claimable.
-      await lockProspectDomain(trx, domain);
-      const raced = await byDomain(trx('seo_link_prospects'), domain).whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
-      if (raced && IN_FLIGHT_STATUSES.has(raced.status)) return { raced };
+      // The shared admission guard (prospect-domain-lock — every board writer
+      // goes through it): lock the canonical domain, then RE-CHECK in-flight
+      // rows under it. The unique key is the textual (target_domain,
+      // target_page) pair, so a row filed for this domain under another Waves
+      // page or spelling during the slow scoring/contact lookup would not
+      // conflict — it would land beside this one, both claimable.
+      const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES });
+      if (raced) return { raced };
       return trx('seo_link_prospects').insert({
       target_domain: domain,
       target_url: loss.source_url || null,

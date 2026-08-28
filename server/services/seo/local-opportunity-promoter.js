@@ -14,7 +14,7 @@
 const logger = require('../logger');
 const prospector = require('./local-opportunity-prospector');
 const scorer = require('./prospect-scorer');
-const { lockProspectDomain } = require('./prospect-domain-lock');
+const { claimProspectDomain } = require('./prospect-domain-lock');
 const { etDateString } = require('../../utils/datetime-et');
 
 const HOME = 'https://wavespestcontrol.com/';
@@ -114,12 +114,13 @@ async function run({
   // throw a unique violation, aborting the rest of the run. `.returning('id')` is empty
   // when the row already existed, so the dupe is counted, not crashed on.
   const tag = `local_opportunity_${todayTag()}`;
-  // Each insert also holds the per-domain board lock (prospect-domain-lock):
-  // the lost-link recovery lane's domain-wide in-flight re-check only excludes
-  // writers holding the same lock — ON CONFLICT alone guards the exact pair.
+  // Each insert goes through the shared per-domain guard (prospect-domain-lock):
+  // lock, then skip the domain if a row is already in active outreach on any
+  // page / spelling — ON CONFLICT alone only guards the exact pair.
   for (const { s, cand } of writable) {
     const inserted = await db.transaction(async (trx) => {
-      await lockProspectDomain(trx, cand.domain);
+      const { inFlight } = await claimProspectDomain(trx, cand.domain);
+      if (inFlight) return [];
       return trx('seo_link_prospects').insert({
         target_domain: cand.domain, target_page: HOME, target_url: cand.source_url || null,
         anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,

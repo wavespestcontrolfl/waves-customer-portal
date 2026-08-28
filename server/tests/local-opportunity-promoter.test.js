@@ -5,7 +5,7 @@ const { HOME } = require('../services/seo/local-opportunity-promoter')._internal
 //   db('seo_backlinks').where({status}).select('source_domain')
 //   db('seo_link_prospects').where({target_domain,target_page}).first()
 //   db('seo_link_prospects').insert(row)
-function fakeDb({ ownActive = [], existing = [] } = {}) {
+function fakeDb({ ownActive = [], existing = [], inFlight = [] } = {}) {
   const inserts = [];
   const locks = []; // [sql, bindings] of every advisory-lock raw call, in order
   const fn = (table) => {
@@ -16,7 +16,15 @@ function fakeDb({ ownActive = [], existing = [] } = {}) {
       // Atomic insert chain: .insert(row).onConflict([...]).ignore().returning('id').
       // Emulates ON CONFLICT DO NOTHING — empty result when (target_domain,target_page)
       // already exists, else the inserted id.
+      let probeDomain = null;
+      const probe = {
+        whereRaw: (_sql, bind) => { probeDomain = bind[0]; return probe; },
+        whereIn: () => probe,
+        // the guard's domain-wide probe: an `inFlight` fixture row for the domain
+        first: async () => inFlight.find((p) => p.target_domain === probeDomain) || null,
+      };
       return {
+        whereRaw: probe.whereRaw,
         insert: (row) => {
           const b = {
             onConflict: () => b,
@@ -106,6 +114,14 @@ describe('local-opportunity-promoter.run', () => {
     const chamber = db._inserts.find((i) => i.target_domain === 'chamber.com');
     expect(chamber.link_type).toBe('directory');
     expect(chamber.contact_email).toBeNull();
+  });
+
+  test('a domain already in active outreach on ANY page is skipped by the shared guard (lock taken, no insert)', async () => {
+    const db = fakeDb({ ownActive: ['owned.com'], inFlight: [{ id: 'p-1', target_domain: 'sponsora.org', status: 'contacted', target_page: 'https://www.wavespestcontrol.com/other/' }] });
+    const r = await promoter.run({ db, discoverFn, scoreFn });
+    expect(db._inserts.map((i) => i.target_domain)).not.toContain('sponsora.org');
+    expect(db._locks.map(([, b]) => b[0])).toContain('lost_recovery:sponsora.org');
+    expect(r.dupes).toBe(1);
   });
 
   test('every promote holds the shared per-domain board lock (same key as lost-link recovery) inside its transaction', async () => {

@@ -7,7 +7,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { lockProspectDomain } = require('./prospect-domain-lock');
+const { claimProspectDomain } = require('./prospect-domain-lock');
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
@@ -249,12 +249,13 @@ async function executeBacklinkTool(toolName, input) {
           scored_by: 'create_link_prospects',
         } : null;
 
-        // Insert under the per-domain board lock shared with lost-link recovery
-        // (prospect-domain-lock): its domain-wide in-flight re-check can only
-        // exclude writers that hold the same lock. Re-check the pair under it —
-        // the scoring above is slow and another writer may have filed it.
+        // Admission through the shared per-domain guard (prospect-domain-lock):
+        // lock, then refuse if the domain already has a row in active outreach
+        // on any page / spelling — one conversation per inbox. The exact pair is
+        // re-checked under the lock too (the scoring above is slow).
         const landed = await db.transaction(async (trx) => {
-          await lockProspectDomain(trx, domain);
+          const { inFlight } = await claimProspectDomain(trx, domain);
+          if (inFlight) return false;
           const raced = await trx('seo_link_prospects').where({ target_domain: domain, target_page: p.target_page }).first('id');
           if (raced) return false;
           await trx('seo_link_prospects').insert({

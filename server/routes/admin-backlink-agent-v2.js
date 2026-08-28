@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
-const { lockProspectDomain } = require('../services/seo/prospect-domain-lock');
+const { claimProspectDomain } = require('../services/seo/prospect-domain-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -252,11 +252,14 @@ router.post('/prospects', async (req, res, next) => {
     if (!domain) return res.status(400).json({ error: 'target_domain, target_url, or live_url is required' });
     if (!target_page) return res.status(400).json({ error: 'target_page (our money page) is required' });
 
-    // Existence check + insert under the per-domain board lock shared with the
-    // lost-link recovery lane (its domain-wide in-flight re-check only excludes
-    // writers holding the same lock) — and the 409 is no longer a TOCTOU guess.
+    // Admission through the shared per-domain guard (prospect-domain-lock, the
+    // same one every board writer uses): lock, then refuse if the domain already
+    // has a row in ACTIVE OUTREACH on any page / spelling (two claimable rows =
+    // two emails to one inbox). A site that already links to us may be added
+    // for another page. The exact-pair 409 is checked under the lock too.
     const result = await db.transaction(async (trx) => {
-      await lockProspectDomain(trx, domain);
+      const { inFlight } = await claimProspectDomain(trx, domain);
+      if (inFlight) return { inFlight };
       const exists = await trx('seo_link_prospects').where({ target_domain: domain, target_page }).first();
       if (exists) return { exists };
       const [row] = await trx('seo_link_prospects').insert({
@@ -270,6 +273,7 @@ router.post('/prospects', async (req, res, next) => {
       }).returning('*');
       return { row };
     });
+    if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
     if (result.exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: result.exists.id });
     res.json({ prospect: result.row });
   } catch (err) { next(err); }
