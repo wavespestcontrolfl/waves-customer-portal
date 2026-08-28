@@ -362,7 +362,11 @@ const NotificationService = {
   // claim): the voicemail bell supersedes — retire the missed-call bell so
   // the owner never holds two contradictory alerts for one call. System
   // writer (no role scoping): every admin copy of that bell is retired.
-  async supersedeMissedCallAdmin({ callLogId } = {}) {
+  async supersedeMissedCallAdmin({ callLogId, callSid } = {}) {
+    if (!callLogId && callSid) {
+      const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
+      callLogId = row?.id || null;
+    }
     if (!callLogId) return 0;
     return db('notifications')
       .where({ recipient_type: 'admin', category: 'missed_call' })

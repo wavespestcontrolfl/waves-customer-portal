@@ -15,6 +15,7 @@
  *   APNS_PRODUCTION — 'true' → prod APNs host; otherwise sandbox
  */
 const http2 = require('http2');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const logger = require('./logger');
 
@@ -83,7 +84,11 @@ function providerToken(nowMs = Date.now()) {
 function apnsCollapseId(tag) {
   if (!tag) return null;
   const s = String(tag);
-  return s.length > 64 ? s.slice(0, 64) : s;
+  if (Buffer.byteLength(s) <= 64) return s;
+  // Hash, never truncate: tags put the distinguishing suffix LAST (e.g.
+  // customer id + decision id), so a prefix cut would collapse distinct
+  // pushes into one (codex r6). sha256 hex is exactly 64 bytes.
+  return crypto.createHash('sha256').update(s).digest('hex');
 }
 
 function buildApnsPayload(notification = {}) {

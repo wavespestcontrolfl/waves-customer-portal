@@ -2,8 +2,8 @@
  * "Customer called and we missed it" bell (owner ruling 2026-08-28: the
  * bell/push/badge are for customer communication — a missed call is one).
  *
- * Runs from the same 2-minute post-call hook as recording recovery, so a
- * voicemail has had time to land: a call WITH a recording is the voicemail
+ * Runs 5 minutes after the call's terminal status (post-call hook + the
+ * 2-minute sweep), so a voicemail has had time to land: a call WITH a recording is the voicemail
  * lane's (customer_voicemail_callback) and never rings here. Rings at most
  * once per call, only for an inbound call from a customer on file that no
  * human or AI agent answered. Delivery state lives in call_log.metadata:
@@ -24,6 +24,9 @@ const UNANSWERED_STATUSES = new Set(['no-answer', 'busy', 'canceled']);
 // Lease length: covers customer lookup + delivery with margin; a stale lease
 // is reclaimed by the 2-minute sweep.
 const LEASE_MS = 10 * 60 * 1000;
+// Time after a call's terminal update before "no recording" means "no
+// voicemail": ~120s recording window + Twilio's recording callback.
+const VOICEMAIL_GRACE_MS = 5 * 60 * 1000;
 
 function outcomeUnanswered(row) {
   if (row.answered_by) return UNANSWERED.has(row.answered_by);
@@ -139,8 +142,9 @@ const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed
 
 /**
  * Durable retry (runs on the 2-minute scheduler): re-offer unanswered,
- * unsettled (unclaimed or stale-leased) customer calls from the last 24h that ended ≥3 minutes ago (so
- * the voicemail recording has had its chance to land). Idempotent — the
+ * unsettled (unclaimed or stale-leased) customer calls from the last 24h
+ * whose terminal update is ≥5 minutes old (so the voicemail recording has
+ * had its chance to land). Idempotent — the
  * atomic claim inside ringMissedCallIfUnanswered makes a re-offer a no-op.
  */
 async function sweepMissedCalls({ limit = 50 } = {}) {
@@ -154,7 +158,10 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
     // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
     .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
-    .where('created_at', '<', new Date(Date.now() - 3 * 60 * 1000))
+    // Grace runs from the TERMINAL update, not call creation: the no-answer
+    // status lands before the caller records up to 120s of voicemail and
+    // the recording callback persists it (codex r6).
+    .whereRaw('COALESCE(updated_at, created_at) < ?', [new Date(Date.now() - VOICEMAIL_GRACE_MS)])
     .orderBy('created_at', 'asc')
     .limit(limit)
     .select('twilio_call_sid');

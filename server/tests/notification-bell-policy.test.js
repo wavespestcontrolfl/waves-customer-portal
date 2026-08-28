@@ -760,3 +760,19 @@ describe('voicemail supersedes a missed-call bell for the same call (hook P1)', 
     await expect(NotificationService.supersedeMissedCallAdmin({})).resolves.toBe(0);
   });
 });
+
+describe('notification payload sanitizer — opaque ids survive (codex r6)', () => {
+  const { __private } = require('../services/notification-triggers');
+  test('emailId / callLogId keep their value while real contact fields are still masked', () => {
+    const out = __private.sanitizeNotificationPayload('customer_email_received', {
+      emailId: '5f2c1e4a-1111-2222-3333-444455556666',
+      customer_id: 'c1',
+      fromEmail: 'jane@customer-domain.com',
+      phone: '+19415551234',
+    });
+    expect(out.emailId).toBe('5f2c1e4a-1111-2222-3333-444455556666');
+    expect(out.customer_id).toBe('c1');
+    expect(out.fromEmail).not.toBe('jane@customer-domain.com');
+    expect(out.phone).not.toBe('+19415551234');
+  });
+});

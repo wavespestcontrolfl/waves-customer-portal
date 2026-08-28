@@ -38,12 +38,17 @@ function scheduleRecordingRecovery(callSid) {
     }
     // After recordings had their chance to land: a customer's unanswered
     // call with no voicemail rings the missed-call bell (owner ruling
-    // 2026-08-28). Idempotent per call inside.
-    try {
-      await require('../services/missed-call-bell').ringMissedCallIfUnanswered(callSid);
-    } catch (err) {
-      logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
-    }
+    // 2026-08-28). The terminal status lands BEFORE the caller enters
+    // voicemail (up to 120s of recording + the recording callback), so the
+    // bell waits a further 3 minutes — 5 from the terminal update, the same
+    // grace the durable sweep uses (codex r6). Idempotent per call inside.
+    setTimeout(async () => {
+      try {
+        await require('../services/missed-call-bell').ringMissedCallIfUnanswered(callSid);
+      } catch (err) {
+        logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
+      }
+    }, 3 * 60 * 1000);
   }, 2 * 60 * 1000);
 }
 
@@ -1379,6 +1384,11 @@ router.post('/recording-status', async (req, res) => {
 
       if (updated > 0) {
         logger.info(`Recording saved: ${matchedSid} → ${RecordingSid} (${RecordingDuration}s)`);
+        // A recording makes this the voicemail lane's call: retire any
+        // missed-call bell already rung for it — unconditionally, not only
+        // when the voicemail-callback alert fires (codex r6).
+        await require('../services/notification-service').supersedeMissedCallAdmin({ callSid: matchedSid })
+          .catch((e) => logger.warn(`[recording-status] missed-call supersede failed for ${maskSid(matchedSid)}: ${e.message}`));
       } else if (quarantinedMatch) {
         logger.warn(`[recording-status] recording ${maskSid(RecordingSid)} arrived for PAN-quarantined call ${maskSid(quarantinedMatch.twilio_call_sid)} — deleting instead of attaching`);
         await require('../services/call-recording-processor').quarantineCardRecording(

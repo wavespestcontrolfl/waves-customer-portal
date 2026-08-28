@@ -14340,6 +14340,10 @@ const CallRecordingProcessor = {
 
     if (updated === 0) return { success: true, skipped: true, reason: 'already_recovered_by_peer' };
 
+    // Recovered recording ⇒ voicemail lane's call: retire a missed-call
+    // bell rung while the recording was missing (codex r6).
+    await require('./notification-service').supersedeMissedCallAdmin({ callSid })
+      .catch((e) => logger.warn(`[call-proc] missed-call supersede failed for ${maskSid(callSid)}: ${e.message}`));
     logger.info(`[call-proc] Recovered missing recording for ${maskSid(callSid)} → ${maskSid(recording.sid)}`);
     return { success: true, recovered: true, recordingSid: recording.sid };
   },

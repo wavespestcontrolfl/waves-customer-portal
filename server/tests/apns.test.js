@@ -82,9 +82,13 @@ describe('classifyApnsResponse', () => {
 });
 
 describe('apnsCollapseId', () => {
-  test('mirrors the push tag so a redelivery replaces the banner; capped at 64 bytes; absent without a tag', () => {
+  test('mirrors the push tag so a redelivery replaces the banner; hashed to 64 bytes when longer; absent without a tag', () => {
     expect(apnsCollapseId('waves-customer_missed_call-call-1')).toBe('waves-customer_missed_call-call-1');
-    expect(apnsCollapseId('x'.repeat(80))).toHaveLength(64);
+    const a = apnsCollapseId('waves-appointment_reschedule_intent-' + 'c'.repeat(36) + '-decision-1');
+    const b = apnsCollapseId('waves-appointment_reschedule_intent-' + 'c'.repeat(36) + '-decision-2');
+    expect(a).toHaveLength(64);
+    expect(b).toHaveLength(64);
+    expect(a).not.toBe(b); // suffix entropy survives (hashed, not truncated)
     expect(apnsCollapseId(undefined)).toBeNull();
     expect(apnsCollapseId('')).toBeNull();
   });
