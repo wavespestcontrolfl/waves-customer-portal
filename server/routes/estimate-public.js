@@ -14445,6 +14445,8 @@ const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
 // Cadence pills carry their visit count in parens (owner 2026-07-23,
 // matching the mosquito "Seasonal (9 visits)" style — recurring services
 // only, never one-time labels).
+const { bandFrequencyForIntent } = require('../services/pricing-engine/unit-band-pricing');
+
 const FREQUENCY_LADDER = [
   { key: 'quarterly',  label: 'Quarterly (4 visits)',   engineFrequency: 'quarterly' },
   { key: 'bi_monthly', label: 'Bi-monthly (6 visits)',  engineFrequency: 'bimonthly' },
@@ -22262,7 +22264,16 @@ async function buildPricingBundleInner(estimate) {
     // price. Defaulting the same way here keeps the flag on that cadence
     // instead of stripping it everywhere and re-clamping the confirmed price.
     const savedPestFrequency = normalizePestCadence(engineInputs?.services?.pest?.frequency) || 'quarterly';
+    // A bedroom-band unit quote (GATE_UNIT_BAND_PRICING) carries a signed
+    // row per cadence the rate table has (quarterly, bi-monthly — never
+    // monthly): only those cadences are offered; the engine would fail
+    // closed on any other and a $0 "Monthly" entry must not render.
+    const bandCadences = engineInputs?.unitBandPricing?.pestCadences;
     for (const ladder of FREQUENCY_LADDER) {
+      if (bandCadences && typeof bandCadences === 'object'
+        && !bandCadences[bandFrequencyForIntent(ladder.engineFrequency)]) {
+        continue;
+      }
       const inputsForFrequency = JSON.parse(JSON.stringify(engineInputs));
       inputsForFrequency.services = inputsForFrequency.services || {};
       inputsForFrequency.services.pest = {

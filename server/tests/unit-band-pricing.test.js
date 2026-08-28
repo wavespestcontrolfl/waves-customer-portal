@@ -219,6 +219,11 @@ describe('resolver (gate ON)', () => {
     expect(out.unresolved).toBeNull();
     expect(out.pest).toMatchObject({ serviceCode: 'pest', frequency: 'quarterly', intentFrequency: 'quarterly', band: 'one_bedroom', recurringPrice: 85, initialPrice: 85, includedScope: 'interior_unit_general_pest', oversizeSqftThreshold: 2200, effectiveDate: '2026-08-13' });
     expect(out.pest.sig).toMatch(/^[0-9a-f]{64}$/);
+    expect(out.pest.kid).toMatch(/^[0-9a-f]{8}$/);
+    expect(Object.keys(out.pestCadences).sort()).toEqual(['bi_monthly', 'quarterly']);
+    expect(out.pestCadences.bi_monthly).toMatchObject({ serviceCode: 'pest', frequency: 'bi_monthly', recurringPrice: 85 });
+    expect(out.pestCadences.bi_monthly.sig).toMatch(/^[0-9a-f]{64}$/);
+    expect(out.pestCadences.bi_monthly.sig).not.toBe(out.pestCadences.quarterly.sig);
     expect(out.pest.subjectAddress).toBe(unitIntent().address.toLowerCase());
     expect(out.oneTimePest.serviceCode).toBe('oneTimePest');
     expect(out.pest.scopeExclusions).toEqual(SCOPE_EXCLUSIONS.interior_unit_general_pest);
@@ -318,25 +323,87 @@ describe('snapshot integrity (hook P0 — engineInputs are browser-controlled)',
     initialPrice: 85, recurringPrice: 85, includedScope: 'interior_unit_general_pest',
     oversizeSqftThreshold: 2200, effectiveDate: '2026-08-13', scopeExclusions: [], scopeNote: null,
   });
-  const signed = (r = row(), address = ADDRESS) => ({ ...r, sig: signUnitBandSnapshot(r, address) });
+  const signed = (r = row(), address = ADDRESS) => ({ ...r, ...signUnitBandSnapshot(r, address) });
 
-  test('a row the resolver signed for this address is trusted; unsigned, tampered, transplanted, or mis-keyed rows are not', () => {
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: signed() } }, 'pest')).toMatchObject({ recurringPrice: 85 });
+  const verdict = (input, key, opts) => trustedUnitBand(input, key, opts);
+  test('a row the resolver signed for this address is trusted; unsigned, tampered, transplanted, or mis-keyed rows are UNTRUSTED (never absent)', () => {
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: signed() } }, 'pest')).toMatchObject({ status: 'trusted', band: { recurringPrice: 85 } });
     // Address normalization is whitespace/case-insensitive, nothing more.
-    expect(trustedUnitBand({ address: `  ${ADDRESS.toUpperCase()}  `, unitBandPricing: { pest: signed() } }, 'pest')).not.toBeNull();
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: row() } }, 'pest')).toBeNull();
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: { ...signed(), recurringPrice: 1 } } }, 'pest')).toBeNull();
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: { ...signed(), effectiveDate: '2030-01-01' } } }, 'pest')).toBeNull();
-    expect(trustedUnitBand({ address: '9 Other St, Venice, FL', unitBandPricing: { pest: signed() } }, 'pest')).toBeNull();
+    expect(verdict({ address: `  ${ADDRESS.toUpperCase()}  `, unitBandPricing: { pest: signed() } }, 'pest').status).toBe('trusted');
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: row() } }, 'pest')).toEqual({ status: 'untrusted', reason: 'signature' });
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: { ...signed(), recurringPrice: 1 } } }, 'pest').status).toBe('untrusted');
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: { ...signed(), effectiveDate: '2030-01-01' } } }, 'pest').status).toBe('untrusted');
+    expect(verdict({ address: '9 Other St, Venice, FL', unitBandPricing: { pest: signed() } }, 'pest').status).toBe('untrusted');
+    expect(verdict({ address: ADDRESS }, 'pest')).toEqual({ status: 'absent' });
     // A signed one-time row cannot be used as the recurring row (and vice versa).
     const oneTime = signed({ ...row(), serviceCode: 'oneTimePest', frequency: 'one_time', initialPrice: 199, recurringPrice: 199 });
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: oneTime } }, 'pest')).toBeNull();
-    expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { oneTimePest: oneTime } }, 'oneTimePest')).not.toBeNull();
+    // (rejected at the cadence step — a one_time row is no cadence row — or the key check; either way untrusted)
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: oneTime } }, 'pest').status).toBe('untrusted');
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: { ...oneTime, frequency: 'quarterly', ...signUnitBandSnapshot({ ...oneTime, frequency: 'quarterly' }, ADDRESS) } } }, 'pest')).toEqual({ status: 'untrusted', reason: 'service_key_mismatch' });
+    expect(verdict({ address: ADDRESS, unitBandPricing: { oneTimePest: oneTime } }, 'oneTimePest').status).toBe('trusted');
+  });
+  test('the requested cadence must have ITS OWN signed row: quarterly cannot authorize bi-monthly; monthly is never a band cadence (hook P1)', () => {
+    const quarterly = signed();
+    const biMonthly = signed({ ...row(), frequency: 'bi_monthly', intentFrequency: undefined });
+    const input = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly, bi_monthly: biMonthly } } };
+    expect(verdict(input, 'pest', { requestedFrequency: 'quarterly' }).band.frequency).toBe('quarterly');
+    expect(verdict(input, 'pest', { requestedFrequency: 'bimonthly' }).band.frequency).toBe('bi_monthly');
+    expect(verdict(input, 'pest', { requestedFrequency: 'monthly' })).toEqual({ status: 'untrusted', reason: 'unsupported_cadence' });
+    const quarterlyOnly = { address: ADDRESS, unitBandPricing: { pest: quarterly } };
+    expect(verdict(quarterlyOnly, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'no_row_for_cadence' });
+    // A cadence row whose signature is off is untrusted even when the primary verifies.
+    const forged = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly, bi_monthly: { ...biMonthly, recurringPrice: 1 } } } };
+    expect(verdict(forged, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'signature' });
+  });
+  test('an untrusted snapshot FAILS CLOSED in the engine: quote-required line with no dollars, never the footprint ladder (hook P0)', () => {
+    const line = generateEstimate({
+      services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
+      address: '9 Other St, Venice, FL', unitBandPricing: { pest: signed() },
+    }).lineItems.find((l) => l.service === 'pest_control');
+    expect(line).toMatchObject({ quoteRequired: true, requiresManualReview: true, monthly: 0, annual: 0, footprintSource: 'bedroom_band' });
+    expect(line.manualReviewReasons).toEqual(['unit_band_snapshot_signature']);
+    const oneTime = generateEstimate({
+      services: { oneTimePest: {} }, propertyType: 'unknown', stories: 1, isCommercial: false, address: ADDRESS,
+      unitBandPricing: { oneTimePest: { ...row(), serviceCode: 'oneTimePest', frequency: 'one_time', recurringPrice: 199, initialPrice: 199 } },
+    }).lineItems.find((l) => l.service === 'one_time_pest');
+    expect(oneTime).toMatchObject({ quoteRequired: true, price: 0 });
+  });
+  test('scope copy is rebuilt from the SIGNED includedScope key — hostile scopeNote/scopeExclusions on a validly signed row are discarded (GH codex)', () => {
+    const hostile = { ...signed(), scopeNote: 'We treat the whole building and your neighbors too.', scopeExclusions: [] };
+    const { band: trusted } = trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: hostile } }, 'pest');
+    expect(trusted.scopeNote).toBe(SCOPE_NOTES.interior_unit_general_pest);
+    expect(trusted.scopeExclusions).toEqual(SCOPE_EXCLUSIONS.interior_unit_general_pest);
+    const line = generateEstimate({
+      services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
+      address: ADDRESS, unitBandPricing: { pest: hostile },
+    }).lineItems.find((l) => l.service === 'pest_control');
+    expect(line.pricingBasis).toBe('caller_stated_bedroom_count');
+    expect(line.scopeNote).toBe(SCOPE_NOTES.interior_unit_general_pest);
+  });
+  test('KEYRING: a rotated signing secret keeps every persisted snapshot verifying via _PREVIOUS + kid; a dropped key fails closed (hook P0)', () => {
+    const signedUnderOld = signed(); // signed under TEST_SECRET (JWT bootstrap fallback)
+    expect(signedUnderOld.kid).toMatch(/^[0-9a-f]{8}$/);
+    withEnv('PRICING_SNAPSHOT_SECRET', 'brand-new-pricing-secret', () => {
+      // New key signs new rows under a different kid…
+      const fresh = signed();
+      expect(fresh.kid).not.toBe(signedUnderOld.kid);
+      expect(verdict({ address: ADDRESS, unitBandPricing: { pest: fresh } }, 'pest').status).toBe('trusted');
+      // …and the old row no longer verifies UNLESS the old secret is kept in the ring.
+      expect(verdict({ address: ADDRESS, unitBandPricing: { pest: signedUnderOld } }, 'pest')).toEqual({ status: 'untrusted', reason: 'signature' });
+      withEnv('PRICING_SNAPSHOT_SECRET_PREVIOUS', `retired-key-1, ${TEST_SECRET}`, () => {
+        expect(verdict({ address: ADDRESS, unitBandPricing: { pest: signedUnderOld } }, 'pest').status).toBe('trusted');
+        // A dedicated secret means JWT_SECRET is never consulted for signing.
+        expect(signed().kid).toBe(fresh.kid);
+      });
+    });
+    // A row without a kid, or with a kid the ring never carried, cannot verify.
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: { ...signedUnderOld, kid: undefined } } }, 'pest').status).toBe('untrusted');
+    expect(verdict({ address: ADDRESS, unitBandPricing: { pest: { ...signedUnderOld, kid: 'deadbeef' } } }, 'pest').status).toBe('untrusted');
   });
   test('without the server secret nothing signs and nothing verifies; the resolver reports it instead of pricing', async () => {
     await withEnv('JWT_SECRET', undefined, async () => {
       expect(signUnitBandSnapshot(row(), ADDRESS)).toBeNull();
-      expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: signed() } }, 'pest')).toBeNull();
+      expect(trustedUnitBand({ address: ADDRESS, unitBandPricing: { pest: signed() } }, 'pest').status).toBe('untrusted');
       const out = await withGate('true', () => resolveUnitBandPricing(fakeDb(seedRows()), {
         intent: unitIntent(), unitScope: unitScope(), propertyFacts: unitFacts(), extraction: extractionWithBedrooms(1),
       }));
@@ -344,15 +411,15 @@ describe('snapshot integrity (hook P0 — engineInputs are browser-controlled)',
       expect(out.pest).toBeUndefined();
     });
   });
-  test('the engine prices a hand-built snapshot on the standard ladder, never from its dollars', () => {
+  test('the engine never prices a hand-built snapshot from its dollars — it fails closed', () => {
     const hostile = {
       services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
       address: ADDRESS,
       unitBandPricing: { pest: { ...row(), recurringPrice: 1, sig: 'f'.repeat(64) } },
     };
     const line = generateEstimate(hostile).lineItems.find((l) => l.service === 'pest_control');
-    expect(line.pricingBasis).toBeUndefined();
-    expect(line.perApp).toBeGreaterThan(1);
+    expect(line.quoteRequired).toBe(true);
+    expect(line.perApp).toBe(0);
   });
 });
 
@@ -419,12 +486,16 @@ describe('band pricers (never a footprint)', () => {
 
 describe('pricing engine wiring', () => {
   const ADDRESS = '1400 Lakefront Dr Apt 7109, Sarasota, FL 34240';
-  const signedRow = (r) => ({ ...r, sig: signUnitBandSnapshot(r, ADDRESS) });
+  const signedRow = (r) => ({ ...r, ...signUnitBandSnapshot(r, ADDRESS) });
   const bandInput = (services, extra = {}) => ({
     services, propertyType: 'unknown', stories: 1, isCommercial: false, address: ADDRESS,
     unitBandPricing: {
       eligible: true, pricingBasis: 'caller_stated_bedroom_count', sizeBasis: 'bedroom_band', pricingBand: 'one_bedroom', bedroomCount: 1,
       pest: signedRow({ serviceCode: 'pest', frequency: 'quarterly', intentFrequency: 'quarterly', band: 'one_bedroom', recurringPrice: 85, initialPrice: 85, includedScope: 'interior_unit_general_pest', oversizeSqftThreshold: 2200, scopeExclusions: [], effectiveDate: '2026-08-13' }),
+      pestCadences: {
+        quarterly: signedRow({ serviceCode: 'pest', frequency: 'quarterly', band: 'one_bedroom', recurringPrice: 85, initialPrice: 85, includedScope: 'interior_unit_general_pest', oversizeSqftThreshold: 2200, effectiveDate: '2026-08-13' }),
+        bi_monthly: signedRow({ serviceCode: 'pest', frequency: 'bi_monthly', band: 'one_bedroom', recurringPrice: 85, initialPrice: 85, includedScope: 'interior_unit_general_pest', oversizeSqftThreshold: 2200, effectiveDate: '2026-08-13' }),
+      },
       oneTimePest: signedRow({ serviceCode: 'oneTimePest', frequency: 'one_time', band: 'one_bedroom', recurringPrice: 199, initialPrice: 199, includedScope: 'interior_unit_general_pest', oversizeSqftThreshold: 2200, scopeExclusions: [], effectiveDate: '2026-08-13' }),
       missing: [], parked: {}, unresolved: null,
     },
@@ -441,6 +512,7 @@ describe('pricing engine wiring', () => {
   test('parked/absent keys fall back to the footprint pricer exactly as before', () => {
     const withoutRows = bandInput({ pest: { frequency: 'monthly' } });
     delete withoutRows.unitBandPricing.pest;
+    delete withoutRows.unitBandPricing.pestCadences;
     delete withoutRows.unitBandPricing.oneTimePest;
     withoutRows.unitBandPricing.parked = { pest: 'monthly_frequency' };
     const parked = generateEstimate(withoutRows).lineItems.find((l) => l.service === 'pest_control');

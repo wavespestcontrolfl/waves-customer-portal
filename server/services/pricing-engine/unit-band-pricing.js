@@ -145,16 +145,43 @@ async function loadBandRows(db, { asOf = new Date() } = {}) {
 // engineInputs are browser-controlled on the recompute paths (admin save,
 // public replay, admin-pricing-config), so a snapshot the engine will
 // price from must prove it came from THIS resolver, for THIS property. Each
-// row carries an HMAC (JWT_SECRET) over its rate fields + the quoted
-// address; estimate-engine honors a row only when the signature verifies
-// AND the input's address is the signed one (a signed 1BR row cannot be
-// transplanted onto another quote). Fail closed: no secret → nothing signs,
-// nothing verifies, the standard ladder prices.
+// row carries an HMAC over its rate fields + the quoted address;
+// estimate-engine honors a row only when the signature verifies AND the
+// input's address is the signed one (a signed 1BR row cannot be
+// transplanted onto another quote).
+//
+// KEYRING — persisted snapshots must keep verifying for the life of the
+// estimate (in-flight tokenized links, existing DB rows), so signing is
+// decoupled from the auth secret: PRICING_SNAPSHOT_SECRET signs; every
+// secret in PRICING_SNAPSHOT_SECRET_PREVIOUS (comma-separated) still
+// VERIFIES, and each row carries the key id (`kid`) it was signed under.
+// Rotation = move the old secret into _PREVIOUS and set a new one —
+// nothing already quoted stops pricing. JWT_SECRET is the bootstrap
+// fallback only while no dedicated secret is set (it is never consulted
+// once one is). Fail closed: no secret at all → nothing signs, nothing
+// verifies, the standard ladder prices.
 const SNAPSHOT_SIG_VERSION = 'v1';
 
+function nonEmpty(value) {
+  return typeof value === 'string' && value.trim().length ? value.trim() : null;
+}
+
+function keyIdFor(secret) {
+  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 8);
+}
+
+function signingKeyring() {
+  const current = nonEmpty(process.env.PRICING_SNAPSHOT_SECRET) || nonEmpty(process.env.JWT_SECRET);
+  if (!current) return { current: null, byKid: new Map() };
+  const previous = String(process.env.PRICING_SNAPSHOT_SECRET_PREVIOUS || '')
+    .split(',').map((v) => v.trim()).filter(Boolean);
+  const byKid = new Map();
+  for (const secret of [current, ...previous]) byKid.set(keyIdFor(secret), secret);
+  return { current, byKid };
+}
+
 function signingSecret() {
-  const secret = process.env.JWT_SECRET;
-  return typeof secret === 'string' && secret.length ? secret : null;
+  return signingKeyring().current;
 }
 
 function normalizeSubjectAddress(address) {
@@ -171,32 +198,79 @@ function snapshotCanonical(band, subjectAddress) {
   ].join('|');
 }
 
+/** Returns { sig, kid } under the CURRENT key, or null without a secret. */
 function signUnitBandSnapshot(band, subjectAddress) {
-  const secret = signingSecret();
-  if (!secret) return null;
-  return crypto.createHmac('sha256', secret).update(snapshotCanonical(band, subjectAddress)).digest('hex');
+  const { current } = signingKeyring();
+  if (!current) return null;
+  return {
+    sig: crypto.createHmac('sha256', current).update(snapshotCanonical(band, subjectAddress)).digest('hex'),
+    kid: keyIdFor(current),
+  };
 }
 
 function verifyUnitBandSnapshot(band, subjectAddress) {
-  const secret = signingSecret();
-  if (!secret || !band || typeof band.sig !== 'string' || !/^[0-9a-f]{64}$/.test(band.sig)) return false;
+  if (!band || typeof band.sig !== 'string' || !/^[0-9a-f]{64}$/.test(band.sig)) return false;
+  const { byKid } = signingKeyring();
+  // The row names the key it was signed under; a kid the ring no longer
+  // carries (or a row without one) cannot verify.
+  const secret = typeof band.kid === 'string' ? byKid.get(band.kid) : null;
+  if (!secret) return false;
   const expected = crypto.createHmac('sha256', secret).update(snapshotCanonical(band, subjectAddress)).digest('hex');
   return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(band.sig, 'hex'));
 }
 
 /**
- * The engine's ONLY door to a band row: the row for `key` from
- * engineInput.unitBandPricing, iff it is signed for this input's address
- * and names the engine service key it is being used for. Anything else →
- * null → the standard footprint pricer.
+ * The engine's ONLY door to a band row. Verdicts:
+ *   { status: 'absent' }                 — no snapshot for this key: the
+ *                                          standard footprint pricer runs.
+ *   { status: 'trusted', band }          — signed for this input's address,
+ *                                          names this engine key, carries
+ *                                          the REQUESTED cadence.
+ *   { status: 'untrusted', reason }      — a snapshot exists but cannot be
+ *                                          honored (bad/missing signature,
+ *                                          other address, other key, a
+ *                                          cadence it was not signed for).
+ * 'untrusted' must FAIL CLOSED to a quote-required line, never fall back
+ * to the footprint ladder: a stored quote whose snapshot stops verifying
+ * (secret rotation, an authorized address correction) would otherwise
+ * silently re-price on the public replay path — in-flight tokenized
+ * estimates must keep working or visibly stop, never change dollars.
+ *
+ * Cadence: the resolver signs a row PER cadence the table carries
+ * (`pestCadences`), because the public ladder recomputes every cadence
+ * from one stored input; the row for the requested cadence is selected
+ * here, so a quarterly row can never authorize a bi-monthly price.
  */
-function trustedUnitBand(engineInput, key) {
-  const band = engineInput?.unitBandPricing?.[key];
-  if (!band || typeof band !== 'object') return null;
-  if (band.serviceCode !== BAND_SERVICE_KEYS[key]) return null;
-  if (!(Number(band.recurringPrice) > 0)) return null;
-  if (!verifyUnitBandSnapshot(band, engineInput.address)) return null;
-  return band;
+function trustedUnitBand(engineInput, key, { requestedFrequency } = {}) {
+  const snapshot = engineInput?.unitBandPricing;
+  const primary = snapshot?.[key];
+  if (!primary || typeof primary !== 'object') return { status: 'absent' };
+  let band = primary;
+  if (key === 'pest') {
+    const cadence = bandFrequencyForIntent(requestedFrequency || primary.intentFrequency || 'quarterly');
+    if (!cadence) return { status: 'untrusted', reason: 'unsupported_cadence' };
+    const byCadence = snapshot.pestCadences && typeof snapshot.pestCadences === 'object'
+      ? snapshot.pestCadences[cadence]
+      : null;
+    band = byCadence || (primary.frequency === cadence ? primary : null);
+    if (!band) return { status: 'untrusted', reason: 'no_row_for_cadence' };
+  }
+  if (band.serviceCode !== BAND_SERVICE_KEYS[key]) return { status: 'untrusted', reason: 'service_key_mismatch' };
+  if (!(Number(band.recurringPrice) > 0)) return { status: 'untrusted', reason: 'no_price' };
+  if (!verifyUnitBandSnapshot(band, engineInput.address)) return { status: 'untrusted', reason: 'signature' };
+  // The customer-facing scope copy is NOT part of the signature (it is
+  // derived, not a rate) — so it is rebuilt here from the signed
+  // includedScope key rather than read off the snapshot: a browser-edited
+  // snapshot with a valid price signature cannot alter or drop the
+  // approved exclusion language (codex GH round on #3576).
+  return {
+    status: 'trusted',
+    band: {
+      ...band,
+      scopeExclusions: SCOPE_EXCLUSIONS[band.includedScope] || [],
+      scopeNote: SCOPE_NOTES[band.includedScope] || null,
+    },
+  };
 }
 
 function rowToPrice(row) {
@@ -312,22 +386,35 @@ async function resolveUnitBandPricing(db, { intent, unitScope, propertyFacts, ex
   }
   const priced = {};
   let missingRow = false;
+  const signedRow = (row, extra = {}) => {
+    const snapshot = { ...extra, ...rowToPrice(row) };
+    return {
+      ...snapshot,
+      subjectAddress: normalizeSubjectAddress(intent.address),
+      ...signUnitBandSnapshot(snapshot, intent.address),
+    };
+  };
   for (const [key, k] of Object.entries(verdict.keys)) {
     if (!k.eligible) continue;
     const row = rows.get(`${BAND_SERVICE_KEYS[key]}|${k.frequency}|${base.pricingBand}`);
     if (!row) { missingRow = true; continue; }
-    const snapshot = {
+    priced[key] = signedRow(row, {
       frequency: k.frequency,
       ...(k.intentFrequency ? { intentFrequency: k.intentFrequency } : {}),
-      ...rowToPrice(row),
-    };
-    priced[key] = {
-      ...snapshot,
-      subjectAddress: normalizeSubjectAddress(intent.address),
-      sig: signUnitBandSnapshot(snapshot, intent.address),
-    };
+    });
+    if (key === 'pest') {
+      // Every cadence the table carries for this band, each signed on its
+      // own: the public ladder recomputes quarterly AND bi-monthly from
+      // one stored input, and each must price from ITS row.
+      const pestCadences = {};
+      for (const cadence of Object.values(INTENT_FREQUENCY_TO_BAND)) {
+        const cadenceRow = rows.get(`pest|${cadence}|${base.pricingBand}`);
+        if (cadenceRow) pestCadences[cadence] = signedRow(cadenceRow, { frequency: cadence });
+      }
+      priced.pestCadences = pestCadences;
+    }
   }
-  if (!Object.keys(priced).length) {
+  if (!priced.pest && !priced.oneTimePest) {
     return { ...base, unresolved: 'no_rate_row' };
   }
   return {
@@ -352,5 +439,5 @@ module.exports = {
   trustedUnitBand,
   signUnitBandSnapshot,
   verifyUnitBandSnapshot,
-  _private: { loadBandRows, rowToPrice, snapshotCanonical },
+  _private: { loadBandRows, rowToPrice, snapshotCanonical, signingKeyring, keyIdFor },
 };

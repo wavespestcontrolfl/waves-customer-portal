@@ -202,16 +202,21 @@ async function withAutomatedEstimatePhoneLock(phone, callback, options = {}) {
 }
 
 /**
- * Retire an automated draft that a replacement is about to supersede —
- * INSIDE the dedupe transaction, so the guard's open-estimate listing no
- * longer sees it and the replacement passes. Only an unsent 'draft' that
- * is not already archived qualifies: a sent/scheduled/terminal row is
- * never touched (the send flow or the customer owns it). Returns true
- * when a row was retired. The archive marker + estimator_engine stamp
- * mirror the linkage-invalidation precedent (estimator-engine/index.js).
+ * Supersede support for a clarify-reply re-draft — two steps that bracket
+ * the duplicate check so the original is NEVER lost:
+ *   1. lockSupersededDraftInTx — SELECT … FOR UPDATE the unsent 'draft'
+ *      (not archived, not sent); returns the row or null. The caller
+ *      excludes it from the open-estimate listing by id.
+ *   2. archiveSupersededDraftInTx — after the replacement row is inserted
+ *      (same transaction), archive it with the superseded stamp. If the
+ *      duplicate check blocks or the insert never happens, nothing is
+ *      archived and the transaction leaves the original standing.
+ * A sent/scheduled/terminal row never qualifies (the send flow or the
+ * customer owns it). Marker + estimator_engine stamp mirror the
+ * linkage-invalidation precedent (estimator-engine/index.js).
  */
-async function retireSupersededDraftInTx(trx, { estimateId, reason }) {
-  if (!trx || !estimateId) return false;
+async function lockSupersededDraftInTx(trx, { estimateId }) {
+  if (!trx || !estimateId) return null;
   const stale = await trx('estimates')
     .select('id', 'estimate_data')
     .where({ id: estimateId, status: 'draft' })
@@ -219,7 +224,11 @@ async function retireSupersededDraftInTx(trx, { estimateId, reason }) {
     .whereNull('archived_at')
     .forUpdate()
     .first();
-  if (!stale) return false;
+  return stale || null;
+}
+
+async function archiveSupersededDraftInTx(trx, stale, { reason } = {}) {
+  if (!trx || !stale?.id) return false;
   let data = {};
   try {
     data = typeof stale.estimate_data === 'string' ? JSON.parse(stale.estimate_data) : (stale.estimate_data || {});
@@ -244,7 +253,8 @@ async function retireSupersededDraftInTx(trx, { estimateId, reason }) {
 
 module.exports = {
   acquireAutomatedEstimateLocks,
-  retireSupersededDraftInTx,
+  lockSupersededDraftInTx,
+  archiveSupersededDraftInTx,
   automatedDuplicateBlock,
   automatedEstimateLockKeys,
   blockIfAutomatedEstimateDuplicate,

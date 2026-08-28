@@ -24,7 +24,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { generateEstimate } = require('../pricing-engine');
 const {
-  retireSupersededDraftInTx,
+  lockSupersededDraftInTx,
+  archiveSupersededDraftInTx,
   acquireAutomatedEstimateLocks,
   automatedDuplicateBlock,
   listOpenEstimatesByCustomerId,
@@ -1187,20 +1188,24 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // it answers is retired HERE — same transaction, right before the
     // open-estimate listing — so the replacement passes the guard while a
     // red/skip outcome (no insert) leaves the original draft standing.
+    // Bedroom clarify reply (GATE_UNIT_BAND_PRICING lane): the reply
+    // RE-DRAFTS through the SMS thread. The stale fallback-priced draft it
+    // answers is LOCKED here and excluded from the open-estimate listing,
+    // then archived only AFTER the replacement insert (same transaction)
+    // — a duplicate block or any other early return leaves it standing,
+    // never archived-without-successor (codex pre-push P0).
     const supersedeEstimateId = context?.supersedeEstimateId || null;
-    let supersededEstimateId = null;
-    if (supersedeEstimateId) {
-      const retired = await retireSupersededDraftInTx(trx, {
-        estimateId: supersedeEstimateId,
-        reason: context?.supersedeReason || 'superseded_by_redraft',
-      });
-      if (retired) supersededEstimateId = supersedeEstimateId;
-      else logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
+    const supersedeTarget = supersedeEstimateId
+      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId })
+      : null;
+    if (supersedeEstimateId && !supersedeTarget) {
+      logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
     }
     const allOpen = [];
     const seenEstimateIds = new Set();
     const absorb = (rows) => {
       for (const row of rows) {
+        if (supersedeTarget && String(row.id) === String(supersedeTarget.id)) continue;
         if (seenEstimateIds.has(row.id)) continue;
         seenEstimateIds.add(row.id);
         allOpen.push(row);
@@ -1259,7 +1264,7 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
           version: 1,
           callLogId: call?.id || null,
           callSid: call?.twilio_call_sid || null,
-          ...(supersededEstimateId ? { supersedesEstimateId: supersededEstimateId } : {}),
+          ...(supersedeTarget ? { supersedesEstimateId: supersedeTarget.id } : {}),
           // The processing generation whose claim composed this draft —
           // lets any later reconciler prove the draft predates (or
           // matches) the call's current pass without wall clocks or
@@ -1323,6 +1328,14 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         || Object.keys(intent.services).map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join(' + '),
       category: intent.category,
     }).returning(['id', 'token']);
+
+    // Replacement inserted — NOW retire the draft it supersedes (same
+    // transaction; a rollback un-archives it together with the insert).
+    if (supersedeTarget) {
+      await archiveSupersededDraftInTx(trx, supersedeTarget, {
+        reason: context?.supersedeReason || 'superseded_by_redraft',
+      });
+    }
 
     return { estimate };
   });

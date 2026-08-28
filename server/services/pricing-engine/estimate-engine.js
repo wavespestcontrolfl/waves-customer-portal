@@ -85,7 +85,7 @@ const {
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
-  pricePestControlUnitBand, priceOneTimePestUnitBand,
+  pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBugTreatment, priceWDO, priceFlea,
   priceTopDressing, priceDethatching,
@@ -759,13 +759,18 @@ function generateEstimate(input) {
       // only a row the resolver SIGNED for this input's address is
       // honored (trustedUnitBand) — a hand-built or transplanted snapshot
       // prices on the standard ladder.
-      const bandPest = trustedUnitBand(input, 'pest');
-      const result = bandPest
+      const bandVerdict = trustedUnitBand(input, 'pest', { requestedFrequency: services.pest.frequency || 'quarterly' });
+      const result = bandVerdict.status === 'trusted'
         ? pricePestControlUnitBand(property, {
-          band: bandPest,
+          band: bandVerdict.band,
           frequency: services.pest.frequency || 'quarterly',
           bedroomCount: input.unitBandPricing.bedroomCount,
         })
+        : bandVerdict.status === 'untrusted'
+        // Fail CLOSED: a snapshot that no longer verifies must not
+        // re-price on the footprint ladder (stored quotes keep their
+        // dollars or visibly stop).
+        ? unitBandQuoteRequiredLine('pest_control', bandVerdict.reason)
         : pricePestControl(property, {
         frequency: services.pest.frequency || 'quarterly',
         // No caller-provided version → defer to pricePestControl's own live
@@ -1176,10 +1181,10 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       addCommercialManualQuote('pest_control');
     } else {
-      const bandOneTime = trustedUnitBand(input, 'oneTimePest');
-      const result = bandOneTime
+      const oneTimeVerdict = trustedUnitBand(input, 'oneTimePest');
+      const result = oneTimeVerdict.status === 'trusted'
         ? priceOneTimePestUnitBand(property, {
-          band: bandOneTime,
+          band: oneTimeVerdict.band,
           urgency: services.oneTimePest.urgency || 'NONE',
           afterHours: services.oneTimePest.afterHours || false,
           isRecurringCustomer,
@@ -1188,6 +1193,8 @@ function generateEstimate(input) {
           recurringPerVisit: lineItems.find(l => l.service === 'pest_control' && l.pricingBasis === 'caller_stated_bedroom_count')?.basePrice ?? null,
           bedroomCount: input.unitBandPricing.bedroomCount,
         })
+        : oneTimeVerdict.status === 'untrusted'
+        ? unitBandQuoteRequiredLine('one_time_pest', oneTimeVerdict.reason)
         : priceOneTimePest(property, {
         urgency: services.oneTimePest.urgency || 'NONE',
         afterHours: services.oneTimePest.afterHours || false,

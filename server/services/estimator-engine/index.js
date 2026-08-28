@@ -2185,6 +2185,12 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
     // ask; dedupe is the clarify service's own.
     if (!dryRun && unitBandPricing?.missing?.includes('bedroom_count') && context.phone) {
       try {
+        // The reply re-prices ONLY through the SMS-thread re-draft
+        // (GATE_ESTIMATOR_SMS_DRAFTS): with that gate off, an answered ask
+        // would be consumed with nothing able to act on it — so the ask is
+        // not parked at all; the yellow reason still names the gap.
+        const { smsThreadDraftsEnabled } = require('./sms-thread');
+        if (!smsThreadDraftsEnabled()) throw Object.assign(new Error('sms-thread drafts gated off — bedroom ask not parked'), { expected: true });
         const { parkClarifyAsk } = require('../estimate-clarify-asks');
         await parkClarifyAsk({
           missing: ['bedroom_count'],
@@ -2198,7 +2204,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           contextSummary: 'Residential-unit quote drafted without a stated bedroom count — the unit band cannot price until the customer says how many bedrooms. Clarifying question drafted; review and approve to send.',
         });
       } catch (askErr) {
-        logger.warn(`[estimator-engine] bedroom clarify ask failed: ${askErr.message}`);
+        if (askErr.expected) logger.info(`[estimator-engine] ${askErr.message}`);
+        else logger.warn(`[estimator-engine] bedroom clarify ask failed: ${askErr.message}`);
       }
     }
     const laneWord = lane === LANES.GREEN ? 'ready to send' : 'needs a look before send';

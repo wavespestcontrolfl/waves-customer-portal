@@ -848,6 +848,10 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(extractBedroomReply('2 bed 2 bath')).toBe(2);
     expect(extractBedroomReply('studio')).toBe(0);
     expect(extractBedroomReply('Efficiency unit')).toBe(0);
+    // An explicit count beats the studio word; a negated studio is not zero.
+    expect(extractBedroomReply("not a studio, it's a 2 bedroom")).toBe(2);
+    expect(extractBedroomReply("It isn't a studio")).toBeNull();
+    expect(extractBedroomReply('no studio here')).toBeNull();
     expect(extractBedroomReply('2')).toBeNull();
     expect(extractBedroomReply('ok thanks')).toBeNull();
     expect(extractBedroomReply('')).toBeNull();

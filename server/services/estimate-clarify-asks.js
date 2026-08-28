@@ -327,15 +327,22 @@ function stripServiceTail(address) {
 // abbreviation must be there. Studio/efficiency = 0.
 const BEDROOM_WORDS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6 };
 const BEDROOM_COUNT_RE = /\b(\d{1,2}|one|two|three|four|five|six)\s*[-–]?\s*(?:br|bd|bdr|bdrm|bed|beds|bedroom|bedrooms)\b/i;
+// "not a studio" / "isn't an efficiency" / "no studio" — the studio word
+// under a negation is not an answer of zero.
+const NEGATED_STUDIO_RE = /\b(?:not|no|isn'?t|ain'?t|wasn'?t|never)\s+(?:a\s+|an\s+|the\s+)?(?:studio|efficiency)\b/i;
 function extractBedroomReply(body) {
   const text = String(body || '').trim();
   if (!text) return null;
-  if (/\b(?:studio|efficiency)\b/i.test(text)) return 0;
+  // An explicit count always wins ("not a studio, it's a 2 bedroom").
   const m = text.match(BEDROOM_COUNT_RE);
-  if (!m) return null;
-  const raw = m[1].toLowerCase();
-  const n = BEDROOM_WORDS[raw] ?? Number(raw);
-  return Number.isInteger(n) && n >= 0 && n <= 20 ? n : null;
+  if (m) {
+    const raw = m[1].toLowerCase();
+    const n = BEDROOM_WORDS[raw] ?? Number(raw);
+    return Number.isInteger(n) && n >= 0 && n <= 20 ? n : null;
+  }
+  if (NEGATED_STUDIO_RE.test(text)) return null;
+  if (/\b(?:studio|efficiency)\b/i.test(text)) return 0;
+  return null;
 }
 
 const CLARIFY_STREET_SUFFIX_RE = /\b(st|street|ave|avenue|blvd|boulevard|rd|road|dr|drive|ln|lane|way|ct|court|pl|place|ter|terrace|cir|circle|pkwy|parkway|trl|trail|hwy|highway|loop)\b/i;

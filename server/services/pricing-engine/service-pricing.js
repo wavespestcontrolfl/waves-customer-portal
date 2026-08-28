@@ -5372,6 +5372,33 @@ function statedBedroomCount(value) {
   return Number.isInteger(n) && n >= 0 ? n : null;
 }
 
+// Fail-closed line for a unit-band snapshot the engine cannot honor
+// (signature/address/key/cadence mismatch): NO dollars and quoteRequired,
+// so a stored quote visibly stops instead of silently re-pricing on the
+// footprint ladder. An operator re-drafts; the public page shows the row
+// as quote-required (price null), never a changed amount.
+function unitBandQuoteRequiredLine(service, reason) {
+  const recurring = service === 'pest_control';
+  return {
+    service,
+    quoteRequired: true,
+    requiresManualReview: true,
+    pricingConfidence: 'low',
+    manualReviewReasons: [`unit_band_snapshot_${reason || 'unverified'}`],
+    reason: 'Unit pricing could not be verified for this estimate — re-draft it before sending.',
+    pricingBasis: 'caller_stated_bedroom_count',
+    footprintUsed: null,
+    footprintSource: 'bedroom_band',
+    footprintWasDefaulted: false,
+    ...(recurring
+      // visitsPerYear stays positive: the engine's post-rounding divides
+      // annual by it (0/0 would be NaN on a line that must read $0).
+      ? { basePrice: 0, perApp: 0, annual: 0, monthly: 0, visitsPerYear: 4, tiers: [], roachType: 'none', pricingVersion: 'unit_band' }
+      : { price: 0, roachType: 'none' }),
+    warnings: [`unit_band_snapshot_${reason || 'unverified'}`],
+  };
+}
+
 function pricePestControlUnitBand(property, options = {}) {
   const band = options.band || {};
   const perVisit = Number(band.recurringPrice);
@@ -8748,7 +8775,7 @@ module.exports = {
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,
   selectRodentBundle, applyRodentBundle,
   priceOneTimePest, priceOneTimeLawn, priceOneTimeMosquito,
-  pricePestControlUnitBand, priceOneTimePestUnitBand,
+  pricePestControlUnitBand, priceOneTimePestUnitBand, unitBandQuoteRequiredLine,
   priceTrenching, priceBoraCare, pricePreSlabTermiticide, pricePreSlabTermidor,
   priceGermanRoach, priceGermanRoachInitial, priceBedBug, priceBedBugTreatment, priceWDO, priceFlea, priceFleaExterior,
   priceTopDressing, priceDethatching,
