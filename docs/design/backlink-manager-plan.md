@@ -502,10 +502,27 @@ under `claimProspectDomain`).
 
 ## 7. Hands — providers behind the existing contract
 
-`claim → act → report` stays exactly as shipped (`/api/integrations/backlink-worker/*`):
-`claim` leases `prospect` rows (`FOR UPDATE SKIP LOCKED`), `report` moves to `placed` /
-`drafted` / `failed` / `skipped` and now also `needs_owner`, requires `live_url` for `placed`,
-rejects stale leases. **The board does not care which provider did the work.**
+`claim → act → report` keeps its shape (`/api/integrations/backlink-worker/*`,
+`FOR UPDATE SKIP LOCKED`, lease token, `live_url` required for `placed`, stale leases
+rejected). **The board does not care which provider did the work.** Two contract changes
+land with the authority step (§14 step 4), in one PR, with the route/worker tests updated
+together:
+- **Claim predicate is authority-aware and atomic.** Today `claim()` filters only on
+  prospect status/type. Under `GATE_LINK_AUTHORITY` it joins the registry and leases a row
+  only when ALL hold inside the same locked select: placement `status='prospect'`; registry
+  `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
+  **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row; the path's lane
+  gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
+  `GATE_LINK_AUTO_PAID` for any `payment_required` path); no open purchase
+  (`reserved`/`submitting`/`ambiguous`) exists for the placement; and the provider requesting
+  the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
+  the policy has not authorized cannot be leased by any caller.
+- **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
+  gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `price_changed`,
+  `captcha`); `needs_owner` atomically maps the placement to `status='awaiting_owner'`
+  (+ the owner card), `claim()` excludes `awaiting_owner`/`watching`, and approval moves the
+  row back to `prospect` with the approval recorded — so an owner-gated row is neither
+  rejected by the route nor reclaimed by another worker.
 
 ```ts
 interface BrowserAgentProvider {
@@ -528,10 +545,15 @@ provider whose reasoning observes page state (DOM, screenshots, accessibility tr
 traces — i.e. every cloud CUA implementation) is restricted to non-payment steps; for a
 paid path it may prepare the checkout up to the payment form, then hands off to the broker
 (`outcome='ready_for_payment'`) and is never resumed on that page until the broker has
-submitted and the card is closed. Screenshots and traces captured on any payment page are
-redacted at capture (card-field regions masked, card inputs excluded from accessibility
-dumps). A provider without a technically enforced secret-input boundary is never granted
-payment execution; this is a hard rule, not a configuration.
+submitted and the card is closed. The broker performs the payment in a **separate,
+observation-free browser context**: tracing, video, screenshots, DOM snapshots, HAR/network
+recording, accessibility dumps, console capture and every provider hook are **disabled on
+that context before the card is fetched**, and nothing in that context is ever attached to
+an attempt, evidence or log — there is no post-capture redaction because nothing is
+captured; the only artefacts are the merchant's order id and the issuer's capture record.
+Evidence for a paid placement is taken afterwards from a fresh context on the confirmation
+page, with the card already closed. A provider without a technically enforced secret-input
+boundary is never granted payment execution; this is a hard rule, not a configuration.
 
 Implementations, in order:
 1. **`deterministic_runner`** — the existing `signup-runner.js` (Playwright + form filler),
