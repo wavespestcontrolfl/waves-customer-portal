@@ -361,8 +361,7 @@ The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
 
 ### 3.6b Approvals — `seo_link_approvals` (immutable terms snapshot)
 
-Every `OWNER_*` decision and every `OWNER_OVERRIDE` click is a row that freezes exactly
-what was approved; execution is bound to it and it dies if anything it froze changes.
+Every `OWNER_*` decision is an approval row that freezes exactly what was approved (a floor-waiver click is NOT an approval row — it is audited in its own table, `seo_link_floor_waivers`, §6.3 1b, and never authorizes an action instance); execution is bound to it and it dies if anything it froze changes.
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
@@ -370,7 +369,7 @@ t.integer('path_revision').notNullable();     // the path's revision_<dimension 
 t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, currency, payment_required, legal_attestation, legal_terms_hash, merchant_binding}; communication = {link_type, expected_rel, legal_attestation, legal_terms_hash, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, legal_terms_hash, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence} AND the `instance_key` (so the hash itself differs per generation). A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
 t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
-t.string('authority').notNullable();          // the OWNER_* level being granted, or OWNER_OVERRIDE for a floor-waiver click (the waiver row it authorizes is what the dimension references — the dimension's own level is never OWNER_OVERRIDE)
+t.string('authority').notNullable();          // CHECK (authority IN (the §6.1 OWNER_* levels EXCEPT OWNER_OVERRIDE/OWNER_MANUAL_PAYMENT/OWNER_INPUT_REQUIRED)) — the OWNER_* level being granted; a floor waiver is never an approval row (it has no dimension/action/instance — `seo_link_floor_waivers` is its only record)
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT (money_action AND decision = 'approved') OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid APPROVAL without a ceiling cannot exist, while a `rejected`/`watch` decision on a payment card is an audit row with no approved terms: CHECK (decision = 'approved' OR (approved_amount_cents IS NULL AND max_payable_cents IS NULL)) (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT (money_action AND decision = 'approved') OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), currency (always 'USD' on a payment approval — the approval insert refuses otherwise), renewal_period, renewal_cost_cents, legal_attestation, legal_terms_hash (+ the agreement URL — the exact terms the owner read), expected_rel, overridden_floors[], and for payment approvals the COMPLETE canonical merchant_binding from the path (§3.2: checkout_origin, processor.host, processor.merchant_account_id, issuer_merchant_descriptor) the owner approved — a processor host alone never appears here; copied, never referenced
@@ -554,9 +553,10 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   empty string parses to null; it does not validate currency, which is why the gate precedes
   it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown','foreign') — the ONE enum, identical in the migration, the investigator JSON schema and the tests)
   is a column on the path, copied into every approval `terms_snapshot` and stamped on every
-  purchase row; §6.3's validity step returns INVALID for any `payment_required` path whose
-  `currency ≠ 'USD'` (no conversion is ever performed — a non-USD listing is an owner
-  card), and the pre-mint/pre-submit final-total read verifies the LIVE checkout currency is
+  purchase row; §6.3 never automates a `payment_required` path whose `currency ≠ 'USD'`
+  (no conversion is ever performed): `currency='foreign'` ⇒ `OWNER_MANUAL_PAYMENT` (stays
+  foreign, manual-only, forever); `currency='unknown'` ⇒ `OWNER_INPUT_REQUIRED` (price-entry
+  card) — the ONE rule, restated identically in §6.1 and the §6.3 pseudocode, and the pre-mint/pre-submit final-total read verifies the LIVE checkout currency is
   USD as well as `final_cents` (any other currency ⇒ `voided`, `outcome='price_changed'`).
   An unparseable or non-USD quote leaves the cents null, which §6.3 turns into
   `OWNER_INPUT_REQUIRED` for the payment dimension of a `payment_required` path when the
@@ -593,7 +593,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_INPUT_REQUIRED` (payment dimension only: the path is otherwise valid but its price is unparseable or its currency is UNKNOWN (`currency='unknown'` — a bare `$` or no marker); a CONFIRMED non-USD quote (`currency='foreign'`) is NEVER routed here — it is `OWNER_MANUAL_PAYMENT`, because an owner entry cannot change a merchant's checkout currency — parked `awaiting_owner` with a PRICE-ENTRY card, never a purchase approval; the owner's entry writes `estimated_cost_cents`/`renewal_cost_cents` + `currency='USD'` (the owner attests the checkout is USD; the live-checkout currency check still runs before reservation and submit) on the path as an owner-sourced revision (bumps `revision_payment`, recorded as a `human` attempt `outcome='price_entered'`), after which the bridge re-decides normally — an entered price is an INPUT, never an approval) · `OWNER_OVERRIDE` (the `authority` of a floor-waiver click's approval row only — never a dimension level, §6.3 1b) · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_INPUT_REQUIRED` (payment dimension only: the path is otherwise valid but its price is unparseable or its currency is UNKNOWN (`currency='unknown'` — a bare `$` or no marker); a CONFIRMED non-USD quote (`currency='foreign'`) is NEVER routed here — it is `OWNER_MANUAL_PAYMENT`, because an owner entry cannot change a merchant's checkout currency — parked `awaiting_owner` with a PRICE-ENTRY card, never a purchase approval; the owner's entry writes `estimated_cost_cents`/`renewal_cost_cents` + `currency='USD'` (the owner attests the checkout is USD; the live-checkout currency check still runs before reservation and submit) on the path as an owner-sourced revision (bumps `revision_payment`, recorded as a `human` attempt `outcome='price_entered'`), after which the bridge re-decides normally — an entered price is an INPUT, never an approval) · `OWNER_OVERRIDE` (the audit label of a floor-waiver row in `seo_link_floor_waivers` only — never a dimension level and never an approval row, §6.3 1b) · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -672,8 +672,9 @@ if path.legal_attestation and not validLegalTermsHash(path.legal_terms_hash) →
 #     level: the authority row records the UNDERLYING per-dimension level (OWNER_HUMAN_STEP
 #     stays OWNER_HUMAN_STEP, OWNER_MANUAL_PAYMENT stays OWNER_MANUAL_PAYMENT, an AUTO_* level
 #     only when its switch grants it) plus `floor_waiver_id` → `seo_link_floor_waivers`;
-#     OWNER_OVERRIDE is never written as a dimension level — it exists only as the `authority`
-#     of the waiver click's approval row (§3.6b). Claimability therefore always consults the
+#     OWNER_OVERRIDE is never written as a dimension level and never as an approval row — it is
+#     the audit label of the `seo_link_floor_waivers` row alone (approved_by/at, floors, inputs hash,
+#     invalidated_at), which authorizes no action instance. Claimability therefore always consults the
 #     underlying level: a waived human-step or manual-payment dimension is exactly as
 #     unleasable as an unwaived one.
 if domain.spam_score > policy.max_spam_score
