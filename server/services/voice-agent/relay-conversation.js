@@ -99,10 +99,11 @@ try {
 // below; buildBasePrompt(true) replaces this exact line with PRICE_LINE_CONTEXT.
 const PRICE_LINE_NO_CONTEXT =
   '- You CANNOT quote prices on this call. If the caller asks about price, say you cannot give a'
-  + ' number over the phone but Waves will send a written estimate — during office hours that is'
-  + ' usually about 15 minutes, otherwise as soon as the office opens (never promise a time you'
-  + ' cannot know) — then, before anything else, get their first and last name, email address,'
-  + ' and full service street address so it can go out.';
+  + ' number over the phone but Waves will send a written estimate — the office turns these'
+  + ' around quickly during business hours; you cannot see the clock on this call, so never say'
+  + ' whether the office is open now or promise a delivery time — then, before anything else,'
+  + ' get their first and last name, email address, and full service street address so it can'
+  + ' go out.';
 
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate

@@ -17,12 +17,14 @@ test('tone: calm front-desk register, no cheerleading', () => {
   expect(SYSTEM_PROMPT).not.toMatch(/Be warm, plain-spoken/);
 });
 
-test('pricing fallback (gate off): estimate within ~15 minutes + the four capture fields, before anything else', () => {
+test('pricing fallback (gate off): written estimate, no clock promise, + the four capture fields before anything else', () => {
   expect(SYSTEM_PROMPT).toContain(PRICE_LINE_NO_CONTEXT);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/cannot give a number over the phone/i);
-  expect(PRICE_LINE_NO_CONTEXT).toMatch(/during office hours that is usually about 15 minutes/);
-  expect(PRICE_LINE_NO_CONTEXT).toMatch(/otherwise as soon as the office opens/); // true at 2 AM too
-  expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/estimate within (about )?15 minutes/); // never a flat SLA
+  // Gate OFF has no clock: the turnaround is stated as a fact of the office, never as a
+  // promise for THIS call, and the 15-minute figure lives only in the gate-on prompt.
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/turns these\s+around quickly during business hours/);
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/never say\s+whether the office is open now or promise a delivery time/);
+  expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/15 minutes/);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/first and last name, email address, and full service street address/);
   expect(PRICE_LINE_NO_CONTEXT).not.toMatch(/\$\s?\d/); // still never a figure
   expect(buildBasePrompt(false)).toBe(SYSTEM_PROMPT);
