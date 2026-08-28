@@ -2352,6 +2352,9 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
       ['<span style="display:none">x</span>', 'hidden_or_styled_markup'],
       ['<span class="cta">x</span>', 'hidden_or_styled_markup'],
       ['<div className="x">x</div>', 'hidden_or_styled_markup'],
+      ['<div {...{hidden: true}}>x</div>', 'jsx_expression_attribute'],
+      ['<div {...props}>x</div>', 'jsx_expression_attribute'],
+      ['<span title={x}>x</span>', 'jsx_expression_attribute'],
     ];
     for (const [body, reason] of cases) expect(guardrails.unsupportedBodySyntax(body)).toContain(reason);
     // Attribute detection is quote-aware: the word inside a quoted value

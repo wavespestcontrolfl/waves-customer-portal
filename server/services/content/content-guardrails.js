@@ -2345,9 +2345,16 @@ function unsupportedBodySyntax(body) {
   // the writer contract and validated by their own gates.
   const tagScan = /<\/?[a-z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}|[^>"'{])*>/g;
   let tm;
+  let hiddenSeen = false;
+  let exprSeen = false;
   while ((tm = tagScan.exec(text)) !== null) {
+    // ANY brace on a raw (lowercase) element is an MDX expression — a
+    // spread ("{...{hidden: true}}"), a computed prop, a template — which a
+    // static scan cannot evaluate; the writer never writes them.
+    if (!exprSeen && tm[0].includes('{')) { reasons.push('jsx_expression_attribute'); exprSeen = true; }
     const bare = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}/g, '""');
-    if (VISIBILITY_ATTR_RE.test(bare)) { reasons.push('hidden_or_styled_markup'); break; }
+    if (!hiddenSeen && VISIBILITY_ATTR_RE.test(bare)) { reasons.push('hidden_or_styled_markup'); hiddenSeen = true; }
+    if (hiddenSeen && exprSeen) break;
   }
   return reasons;
 }

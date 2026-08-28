@@ -405,6 +405,10 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     expect(checkBodySyntaxSupported({ body: '<a href="/contact/">Get a Termite Estimate</a>' }).ok).toBe(false);
     expect(checkBodySyntaxSupported({ body: '<a href="/contact/">x</a>' }).reason).toMatch(/^unsupported_body_syntax:raw_html_anchor/);
     expect(checkBodySyntaxSupported({ body: 'Plain [Get a Termite Estimate](/contact/) text.' }).ok).toBe(true);
+    // Refresh grandfather by feature name — same posture as the guardrail.
+    const legacy = '<a href="tel:+19412975749">Call</a>';
+    expect(checkBodySyntaxSupported({ body: legacy + ' more' }, {}, { previousVersion: { body: legacy } }).ok).toBe(true);
+    expect(checkBodySyntaxSupported({ body: legacy + '<span hidden>x</span>' }, {}, { previousVersion: { body: legacy } }).reason).toBe('unsupported_body_syntax:hidden_or_styled_markup');
     // Aligned/colon variants of the delimiter row still match.
     expect(checkNoRawMarkdownTables({ body: '| A | B |\n|:---|---:|\n| 1 | 2 |' }).ok).toBe(false);
     // GFM tables WITHOUT outer pipes are still tables.

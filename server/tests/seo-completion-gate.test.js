@@ -1468,6 +1468,38 @@ describe('seo-completion-gate', () => {
     });
     expect(plainBody.findings.some((f) => f.code === 'P1_UNSUPPORTED_BODY_SYNTAX')).toBe(false);
 
+    // A specialty-family brief keeps service 'pest' but names the real topic
+    // on gsc_signal.specialty_topic — the CTA must be tied to THAT topic.
+    const wrongSpecialty = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Request a Cockroach Quote](/contact/) x.' }),
+      brief: baseBrief({ service: 'pest', gsc_signal: { specialty_topic: 'bed-bug' } }),
+      shadowMode: true,
+    });
+    expect(wrongSpecialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    expect(wrongSpecialty.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const rightSpecialty = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Request a Bed Bug Quote](/contact/) x.' }),
+      brief: baseBrief({ service: 'pest', gsc_signal: { specialty_topic: 'bed-bug' } }),
+      shadowMode: true,
+    });
+    expect(rightSpecialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(rightSpecialty.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Canonical service hubs are service destinations: a request-led anchor
+    // on /waveguard-memberships/ needs estimate/quote wording.
+    const hubCta = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get My Free Termite Estimate](/contact/) and [Get a WaveGuard Membership](/waveguard-memberships/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(hubCta.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const hubProse = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get My Free Termite Estimate](/contact/) and our [WaveGuard membership options](/waveguard-memberships/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(hubProse.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // Ask-led estimate CTAs, and CTA modifiers between the keyword and the
     // service preposition ("Request a Quote Today for Termite Control").
     for (const body of [

@@ -409,6 +409,17 @@ const CANONICAL_TAG_SERVICES = {
 // A service value may resolve to SEVERAL vocabulary keys (the compound
 // canonical tags: "Fleas & Ticks" → flea + tick) — the brief-aware paths
 // union every entry's vocabulary rather than collapsing to the first.
+// The brief's CTA topic: a specialty-family brief keeps the coarse
+// 'pest' service but names the real topic on gsc_signal.specialty_topic
+// (same field guardrail-options preserves for FAQ_BLOCKED_SERVICE) — the
+// CTA must be tied to THAT topic, or every pest specialty would be allowed
+// on a bed-bug post.
+function ctaBriefTopic(brief = {}) {
+  const specialty = brief?.gsc_signal?.specialty_topic;
+  if (specialty && ctaBriefService(specialty)) return specialty;
+  return brief.service;
+}
+
 function ctaBriefServices(rawService) {
   const one = ctaBriefService(rawService);
   if (!one) return [];
@@ -982,7 +993,7 @@ function hasConversionCta(body, brief = {}) {
   // a termite post may talk about inspections all it wants;
   // `[Schedule Service](/contact/)`, "Get an estimate. [Click here](/contact/)",
   // and a lawn-care quote anchor on a termite post all fail to qualify.
-  const briefServices = ctaBriefServices(brief.service);
+  const briefServices = ctaBriefServices(ctaBriefTopic(brief));
   const allowed = briefServices.length
     ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
     : null;
@@ -1012,7 +1023,7 @@ function hasConversionCta(body, brief = {}) {
 //   - an imperative CTA-shaped anchor with no estimate/quote wording at
 //     all ("Schedule Service", "Click here").
 function badCtaAnchor(body, brief = {}) {
-  const briefServices = ctaBriefServices(brief.service);
+  const briefServices = ctaBriefServices(ctaBriefTopic(brief));
   const allowed = briefServices.length
     ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
     : null;
@@ -1061,7 +1072,19 @@ function isServiceOrCityPath(href) {
   if (['service', 'city'].includes(inferLinkReason(href))) return true;
   const { CITY_SERVICE_LINK_RE, normalizeInternalPath } = require('./content-guardrails')._internals;
   const norm = normalizeInternalPath(href);
-  return Boolean(norm) && CITY_SERVICE_LINK_RE.test(norm);
+  if (!norm) return false;
+  if (CITY_SERVICE_LINK_RE.test(norm)) return true;
+  // Canonical service HUBS (brief builder's SERVICE_HUB_LINKS — the same
+  // routes the hub_link_present check accepts): "/waveguard-memberships/"
+  // is a service destination even though the reason heuristic reads it as
+  // a related blog.
+  // The pest LIBRARY is an informational hub, not a service page — a
+  // "Get the … Checklist" link there is a resource link (r13 ruling), so it
+  // stays out.
+  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
+  const hubs = new Set(Object.values(SERVICE_HUB_LINKS).flat().map((h) => normalizeInternalPath(h)));
+  hubs.delete(normalizeInternalPath('/pest-library/'));
+  return hubs.has(norm);
 }
 function isServicePageRequestCta(href, anchor) {
   if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;

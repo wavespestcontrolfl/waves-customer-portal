@@ -1041,11 +1041,17 @@ function checkNoRawMarkdownTables(draft, _brief, context = {}) {
 // Fail-closed park for unsupported body syntax — single-source predicate
 // in content-guardrails (unsupportedBodySyntax); the completion gate raises
 // the matching P1 so both enforcement points agree.
-function checkBodySyntaxSupported(draft) {
+// Refresh grandfather mirrors the guardrails finding: forms the live prior
+// body already carried (by feature NAME) pass; any newly introduced form
+// still parks.
+function checkBodySyntaxSupported(draft, _brief, context = {}) {
   const { unsupportedBodySyntax } = require('./content-guardrails');
   const reasons = unsupportedBodySyntax(draft.body);
   if (!reasons.length) return { ok: true };
-  return { ok: false, reason: `unsupported_body_syntax:${reasons.join(',')}` };
+  const prior = new Set(context.previousVersion ? unsupportedBodySyntax(context.previousVersion.body) : []);
+  const added = reasons.filter((r) => !prior.has(r));
+  if (!added.length) return { ok: true };
+  return { ok: false, reason: `unsupported_body_syntax:${added.join(',')}` };
 }
 
 function checkVoiceMatch(draft) {
