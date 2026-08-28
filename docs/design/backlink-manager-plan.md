@@ -207,10 +207,12 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (bumps on any authority/approval-relevant field change — §3.2)
+t.text('decision_inputs_hash').notNullable(); // hash of the §6.3 inputs at approval (spam_score, score, confidence, estimated/renewal cents, flags); a mismatch at claim time invalidates the approval
 t.boolean('payment_required').notNullable();  // copied from the path at approval time (same-row, so the CHECK below can see it)
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
-t.integer('approved_amount_cents');           // the ceiling the owner approved; same-row CHECK (NOT payment_required OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
+t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT payment_required OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
+t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (max_payable_cents >= approved_amount_cents); the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
@@ -218,9 +220,11 @@ t.timestamp('consumed_at');                   // set when the leased execution r
 ```
 `seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
-invalidated, not consumed, and whose `path_revision` equals the path's current revision;
-the final-total guard compares `final_cents` to `approved_amount_cents` (+ tolerance) and
-refuses when the approval lacks one (it cannot, by CHECK, for a paid path — the guard is
+invalidated, not consumed, whose `path_revision` equals the path's current revision AND whose
+`decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
+numbers, not whatever they became);
+the final-total guard compares `final_cents` to the approval's immutable `max_payable_cents`
+and refuses when the approval lacks one (it cannot, by CHECK, for a paid path — the guard is
 still written null-safe: null ⇒ refuse). Any
 path write re-validates open approvals and invalidates the ones whose snapshot no longer
 matches — the row returns to `awaiting_owner` with a fresh card.
@@ -405,8 +409,13 @@ revision — so approval never invalidates itself), and advances the registry: `
 now leasable); `OWNER_*` → `awaiting_owner` (registry stays `qualified` until approval, which
 runs the same stamping and advances it); `DENY` → `agent_state='rejected'` with reasons
 shown (owner override re-enters here); `INVALID` → back to `investigating`. The job is
-idempotent and re-runs the decision when the policy, the path revision or the D30 evidence
-changes.
+idempotent and re-runs the decision whenever ANY §6.3 input changes — policy, path
+revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
+evidence, month spend. **A stamp is never trusted on its own:** the claim predicate and the
+budget reservation both re-run the pure §6.3 decision on the *current* inputs inside their
+locked transaction and refuse (409, row re-parked) if the result differs from the stamped
+`authority` — so a row whose confidence dropped or whose domain's spam rose after stamping
+cannot send or spend. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
@@ -466,9 +475,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   the renewal terms differ from the path; otherwise reserves the delta
   (`final_cents − amount_cents`, if positive) against the month under the same budget check —
   no room → `voided`; else commits `submitting` with `final_cents` as the consuming amount.
-  An owner-approved purchase whose final total exceeds the approved amount by more than
-  `policy.owner_price_tolerance_cents` (default 0) is also refused and re-parked with the new
-  total. The provider can never charge an amount the ledger has not reserved.
+  An owner-approved purchase whose final total exceeds the approval's immutable
+  `max_payable_cents` (snapshotted at approval; the live policy tolerance is never read here)
+  is also refused and re-parked with the new total. The provider can never charge an amount the ledger has not reserved.
 - **Renewals are separate purchases; a merchant can never charge outside the ledger.** A
   reservation covers exactly one charge, and the instrument enforces it: each purchase is paid
   with a **single-use virtual card number minted at `submitting` with an issuer-enforced
