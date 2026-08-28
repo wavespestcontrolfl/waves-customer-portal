@@ -19,6 +19,9 @@ jest.mock('../services/email-template-library', () => ({
   activeSuppressionsFor: jest.fn(async () => []),
 }));
 jest.mock('../services/service-report/application-conditions', () => ({
+  // Real unit helpers — the forecast fetcher's ET₀ conversion is under test.
+  sumPrecipInches: jest.requireActual('../services/service-report/application-conditions').sumPrecipInches,
+  et0SumToInches: jest.requireActual('../services/service-report/application-conditions').et0SumToInches,
   fetchServiceWeekWeather: jest.fn(async () => ({ rainInches: null, et0Inches: null, dailyRain: null })),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -316,12 +319,15 @@ describe('forecastLine', () => {
 
 describe('fetchUpcomingWeekForecast', () => {
   // The module caches by coordinates — every case uses distinct coords.
-  const okJson = (precipitation_sum, et0_fao_evapotranspiration) => ({ ok: true, json: async () => ({ daily: { precipitation_sum, ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration } : {}) } }) });
+  const okJson = (precipitation_sum, et0_fao_evapotranspiration, et0Unit = 'inch') => ({ ok: true, json: async () => ({ daily: { precipitation_sum, ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration } : {}) }, daily_units: { precipitation_sum: 'inch', ...(et0_fao_evapotranspiration ? { et0_fao_evapotranspiration: et0Unit } : {}) } }) });
 
   test('a full 7-day window sums to inches', async () => {
-    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5.08, 5.08, 5.08, 5.08, 5.08, 5.08, 5.08]));
-    // rain summed in inches; ET₀ arrives in mm → 35.56 mm = 1.4"
+    // Under precipitation_unit=inch Open-Meteo reports ET₀ in inches too (daily_units).
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2], 'inch'));
     await expect(fetchUpcomingWeekForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toEqual({ rainInches: 1.2, et0Inches: 1.4 });
+    // …and a mm series (no precipitation_unit, or a unit change upstream) is converted, never divided twice.
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5.08, 5.08, 5.08, 5.08, 5.08, 5.08, 5.08], 'mm'));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.06, longitude: -81.06 })).resolves.toEqual({ rainInches: 1.2, et0Inches: 1.4 });
     expect(String(global.fetch.mock.calls[0][0])).toContain('daily=precipitation_sum%2Cet0_fao_evapotranspiration');
   });
 

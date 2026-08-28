@@ -31,7 +31,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
 const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory } = require('./irrigation-week-plan');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
-const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
+const { fetchServiceWeekWeather, sumPrecipInches, et0SumToInches } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
@@ -249,7 +249,7 @@ async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
   url.searchParams.set('longitude', String(lon));
   // Rain for the conditional-run copy; FAO ET₀ so the WEEK-AHEAD plan is
   // sized from the week ahead's demand, not the completed week's (GH codex
-  // r3 on #3565). ET₀ arrives in mm whatever the precipitation unit.
+  // r3 on #3565).
   url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
   url.searchParams.set('forecast_days', '7');
   url.searchParams.set('precipitation_unit', 'inch');
@@ -275,11 +275,12 @@ async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
     const rainInches = Math.round(total * 100) / 100;
     // ET₀ is optional: a missing/partial series leaves it null (the plan then
     // falls back to the seasonal target) without discarding the rain window.
+    // Unit follows daily_units ('inch' under precipitation_unit=inch, 'mm'
+    // by default) — same unit-aware conversion the service-week fetch uses.
     let et0Inches = null;
     const et0Days = payload?.daily?.et0_fao_evapotranspiration;
-    if (Array.isArray(et0Days) && et0Days.length === 7 && et0Days.every((v) => numberOrNull(v) != null)) {
-      const mm = et0Days.reduce((sum, v) => sum + Number(v), 0);
-      et0Inches = Math.round((mm / 25.4) * 100) / 100;
+    if (Array.isArray(et0Days) && et0Days.length === 7) {
+      et0Inches = et0SumToInches(sumPrecipInches(et0Days), payload?.daily_units?.et0_fao_evapotranspiration);
     }
     const value = { rainInches, et0Inches };
     _forecastCache.set(key, { at: Date.now(), value });
