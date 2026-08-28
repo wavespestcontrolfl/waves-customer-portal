@@ -119,7 +119,7 @@ some sounds still stop such sure take thank thanks that that's the their them th
 these they this those though to too up us very was we we'll we're we've welcome well were
 what when where whether which while who why will wish with would yes you your you're yours
 `.split(/\s+/).filter(Boolean));
-const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast']);
+const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
 const DATE_CLAIM_RE = /\b(?:yesterday|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|month|year|weekend)|last (?:week|month|year|weekend|night|time|visit|spring|summer|fall|winter)|next (?:week|month|year|visit)|(?:\d+|a|an|few|couple(?: of)?|several|two|three|four|five|six|seven|eight|nine|ten) (?:days?|weeks?|months?|years?|hours?|minutes?) ago|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|\bmay \d|on the \d{1,2}(?:st|nd|rd|th)|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:19|20)\d{2})\b/i;
@@ -255,7 +255,8 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
   }
   const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
-  const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+)/gu;
+  // Title-case words AND all-caps words ("KEVIN") both need provenance.
+  const properNounRe = /(^|[^\p{L}'])(\p{Lu}[\p{Ll}'-]+|\p{Lu}{2,})/gu;
   let pn;
   while ((pn = properNounRe.exec(body)) !== null) {
     if (inCitySpan(pn.index + pn[1].length)) continue;

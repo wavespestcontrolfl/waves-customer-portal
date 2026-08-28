@@ -44,6 +44,7 @@ describe('review-derived facts', () => {
     expect(G.reviewerFirstName('José Alvarez')).toBe('José');
     expect(G.reviewerFirstName('Zoë')).toBe('Zoë');
     expect(G.reviewerFirstName('A Google User')).toBeNull();
+    expect(G.reviewerFirstName('Anonymous')).toBeNull();
     expect(G.reviewerFirstName('J.')).toBeNull();
     expect(G.reviewerFirstName('XXBLAZE99')).toBeNull();
     expect(G.reviewerFirstName('')).toBeNull();

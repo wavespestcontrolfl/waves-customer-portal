@@ -505,6 +505,15 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'posted', publish_claimed_until: null }, { owner_reply: 'edited' }, { now, fnNow: 'NOW()' })).toEqual({ review_reply: 'edited', reply_updated_at: 'NOW()' });
   });
 
+  test('a human draft saved while the model was drafting aborts the publish and parks human_draft', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].review_reply = '[DRAFT] Agent Ops template'; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ parked: 1, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Agent Ops template' });
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

@@ -75,7 +75,9 @@ function reviewerFirstName(reviewerName) {
   // "A Google User", single initials, ALL-CAPS handles, and non-alphabetic
   // handles get no greeting-by-name.
   if (first.length < 2 || first.length > 14) return null;
-  if (/^(a|an|the|google|user|local|guide)$/i.test(first)) return null;
+  // Provider sentinels for authorless reviews ("Anonymous") and generic
+  // handles get the generic greeting, never "Hi Anonymous,".
+  if (/^(a|an|the|google|user|local|guide|anonymous|anon|unknown|guest|customer|reviewer|someone)$/i.test(first)) return null;
   if (first === first.toUpperCase() && first.length > 3) return null;
   return first[0].toUpperCase() + first.slice(1);
 }

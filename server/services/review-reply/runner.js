@@ -172,7 +172,7 @@ async function releaseClaim(row, patch = {}) {
 // fresh row read: our claim token must still be on the row (an admin skip,
 // a dismissal, or another worker clears/replaces it) and the row must not be
 // dismissed. Any mismatch = this invocation is stale and must not post.
-function claimGuard(row) {
+function claimGuard(row, { publishingText = null } = {}) {
   return (fresh) => {
     if (fresh.dismissed) return 'review was dismissed';
     const held = fresh.auto_reply_claimed_until ? new Date(fresh.auto_reply_claimed_until).toISOString() : null;
@@ -182,10 +182,15 @@ function claimGuard(row) {
     // draft stale — and may move the review under the human-only rule.
     if (Number(fresh.star_rating) !== Number(row.star_rating)
       || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()) return REVIEW_CHANGED;
+    // A "[DRAFT]" that is not ours (Agent Ops / operator saved one while we
+    // were drafting) is a human intervention: never post over it.
+    const human = humanDraftOn({ ...fresh, auto_reply_draft: row.auto_reply_draft || fresh.auto_reply_draft });
+    if (human && human !== String(publishingText || '').trim()) return HUMAN_DRAFT;
     return null;
   };
 }
 const REVIEW_CHANGED = 'review changed while drafting';
+const HUMAN_DRAFT = 'a human draft was saved while drafting';
 
 // A "[DRAFT]" on review_reply that the pipeline did NOT write (Agent Ops
 // template, an operator's saved draft) is a human intervention: the cron
@@ -454,6 +459,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await parkPersistFailed(merged, draft, err);
       return { outcome: 'parked', reason: 'persist_failed' };
     }
+    if (code === CODES.STALE && err.message.includes(HUMAN_DRAFT)) {
+      await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft' });
+      return { outcome: 'parked', reason: 'human_draft' };
+    }
     if (code === CODES.STALE && err.message.includes(REVIEW_CHANGED)) {
       // Not lost to a person — the review itself changed. Back to the queue
       // for a fresh draft against the current rating/text.
@@ -563,7 +572,9 @@ async function postNow(reviewId, actor) {
           auto_reply_claimed_until: null,
         },
         auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
-        guard: claimGuard(row),
+        // Post-now publishes the draft the admin is looking at — a human
+        // draft on the row is the payload, not an intervention.
+        guard: claimGuard(row, { publishingText: existing }),
         requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };

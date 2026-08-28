@@ -161,6 +161,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi José, glad Marcus got the ants out of your kitchen so fast.'), g)).toBeNull();
     expect(Drafter.greetingName('Hi José, thanks')).toBe('José');
   });
+  test('all-caps names need provenance too; common acronyms are fine', () => {
+    expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled before your HOA walk-through.'))).toBeNull();
+  });
   test('drying / curing / wait-before language is banned even when the number came from the review', () => {
     const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
     expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');
