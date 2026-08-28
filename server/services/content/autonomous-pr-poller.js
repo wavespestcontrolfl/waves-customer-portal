@@ -228,20 +228,27 @@ function deriveBlogRouteUrl(run, brief = {}) {
   return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
 }
 
-// The blog file the publisher committed for this run, relative to the astro
-// repo (extension resolved by the caller): ASTRO_BLOG_DIR + the same route
-// slug deriveBlogRouteUrl composes. null when it cannot be derived — never
-// guess.
-function blogFilePathForRun(run, brief = {}) {
+// The blog files the publisher may have committed for this run, relative to
+// the astro repo, in publishOrUpdatePage's own probe order: the category
+// route path (where a NEW post is written), then the flat leaf path (an
+// EXISTING flat-convention file that already renders this route is adopted
+// and updated in place), each as .mdx then .md. `routeKey` is the route the
+// adopted file must render — a same-leaf file under another category is not
+// this post. null when nothing can be derived — never guess.
+function blogFileCandidatesForRun(run, brief = {}) {
   let internals;
   try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
-  const { categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory } = internals;
-  if ([categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory].some((f) => typeof f !== 'function')) return null;
+  const { categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory, slugLeafOf, blogRouteKey } = internals;
+  if ([categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory, slugLeafOf, blogRouteKey].some((f) => typeof f !== 'function')) return null;
   const frontmatter = parseJsonObject(run.draft_payload).frontmatter || {};
   let slugPath;
   try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
   const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
-  return routeSlug ? `src/content/blog/${routeSlug}` : null;
+  if (!routeSlug) return null;
+  const bases = [`src/content/blog/${routeSlug}`];
+  const leaf = slugLeafOf(routeSlug);
+  if (leaf && !bases.includes(`src/content/blog/${leaf}`)) bases.push(`src/content/blog/${leaf}`);
+  return { routeSlug, routeKey: blogRouteKey(routeSlug), paths: bases.flatMap((b) => [`${b}.mdx`, `${b}.md`]), slugKey: blogRouteKey };
 }
 
 // → { ok } | { ok: false, reason }. Reads the PR head's blog file and re-runs
@@ -250,18 +257,27 @@ function blogFilePathForRun(run, brief = {}) {
 async function recheckTopicTargeting(run, pr, gh) {
   let brief = {};
   try { brief = await briefCategorySignalsForRun(run); } catch (err) { return { ok: false, reason: `brief lookup failed: ${err.message}` }; }
-  const base = blogFilePathForRun(run, brief);
-  if (!base) return { ok: false, reason: 'blog file path could not be derived from the draft slug' };
+  const candidates = blogFileCandidatesForRun(run, brief);
+  if (!candidates) return { ok: false, reason: 'blog file path could not be derived from the draft slug' };
+  let parse;
+  try { ({ parse } = require('../content-astro/frontmatter')); } catch (err) { return { ok: false, reason: `gate could not run: ${err.message}` }; }
   let file = null;
-  for (const ext of ['.mdx', '.md']) {
-    file = await gh.getFile(`${base}${ext}`, pr.head?.ref);
-    if (file && typeof file.content === 'string') break;
-    file = null;
+  for (const path of candidates.paths) {
+    const found = await gh.getFile(path, pr.head?.ref);
+    if (!found || typeof found.content !== 'string') continue;
+    // The publisher's own adoption rule: a file whose frontmatter slug
+    // renders a DIFFERENT route (same leaf, other category) is not this
+    // post's file; one with no readable slug occupies the path it was
+    // resolved from.
+    let existingSlug = '';
+    try { existingSlug = parse(found.content)?.data?.slug || ''; } catch (_) { existingSlug = ''; }
+    if (existingSlug && candidates.slugKey(existingSlug) !== candidates.routeKey) continue;
+    file = found;
+    break;
   }
-  if (!file) return { ok: false, reason: `branch file ${base}.mdx unreadable at ${pr.head?.ref}` };
+  if (!file) return { ok: false, reason: `branch file for ${candidates.routeSlug} unreadable at ${pr.head?.ref} (probed ${candidates.paths.join(', ')})` };
   try {
     const topicGate = require('./topic-targeting-gate');
-    const { parse } = require('../content-astro/frontmatter');
     const data = parse(file.content)?.data || {};
     const index = await topicGate.loadLiveIndex();
     const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });

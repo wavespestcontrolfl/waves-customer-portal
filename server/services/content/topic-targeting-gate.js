@@ -245,7 +245,7 @@ function geoCompoundExemptRe() {
 // CONTEXT_PLACE_NAMES and count only with geo/service context.
 // Country / nation words inside species, plant and material names are not
 // markets: stripped with the state-named species before the matchers.
-const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:oaks?|vultures?|tail)|wild\s+turkeys?|spanish\s+(?:moss|needles?|bayonets?|daggers?|lime)|french\s+drains?|italian\s+cypress|english\s+ivy|irish\s+moss|jamaica\s+dogwood|china\s+(?:rose|doll)|chile\s+peppers?|india\s+hawthorn|panama\s+hats?|greece\s+laurel|japan\s+(?:cedar|privet)|guatemala\s+rhubarb|brazil\s+nuts?|cuba\s+laurel|dubai\s+chocolate|peru\s+lily)\b/gi;
+const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:oaks?|vultures?|tail|mites?|gnats?)|wild\s+turkeys?|spanish\s+(?:moss|needles?|bayonets?|daggers?|lime)|french\s+drains?|italian\s+cypress|english\s+ivy|irish\s+moss|jamaica\s+dogwood|china\s+(?:rose|doll)|chile\s+peppers?|india\s+hawthorn|panama\s+hats?|greece\s+laurel|japan\s+(?:cedar|privet)|guatemala\s+rhubarb|brazil\s+nuts?|cuba\s+laurel|dubai\s+chocolate|peru\s+lily)\b/gi;
 // Pesticide formulation suffixes (SC = suspension concentrate, CS, WP, WDG,
 // …) after a governed product name are not state abbreviations — scrubbed
 // before the abbreviation matchers. "Columbia SC pest control" still is.
@@ -764,6 +764,11 @@ function proseOf(body) {
     // Case text that would otherwise count as capitalized prose.
     .replace(/^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*(?:=+|-{3,})[ \t]*$/gm, ' ')
     .replace(/<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]>/gi, ' ')
+    // List / blockquote markers are dropped so a bullet label ("- Warranty
+    // details") starts its line: PROSE_WORD_RE's sentence-start alternatives
+    // cannot see a marker (the word's `pre` is the space after it), so
+    // repeated Title Case bullet labels would count as capitalized prose.
+    .replace(/^[ \t]*(?:[-*+]|\d+[.)]|>)[ \t]+/gm, '')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`]*`/g, ' ')
     .replace(/\]\([^)]*\)/g, ']')
@@ -886,7 +891,14 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // The city is a SEMANTIC field the writer is prompted with ("City:
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
-  if (cities.length && !findings.length && !ownershipOnly) findings.push(...semanticCityFindings(cities));
+  // Reported ALONGSIDE any geo finding: the runner grants one feedback
+  // retry, so a recognized out-of-area city (Tampa) must not hide an
+  // unrecognized one (Atlantis) until the second attempt. A city the geo
+  // scan already named is not repeated.
+  if (cities.length && !ownershipOnly) {
+    const named = findings.flatMap((f) => f.cities || []).map((c) => String(c).toLowerCase());
+    findings.push(...semanticCityFindings(cities.filter((c) => !named.some((n) => new RegExp(`(?:^|\\W)${escapeRe(n)}(?:\\W|$)`, 'i').test(c)))));
+  }
   if (findings.length) return { ...base, ok: false, findings, geo };
 
   const idx = index || (corpus ? indexCorpus(corpus) : null);

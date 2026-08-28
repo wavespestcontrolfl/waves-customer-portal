@@ -785,7 +785,7 @@ describe('PR codex r12 (4e38a9eb8)', () => {
     for (const t of ['Toronto pest control', 'termite treatment London UK', 'pest control Canada', 'pest control in London', 'Sydney, Australia termite bond', 'mumbai exterminator cost']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
     }
-    for (const t of ['london plane tree pests in sarasota', 'victoria asked about ants', 'nice weather for termites', 'norway rat vs roof rat', 'turkey oak pests', 'spanish moss removal in sarasota', 'mexican petunia pests in venice', 'german cockroach control in bradenton']) {
+    for (const t of ['london plane tree pests in sarasota', 'victoria asked about ants', 'nice weather for termites', 'norway rat vs roof rat', 'turkey oak pests', 'Turkey mites in Sarasota lawns', 'turkey gnats biting in venice', 'spanish moss removal in sarasota', 'mexican petunia pests in venice', 'german cockroach control in bradenton']) {
       expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
     }
   });
@@ -852,6 +852,28 @@ describe('PR codex r17 (600d484ae)', () => {
     const idx = gate.indexCorpus([{ url: '/lawn-care/yellow-mites/', body }]);
     expect(idx.properNouns.has('yellow')).toBe(false);
     expect(idx.properNouns.has('mites')).toBe(false);
+  });
+});
+
+describe('PR codex r20 (1306d052d)', () => {
+  test('turkey mites are a pest, not the nation — GSC demand keeps its footprint anchor', () => {
+    expect(gate.classifyGeoScope('Turkey mites in Sarasota lawns').scope).not.toBe('out_of_area');
+    expect(gate.classifyGeoScope('pest control turkey').scope).toBe('out_of_area');
+  });
+  test('an unrecognized semantic city is reported next to a recognized out-of-area one (one retry hears both)', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'pest control frequency', title: 'How Often Should Pest Control Come?', slug: 'pest-control-frequency', city: ['Tampa', 'Atlantis'] }, { index });
+    expect(r.ok).toBe(false);
+    const cities = r.findings.flatMap((f) => f.cities || []);
+    expect(cities).toContain('Tampa');
+    expect(cities).toContain('Atlantis');
+    // …and a city the geo scan already named is not reported twice.
+    expect(cities.filter((c) => c === 'Tampa')).toHaveLength(1);
+  });
+  test('unordered / ordered list labels do not feed the proper-noun statistics', () => {
+    const body = "---\ntitle: Termite Bond Guide\nslug: /termite/termite-bond-guide/\nprimary_keyword: termite bond\ncategory: termite\n---\n\nA bond is a contract.\n\n- Warranty details\n- Warranty length\n* Warranty renewal\n1. Warranty transfer\n> Warranty fine print\n\nthe warranty covers retreatment.\n";
+    const idx = gate.indexCorpus([{ url: '/termite/termite-bond-guide/', body }]);
+    expect(idx.properNouns.has('warranty')).toBe(false);
   });
 });
 

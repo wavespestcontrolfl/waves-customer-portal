@@ -864,6 +864,46 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(res.results[0]).toMatchObject({ pending: true, reason: 'topic_merge_lock_busy' });
   });
 
+  test('the recheck adopts the flat-path file the publisher updated in place (codex r20)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    // Nothing at the category path; the legacy flat file renders this route.
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/test-post.mdx'
+      ? { content: '---\ntitle: Flat Legacy Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' }
+      : null));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Flat Legacy Post');
+    expect(gh.getFile.mock.calls.map((c) => c[0])).toEqual(['src/content/blog/pest-control/test-post.mdx', 'src/content/blog/pest-control/test-post.md', 'src/content/blog/test-post.mdx']);
+  });
+
+  test('a same-leaf flat file under ANOTHER category is not this post (fails closed like an unreadable file)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/test-post.mdx'
+      ? { content: '---\ntitle: Lawn Post\nslug: /lawn-care/test-post/\n---\n\nBody.\n' }
+      : null));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: branch file .* unreadable/) });
+  });
+
   test('an unreadable head file fails the recheck closed (deferred, not merged)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()] });

@@ -3131,6 +3131,11 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
     expect(stamp).toBeDefined();
     expect(stamp.astro_publish_error).toMatch(/TOPIC_GEO_OUT_OF_AREA/);
     expect(stamp).not.toHaveProperty('astro_pr_number');
+    // The blocked PR is retired (closed + branch deleted) so nobody can merge
+    // the stale branch from GitHub while the row waits for a republish — and
+    // only AFTER the park is durable (codex r20 P1).
+    expect(gh.closePr).toHaveBeenCalledWith(43);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails');
   });
 
   test('a busy topic-merge lock defers the merge (TOPIC_MERGE_LOCK_BUSY), nothing merged', async () => {

@@ -2395,6 +2395,21 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed' } : {}),
       updated_at: new Date(),
     });
+    if (err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish) {
+      // The park is durable (publish_failed) — now retire the PR too. Left
+      // open it stays mergeable on GitHub until the operator republishes,
+      // and a human merge in that window ships the targeting violation the
+      // gate just refused. Same order as the autonomous lane's park (DB
+      // first, GitHub after); cleanupStaleAstroPr is best-effort + idempotent
+      // and republish repeats it, so a lost close converges. Markers stay.
+      await cleanupStaleAstroPr(post);
+      try {
+        const { markPrTerminal } = require('../content/codex-remediation');
+        await markPrTerminal(post.astro_pr_number, 'closed');
+      } catch (termErr) {
+        logger.warn(`[astro-publisher] markPrTerminal after topic-block retire failed for PR #${post.astro_pr_number}: ${termErr.message}`);
+      }
+    }
     throw err;
   }
 }
@@ -3340,6 +3355,7 @@ module.exports = {
     slugPathFromFrontmatter,
     categoryRouteSlug,
     slugLeafOf,
+    blogRouteKey,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     clampMetaDescription,
