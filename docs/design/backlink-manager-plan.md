@@ -502,26 +502,34 @@ if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score → DENY
-# 2. Authority (only reached by rows that passed every floor)
-if not path.agent_completable → OWNER_HUMAN_STEP      # the investigator judged a human must act; never AUTO_*
-if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
-if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
+# 2. Authority (only reached by rows that passed every floor). Dimensions are decided
+#    INDEPENDENTLY and the result is the SET {execution|communication, payment?}; no branch
+#    returns early for the whole placement — an OWNER_* verdict in one dimension never
+#    suppresses the payment decision for a paid path.
+# 2a. EXECUTION dimension (non-outreach types) — first matching rule wins for THIS dimension only
+if not path.agent_completable → execution = OWNER_HUMAN_STEP      # the investigator judged a human must act; never AUTO_*
+elif path.legal_attestation and policy.legal_attestation_requires_owner → execution = OWNER_LEGAL
+elif path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → execution = OWNER_MEMBERSHIP
 # Policy thresholds are compared ONLY when explicitly configured: `configured(x)` = x is a
 # finite number (not null/undefined/NaN). JS compares `5 >= null` as true, so a null
 # threshold must never reach a comparison — an unconfigured AUTO capability is simply absent.
-if path.payment_required:                               # PAYMENT dimension
+# 2b. PAYMENT dimension — evaluated for EVERY paid path regardless of 2a/2c
+if path.payment_required:
     if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents) and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
        and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
        and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
        and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
-    else → OWNER_PAYMENT
-if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # COMMUNICATION dimension — evaluated in ADDITION to payment, never instead of it; guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
-    → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
+    else → payment = OWNER_PAYMENT
+# 2c. COMMUNICATION dimension (outreach/content types; replaces 2a for them) — evaluated in ADDITION to 2b
+if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
+    → communication = AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
-                      else OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
+                      else communication = OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
                       action='outreach_send', bound to the draft hash) — no draft yet ⇒ the row simply awaits a draft lease, no card
-if path.account_required → AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
-else → AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
+# 2a (continued) — remaining EXECUTION rules for non-outreach types
+elif path.account_required → execution = AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
+else → execution = AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
+return { execution | communication, payment? }   # the complete set; a paid membership carries BOTH OWNER_MEMBERSHIP and its payment verdict
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
 including one per policy floor proving DENY beats every AUTO_* and OWNER_* branch, one per
