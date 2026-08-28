@@ -34,7 +34,7 @@ const { fetchServiceWeekWeather } = require('./service-report/application-condit
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
 const { CUSTOMER_STAGES } = require('./customer-stages');
-const { etDateString, addETDays, etParts } = require('../utils/datetime-et');
+const { etDateString, addETDays, etParts, lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const {
@@ -220,11 +220,7 @@ function buildScheduleNote({ scheduleSource, derived, scheduleFmt, rainSensor = 
   return `We worked that ${scheduleFmt}" out from what you entered under Irrigation in your portal — ${describeRuntimeBasis(derived)} — using the typical ${HEAD_LABELS[derived.headType] || derived.headType} rate from University of Florida turf guidance (about ${formatInches(derived.rateInPerHr)}" per hour).${sensorClause} If you know your actual weekly inches, enter them there and we'll use your number instead.`;
 }
 
-function lastCompletedWeekEnding(now = new Date()) {
-  const { dayOfWeek } = etParts(now); // Sun=0 … Sat=6
-  const back = dayOfWeek === 0 ? 7 : dayOfWeek;
-  return etDateString(addETDays(now, -back));
-}
+const lastCompletedWeekEnding = lastCompletedWeekEndingET;
 
 function monthFromYmd(ymd) {
   const m = Number(String(ymd || '').slice(5, 7));
@@ -1035,23 +1031,6 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       if (decision.weekPlan) {
         const p = decision.weekPlan;
         summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
-        // Snapshot BEFORE the send: the lawn report renders this same plan for
-        // the week whether or not the email reaches the inbox.
-        await persistWeekPlan({
-          customerId: customer.id,
-          weekEnding,
-          planAsOf,
-          weatherInputs: {
-            rainfallInches7d: weekWeather.rainInches,
-            et0Inches: weekWeather.et0Inches,
-            rainSource: weekWeather.rainSource,
-            forecastRainInches,
-            targetInches: decision.advice?.recommendedInchesPerWeek ?? null,
-            appliedInches: decision.advice?.appliedInchesPerWeek ?? null,
-          },
-          restriction: decision.restriction,
-          plan: p,
-        });
       } else if (decision.weekPlanUnavailable) {
         summary.plan.unavailable += 1;
       }
@@ -1087,6 +1066,28 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // (providerAttempted) — those keep their attempt even when reported as
       // deduped (webhook/supersede races), as does a thrown error.
       if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
+
+      // Snapshot the plan the customer actually received: written only
+      // after a send the provider accepted, and never overwritten (first
+      // write wins) — a rerun that the library dedupes keeps Monday's plan,
+      // so the report and the inbox stay identical for the week.
+      if (decision.weekPlan && result.sent && !result.deduped) {
+        await persistWeekPlan({
+          customerId: customer.id,
+          weekEnding,
+          planAsOf,
+          weatherInputs: {
+            rainfallInches7d: weekWeather.rainInches,
+            et0Inches: weekWeather.et0Inches,
+            rainSource: weekWeather.rainSource,
+            forecastRainInches,
+            targetInches: decision.advice?.recommendedInchesPerWeek ?? null,
+            appliedInches: decision.advice?.appliedInchesPerWeek ?? null,
+          },
+          restriction: decision.restriction,
+          plan: decision.weekPlan,
+        });
+      }
 
       if (result.deduped) {
         summary.deduped += 1;

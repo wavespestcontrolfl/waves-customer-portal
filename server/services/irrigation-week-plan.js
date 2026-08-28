@@ -24,6 +24,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS } = require('@waves/irrigation-runtime');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
+const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { _private: advicePrivate } = require('./service-report/irrigation-advice');
 
 const { classifySeason } = advicePrivate;
@@ -120,7 +121,12 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   let heading;
   let actionLine;
 
-  if (plan.action === 'hold') {
+  if (plan.action === 'hold' && plan.reasons.includes('restriction_prohibits')) {
+    // No permitted day exists — no override cycle can be offered.
+    subject = `Skip your turf watering this week, ${name}`;
+    heading = `No lawn watering this week, ${name}`;
+    actionLine = `This week: skip your turf watering. Lawn irrigation isn't permitted in your area right now${restriction?.label ? ` under the ${restriction.label}` : ''}, so your ${grassLabel} rides on rainfall until the rules change. We'll tell you the week that changes.`;
+  } else if (plan.action === 'hold') {
     subject = `Skip your turf watering this week, ${name}`;
     heading = `Your lawn is set for the week, ${name}`;
     const why = overwatered
@@ -131,8 +137,11 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on your permitted watering day.`;
   } else if (plan.conditionalOnForecast) {
     subject = `Rain first, then decide — this week's watering, ${name}`;
-    heading = `Let the rain go first this week, ${name}`;
-    actionLine = `Rain is expected before your watering day (about ${fmtInches(plan.forecastRainInches)} in the forecast near your home), so leave the turf irrigation off for now. If less than ½" actually falls, run ${fallbackCycle} on your permitted watering day.`;
+    heading = `Let the rain decide this week, ${name}`;
+    // The forecast is a 7-day total and we do not know the customer's assigned
+    // day, so the copy never asserts the rain comes first — it keys the
+    // decision on what has actually fallen by the permitted day.
+    actionLine = `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip the run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
     heading = `Your watering plan for this week, ${name}`;
@@ -180,6 +189,12 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
 function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const minutes = minutesPhrase(plan);
+  if (plan.action === 'hold' && plan.reasons.includes('restriction_prohibits')) {
+    return {
+      title: 'This week: no lawn watering',
+      detail: 'Lawn irrigation isn\'t permitted in your area right now, so your lawn rides on rainfall until the rules change.',
+    };
+  }
   if (plan.action === 'hold') {
     return {
       title: 'This week: skip your turf watering',
@@ -189,7 +204,7 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
   if (plan.conditionalOnForecast) {
     return {
       title: 'This week: let the rain go first',
-      detail: `About ${fmtInches(plan.forecastRainInches)} of rain is in the forecast. Leave the turf irrigation off for now; if less than ½" falls, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} on your permitted watering day.`,
+      detail: `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on your permitted watering day, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }
   return {
@@ -199,9 +214,9 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
 }
 
 /**
- * Snapshot the Monday decision so the report renders the same plan. Upsert
- * on (customer_id, week_ending). Never throws — a snapshot miss must not
- * block the send.
+ * Snapshot the Monday decision so the report renders the same plan. Insert
+ * once per (customer_id, week_ending). Never throws — a snapshot miss must
+ * not block the send.
  */
 async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), weatherInputs = {}, restriction = null, plan } = {}) {
   if (!customerId || !weekEnding || !plan) return false;
@@ -215,10 +230,12 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
       week_plan: JSON.stringify(plan),
       updated_at: db.fn.now(),
     };
+    // First write wins: the plan the customer actually received for the
+    // week is immutable — a rerun never rewrites it.
     await db('irrigation_week_plans')
       .insert({ ...row, created_at: db.fn.now() })
       .onConflict(['customer_id', 'week_ending'])
-      .merge(row);
+      .ignore();
     return true;
   } catch (err) {
     logger.warn(`[irrigation-week-plan] snapshot failed for ${customerId}/${weekEnding}: ${err.message}`);
@@ -226,25 +243,37 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
   }
 }
 
-const SNAPSHOT_MAX_AGE_DAYS = 7;
+function samePolicy(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  return Number(a.maxDaysPerWeek) === Number(b.maxDaysPerWeek)
+    && String(a.expiresOn || '') === String(b.expiresOn || '')
+    && String(a.label || '') === String(b.label || '');
+}
 
-/** The most recent snapshot no older than a week, parsed; null when none. */
+/**
+ * The snapshot for the CURRENT week (the sweep's week_ending key), and only
+ * if the restriction policy it was decided under is still the one in force
+ * — a policy that expired or tightened mid-week makes Monday's plan wrong,
+ * so the report shows nothing rather than a stale legal instruction.
+ * Null when there is no such snapshot.
+ */
 async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
   if (!customerId) return null;
   try {
-    const since = new Date(now.getTime() - SNAPSHOT_MAX_AGE_DAYS * 86400000);
+    const weekEnding = lastCompletedWeekEndingET(now);
     const row = await db('irrigation_week_plans')
-      .where({ customer_id: customerId })
-      .where('plan_as_of', '>=', since)
-      .orderBy('plan_as_of', 'desc')
+      .where({ customer_id: customerId, week_ending: weekEnding })
       .first();
     if (!row) return null;
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
+    const restriction = parse(row.restriction_policy) || null;
+    if (!samePolicy(restriction, currentRestrictionPolicy(now))) return null;
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
       weatherInputs: parse(row.weather_inputs) || {},
-      restriction: parse(row.restriction_policy) || null,
+      restriction,
       plan: parse(row.week_plan),
     };
   } catch (err) {
@@ -259,5 +288,5 @@ module.exports = {
   renderWeekPlanReport,
   persistWeekPlan,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, SNAPSHOT_MAX_AGE_DAYS },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy },
 };

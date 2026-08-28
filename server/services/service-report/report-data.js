@@ -47,7 +47,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { decideWeekPlan, renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
 const { currentRestrictionPolicy } = require('../../config/irrigation-restrictions');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
@@ -2580,29 +2580,16 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     completionRainConfidence,
     completionRainSource,
   });
-  // This week's watering plan (GATE_IRRIGATION_WEEK_PLAN). The Monday email
-  // snapshots its decision; the report renders THAT plan for the week so the
-  // two surfaces agree. No snapshot yet (report before Monday's sweep, or a
-  // customer the sweep doesn't reach) → the latest decision from the same
-  // engine, minus the forecast the report doesn't fetch.
+  // This week's watering plan (GATE_IRRIGATION_WEEK_PLAN): the Monday email's
+  // SNAPSHOT for the current week, so the card and the inbox agree. No
+  // snapshot (report before Monday's sweep, customer outside the audience,
+  // policy changed mid-week) → no callout: a "this week" instruction must
+  // never be built from a historical report's weather and season.
   waterContext.weekPlan = null;
   if (featureGates.isEnabled('irrigationWeekPlan')) {
-    const runMinutes = propertyPrefs?.irrigation_run_minutes ?? null;
     const snapshot = await loadCurrentWeekPlan(service.customer_id);
     if (snapshot?.plan) {
-      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes });
-    } else {
-      const { plan } = decideWeekPlan({
-        advice: waterContext.irrigationAdvice,
-        month: Number(String(assessment.service_date || '').slice(5, 7)) || (new Date().getMonth() + 1),
-        forecastRainInches: null,
-        runMinutes,
-        wateringDays: propertyPrefs?.watering_days ?? null,
-        systemType: propertyPrefs?.irrigation_system_type ?? null,
-        explicitInchesPerWeek: propertyPrefs?.irrigation_inches_per_week ?? null,
-        rainSensor: propertyPrefs?.rain_sensor === true || propertyPrefs?.rain_sensor === 't',
-      });
-      waterContext.weekPlan = renderWeekPlanReport(plan, { runMinutes });
+      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: propertyPrefs?.irrigation_run_minutes ?? null });
     }
   }
 

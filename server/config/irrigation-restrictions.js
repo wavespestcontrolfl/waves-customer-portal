@@ -29,15 +29,17 @@ const DEFAULT_POLICY = Object.freeze({
   hoursNote: 'on your assigned day, during your area\'s allowed hours',
 });
 
+// { configured: false } when the variable is unset (default applies);
+// { configured: true, policy: null } when it is set but unusable (FAIL
+// CLOSED — an operator meant to override, so the default must not apply).
 function parseEnvPolicy(raw) {
-  if (!raw || !String(raw).trim()) return null;
+  if (!raw || !String(raw).trim()) return { configured: false, policy: null };
   try {
     const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object') return null;
-    return parsed;
+    return { configured: true, policy: parsed && typeof parsed === 'object' ? parsed : null };
   } catch (err) {
     logger.error(`[irrigation-restrictions] IRRIGATION_RESTRICTION_POLICY is not valid JSON: ${err.message}`);
-    return null;
+    return { configured: true, policy: null };
   }
 }
 
@@ -57,7 +59,7 @@ function validPolicy(p) {
 function currentRestrictionPolicy(now = new Date(), { env = process.env } = {}) {
   const today = etDateString(now);
   const envPolicy = parseEnvPolicy(env.IRRIGATION_RESTRICTION_POLICY);
-  const candidate = envPolicy || DEFAULT_POLICY;
+  const candidate = envPolicy.configured ? envPolicy.policy : DEFAULT_POLICY;
   if (!validPolicy(candidate)) {
     logger.error('[irrigation-restrictions] restriction policy is malformed — weekly watering plan unavailable');
     return null;

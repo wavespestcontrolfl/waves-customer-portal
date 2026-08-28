@@ -265,7 +265,20 @@ function etCalendarDayOf(value) {
   return etDateString(value instanceof Date ? value : new Date(value));
 }
 
+
+/**
+ * The most recent COMPLETED Sunday→Saturday-style week ending (the Sunday on
+ * or before `now`, exclusive of a Sunday `now` itself), as an ET calendar
+ * date. Keys the Monday irrigation sweep and its per-week plan snapshot.
+ */
+function lastCompletedWeekEndingET(now = new Date()) {
+  const { dayOfWeek } = etParts(now); // Sun=0 … Sat=6
+  const back = dayOfWeek === 0 ? 7 : dayOfWeek;
+  return etDateString(addETDays(now, -back));
+}
+
 module.exports = {
+  lastCompletedWeekEndingET,
   TZ, parseETDateTime, formatETDay, formatETDate, formatETTime, etCalendarDayOf,
   etParts, etDateString, addETDays, addETMonthsByWeekday, etNthWeekdayOfMonth, startOfETMonth,
   etMonthStart, etMonthEnd, etQuarterStart, etYearStart, etWeekStart, validCalendarDate, validScheduleDate,

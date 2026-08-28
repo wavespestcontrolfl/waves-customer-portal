@@ -58,8 +58,10 @@ describe('renderWeekPlanEmail', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);
     expect(copy.plan_subject).toMatch(/^Rain first, then decide/);
-    expect(copy.week_plan).toContain('about 1.4" in the forecast');
-    expect(copy.week_plan).toContain('leave the turf irrigation off for now. If less than ½" actually falls, run one cycle of about 30 minutes per turf zone on your permitted watering day');
+    expect(copy.week_plan).toContain('About 1.4" of rain is in this week\'s forecast');
+    expect(copy.week_plan).toContain('leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip the run; if less than ½" has, run one cycle of about 30 minutes per turf zone');
+    // A 7-day total can't establish that rain comes BEFORE the assigned day.
+    expect(copy.week_plan).not.toMatch(/before your watering day/);
   });
 
   test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
@@ -75,6 +77,16 @@ describe('renderWeekPlanEmail', () => {
     expect(copy.plan_note).toContain('Add your sprinkler head type');
     expect(copy.plan_note).toContain('rain sensor will skip a run');
     expect(copy.plan_note).toContain("couldn't get a rain forecast");
+  });
+
+  test('watering prohibited (0-day policy) → skip, no override cycle, no "permitted day"', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: { maxDaysPerWeek: 0 }, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 0 } });
+    expect(copy.week_plan).toContain("Lawn irrigation isn't permitted in your area right now");
+    expect(copy.week_plan).not.toMatch(/permitted watering day|run one cycle|blue-gray/);
+    const report = renderWeekPlanReport(plan);
+    expect(report.title).toBe('This week: no lawn watering');
+    expect(report.detail).not.toMatch(/permitted watering day|run one cycle/);
   });
 
   test('unavailable plan → null (the sender keeps its pre-plan template)', () => {
@@ -93,7 +105,7 @@ describe('renderWeekPlanReport', () => {
     expect(hold.title).toBe('This week: skip your turf watering');
     const cond = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY }));
     expect(cond.title).toBe('This week: let the rain go first');
-    expect(cond.detail).toContain('if less than ½" falls');
+    expect(cond.detail).toContain('only if less than ½" has fallen so far this week');
     for (const c of [run, hold, cond]) expect(`${c.title} ${c.detail}`).not.toMatch(WEEKDAY);
   });
 });
@@ -119,5 +131,48 @@ describe('decideWeekPlan (server glue)', () => {
     expect(_private.fmtInches(0.5)).toBe('½"');
     expect(_private.fmtInches(0.75)).toBe('¾"');
     expect(_private.fmtInches(1.4)).toBe('1.4"');
+  });
+});
+
+describe('loadCurrentWeekPlan (snapshot validity) and persistWeekPlan (first write wins)', () => {
+  const db = require('../models/db');
+  const { loadCurrentWeekPlan, persistWeekPlan } = require('../services/irrigation-week-plan');
+  const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
+  const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order' };
+  const row = (restriction) => ({ week_ending: '2026-08-23', plan_as_of: NOW, weather_inputs: '{}', restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }) });
+
+  function stubSelect(returned, capture) {
+    db.mockImplementation(() => ({
+      where(w) { capture.where = w; return this; },
+      first: async () => returned,
+    }));
+  }
+
+  test('returns the CURRENT week\'s snapshot only when its policy matches the one in force', async () => {
+    const cap = {};
+    stubSelect(row(POLICY), cap);
+    const hit = await loadCurrentWeekPlan('c1', { now: NOW });
+    expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
+    expect(hit.plan.action).toBe('run');
+    stubSelect(row({ ...POLICY, maxDaysWeek: 2, maxDaysPerWeek: 2 }), {});
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    stubSelect(row(POLICY), {});
+    // Policy expired since Monday → the snapshot's legal instruction is stale.
+    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull();
+  });
+
+  test('persist inserts once and ignores a conflict (never overwrites Monday\'s plan)', async () => {
+    const calls = {};
+    db.mockImplementation(() => ({
+      insert(r) { calls.insert = r; return this; },
+      onConflict(cols) { calls.conflict = cols; return this; },
+      ignore: async () => { calls.ignored = true; },
+      merge: async () => { calls.merged = true; },
+    }));
+    const ok = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'hold' }, restriction: POLICY });
+    expect(ok).toBe(true);
+    expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
+    expect(calls.ignored).toBe(true);
+    expect(calls.merged).toBeUndefined();
   });
 });

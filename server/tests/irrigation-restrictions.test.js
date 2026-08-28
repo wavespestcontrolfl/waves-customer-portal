@@ -35,7 +35,7 @@ describe('currentRestrictionPolicy', () => {
   });
 
   test('malformed env policy → null (fail closed), never the default', () => {
-    expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: '{not json' } })).toMatchObject({ maxDaysPerWeek: 1 }); // unparseable = ignored → default applies while in force
+    expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: '{not json' } })).toBeNull(); // configured-but-unusable ≠ unset
     expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 9, expiresOn: '2027-01-01' }) } })).toBeNull();
     expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: 'soon' }) } })).toBeNull();
   });
