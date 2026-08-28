@@ -973,6 +973,26 @@ router.post('/messages/read', async (req, res, next) => {
           if (conversationIds.length) this.orWhere(function conv() { this.whereIn('conversation_id', conversationIds).where('created_at', '<=', readBefore); });
         })
         .update({ metadata: db.raw("metadata - 'backlog_reset'") });
+      // …and from the legacy twins and the thread's bells, so the rollback
+      // (marker-keyed) never reopens anything a human has looked at.
+      if (mirrorSids.length) {
+        await db('sms_log').whereIn('twilio_sid', mirrorSids)
+          .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
+          .update({ metadata: db.raw("metadata - 'backlog_reset'") });
+      }
+      const convForBells = new Set(conversationIds);
+      if (ids.length) {
+        for (const r of await db('messages').whereIn('id', ids).whereNotNull('conversation_id').distinct('conversation_id')) convForBells.add(r.conversation_id);
+      }
+      if (convForBells.size) {
+        const custs = await db('conversations').whereIn('id', [...convForBells]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
+        if (custs.length) {
+          await db('notifications').where({ category: 'inbound_sms' })
+            .whereIn('link', custs.map((cid) => `/admin/communications?thread=${cid}`))
+            .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
+            .update({ metadata: db.raw("metadata - 'backlog_reset'") });
+        }
+      }
     } catch (e) { logger.warn(`[communications] backlog-reset marker clear failed: ${e.message}`); }
     const updated = await q.update({
       is_read: true,
