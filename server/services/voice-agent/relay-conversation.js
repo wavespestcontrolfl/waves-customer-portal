@@ -95,6 +95,14 @@ try {
   anthropic = null;
 }
 
+// The gate-off pricing rule. Defined ONCE and referenced inside SYSTEM_PROMPT
+// below; buildBasePrompt(true) replaces this exact line with PRICE_LINE_CONTEXT.
+const PRICE_LINE_NO_CONTEXT =
+  '- You CANNOT quote prices on this call. If the caller asks about price, say you cannot give a'
+  + ' number over the phone but Waves can send a written estimate within about 15 minutes — then,'
+  + ' before anything else, get their first and last name, email address, and full service street'
+  + ' address so it can go out.';
+
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
   // brand form on any customer surface (AGENTS.md; the greeting says the same).
@@ -109,15 +117,17 @@ const SYSTEM_PROMPT = [
   '  once you have the service address or at least the city/ZIP.',
   '- You CANNOT confirm or reserve an appointment, and you cannot take payment. Offering a',
   '  time is not booking it — a Waves team member calls back to lock it in. Say so.',
-  '- You CANNOT quote prices. If asked, say a team member will go over pricing on the callback.',
+  PRICE_LINE_NO_CONTEXT, // ONE source: the gate-on prompt replaces this exact line
   '',
   'How to talk:',
   '- Keep every reply to one or two short sentences. This is a phone call, not an essay.',
-  '- Be warm, plain-spoken, and efficient. No corporate filler.',
+  '- Calm, plain-spoken, and efficient — a steady front-desk voice, not a cheerleader. No',
+  '  exclamation-point energy, no hype, no gushing; one friendly beat is plenty. No corporate filler.',
   '- Gather, conversationally: their FIRST and LAST name, the full service street address (not',
   '  just the city/ZIP), an email address, and what is going on (the pest or lawn problem).',
   '  These four — full name, service address, and email — are what let the office work the',
-  '  lead, so ask for any you are still missing before you wrap up. The address also lets you',
+  '  lead, so ask for any you are still missing before you wrap up. They are the job even when',
+  '  the caller only wanted a price. The address also lets you',
   '  look up open times; a city/ZIP alone is enough to check availability but still ask for the',
   '  full street address.',
   '- Ask for the email naturally ("what is the best email for your confirmation?"). If the',
@@ -144,14 +154,14 @@ const SYSTEM_PROMPT = [
 
 // The exact Phase-1 line buildBasePrompt swaps out. Exported and pinned by a
 // test so a future prompt edit can't silently break the replacement.
-const PRICE_LINE_NO_CONTEXT =
-  '- You CANNOT quote prices. If asked, say a team member will go over pricing on the callback.';
-
 const PRICE_LINE_CONTEXT = [
   '- Prices: you may quote ONLY numbers the get_pricing tool returned on THIS call, stated',
   '  exactly as the tool reported them. Never negotiate, discount, round up or down, or',
   '  estimate a price yourself. If get_pricing says information is missing, ask the caller',
   '  for it and call the tool again. You still cannot take payment.',
+  '- If you cannot give a number for what they want, do not leave them empty-handed: say Waves',
+  '  can send a written estimate within about 15 minutes, then — before anything else — get their',
+  '  first and last name, email address, and full service street address so it can go out.',
 ].join('\n');
 
 function agentDisplayName() {
@@ -1402,4 +1412,4 @@ class RelayConversation {
   }
 }
 
-module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, agentDisplayName };
+module.exports = { RelayConversation, SYSTEM_PROMPT, MODEL, composeSystemPrompt, sanitizeProfileForPrompt, invalidateVoiceProfileCache, PROFILE_INJECTION_LINE_RE, PROFILE_FACTUAL_LINE_RE, buildBasePrompt, PRICE_LINE_NO_CONTEXT, PRICE_LINE_CONTEXT, agentDisplayName };
