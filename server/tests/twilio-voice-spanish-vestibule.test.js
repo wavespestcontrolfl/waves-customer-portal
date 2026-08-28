@@ -17,7 +17,7 @@ const { isEnabled } = require('../config/feature-gates');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const {
   languageVestibule, appendLanguageVestibule, vestibuleInnerXml, buildSpanishRelayTwiML,
-  spanishSelected, appendVoicemailRecording, SPANISH_MENU_PROMPT, LANGUAGE_MENU_ACTION, relayCompleteLanguage,
+  spanishSelected, appendVoicemailRecording, SPANISH_MENU_PROMPT, LANGUAGE_MENU_ACTION, relayCompleteLanguage, withDeadline,
 } = voiceRouter._test;
 const { DEFAULT_WELCOME_GREETING_ES, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
 
@@ -130,6 +130,18 @@ describe('Spanish relay leg', () => {
   test('the default Spanish greeting is the disclosure', () => {
     expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/grabada/);
     expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/asistente automatizado/);
+  });
+});
+
+describe('withDeadline — best-effort stamps never hold the TwiML', () => {
+  test('a settled write passes through; a stalled one resolves the fallback at the deadline; a rejection resolves the fallback', async () => {
+    expect(await withDeadline(Promise.resolve(1), 50)).toBe(1);
+    jest.useFakeTimers();
+    const stalled = withDeadline(new Promise(() => {}), 1500, null);
+    jest.advanceTimersByTime(1600);
+    await expect(stalled).resolves.toBeNull();
+    jest.useRealTimers();
+    expect(await withDeadline(Promise.reject(new Error('boom')), 50, 'fb')).toBe('fb');
   });
 });
 

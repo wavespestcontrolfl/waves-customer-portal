@@ -525,6 +525,16 @@ function buildSpanishRelayTwiML({ vestibule, callSid }) {
   });
 }
 
+// Best-effort audit writes on the live routing path must never hold the
+// TwiML: a stalled query (held row lock) is bounded and routing continues.
+// `.catch` alone handles rejection, not a query that never settles.
+const STAMP_DEADLINE_MS = 1500;
+function withDeadline(promise, ms = STAMP_DEADLINE_MS, fallback = null) {
+  let timer;
+  const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  return Promise.race([Promise.resolve(promise).catch(() => fallback), deadline]).finally(() => clearTimeout(timer));
+}
+
 // The Gather action contract: only an exact '2' selects Spanish. Anything
 // else (other digit, '*', '#', multi-char, missing, malformed) = English
 // continuation, and the continuation never re-offers the vestibule.
@@ -899,13 +909,21 @@ router.post('/voice', async (req, res) => {
           const spanishLeg = languageVestibule({ routingConfig, handoffKind, reentry: false });
           if (spanishLeg) {
             logger.info(`[voice] Spanish vestibule: press 2 → es-US relay for ${maskSid(CallSid)}`);
-            await db('call_log').where('twilio_call_sid', CallSid)
-              .update({
-                answered_by: 'ai_agent',
-                metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ caller_language: 'es' })]),
-                updated_at: new Date(),
-              })
-              .catch((err) => logger.warn(`[voice] Spanish language stamp skipped for ${maskSid(CallSid)}: ${err.message}`));
+            // Bounded (codex #3561 r2): the caller who pressed 2 must hear
+            // the Spanish leg even if this row is locked. The failover path
+            // does not depend on this stamp (it rides the signed action URL);
+            // the persistence path re-proves from it and simply declines
+            // when it is absent.
+            const stamped = await withDeadline(
+              db('call_log').where('twilio_call_sid', CallSid)
+                .update({
+                  answered_by: 'ai_agent',
+                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ caller_language: 'es' })]),
+                  updated_at: new Date(),
+                })
+                .catch((err) => { logger.warn(`[voice] Spanish language stamp skipped for ${maskSid(CallSid)}: ${err.message}`); return null; }),
+            );
+            if (stamped == null) logger.warn(`[voice] Spanish language stamp did not settle in time for ${maskSid(CallSid)} — routing anyway`);
             return res.type('text/xml').send(buildSpanishRelayTwiML({ vestibule: spanishLeg, callSid: CallSid }));
           }
           logger.warn(`[voice] Spanish chosen but no Spanish session can start (${handoffKind}) for ${maskSid(CallSid)} — continuing in English`);
@@ -1910,6 +1928,7 @@ router._test = {
   vestibuleInnerXml,
   buildSpanishRelayTwiML,
   relayCompleteLanguage,
+  withDeadline,
   spanishSelected,
   appendVoicemailRecording,
   SPANISH_MENU_PROMPT,
