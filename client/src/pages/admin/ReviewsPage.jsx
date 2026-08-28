@@ -805,7 +805,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     border: `1px solid ${D.red}`,
                     color: D.red,
                     borderRadius: 6,
-                    fontSize: 13,
+                    fontSize: 14,
                     fontFamily: "Roboto, Arial, sans-serif",
                     cursor: "pointer",
                     opacity: autoBusy ? 0.5 : 1,

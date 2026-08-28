@@ -432,6 +432,43 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockPublish).toHaveBeenCalledTimes(1);
   });
 
+  test('a failed publish persists the grounding snapshot so the retry can reuse the draft', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('google_failed', 'GBP 500', { status: 502 }));
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(JSON.parse(state.rows[0].auto_reply_grounding).fingerprint).toBe(Runner.reviewFingerprint(row()));
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    state.rows[0].auto_reply_grounding = JSON.parse(state.rows[0].auto_reply_grounding);
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+  });
+
+  test('NO_RESOURCE (Places-first row) retries on a long backoff and the sync re-queues it when identity lands', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('no_gbp_resource', 'no match', { status: 502 }));
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'no_gbp_resource', auto_reply_attempts: 1 });
+    expect(new Date(state.rows[0].auto_reply_due_at).getTime() - Date.now()).toBeGreaterThan(50 * 60000);
+    const parked = { auto_reply_status: 'parked', auto_reply_reason: 'no_gbp_resource', gbp_review_name: null, dismissed: false };
+    expect(Runner.requeueFieldsOnIdentity(parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'identity_attached', auto_reply_attempts: 0 });
+    expect(Runner.requeueFieldsOnIdentity(parked, { gbp_review_name: 'x', owner_reply: 'Owner replied' })).toEqual({});
+    expect(Runner.requeueFieldsOnIdentity({ ...parked, auto_reply_reason: 'low_rating' }, { gbp_review_name: 'x', owner_reply: null })).toEqual({});
+  });
+
+  test('postNow on a saved draft after someone already replied closes the draft state', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('already_replied', 'owner replied on Google', { status: 409 }));
+    state.rows = [row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()) }, review_reply: `[DRAFT] ${GOOD_DRAFT.text}` })];
+    await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toMatchObject({ code: 'already_replied' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied', auto_reply_claimed_until: null });
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

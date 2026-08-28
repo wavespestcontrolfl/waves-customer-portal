@@ -47,6 +47,7 @@ const STATUS = {
 const MAX_ATTEMPTS = 3;
 const CLAIM_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MIN = 10;
+const IDENTITY_BACKOFF_MIN = 60;
 // Clamp for reviews already past their jitter window at detection time.
 const OVERDUE_DELAY_MIN = 5;
 const OVERDUE_DELAY_MAX = 20;
@@ -342,7 +343,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -449,9 +450,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const attempts = (merged.auto_reply_attempts || 0) + 1;
     // Every transient class (lock contention, Google failure, unexpected)
     // shares ONE retry ceiling; after it the row parks for a person.
-    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
-      const due = new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString();
-      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode });
+    // NO_RESOURCE is usually a Places-fallback row whose GBP identity the
+    // next healthy sync will attach — retry on a longer backoff (and the
+    // sync re-queues a parked row the moment it attaches the name).
+    const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
+    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
+      const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
+      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };
     }
@@ -549,6 +554,12 @@ async function postNow(reviewId, actor) {
         await parkPersistFailed(row, { text: existing, version: row.auto_reply_version, mode: row.auto_reply_mode }, err);
         throw err;
       }
+      if (err instanceof ReviewReplyError && [CODES.HAS_REPLY, CODES.MISSING, CODES.RACE].includes(err.code)) {
+        // Google (or a person) already answered / the review is gone — close
+        // the saved-draft state so the card stops showing a stale draft.
+        await releaseClaim(row, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: err.code, auto_reply_error: err.message });
+        throw err;
+      }
       await releaseClaim(row, { auto_reply_error: err.message });
       throw err;
     }
@@ -577,6 +588,18 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * auto-reply state in the same statement (and drops a live claim, which
  * makes the holder's in-lock guard fail).
  */
+/**
+ * Merged into the GBP sync's UPDATE of an existing row: a row that parked on
+ * `no_gbp_resource` (first seen via the Places fallback) re-enters the queue
+ * the moment the authoritative sync attaches its GBP identity.
+ */
+function requeueFieldsOnIdentity(existing, normalized) {
+  if (!existing || existing.auto_reply_status !== STATUS.PARKED || existing.auto_reply_reason !== 'no_gbp_resource') return {};
+  if (existing.gbp_review_name || !normalized?.gbp_review_name) return {};
+  if (hasRealReply(normalized.owner_reply) || existing.dismissed) return {};
+  return { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'identity_attached', auto_reply_due_at: new Date().toISOString(), auto_reply_attempts: 0 };
+}
+
 // Dismissal must not land under an in-flight publish (same predicate as
 // skipAutoReply): the dismiss routes add this to their WHERE.
 function whereNoLivePublishClaim(qb) {
@@ -631,6 +654,7 @@ module.exports = {
   skipAutoReply,
   dismissCancelFields,
   whereNoLivePublishClaim,
+  requeueFieldsOnIdentity,
   reviewFingerprint,
   autoReplyStatus,
   classifyReplyMode,

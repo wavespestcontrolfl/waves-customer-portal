@@ -273,7 +273,11 @@ async function submitReviewReply(reviewId, replyText) {
       reviewId,
       text: replyText,
       actor: { type: 'ib', adminUserId: null },
-      allowOverwrite: true,
+      // This tool submits a draft for an UNANSWERED review; it is not an
+      // explicit edit of a known reply, so it takes the non-overwrite path
+      // (local + live Google reply checks) and yields to anyone who answered
+      // meanwhile.
+      allowOverwrite: false,
       autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_claimed_until: null },
     });
     const review = await db('google_reviews').where('id', reviewId).first();

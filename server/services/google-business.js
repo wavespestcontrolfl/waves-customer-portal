@@ -814,7 +814,10 @@ class GoogleBusinessService {
       : db.fn.now();
     let result;
     if (existing) {
-      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+      // A Places-first row that parked waiting for its GBP identity re-enters
+      // the auto-reply queue once this authoritative sync attaches the name.
+      const { requeueFieldsOnIdentity } = require('./review-reply/runner');
+      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt, ...requeueFieldsOnIdentity(existing, normalized) });
       result = { id: existing.id, inserted: false };
     } else {
       try {
