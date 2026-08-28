@@ -193,9 +193,14 @@ t.date('paid_through');           // end of the term the last `charged` purchase
 t.date('renews_at');              // = the settling purchase row's own `paid_through` (date, ET); written on `charged`, `reconciled_charged` AND `manual_charged` (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
-New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
-and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
-`admin-backlink-agent-v2.js` is the contract; the worker's `claim()` never leases either.
+New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal),
+**`watching`** (unactionable today, rechecked) and **`ready_for_credentials`** (a
+model-observed provider handed off at the credential boundary, §12; leasable ONLY by the
+`deterministic_runner` via `claim(?mode=credentials)`). `PROSPECT_STATUSES` in
+`admin-backlink-agent-v2.js` is the contract — all three are added there, in the step-1
+status migration/constraint, the domain guard (`ready_for_credentials` joins
+`IN_FLIGHT_STATUSES` beside `watching`), the board's status filters and the tests; the
+worker's generic `claim()` never leases any of the three.
 Both statuses join the board's domain guard in the SAME PR (step 1): `awaiting_owner` is added
 to `ACTIVE_OUTREACH_STATUSES` in `prospect-domain-lock.js` — a parked outreach placement is
 still the domain's one conversation, so `claimProspectDomain()` refuses a second writer that
@@ -797,7 +802,7 @@ t.string('currency').notNullable();                 // CHECK (currency = 'USD') 
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
 t.string('authority_class').notNullable();          // CHECK (authority_class IN ('auto','owner')) — stamped at insert from `authority` (AUTO_PAID_WITHIN_POLICY ⇒ 'auto'; every OWNER_* and manual settlement ⇒ 'owner'); the §6.3 month_spend_cents query filters on it so the AUTO and OWNER budgets never mix
-t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged','manual_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist. `manual_charged` = an owner-paid purchase (OWNER_MANUAL_PAYMENT or auto_renew_unavoidable) recorded by the human settlement: inserted terminal in one transaction with the `human` attempt, with amount/final_cents, receipt as merchant_ref, terms_snapshot and paid_through — it counts in the owner budget, the duplicate guard and cost reporting, and the paid term is written from it, never from the attempt alone
+t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged','manual_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist. `manual_charged` = an owner-paid purchase (OWNER_MANUAL_PAYMENT or auto_renew_unavoidable) recorded by the human settlement: inserted terminal in one transaction with the `human` attempt UNDER THE SAME RULES AS AN AUTOMATED RESERVATION — the `link_budget:<YYYY-MM>` advisory lock, the same `idempotency_key` (`${prospect_id}:initial:${generation}` / renewal key — a double-submitted form is a no-op) and the all-time open/settled guard: the manual-settlement action is REFUSED (409) while the placement has ANY `reserved`/`submitting`/`close_pending`/`ambiguous` purchase (an automated purchase must be conclusively settled or voided first) or an already-settled purchase for the same kind/period, with amount/final_cents, receipt as merchant_ref, terms_snapshot and paid_through — it counts in the owner budget, the duplicate guard and cost reporting, and the paid term is written from it, never from the attempt alone
                                                     // reserved → voided (pre-exposure only) | reserved → submitting → close_pending → charged | submitting → ambiguous → reconciled_charged | reconciled_not_charged
 t.uuid('approval_id');                              // → seo_link_approvals (dimension='payment', action = 'purchase' for purchase_kind='initial', 'renewal' for 'renewal') when authority is OWNER_*; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
