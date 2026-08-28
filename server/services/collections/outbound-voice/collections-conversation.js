@@ -758,7 +758,13 @@ class CollectionsConversation {
           { ...anchor, customer_id: customerId }, // open-balance rows carry no customer_id
           { reusePaymentIntentId: anchor.stripe_payment_intent_id || null },
         );
-        if (Array.isArray(siblings) && siblings.length) payLinkInvoiceIds.push(...siblings.map((inv) => String(inv.id)));
+        // Intersect with the refreshed snapshot (hook r4): the probe is a
+        // second live read — an invoice joining between the two must not be
+        // recorded or promised while the spoken itemization omits it.
+        const snapshot = new Set(invoices.map((inv) => String(inv.id)));
+        if (Array.isArray(siblings)) {
+          payLinkInvoiceIds.push(...siblings.map((inv) => String(inv.id)).filter((id) => snapshot.has(id) && !payLinkInvoiceIds.includes(id)));
+        }
       } catch (err) {
         logger.warn(`[collections-voice] combined pay-link scope probe failed callSid=${this.callSid}: ${err.message} — anchor invoice only`);
       }
@@ -772,14 +778,16 @@ class CollectionsConversation {
   // and pay-link scope, in one place (disclosure, send time, credit-cover
   // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
   // is updated — the caller discloses/sends nothing on a partial account.
-  // `callable` = the refreshed account clock still clears the policy's
-  // 14-day floor (gh r3): the overdue anchor paid/reassigned mid-call can
-  // leave only not-yet-callable invoices — those are never dunned.
+  // `callable` = the refreshed account clock is still inside the policy's
+  // pilot window (gh r3 + hook r4): the overdue anchor paid mid-call can
+  // leave only not-yet-callable invoices (never dunned), and an older
+  // invoice joining can push the account past the 60-day ceiling (the
+  // office's, not this call's). `accountDays` lets the caller say which.
   async _refreshBalance() {
-    const { loadEligibleInvoices, PILOT_MIN_DAYS_OVERDUE } = require('../contact-policy');
+    const { loadEligibleInvoices, PILOT_MIN_DAYS_OVERDUE, PILOT_MAX_DAYS_OVERDUE } = require('../contact-policy');
     let incomplete = null;
     const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
-    if (incomplete) return { incomplete, fresh, callable: false };
+    if (incomplete) return { incomplete, fresh, callable: false, accountDays: null };
     this._ctx.balance = {
       total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
       count: fresh.length,
@@ -787,8 +795,21 @@ class CollectionsConversation {
     };
     this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
     Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
-    const callable = fresh.length > 0 && accountDaysOverdue(this._now(), fresh) >= PILOT_MIN_DAYS_OVERDUE;
-    return { incomplete: null, fresh, callable };
+    const accountDays = fresh.length ? accountDaysOverdue(this._now(), fresh) : null;
+    const callable = fresh.length > 0 && accountDays >= PILOT_MIN_DAYS_OVERDUE && accountDays <= PILOT_MAX_DAYS_OVERDUE;
+    return { incomplete: null, fresh, callable, accountDays };
+  }
+
+  // Copy for a refreshed set the policy would no longer call: under the
+  // floor = the past-due part cleared; over the ceiling = the office's.
+  _notCallableCopy(accountDays, { atSend = false } = {}) {
+    const { PILOT_MAX_DAYS_OVERDUE } = require('../contact-policy');
+    if (accountDays > PILOT_MAX_DAYS_OVERDUE) {
+      return `${atSend ? 'Do not send the link: ' : ''}This account now needs the office's attention rather than this call. Do NOT state any figure, do NOT ask for payment or offer a link; say the office will follow up, and end politely.`;
+    }
+    return atSend
+      ? 'Do not send the link: the past-due balance has been taken care of since we dialed and nothing else is past due yet. Tell the customer there is nothing overdue today and end politely.'
+      : 'The past-due balance this call was about has been taken care of since we dialed, and nothing else on the account is past due. Thank the customer, say there is nothing overdue today, do NOT state any figure, do NOT ask for payment or offer a link, and end politely.';
   }
 
   _ensureSystemBlocks() {
@@ -1115,16 +1136,16 @@ class CollectionsConversation {
     try {
       // A read that DROPPED an unprovable row or hit the bound understates
       // the account (gh r1): never present the survivors as "the total".
-      const { incomplete, fresh, callable } = await this._refreshBalance();
+      const { incomplete, fresh, callable, accountDays } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
         return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
       }
       if (fresh.length && !callable) {
-        // The overdue anchor cleared since dialing; what remains is not yet
-        // callable under the policy — never dunned, no figure spoken.
+        // The refreshed account is outside the pilot window the policy
+        // dialed on — never dunned here, no figure spoken.
         this.state = 'RESOLUTION';
-        return 'The past-due balance this call was about has been taken care of since we dialed, and nothing else on the account is past due. Thank the customer, say there is nothing overdue today, do NOT state any figure, do NOT ask for payment or offer a link, and end politely.';
+        return this._notCallableCopy(accountDays);
       }
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
@@ -1486,14 +1507,12 @@ class CollectionsConversation {
     // claimed by a live PaymentIntent since disclosure must be neither
     // promised nor recorded as contacted. Fail closed on an unreadable set.
     try {
-      const { incomplete, fresh, callable } = await this._refreshBalance();
+      const { incomplete, fresh, callable, accountDays } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] send-time balance read incomplete callSid=${this.callSid}: ${incomplete} — not sending`);
         return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
       }
-      if (fresh.length && !callable) {
-        return 'Do not send the link: the past-due balance has been taken care of since we dialed and nothing else is past due yet. Tell the customer there is nothing overdue today and end politely.';
-      }
+      if (fresh.length && !callable) return this._notCallableCopy(accountDays, { atSend: true });
     } catch (err) {
       logger.error(`[collections-voice] send-time balance read failed callSid=${this.callSid}: ${err.message}`);
       return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
@@ -1597,7 +1616,7 @@ class CollectionsConversation {
           return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
         }
         if (!refreshed.callable) {
-          return 'No text was needed: account credit covered the past-due invoice in full, and what remains on the account is not yet due. Tell the customer nothing is overdue today; do NOT state a figure or offer a link.';
+          return `No text was needed: account credit covered that invoice in full. ${this._notCallableCopy(refreshed.accountDays)}`;
         }
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;

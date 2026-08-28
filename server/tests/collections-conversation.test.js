@@ -53,6 +53,7 @@ jest.mock('../services/collections/contact-policy', () => ({
   }),
   isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
   PILOT_MIN_DAYS_OVERDUE: 14,
+  PILOT_MAX_DAYS_OVERDUE: 60,
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -1269,6 +1270,15 @@ describe('account-level disclosure + registers', () => {
     const [anchorArg, opts] = PayCombined.combinedEligibleSiblings.mock.calls.at(-1);
     expect(anchorArg).toMatchObject({ id: 'inv-old', customer_id: 'cust-1' });
     expect(opts).toEqual({ reusePaymentIntentId: 'pi_old' });
+    // A probe result OUTSIDE the refreshed snapshot (an invoice that joined between the two reads) is never recorded or promised.
+    PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-mid' }, { id: 'inv-ghost' }, { id: 'inv-new' }]);
+    r = await disclose(three);
+    expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old', 'inv-mid', 'inv-new']);
+    expect(r.convo._ctx.payLinkCoversAccount).toBe(true);
+    PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-ghost' }]);
+    r = await disclose(three);
+    expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old']);
+    expect(r.out).toMatch(/for the OLDEST invoice only/);
     // Partial bundle (a sibling holds a live PI, over-cap, …) ⇒ name exactly what it collects, never the whole balance.
     PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-mid' }]);
     r = await disclose(three);
@@ -1385,11 +1395,22 @@ describe('account-level disclosure + registers', () => {
     InvoiceService.sendViaSMS.mockClear();
     expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: the past-due balance has been taken care of/);
     expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    // Over the 60-day ceiling (an older invoice joined after dialing) is the office's, not this call's.
+    const ancient = { id: 'inv-ancient', title: 'Termite', status: 'overdue', due_date: '2026-05-01', total: '300.00', credit_applied: 0 }; // 103d
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([ancient, old]);
+    setDb();
+    const { convo: c3 } = makeConvo();
+    await c3._contextReady;
+    c3.verified = true;
+    const over = await c3._toolGetBalance();
+    expect(over).toMatch(/needs the office's attention rather than this call/);
+    expect(over).not.toMatch(/300\.00|nothing overdue/);
+    expect(c3.disclosed).toBe(false);
   });
 
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
     const legacy = [
-      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-06-10T12:00:00Z', total: '10.00', credit_applied: 0 },
+      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-06-20T12:00:00Z', total: '10.00', credit_applied: 0 }, // 53d — inside the pilot window
       { id: 'l2', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-07-01T12:00:00Z', total: '12.00', credit_applied: 0 },
     ];
     loadEligibleInvoices.mockResolvedValueOnce(legacy).mockResolvedValueOnce(legacy);
@@ -1398,7 +1419,7 @@ describe('account-level disclosure + registers', () => {
     await convo._contextReady;
     convo.verified = true;
     const out = await convo._toolGetBalance();
-    expect(out).toMatch(/Pest Control on 2026-06-10: \$10\.00/);
+    expect(out).toMatch(/Pest Control on 2026-06-20: \$10\.00/);
     expect(out).toMatch(/Pest Control on 2026-07-01: \$12\.00/);
   });
 
@@ -1432,7 +1453,7 @@ describe('account-level disclosure + registers', () => {
 
   test('firm/final registers speak a consequence ONLY when the state is true — read from the DB at disclosure', async () => {
     const firmSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }]; // 42d on Aug 12 → firm
-    const finalSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-01', total: '44.55', credit_applied: 0 }]; // 72d → final
+    const finalSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-13', total: '44.55', credit_applied: 0 }]; // exactly 60d → final (the pilot ceiling is 60)
     const disclose = async (set, { customer = CUSTOMER, dunning } = {}) => {
       loadEligibleInvoices.mockResolvedValueOnce(set).mockResolvedValueOnce(set);
       setDb({ customer, dunning });

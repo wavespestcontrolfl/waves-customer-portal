@@ -78,6 +78,9 @@ const ALLOWED_VERDICT = {
   denialReasons: [],
   eligibleInvoiceIds: ['inv-1'],
   eligibleBalanceCents: 12800,
+  eligibleInvoiceCents: { 'inv-1': 12800 },
+  eligibleAccountTier: 14,
+  eligibleAnchorDueDate: '2026-07-22',
   consentEvidence: { source: 'inbound_sms', evidenceRef: 'sms-9', evidenceAt: '2026-08-01T12:00:00.000Z' },
 };
 
@@ -172,7 +175,7 @@ describe('case + card creation', () => {
     };
     const rotate = chain({ returning: [{ ...existing, case_version: 2, idempotency_key: 'collections:cust-1:2:14', eligible_balance_snapshot: 17255 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE, second] })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, total: '78.00' }, { ...second, total: '94.55' }] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), chain({ first: existing }), chain({ first: { customer_id: 'cust-1' } }), chain({ result: [] }), rotate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ result: 1 }), chain({ first: null })],
@@ -180,6 +183,17 @@ describe('case + card creation', () => {
     const result = await ShadowSweep.runShadowSweep({ now: NOW });
     expect(result.casesUpdated).toBe(1);
     expect(rotate.update).toHaveBeenCalledWith(expect.objectContaining({ case_version: 2, eligible_invoice_cents: JSON.stringify({ 'inv-1': 7800, 'inv-2': 9455 }) }));
+  });
+
+  test('an invoice edited between the policy read and the display reload skips the customer this sweep (no case, no card)', async () => {
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, total: '200.00' }] })], // reload ≠ verdict cents
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [] })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0, casesLapsed: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   });
 
   test('a multi-invoice account files ONE card that itemizes every invoice behind the total, oldest-due first', async () => {
@@ -256,6 +270,7 @@ describe('idempotency + versioning', () => {
     case_version: 1,
     eligible_balance_snapshot: 12800,
     eligible_invoice_ids: '["inv-1"]',
+    eligible_invoice_cents: '{"inv-1":12800}',
     current_state: 'shadow',
     idempotency_key: 'collections:cust-1:1:14',
   };
@@ -272,10 +287,10 @@ describe('idempotency + versioning', () => {
   });
 
   test('a balance change bumps case_version, rotates the idempotency key, and files a fresh card', async () => {
-    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
+    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300, eligibleInvoiceCents: { 'inv-1': 15300 } });
     const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 15300 }] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, total: '153.00' }] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ first: { customer_id: 'cust-1' } }), chain({ first: undefined }), caseUpdate, chain({ result: [] })],
       notifications: [chain({ result: 1 }), chain({ first: null })],
@@ -294,9 +309,9 @@ describe('idempotency + versioning', () => {
   });
 
   test('an already-filed card (same dedupe key) is not re-filed even when the case row is rewritten', async () => {
-    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
+    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300, eligibleInvoiceCents: { 'inv-1': 15300 } });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, total: '153.00' }] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [
         chain({ first: EXISTING_CASE }),
@@ -310,9 +325,9 @@ describe('idempotency + versioning', () => {
   });
 
   test('a version-guard miss (concurrent sweep already bumped) skips without a card', async () => {
-    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300 });
+    ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 15300, eligibleInvoiceCents: { 'inv-1': 15300 } });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, total: '153.00' }] })],
       customers: [chain({ first: CUSTOMER })],
       collection_cases: [chain({ result: [] }), chain({ first: EXISTING_CASE }), chain({ returning: [, chain({ result: [] })] })],
     });
@@ -360,7 +375,7 @@ describe('script text', () => {
 describe('card durability', () => {
   const EXISTING_CASE = {
     id: 'case-1', case_version: 1, current_state: 'shadow', eligible_balance_snapshot: 12800,
-    eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+    eligible_invoice_ids: JSON.stringify(['inv-1']), eligible_invoice_cents: JSON.stringify({ 'inv-1': 12800 }), idempotency_key: 'collections:cust-1:1:14',
   };
 
   test('a failed notifyAdmin insert is NOT counted as a filed card', async () => {
@@ -447,8 +462,9 @@ describe('retirement + tier rotation', () => {
     // while the invoice is now 35 days overdue (tier 30) ⇒ NOT unchanged.
     const existing = {
       id: 'case-1', case_version: 1, eligible_balance_snapshot: 12800,
-      eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+      eligible_invoice_ids: JSON.stringify(['inv-1']), eligible_invoice_cents: JSON.stringify({ 'inv-1': 12800 }), idempotency_key: 'collections:cust-1:1:14',
     };
+    ContactPolicy.evaluate.mockResolvedValueOnce({ ...ALLOWED_VERDICT, eligibleAccountTier: 30, eligibleAnchorDueDate: '2026-07-08' });
     const caseUpdate = chain({ returning: [{ id: 'case-1', case_version: 2, eligible_balance_snapshot: 12800 }] });
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, due_date: '2026-07-08' }] })],
@@ -549,7 +565,7 @@ test('rotating the case version retires the previous version card', async () => 
   const existing = {
     id: 'case-1', case_version: 1, current_state: 'shadow',
     eligible_balance_snapshot: 9999, // balance changed ⇒ rotation
-    eligible_invoice_ids: JSON.stringify(['inv-1']), idempotency_key: 'collections:cust-1:1:14',
+    eligible_invoice_ids: JSON.stringify(['inv-1']), eligible_invoice_cents: JSON.stringify({ 'inv-1': 12800 }), idempotency_key: 'collections:cust-1:1:14',
   };
   const retireOld = chain({ result: 1 });
   setDbQueues({

@@ -103,7 +103,10 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoice
         `Invoices (${invoices.length}) - $${amountDollars} open balance; the oldest is ${daysOverdue} days past due:`,
         ...invoices.map((inv) => {
           const days = daysOverdueOn(now, dueValueOf(inv));
-          return `  ${inv.invoice_number || inv.id} - $${Number(invoiceAmountDue(inv)).toFixed(2)} (${days > 0 ? `${days} days past due` : 'not yet due'})`;
+          // Amount from the approved snapshot, never the display reload.
+          const cents = verdict.eligibleInvoiceCents?.[String(inv.id)];
+          const dollars = (Number.isFinite(Number(cents)) && cents != null ? Number(cents) / 100 : Number(invoiceAmountDue(inv))).toFixed(2);
+          return `  ${inv.invoice_number || inv.id} - $${dollars} (${days > 0 ? `${days} days past due` : 'not yet due'})`;
         }),
       ]
     : [`Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`];
@@ -168,15 +171,23 @@ async function runShadowSweep({ now = new Date() } = {}) {
       if (!customer) continue;
 
       const invoiceIds = normalizedIdSet(verdict.eligibleInvoiceIds);
-      // ONE clock per customer: the anchor is the OLDEST-DUE open invoice
-      // (owner ruling 2026-08-28), not the first-created row.
+      // The VERDICT is the one snapshot (hook r4): ids, per-invoice cents,
+      // balance, tier and anchor date all come from the policy's read. The
+      // reload below supplies display fields only (number, title, dates) and
+      // must agree with the verdict on ids and amounts — an edit between the
+      // two reads skips this customer until the next sweep re-evaluates.
+      const verdictCents = verdict.eligibleInvoiceCents || {};
       const invoiceRows = orderByDue(await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*'));
-      const invoice = invoiceRows[0] || null;
-      if (!invoice) continue;
-
-      const dueValue = dueValueOf(invoice);
+      const rowsAgree = JSON.stringify(normalizedIdSet(invoiceRows.map((r) => r.id))) === JSON.stringify(invoiceIds)
+        && invoiceRows.every((r) => Math.round(invoiceAmountDue(r) * 100) === Number(verdictCents[String(r.id)]));
+      if (!invoiceRows.length || !rowsAgree) {
+        logger.info(`[collections-shadow] customer ${customerId}: invoice reload disagrees with the policy verdict — re-evaluated next sweep`);
+        continue;
+      }
+      const invoice = invoiceRows[0];
+      const dueValue = verdict.eligibleAnchorDueDate || dueValueOf(invoice);
       const daysOverdue = daysOverdueOn(now, dueValue);
-      const tier = dunningTierForOverdue(daysOverdue);
+      const tier = verdict.eligibleAccountTier ?? dunningTierForOverdue(daysOverdue);
 
       // Latest case across shadow AND lapsed (r4): a retired case that
       // requalifies must advance its version monotonically — treating it
