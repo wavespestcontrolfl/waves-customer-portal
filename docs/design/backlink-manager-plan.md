@@ -191,14 +191,24 @@ t.boolean('recurring_merchant').notNullable().defaultTo(false);
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
 and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
 `admin-backlink-agent-v2.js` is the contract; the worker's `claim()` never leases either.
+Both statuses join the board's domain guard in the SAME PR (step 1): `awaiting_owner` is added
+to `ACTIVE_OUTREACH_STATUSES` in `prospect-domain-lock.js` — a parked outreach placement is
+still the domain's one conversation, so `claimProspectDomain()` refuses a second writer that
+proposes the same canonical host for another target page while one is parked (otherwise both
+could be approved and contact the same inbox); `watching` is added to `IN_FLIGHT_STATUSES`
+only (the recovery lane sees it; it is not an open conversation), and resuming a `watching`
+row (restoring `parked_from_status`) is a board admission that runs through the same guard
+exactly like the PATCH reopen — refused while another row for the domain is in active
+outreach. `prospect-domain-lock.test.js` pins both sets.
 
 ### 3.3b `seo_link_placement_authorities` — one row per required dimension
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable();
 t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','payment','communication'))
-t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
-t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence; the referenced approval's `dimension` must equal this row's dimension (enforced in the approval transaction)
+t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum EXCEPT OWNER_OVERRIDE)) — the underlying decision; a waiver is referenced, never stamped as the level
+t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_* row (and a row with `floor_waiver_id` additionally needs that waiver valid), not for the row's existence; the referenced approval's `dimension` must equal this row's dimension (enforced in the approval transaction)
+t.uuid('floor_waiver_id');             // → seo_link_floor_waivers when this dimension was decided under a floor waiver (§6.3 1b); `level` still holds the UNDERLYING decision — never OWNER_OVERRIDE — and the claim checks the waiver's validity in addition to the level
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
 t.string('instance_key').notNullable().defaultTo('-:1'); // the ACTION INSTANCE this row governs: `${kind}:${generation}` — kind '-' = initial acquisition/send, a renewal's renewal_period_key, or 'followup'; generation starts at 1 and the bridge opens `${kind}:${n+1}` when the previous instance ended in a NON-successful terminal outcome (`failed`/`skipped`/`send_error` reconciled as not sent) and a retry is warranted (re-investigation or owner "retry") — each new instance is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances; a successful instance (`placed`/`sent`) never gets a successor of the same kind
 t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
@@ -327,9 +337,9 @@ t.integer('path_revision').notNullable();     // the path's revision_<dimension 
 t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding}; communication = {link_type, expected_rel, legal_attestation, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence}. A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
 t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
-t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
-t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT money_action OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
-t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT money_action OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
+t.string('authority').notNullable();          // the OWNER_* level being granted, or OWNER_OVERRIDE for a floor-waiver click (the waiver row it authorizes is what the dimension references — the dimension's own level is never OWNER_OVERRIDE)
+t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT (money_action AND decision = 'approved') OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid APPROVAL without a ceiling cannot exist, while a `rejected`/`watch` decision on a payment card is an audit row with no approved terms: CHECK (decision = 'approved' OR (approved_amount_cents IS NULL AND max_payable_cents IS NULL)) (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
+t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT (money_action AND decision = 'approved') OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[], and for payment approvals the COMPLETE canonical merchant_binding from the path (§3.2: checkout_origin, processor.host, processor.merchant_account_id, issuer_merchant_descriptor) the owner approved — a processor host alone never appears here; copied, never referenced
 t.string('dimension').notNullable();          // CHECK (dimension IN ('execution','payment','communication')) — the authority dimension this approval satisfies
 t.string('action').notNullable();             // CHECK (action IN ('acquire','purchase','renewal','outreach_send','outreach_followup')) AND CHECK ((dimension='execution' AND action='acquire') OR (dimension='payment' AND action IN ('purchase','renewal')) OR (dimension='communication' AND action IN ('outreach_send','outreach_followup'))) — an approval authorizes exactly one action in exactly one dimension; a paid membership has an execution/acquire approval AND a separate payment/purchase approval
@@ -339,7 +349,7 @@ t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_re
 t.timestamp('consumed_at');                   // set when the leased execution reports a terminal outcome
 ```
 `seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
-accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
+accepts an `OWNER_*` row (waived or not) only with an approval that is `approved`, not
 invalidated, **unconsumed for the dimension instance that owns the current action** (a
 consumed approval on a prior, satisfied dimension instance is a durable prerequisite, §3.3b),
 whose `path_id` is the placement's current, non-superseded path,
@@ -516,7 +526,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` (the `authority` of a floor-waiver click's approval row only — never a dimension level, §6.3 1b) · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -587,8 +597,14 @@ if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_
 #     inputs change). With a valid waiver the floors are treated as passed and the NORMAL
 #     per-dimension decision below runs, so every dimension still gets its own AUTO_*/OWNER_*
 #     level and its own action-matching approval; a waived row can still never become AUTO_*
-#     for a dimension whose AUTO switch is off. OWNER_OVERRIDE remains only as the level
-#     recorded on dimensions that were granted solely because of a waiver.
+#     for a dimension whose AUTO switch is off. The waiver is stored INDEPENDENTLY of the
+#     level: the authority row records the UNDERLYING per-dimension level (OWNER_HUMAN_STEP
+#     stays OWNER_HUMAN_STEP, OWNER_MANUAL_PAYMENT stays OWNER_MANUAL_PAYMENT, an AUTO_* level
+#     only when its switch grants it) plus `floor_waiver_id` → `seo_link_floor_waivers`;
+#     OWNER_OVERRIDE is never written as a dimension level — it exists only as the `authority`
+#     of the waiver click's approval row (§3.6b). Claimability therefore always consults the
+#     underlying level: a waived human-step or manual-payment dimension is exactly as
+#     unleasable as an unwaived one.
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score → DENY
@@ -636,7 +652,8 @@ return { execution | communication, payment? }   # the complete set; a paid memb
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
 including one per policy floor proving DENY beats every AUTO_* and OWNER_* branch, one per
-required signal proving null / NaN / undefined → INVALID, and one proving OWNER_OVERRIDE is
+required signal proving null / NaN / undefined → INVALID, one proving a waived OWNER_HUMAN_STEP
+dimension is still recorded as OWNER_HUMAN_STEP (unleasable), and one proving a floor waiver is
 refused on INVALID (an unenriched or uninvestigated domain, or invalid money, can never be
 acted on by anyone until enrichment and investigation have run).
 
@@ -702,7 +719,7 @@ t.integer('final_cents');                           // the checkout's final tota
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
 t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','close_pending','charged','ambiguous','reconciled_charged','reconciled_not_charged','manual_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist. `manual_charged` = an owner-paid purchase (OWNER_MANUAL_PAYMENT or auto_renew_unavoidable) recorded by the human settlement: inserted terminal in one transaction with the `human` attempt, with amount/final_cents, receipt as merchant_ref, terms_snapshot and paid_through — it counts in the owner budget, the duplicate guard and cost reporting, and the paid term is written from it, never from the attempt alone
                                                     // reserved → voided (pre-exposure only) | reserved → submitting → close_pending → charged | submitting → ambiguous → reconciled_charged | reconciled_not_charged
-t.uuid('approval_id');                              // → seo_link_approvals (dimension='payment', action = 'purchase' for purchase_kind='initial', 'renewal' for 'renewal') when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
+t.uuid('approval_id');                              // → seo_link_approvals (dimension='payment', action = 'purchase' for purchase_kind='initial', 'renewal' for 'renewal') when authority is OWNER_*; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
@@ -986,7 +1003,9 @@ together:
   `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — claimability is a
   placement property, so a second location's placement is leasable after the first was
   acquired; the placement's stamped `authority` is an `AUTO_*` level
-  **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row — except
+  **or** an `OWNER_*` level with a recorded approval row (a dimension decided under a floor
+  waiver is leasable exactly as its underlying level would be — its `floor_waiver_id` waiver
+  must still be valid, and a waiver never promotes the level) — except
   `OWNER_MANUAL_PAYMENT`, which is never leasable for any payment claim (no reservation, no
   mint: the owner pays outside the system and records the charge through the manual
   settlement form, which atomically inserts a `manual_charged` purchase row + a `human`
