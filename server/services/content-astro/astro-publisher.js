@@ -381,7 +381,11 @@ function serviceAreasForCity(city) {
   if (SERVICE_AREAS.has(raw)) return [raw];
   const key = raw.toLowerCase().replace(/[’'.]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
   if (REGION_SERVICE_AREAS[key]) return [...REGION_SERVICE_AREAS[key]];
+  // "Manatee County, FL" / "Sarasota County, Florida" are the same regions —
+  // looked up again once the state suffix is off (the raw key first, so
+  // "Southwest Florida" keeps its own last word).
   const locality = key.replace(/\s+(?:fl|florida)$/, '');
+  if (REGION_SERVICE_AREAS[locality]) return [...REGION_SERVICE_AREAS[locality]];
   for (const area of SERVICE_AREAS) if (area.toLowerCase() === locality) return [area];
   let officeByCity = {};
   try { ({ CITY_TO_LOCATION: officeByCity } = require('../../config/locations')); } catch { officeByCity = {}; }
@@ -915,9 +919,17 @@ async function retireTopicBlockedPostPr(post) {
     }
     if (pr.merged || pr.merged_at) {
       logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} was MERGED before it could be retired — the row follows the merge`);
-      if (post.astro_pr_number === prNumber) {
-        await applyMergeEffect(post.id, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null);
-      } else {
+      // `post` is a snapshot: an operator may have republished the fixed row
+      // while GitHub was being awaited, so the row can now belong to a
+      // replacement PR. Decide on the CURRENT row and let the merge write
+      // itself compare-and-set on astro_pr_number — the replacement
+      // lifecycle is never overwritten with the old PR's merged state.
+      const current = await db('blog_posts').where({ id: post.id }).first();
+      const merged = current && current.astro_pr_number === prNumber
+        ? await applyMergeEffect(post.id, current, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null, { onlyIfPrNumber: prNumber })
+        : 0;
+      if (!merged) {
+        logger.warn(`[astro-publisher] post ${post.id} moved on to another PR — merged topic-blocked PR #${prNumber} gets terminal bookkeeping only`);
         await terminal('merged');
       }
       await settle();
@@ -2667,7 +2679,10 @@ async function mergedHeroRef(slug) {
   }
 }
 
-async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
+// `onlyIfPrNumber`: compare-and-set the merged stamp on the row's CURRENT
+// astro_pr_number (returns the affected row count — 0 when the row has moved
+// on to another PR); callers that hold a fresh row omit it.
+async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha, { onlyIfPrNumber = null } = {}) {
   // The PR left the open state — retire its codex_remediation_state row so
   // stale 'parked'/'remediating' rows over merged PRs don't read as live
   // park telemetry. Fail-soft bookkeeping (markPrTerminal never throws).
@@ -2733,7 +2748,8 @@ async function applyMergeEffect(postId, post, mergedAt, isUnpublish, sha) {
     // /images/blog path only resolves on the Astro site, not the portal origin.
     updates.featured_image_url = absoluteHeroUrl(rawHeroRef);
   }
-  await db('blog_posts').where({ id: postId }).update(updates);
+  const where = onlyIfPrNumber ? { id: postId, astro_pr_number: onlyIfPrNumber } : { id: postId };
+  return db('blog_posts').where(where).update(updates);
 }
 
 // ── Unpublish (soft, via revert PR) ────────────────────────────────

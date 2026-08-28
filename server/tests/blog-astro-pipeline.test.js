@@ -3167,11 +3167,12 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
     function owedRow(over = {}) {
       return { id: 'post-gate-1', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton', astro_status: 'publish_failed', astro_pr_number: 43, astro_branch_name: 'content/blog-ant-trails', astro_retire_pr_number: 43, ...over };
     }
-    function reconcileDb(rows, stamps) {
+    function reconcileDb(rows, stamps, { current = rows[0] } = {}) {
       db.mockImplementation(() => chain({
         orderByRaw: jest.fn().mockReturnThis(),
         limit: jest.fn().mockReturnThis(),
         select: jest.fn().mockResolvedValue(rows),
+        first: jest.fn().mockResolvedValue(current),
         update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }),
       }));
     }
@@ -3205,6 +3206,16 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
       expect(res).toMatchObject({ count: 1, retired: 0, merged: 1 });
       expect(gh.closePr).not.toHaveBeenCalled();
       expect(stamps.find((p) => p.astro_status === 'merged')).toMatchObject({ status: 'published' });
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+    });
+
+    test('a row republished while GitHub was awaited (current PR #44) is NOT overwritten with the old merged PR #43 (codex r21 P1)', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps, { current: owedRow({ astro_pr_number: 44, astro_branch_name: 'content/blog-ant-trails-v2', astro_status: 'pr_open' }) });
+      gh.getPr.mockResolvedValue({ number: 43, state: 'closed', merged: true, merged_at: '2026-08-28T09:00:00Z', merge_commit_sha: 'm1', head: { ref: 'content/blog-ant-trails' } });
+      const res = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(res).toMatchObject({ count: 1, merged: 1 });
+      expect(stamps.some((p) => p.astro_status === 'merged')).toBe(false);
       expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
     });
 
@@ -3516,6 +3527,10 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     expect(AstroPublisher.serviceAreasForCity('Venice, FL')).toEqual(['Venice']);
     expect(AstroPublisher.serviceAreasForCity('Lakewood Ranch')).toEqual(['Lakewood Ranch']);
     expect(AstroPublisher.serviceAreasForCity('Charlotte County')).toEqual(['Port Charlotte']);
+    // Qualified region forms are the same regions (PR codex r21 P2).
+    expect(AstroPublisher.serviceAreasForCity('Manatee County, FL')).toEqual(['Bradenton', 'Lakewood Ranch', 'Palmetto', 'Parrish']);
+    expect(AstroPublisher.serviceAreasForCity('Sarasota County, Florida')).toEqual(['Sarasota', 'Venice', 'North Port']);
+    expect(AstroPublisher.serviceAreasForCity('Charlotte County, FL')).toEqual(['Port Charlotte']);
     expect(AstroPublisher.serviceAreasForCity('Southwest Florida')).toHaveLength(8);
     for (const c of ['Tampa', 'Boise', 'Venice Beach', '']) expect(AstroPublisher.serviceAreasForCity(c)).toEqual([]);
     const { inferServiceAreas } = AstroPublisher._internals;
