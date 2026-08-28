@@ -68,6 +68,7 @@ jest.mock('../models/db', () => {
       whereNotNull(col) { filters.push((r) => r[col] != null); return api; },
       whereRaw(sql, params) {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
+        if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         return api;
       },
       orWhere() { return api; },
@@ -754,12 +755,17 @@ describe('processDueAutoReplies — state machine', () => {
       row({ id: 'c', star_rating: 4, auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_drafted_at: '2026-08-22T00:00:00Z', review_reply: 'by hand' }),
       row({ id: 'd', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_drafted_at: '2026-08-19T00:00:00Z' }),
       row({ id: 'e', star_rating: 5, auto_reply_status: 'queued' }),
+      // codex r22: eligibility is the DRAFT-TIME rating. A posted 5★ draft whose
+      // reviewer later dropped to 2★ stays in the sample; a 2★ human-only draft
+      // whose reviewer later raised to 5★ never enters it.
+      row({ id: 'f', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_drafted_at: '2026-08-18T00:00:00Z', auto_reply_grounding: { review: { rating: 5 } } }),
+      row({ id: 'g', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_drafted_at: '2026-08-17T00:00:00Z', auto_reply_grounding: { review: { rating: 2 } } }),
     ];
     const st = await Runner.autoReplyStatus();
-    expect(st.shadowDrafts).toBe(3);
-    expect(st.firstShadowDraftAt).toBe('2026-08-20T00:00:00Z');
-    expect(st.draftsTotal).toBe(4);
-    expect(st.byStatus).toEqual({ drafted: 1, posted: 1, skipped: 1, parked: 1, queued: 1 });
+    expect(st.shadowDrafts).toBe(4);
+    expect(st.firstShadowDraftAt).toBe('2026-08-18T00:00:00Z');
+    expect(st.draftsTotal).toBe(6);
+    expect(st.byStatus).toEqual({ drafted: 1, posted: 1, skipped: 1, parked: 3, queued: 1 });
   });
 
   test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {

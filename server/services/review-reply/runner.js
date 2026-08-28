@@ -927,7 +927,13 @@ async function autoReplyStatus() {
   // editor is the shadow workflow, and a row that left 'drafted' that way is
   // still a sample — filtering on current state would shrink the count as
   // admins do exactly what shadow asks of them.
-  const eligible = () => db('google_reviews').whereNotNull('auto_reply_drafted_at').where('star_rating', '>=', Math.max(cfg.minStars, 4));
+  // Eligibility reads the DRAFT-TIME rating (the grounding snapshot the
+  // draft was written from), not the row's current star_rating, which the
+  // sync overwrites on a reviewer edit: a later rating change must not
+  // rewrite rollout history in either direction.
+  const eligible = () => db('google_reviews')
+    .whereNotNull('auto_reply_drafted_at')
+    .whereRaw("COALESCE((auto_reply_grounding->'review'->>'rating')::int, star_rating) >= ?", [Math.max(cfg.minStars, 4)]);
   const shadowDrafts = await eligible().count('* as n').first();
   const firstShadow = await eligible().min('auto_reply_drafted_at as at').first();
   return {

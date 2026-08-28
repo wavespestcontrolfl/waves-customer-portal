@@ -91,7 +91,12 @@ const BANNED_RE = new RegExp([
   // Rating solicitation / review editing.
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
-  '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharm\\w*\\b', '\\brisk[- ]?free\\b', '\\bno[- ]risk\\b', "\\b(?:won't|will\\s+not|doesn't|does\\s+not|never|no)\\s+(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten)\\w*\\b",
+  '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharm\\w*\\b', '\\brisk\\w*\\b',
+  // No-injury / no-threat assertions in ANY grammatical wrapper ("cannot
+  // hurt", "is not able to affect", "couldn't bother"): the verbs themselves
+  // are banned outright — a thank-you reply has no legitimate use for them.
+  '\\bhurt\\w*\\b', '\\binjur\\w*\\b', '\\bendanger\\w*\\b', '\\bsicken\\w*\\b', '\\bthreat\\w*\\b', '\\bjeopard\\w*\\b',
+  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb)\\w*\\b",
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
   '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\b(?:okay|ok|fine|gentle)\\s+(?:around|for|with)\\s+(?:your\\s+)?(?:pets?|dogs?|cats?|kids?|children|family|babies|plants)\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
@@ -130,7 +135,7 @@ what when where whether which while who why wish with would yes you your you're 
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
-const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p\.m\.)|\d{1,2}\s?o'?clock|(?:in|during) the (?:morning|afternoon|evening)|yesterday|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|month|year|weekend)|last (?:week|month|year|weekend|night|time|visit|spring|summer|fall|winter)|next (?:week|month|year|visit)|(?:\d+|a|an|few|couple(?: of)?|several|two|three|four|five|six|seven|eight|nine|ten) (?:days?|weeks?|months?|years?|hours?|minutes?) ago|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|\bmay \d|on the \d{1,2}(?:st|nd|rd|th)|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:19|20)\d{2})\b/i;
+const DATE_CLAIM_RE = /\b(?:noon|midnight|\d{1,2}(?::\d{2})?\s?(?:am|pm|a\.m\.|p\.m\.)|\d{1,2}\s?o'?clock|(?:in|during) the (?:morning|afternoon|evening)|yesterday|today|tomorrow|tonight|this (?:morning|afternoon|evening|week|month|year|weekend)|last (?:week|month|year|weekend|night|time|visit|spring|summer|fall|winter)|next (?:week|month|year|visit)|(?:this|next|past|the|each|every|early|late|mid|all|over the|during the|in the|for the|through the|throughout the|since|before|after|until) (?:spring|summer|fall|autumn|winter|season)|(?:rainy|dry|wet|hurricane|holiday|peak|busy|off|slow|bug|mosquito|termite|swarm|love ?bug|snowbird) season|springtime|summertime|wintertime|(?:spring|summer|winter|autumn|fall) (?:season|months?|weather|heat|rains?|storms?)|summer|winter|autumn|springtime|(?:\d+|a|an|few|couple(?: of)?|several|two|three|four|five|six|seven|eight|nine|ten) (?:days?|weeks?|months?|years?|hours?|minutes?) ago|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|june|july|august|september|october|november|december|\bmay \d|on the \d{1,2}(?:st|nd|rd|th)|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?|(?:19|20)\d{2})\b/i;
 // Service / treatment / relationship claims. Each is a factual assertion
 // about what we did or who the customer is; it must come from the review
 // text or from an allowed account fact, never from the model.

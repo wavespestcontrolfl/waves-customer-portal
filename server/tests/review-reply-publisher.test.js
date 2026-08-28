@@ -159,6 +159,24 @@ describe('publishReviewReply', () => {
     expect(r.googlePosted).toBe(true);
   });
 
+  test('overwriting callers also compare the LIVE review content (codex r22): a reviewer rewrite on Google blocks the admin PUT', async () => {
+    state.rows[0].review_text = 'Great';
+    state.rows[0].review_reply = 'Already answered.';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Already answered.' }, starRating: 'ONE', comment: 'Terrible now', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // No owner reply yet, text rewritten: still blocked.
+    state.rows[0].review_reply = null;
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Rewritten complaint', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'ib' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+  });
+
   test('activity_log never carries the reviewer name', async () => {
     await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' }, allowOverwrite: true });
     expect(state.activity[0].description).not.toContain('Dana');

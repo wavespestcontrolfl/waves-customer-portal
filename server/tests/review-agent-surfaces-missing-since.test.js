@@ -195,6 +195,45 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     expect(row.review_reply).toBe(reply);
   });
 
+  test('a click_auto-linked review submits through the same review-only grounding the draft used (codex r22)', async () => {
+    // customer_id set by GATE_REVIEW_CLICK_AUTOLINK, unconfirmed: the guard
+    // must reload facts through groundingCustomerId (→ null), not the raw
+    // customer_id. This rig has no customers table, so a raw reload throws
+    // and the guard would report every submit as stale. The publisher is
+    // mocked to RUN the guard the way the real in-claim path does (the
+    // unconfigured-GBP local path above never reaches it).
+    const row = liveReview({ customer_id: 'cust-1', link_source: 'click_auto' });
+    state.rows.google_reviews = [row];
+    const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    const guards = [];
+    let tools;
+    jest.isolateModules(() => {
+      jest.doMock('../services/review-reply/publisher', () => {
+        const actual = jest.requireActual('../services/review-reply/publisher');
+        return {
+          ...actual,
+          publishReviewReply: async ({ reviewId, text, guard }) => {
+            guards.push(guard);
+            const fresh = state.rows.google_reviews.find((r) => r.id === reviewId);
+            const reason = await guard({ ...fresh });
+            if (reason) throw new actual.ReviewReplyError(actual.CODES.STALE, `Reply not posted: ${reason}`, { status: 409 });
+            fresh.review_reply = text;
+            return { googlePosted: true, reviewId };
+          },
+        };
+      });
+      tools = require('../services/intelligence-bar/review-tools');
+    });
+    const result = await tools.executeReviewTool('submit_review_reply', { review_id: 'rev-1', reply_text: reply });
+    expect(result.success).toBe(true);
+    expect(row.review_reply).toBe(reply);
+    // The link being confirmed (or cleared) between verification and the PUT
+    // changes what the draft was grounded on → stale, never posted.
+    expect(await guards[0]({ ...row, link_source: 'manual' })).toMatch(/customer link changed/);
+    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toMatch(/review changed/);
+    expect(await guards[0]({ ...row })).toBeNull();
+  });
+
   test('a model-proposed reply that fails the public-reply verifier is never posted', async () => {
     const row = liveReview();
     state.rows.google_reviews = [row];

@@ -117,6 +117,19 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
 // needs-reply queue, and close any pending pipeline state (a drafted/parked
 // row would otherwise sit labeled "Shadow draft / Needs you" beside the real
 // reply forever — the cron never reclaims those statuses).
+/**
+ * True when the LIVE Google review (rating / text / reviewer) differs from
+ * the synced row. Rating compares only when Google returned one.
+ */
+function liveReviewChanged(live, row) {
+  const liveRating = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(live?.starRating || '').toUpperCase()] || Number(live?.starRating) || 0;
+  const liveText = String(live?.comment || '').trim();
+  const liveName = String(live?.reviewer?.displayName || '').trim().toLowerCase();
+  return (live?.starRating != null && liveRating !== (Number(row.star_rating) || 0))
+    || liveText !== String(row.review_text || '').trim()
+    || (!!liveName && liveName !== String(row.reviewer_name || '').trim().toLowerCase());
+}
+
 async function recordLiveOwnerReply(reviewId, live) {
   const liveReply = String(live?.reviewReply?.comment || '').trim();
   if (!liveReply) return;
@@ -248,12 +261,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // The LIVE review itself must still be the one the reply was drafted
         // for: a reviewer edit after the last sync (5★ praise → 1★ complaint,
         // rewritten text, renamed account) is invisible locally.
-        const liveRating = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(live?.starRating || '').toUpperCase()] || Number(live?.starRating) || 0;
-        const liveText = String(live?.comment || '').trim();
-        const liveName = String(live?.reviewer?.displayName || '').trim().toLowerCase();
-        if ((live?.starRating != null && liveRating !== (Number(fresh.star_rating) || 0))
-          || liveText !== String(fresh.review_text || '').trim()
-          || (liveName && liveName !== String(fresh.reviewer_name || '').trim().toLowerCase())) {
+        if (liveReviewChanged(live, fresh)) {
           throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed on Google since it was synced — reply not posted.', { status: 409 });
         }
         // The live GET is a network round-trip; an admin skip/dismiss can
@@ -285,6 +293,13 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         if (liveReply && liveReply !== seenReply) {
           await recordLiveOwnerReply(reviewId, live);
           throw new ReviewReplyError(CODES.STALE, 'The reply on Google changed since this review was loaded — reload it and try again.', { status: 409 });
+        }
+        // The review itself must also still be the one the person wrote
+        // for: a reviewer rewrite on Google after the page loaded (praise →
+        // complaint) is invisible locally, and the wording would attach to
+        // the new text. Same comparison as the automation branch.
+        if (liveReviewChanged(live, fresh)) {
+          throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed on Google since it was synced — reload it and try again.', { status: 409 });
         }
       }
       try {

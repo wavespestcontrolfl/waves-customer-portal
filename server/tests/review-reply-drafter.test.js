@@ -113,6 +113,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants with a product that poses no hazard to kids.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and the products won't make your pets sick."))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and the toxicity is low.'))).toBe('banned_phrase');
+    // codex r22: no-injury / no-threat assertions in ANY wrapper.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments cannot hurt your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product is not able to affect your dogs.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and it couldn't bother the kids."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants without any risk to your family.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there is no threat to your cats.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing will injure your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');
@@ -164,6 +171,14 @@ describe('verifyReplyText — public-surface safety net', () => {
   test('date and relative-time claims are rejected unless the reviewer wrote them', () => {
     expect(verify(good('Hi Dana, glad Marcus got the ants handled last week.'))).toBe('date_claim');
     expect(verify(good('Hi Dana, glad Marcus got the ants handled on Tuesday.'))).toBe('date_claim');
+    // codex r22: seasonal phrasing in every wrapper is a timing claim too.
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled over the summer.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled this spring.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled during the summer heat.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled before winter.'))).toBe('date_claim');
+    expect(verify(good('Hi Dana, glad Marcus got the ants handled in the rainy season.'))).toBe('date_claim');
+    const gSeason = grounding({ text: 'Marcus came out this spring and the ants are gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got to the ants this spring.'), gSeason)).toBeNull();
     const g = grounding({ text: 'Marcus came out last week and the ants are gone.' });
     expect(verify(good('Hi Dana, glad Marcus got to the ants last week.'), g)).toBeNull();
   });

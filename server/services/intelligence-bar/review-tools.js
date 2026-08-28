@@ -286,13 +286,18 @@ async function submitReviewReply(reviewId, replyText) {
     // INSIDE the publish claim so a re-attribution / city correction between
     // verification and the PUT cannot let a claim licensed by old facts post.
     const { reviewFingerprint } = require('../review-reply/runner');
-    const { accountFingerprint, loadAccountFacts } = require('../review-reply/grounding');
+    const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('../review-reply/grounding');
     const reviewFp = reviewFingerprint(review);
     const accountFp = accountFingerprint(grounding.account);
     submitGuard = async (fresh) => {
       if (reviewFingerprint(fresh) !== reviewFp) return 'review changed since it was verified';
       let current;
-      try { current = accountFingerprint(await loadAccountFacts(fresh.customer_id)); } catch { return 'account facts could not be re-read'; }
+      // Same confirmation policy as drafting: a click_auto link grounds
+      // review-only, so the guard must not reload facts from the raw
+      // customer_id (the fingerprints would never match and every IB
+      // submit would fail as stale).
+      if ((groundingCustomerId(fresh) || null) !== (groundingCustomerId(review) || null)) return 'customer link changed since it was verified';
+      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
       if (current !== accountFp) return 'account facts changed since it was verified';
       return null;
     };
