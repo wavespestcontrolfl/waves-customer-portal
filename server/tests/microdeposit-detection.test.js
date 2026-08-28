@@ -51,6 +51,14 @@ describe('StripeService.isInvoiceAwaitingMicrodepositVerification', () => {
     expect(stripeClient.paymentIntents.retrieve).not.toHaveBeenCalled();
   });
 
+  test('throwOnError propagates the Stripe retrieve error — the outbound voice policy fails CLOSED on it', async () => {
+    stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('stripe unavailable'));
+    const StripeService = require('../services/stripe');
+    await expect(StripeService.isInvoiceAwaitingMicrodepositVerification(
+      { id: 'inv1', stripe_payment_intent_id: 'pi_1' }, { throwOnError: true },
+    )).rejects.toThrow('stripe unavailable');
+  });
+
   test('FAILS OPEN (false) when the Stripe retrieve throws — never suppress real dunning', async () => {
     stripeClient.paymentIntents.retrieve.mockRejectedValueOnce(new Error('stripe unavailable'));
     const StripeService = require('../services/stripe');

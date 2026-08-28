@@ -516,6 +516,32 @@ describe('r4: unpaid candidates + lapsed reactivation', () => {
 
 // r6: outage safety + merge hygiene.
 describe('r6: evaluation errors preserve, duplicate live cases self-heal', () => {
+  test('an incomplete read excuses only denials the dropped row could change — pilot_overdue_too_long / microdeposit stay definitive', async () => {
+    const run = async (reasons) => {
+      jest.clearAllMocks();
+      ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: reasons });
+      const selectChain = chain({ result: [] });
+      setDbQueues({ invoices: [chain({ result: [{ customer_id: 'cust-1' }] })], collection_cases: [selectChain] });
+      await ShadowSweep.runShadowSweep({ now: NOW });
+      return selectChain.whereNotIn.mock.calls[0][1]; // the preserved customers
+    };
+    expect(await run(['balance_read_incomplete', 'pilot_not_overdue_long_enough'])).toEqual(['cust-1']); // an omitted older row could make it old enough
+    expect(await run(['balance_read_incomplete', 'pilot_insufficient_dunning_history'])).toEqual(['cust-1']);
+    expect(await run(['balance_read_incomplete', 'pilot_overdue_too_long'])).toEqual([]); // nothing omitted makes the oldest younger
+    expect(await run(['balance_read_incomplete', 'pilot_awaiting_microdeposit_verification'])).toEqual([]);
+  });
+
+  test('a due date moved between the policy read and the display reload skips the customer (anchor day must agree)', async () => {
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [{ ...INVOICE, due_date: '2026-07-15' }] })], // verdict anchor is 07-22
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [] })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 0, casesUpdated: 0, cardsFiled: 0, casesLapsed: 0 });
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+  });
+
   test('a STANDALONE balance-derived denial (paid down / aged out) is definitive and lapses the case', async () => {
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, denialReasons: ['pilot_not_overdue_long_enough'] });
     const selectChain = chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] });

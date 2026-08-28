@@ -523,7 +523,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
             if (!invoice.stripe_payment_intent_id) continue;
             try {
               const StripeService = require('../stripe');
-              const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice);
+              // throwOnError: the helper fails OPEN for the SMS rails; this
+              // policy's safe direction is to DENY on an unknown state (gh r6).
+              const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError: true });
               if (mdPending) { deny('pilot_awaiting_microdeposit_verification'); break; }
             } catch (mdErr) {
               logger.warn(`[contact-policy] microdeposit check failed for invoice ${invoice.id}: ${mdErr.message} — denying voice`);

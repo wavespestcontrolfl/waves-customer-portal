@@ -1025,6 +1025,8 @@ describe('microdeposit-pending pilot denial', () => {
 
     armAllowedBaseline({ invoices: [PI_INVOICE()] });
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockRejectedValueOnce(new Error('stripe down'));
+    // The helper fails OPEN for the SMS rails; this policy asks it to throw so an unknown state DENIES (gh r6).
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).toHaveBeenLastCalledWith(expect.anything(), { throwOnError: true });
     expect((await evalVoice()).denialReasons).toContain('pilot_awaiting_microdeposit_verification');
 
     armAllowedBaseline(); // PI null

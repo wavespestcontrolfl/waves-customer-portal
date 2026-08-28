@@ -41,12 +41,16 @@ function normalizedCents(value) {
   return Object.entries(map).map(([id, c]) => [String(id), Number(c)]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
 }
 
-// Denials that are unknowns or computed FROM the eligible balance — the only
-// ones an INCOMPLETE read can excuse (standalone, a pilot_* / no-balance
-// denial is definitive: paid, reassigned, or aged out — the case lapses).
+// Denials whose truth can CHANGE because of a row the incomplete read
+// dropped — the only ones such a read can excuse (gh r6): an omitted older
+// invoice could make the account old enough or supply the dunning history,
+// or be the only balance. It can never make the oldest due date YOUNGER
+// (pilot_overdue_too_long) or clear a surviving invoice's microdeposit
+// state — those, like flags and suppressions, are definitive.
 function isTransientOrBalanceDerived(reason) {
   const r = String(reason).split(':')[0];
-  return r === 'policy_evaluation_error' || r === 'balance_read_incomplete' || r === 'no_eligible_balance' || r.startsWith('pilot_');
+  return r === 'policy_evaluation_error' || r === 'balance_read_incomplete' || r === 'no_eligible_balance'
+    || r === 'pilot_not_overdue_long_enough' || r === 'pilot_insufficient_dunning_history';
 }
 
 function normalizedIdSet(value) {
@@ -193,7 +197,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const verdictCents = verdict.eligibleInvoiceCents || {};
       const invoiceRows = orderByDue(await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*'));
       const rowsAgree = JSON.stringify(normalizedIdSet(invoiceRows.map((r) => r.id))) === JSON.stringify(invoiceIds)
-        && invoiceRows.every((r) => Math.round(invoiceAmountDue(r) * 100) === Number(verdictCents[String(r.id)]));
+        && invoiceRows.every((r) => Math.round(invoiceAmountDue(r) * 100) === Number(verdictCents[String(r.id)]))
+        // …and the same anchor day: a due date moved between the two reads
+        // would file a card whose itemization disagrees with its tier.
+        && (!verdict.eligibleAnchorDueDate || dueDayOf(invoiceRows[0]) === String(verdict.eligibleAnchorDueDate));
       if (!invoiceRows.length || !rowsAgree) {
         logger.info(`[collections-shadow] customer ${customerId}: invoice reload disagrees with the policy verdict — re-evaluated next sweep`);
         continue;

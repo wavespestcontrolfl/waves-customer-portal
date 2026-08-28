@@ -672,11 +672,14 @@ const StripeService = {
    * to pay, so the dunning sweeps divert it to a verification re-nudge instead of
    * an "overdue" notice.
    *
-   * FAIL OPEN: returns false on a missing PI, no Stripe, or any retrieve error —
-   * uncertainty must never SUPPRESS legitimate dunning for a genuinely-overdue
-   * invoice. The caller only treats a positive result as "divert".
+   * FAIL OPEN by default: returns false on a missing PI, no Stripe, or any
+   * retrieve error — uncertainty must never SUPPRESS legitimate dunning for a
+   * genuinely-overdue invoice. The caller only treats a positive result as
+   * "divert". `throwOnError` inverts that for callers whose safe direction is
+   * the opposite (the outbound voice policy: an unknown verification state
+   * must DENY the call, never let Sandy demand payment mid-verification).
    */
-  async isInvoiceAwaitingMicrodepositVerification(invoice) {
+  async isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError = false } = {}) {
     const piId = invoice?.stripe_payment_intent_id;
     if (!piId) return false;
     const stripe = getStripe();
@@ -687,6 +690,7 @@ const StripeService = {
         && pi.next_action?.type === 'verify_with_microdeposits';
     } catch (e) {
       logger.warn(`[stripe] micro-deposit-pending check failed for invoice ${invoice?.id || piId}: ${e.message}`);
+      if (throwOnError) throw e;
       return false;
     }
   },
