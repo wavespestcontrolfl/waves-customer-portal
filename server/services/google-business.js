@@ -781,12 +781,20 @@ class GoogleBusinessService {
   // for the old review — clear it and requeue (no bell: the runner redrafts).
   // Compare-and-set on the state the snapshot saw. Shared by the GBP upsert
   // and the Places fallback.
-  async _reconcileReviewEdit(existing, normalized) {
+  async _reconcileReviewEdit(existing, normalized, { conn = db, bell = true } = {}) {
     const { applyReviewEditFields } = require('./review-reply/runner');
     const wasPosted = existing.auto_reply_status === 'posted';
-    const n = await applyReviewEditFields(existing.id, existing, normalized);
+    const n = await applyReviewEditFields(existing.id, existing, normalized, { conn });
     if (n === 0) return false;
     if (!wasPosted) return true;
+    // Inside a caller's transaction the bell is deferred to after commit
+    // (see _bellEditedAfterPost); the Places path bells inline.
+    if (!bell) return 'posted_parked';
+    await this._bellEditedAfterPost(existing, normalized);
+    return true;
+  }
+
+  async _bellEditedAfterPost(existing, normalized) {
     const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
     await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
       link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
@@ -852,14 +860,23 @@ class GoogleBusinessService {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
       const { applyRequeueOnIdentity } = require('./review-reply/runner');
-      await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
-      // Conditional on the row STILL being parked for that reason (an admin
-      // Skip in the meantime wins).
-      await applyRequeueOnIdentity(existing.id, existing, normalized);
-      await applySyncReplyFields(existing.id, existingReplyFields, { expectedReply: existing.review_reply ?? null });
-      // A reviewer edit: a POSTED reply parks for a person, a pipeline
-      // draft is cleared and requeued (compare-and-set on the snapshot).
-      await this._reconcileReviewEdit(existing, normalized);
+      // Content update + reply sync + reviewer-edit reconciliation commit
+      // TOGETHER: if the edit's park/requeue were written after the content
+      // in a separate statement, a crash in between would leave the next
+      // sync seeing the edited text as the existing fingerprint (no change
+      // detected) and a posted reply attached to a rewritten review.
+      const edited = await db.transaction(async (trx) => {
+        await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
+        // Conditional on the row STILL being parked for that reason (an admin
+        // Skip in the meantime wins).
+        await applyRequeueOnIdentity(existing.id, existing, normalized, { conn: trx });
+        await applySyncReplyFields(existing.id, existingReplyFields, { conn: trx, expectedReply: existing.review_reply ?? null });
+        // A reviewer edit: a POSTED reply parks for a person, a pipeline
+        // draft is cleared and requeued (compare-and-set on the snapshot).
+        return this._reconcileReviewEdit(existing, normalized, { conn: trx, bell: false });
+      });
+      // The action bell only after the park is durable.
+      if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
       result = { id: existing.id, inserted: false };
     } else {
       try {

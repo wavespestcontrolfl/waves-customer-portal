@@ -819,6 +819,20 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
+  test('terminal parks record the final attempt count (codex r29)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('google_failed', 'GBP 503', { status: 502 }); });
+    state.rows = [row({ auto_reply_attempts: Runner.MAX_ATTEMPTS - 1, auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_due_at: '2026-08-27T14:00:00Z' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_attempts: Runner.MAX_ATTEMPTS });
+    expect(state.rows[0].auto_reply_error).toContain('GBP 503');
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
+    state.rows = [row({ id: 'p', auto_reply_attempts: Runner.MAX_ATTEMPTS - 1, auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_due_at: '2026-08-27T14:00:00Z' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_attempts: Runner.MAX_ATTEMPTS });
+  });
+
   test('a transient account-facts read failure inside the claim retries (never skipped as lost to a person) — codex r28', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

@@ -2048,8 +2048,11 @@ export default function ReviewsPage() {
     if (filterResponded === "needs-reply") params.set("responded", "false");
     if (filterResponded === "removed") params.set("missing", "true");
     if (search.trim()) params.set("search", search.trim());
+    // A notification deep link names one review; the server pins it into the
+    // first page so an old row (beyond the page size) is still reached.
+    if (pageNum === 1 && deepLink.review) params.set("review", deepLink.review);
     return params;
-  }, [filterLocation, filterRating, filterResponded, search]);
+  }, [filterLocation, filterRating, filterResponded, search, deepLink.review]);
 
   const loadData = useCallback(() => {
     const loadSeq = loadSeqRef.current + 1;
@@ -2063,7 +2066,10 @@ export default function ReviewsPage() {
     // the new result's Load More button isn't permanently disabled.
     setLoadingMore(false);
     setLoadMoreError(null);
-    adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
+    // Returns the fetch chain so callers that must not re-enable an action
+    // before the new row state is installed can await it (Post now on a
+    // 1-3★ review that just drafted: the card must render the draft first).
+    return adminFetch(`/admin/reviews?${buildParams(1).toString()}`)
       .then((d) => {
         if (loadSeq !== loadSeqRef.current) return;
         setData(d);
@@ -2123,7 +2129,7 @@ export default function ReviewsPage() {
     // Post now on a 1-3★ / unrated review with no surfaced draft: the server
     // drafted + parked instead of posting; reload so the draft is rendered.
     if (result && result.drafted && result.message) alert(result.message);
-    loadData();
+    await loadData();
   };
 
   const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null } = {}) => {

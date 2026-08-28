@@ -154,6 +154,20 @@ router.get('/', async (req, res, next) => {
     const parsedLimit = Math.max(1, Math.min(500, parseInt(limit, 10) || 200));
     const offset = (Math.max(1, parseInt(page, 10) || 1) - 1) * parsedLimit;
     const reviews = await query.limit(parsedLimit).offset(offset);
+    // Deep-linked review (?review=<id> from an action bell): pin it into the
+    // first page when it is not already there, so a review older than the
+    // page size (edited-after-post, removal evidence …) is reached directly.
+    const pin = typeof req.query.review === 'string' && req.query.review.trim() ? req.query.review.trim() : null;
+    if (pin && offset === 0 && !reviews.some((r) => String(r.id) === pin)) {
+      const pinned = await db('google_reviews')
+        .leftJoin('customers', 'google_reviews.customer_id', 'customers.id')
+        .where('google_reviews.id', pin)
+        .where('google_reviews.reviewer_name', '!=', '_stats')
+        .whereIn('google_reviews.location_id', activeLocationIds)
+        .select('google_reviews.*', 'customers.first_name as cust_first', 'customers.last_name as cust_last', 'customers.waveguard_tier as cust_tier')
+        .first();
+      if (pinned) reviews.unshift(pinned);
+    }
 
     // Get real Google stats from Places API (stored during sync).
     // Restrict to currently-configured WAVES_LOCATIONS so a `_stats`

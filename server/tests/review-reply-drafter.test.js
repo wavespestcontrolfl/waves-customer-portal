@@ -132,6 +132,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r29: use-near / apply-near / while-pets-are-home framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments can be used near pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product that may be applied near children.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we can spray while your pets are home.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product goes next to the kids without issue.'))).toBe('banned_phrase');
     // codex r28: benign / innocuous / inert / gentle / mild / non-harmful.
     expect(verify(good('Hi Dana, Marcus got the ants and our treatments are benign for your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with an innocuous product.'))).toBe('banned_phrase');

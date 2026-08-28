@@ -504,7 +504,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'provider_unavailable', auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: String(draft.error || '') });
         return { outcome: 'retry', reason: 'provider_unavailable' };
       }
-      if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+      if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
       await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — reply providers were down ${attempts} times. Draft one by hand.`, reason: 'provider_down', action: true });
       return { outcome: 'parked', reason: 'provider_down' };
     }
@@ -652,7 +652,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         : code === CODES.LOCK_BUSY ? 'lock_busy'
           : code === 'account_read_failed' ? 'account_read_failed'
             : 'google_failed';
-    if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot, fields: { auto_reply_attempts: attempts, auto_reply_error: String(err.message || err).slice(0, 1000) } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
     logger.error(`[review-auto-reply] publish failed for ${merged.id}: ${code} (${err.message})`);
     return { outcome: 'parked', reason: code };
