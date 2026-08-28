@@ -901,14 +901,23 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
  * manual task in the existing needs-reply queue).
  */
 async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
-  const updated = await db('google_reviews')
+  const row = await db('google_reviews').where({ id: reviewId }).first();
+  if (!row) return false;
+  // A FAILED publish-retry row keeps its verified draft only in
+  // auto_reply_draft (the slot stays empty while retrying): copy it into the
+  // visible "[DRAFT]" slot on skip so the person still sees it (codex r51).
+  const surface = row.auto_reply_status === STATUS.FAILED && row.auto_reply_draft && row.review_reply == null
+    ? { review_reply: asDraft(row.auto_reply_draft), reply_updated_at: null }
+    : {};
+  const q = db('google_reviews')
     .where({ id: reviewId })
     .whereIn('auto_reply_status', [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED])
     // A publish in flight holds the per-review publish claim; refusing the
     // skip (409 to the admin, retry in a moment) is the honest answer — the
     // publisher's pre-PUT guard covers the rest of the window.
-    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()])
-    .update({ auto_reply_status: STATUS.SKIPPED, auto_reply_reason: reason, auto_reply_claimed_until: null });
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()]);
+  if (Object.keys(surface).length) q.whereNull('review_reply');
+  const updated = await q.update({ auto_reply_status: STATUS.SKIPPED, auto_reply_reason: reason, auto_reply_claimed_until: null, ...surface });
   return (Array.isArray(updated) ? updated.length : updated) > 0;
 }
 

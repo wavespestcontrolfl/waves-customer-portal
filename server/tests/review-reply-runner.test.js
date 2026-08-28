@@ -917,6 +917,16 @@ describe('processDueAutoReplies — state machine', () => {
     expect(JSON.parse(state.rows[0].auto_reply_grounding)).toMatchObject({ version: 'grounding-v1' });
   });
 
+  test('Skip auto on a FAILED retry row surfaces its verified draft into the [DRAFT] slot (codex r51)', async () => {
+    state.rows = [row({ id: 'sf', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, review_reply: null })];
+    expect(await Runner.skipAutoReply('sf')).toBe(true);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip', review_reply: '[DRAFT] ' + GOOD_DRAFT.text });
+    // A drafted row already shows its draft in the slot: unchanged slot.
+    state.rows = [row({ id: 'sd', auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text, review_reply: '[DRAFT] ' + GOOD_DRAFT.text })];
+    expect(await Runner.skipAutoReply('sd')).toBe(true);
+    expect(state.rows[0].review_reply).toBe('[DRAFT] ' + GOOD_DRAFT.text);
+  });
+
   test('a skipped row keeps its pipeline draft usable: Use Draft passes the guard and Post now reuses it (codex r32)', async () => {
     const draft = 'Hi Dana, glad Marcus got the ants. Thanks for having us.';
     const base = row({ id: 'sk', customer_id: 'c1', auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip', auto_reply_draft: draft, review_reply: '[DRAFT] ' + draft });

@@ -136,6 +136,9 @@ const BANNED_RE = new RegExp([
   '\\bspar(?:e|es|ed|ing)\\b',
   // "<protected subject> never noticed / barely knew / didn't mind" (codex r48).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
+  // "agreed with / sat well with / suited / got along with <protected
+  // subject>" tolerance framing (codex r51).
+  '\\b(?:agree|agreed|agrees|agreeing|sat\\s+well|sits\\s+well|sit\\s+well|went\\s+down\\s+well|goes\\s+down\\s+well|go\\s+down\\s+well|suit|suited|suits|got\\s+along|get\\s+along|gets\\s+along|got\\s+on|get\\s+on|gets\\s+on|work|worked|works)\\s+(?:[\\w-]+\\s+){0,3}?(?:with|for|around)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\b',
   // "trouble / bother / faze <protected subject>" as a transitive verb (codex r44).
   // …with up to four intervening words so "bothered none of your pets",
   // "troubled neither of the kids" are caught (codex r49).
