@@ -81,6 +81,20 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
     }
   });
 
+  test('bare affirmatives and 👍 are closers only when we are NOT awaiting an answer', () => {
+    for (const t of ['Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Okay', 'Ok great', 'Np', 'All set', '👍', '🙏🙏', 'Ok 👍']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "does 9am work?" → 👍 is the answer
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]); // default = strict
+    }
+    for (const t of ['Thanks!', 'Sounds good, thanks!', 'Thank you 🙏']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, true]); // gratitude closes in any context
+    }
+    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]); // real content stays loud regardless
+    }
+  });
+
   test('pure courtesy closers are detected', () => {
     for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Sounds good, thanks!', 'Got it, thank you', 'Perfect, thanks Adam!', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'You too!', 'Have a great weekend']) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, true]);
