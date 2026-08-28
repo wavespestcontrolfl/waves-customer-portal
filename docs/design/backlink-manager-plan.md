@@ -123,7 +123,7 @@ t.string('acquisition_type').notNullable();
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
 t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none
-t.string('currency').notNullable().defaultTo('unknown'); // CHECK (currency IN ('USD','unknown')) — set by the investigator's currency gate (§5); a payment_required path is only ever VALID with 'USD'; a payment input for revision_payment and every payment hash/snapshot
+t.string('currency').notNullable().defaultTo('unknown'); // CHECK (currency IN ('USD','unknown','foreign')) — 'foreign' = a confirmed non-USD marker (never automated; §6.3 ⇒ OWNER_MANUAL_PAYMENT), 'unknown' = no/uncertain marker (⇒ price-entry card) — set by the investigator's currency gate (§5); a payment_required path is only ever VALID with 'USD'; a payment input for revision_payment and every payment hash/snapshot
 t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; nullable: a paid path MAY qualify without a valid binding — it then can only ever be decided payment=OWNER_MANUAL_PAYMENT (§6.3) and never reaches an automated reservation (fail-closed there); when present, the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
@@ -239,7 +239,14 @@ payment/`purchase` approval spans reserve → mint → submit and is consumed on
 settlement; the communication approval on the send's terminal outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
 `AUTO_*` or `OWNER_*` with an approval that is valid and not invalidated (consumed is fine —
 the communication approval consumed by the send still satisfies the later mint of the same
-paid outreach placement, and vice versa). **Invalidation is scoped per dimension by construction:** each dimension has its own path
+paid outreach placement, and vice versa) — with ONE ordering exception: a payment dimension
+decided `OWNER_MANUAL_PAYMENT` (or any payment dimension on a paid OUTREACH path, whose
+purchase is only reservable once the publisher exposes a checkout, §7 `mode=payment`) is a
+**deferred** prerequisite for the communication send — the initial send and follow-up
+proceed on communication authority alone, and the payment dimension becomes a hard
+prerequisite only from `ready_for_payment` onward (`OWNER_MANUAL_PAYMENT` parks the placement
+`awaiting_owner` at that point, never before). Execution/communication prerequisites are
+never deferred. **Invalidation is scoped per dimension by construction:** each dimension has its own path
 revision (`revision_payment` / `revision_communication` / `revision_execution`, §3.2) and its
 own inputs hash, so a change invalidates only the approvals of the dimension it belongs to
 (price, renewal, payment/legal flags → payment; recipient/draft → communication; type/URL →
@@ -262,6 +269,7 @@ alone, nor send on an outreach approval alone.
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
+t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back (lease expired, or ET-day rollover re-reservation) — terminal, audit-only, NEVER counted by the cap query
@@ -530,7 +538,7 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   from) and the investigator derives `estimated_cost_cents` / `renewal_cost_cents`
   deterministically: a **currency gate first** — the quote must carry an explicit USD marker
   (`$` with no non-US prefix, `US$`, `USD`; `€`, `£`, `CAD`, `A$`, `C$`, `MXN`, any other ISO
-  code or symbol, or NO marker ⇒ `currency='unknown'`, cents null) — then the shipped
+  code or symbol ⇒ `currency='foreign'`, cents null; NO marker ⇒ `currency='unknown'`, cents null) — then the shipped
   `price-scan/extract.parsePriceText()` (strict: a range, a percentage, a promo badge or an
   empty string parses to null; it does not validate currency, which is why the gate precedes
   it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown'))
@@ -540,8 +548,9 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   card), and the pre-mint/pre-submit final-total read verifies the LIVE checkout currency is
   USD as well as `final_cents` (any other currency ⇒ `voided`, `outcome='price_changed'`).
   An unparseable or non-USD quote leaves the cents null, which §6.3 turns into
-  `OWNER_INPUT_REQUIRED` for the payment dimension of a `payment_required` path (a price-entry
-  card, §6.1 — never the non-overrideable INVALID, which would send the row back to
+  `OWNER_INPUT_REQUIRED` for the payment dimension of a `payment_required` path when the
+  currency is merely UNKNOWN (a price-entry card, §6.1; a CONFIRMED non-USD quote goes to
+  `OWNER_MANUAL_PAYMENT` instead — the owner cannot change a merchant's checkout currency — never the non-overrideable INVALID, which would send the row back to
   investigation with no owner affordance) until an owner enters the USD amount —
   a hallucinated or mis-scaled number can therefore never reach authority, an approval, or a
   budget reservation — plus
@@ -636,7 +645,9 @@ if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shi
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and (not (Number.isSafeInteger(amount_cents) and amount_cents > 0) or path.currency !== 'USD'):
-    payment dimension → OWNER_INPUT_REQUIRED   # §5 currency gate / unparseable quote: no conversion, ever; NOT INVALID — the placement parks awaiting_owner with a price-entry card (§6.1) so the owner can supply the USD amount; every other dimension still evaluates; no AUTO_* or purchase approval can exist until the entry lands
+    if path.currency is a CONFIRMED non-USD currency (investigator read an explicit €/£/CAD/… marker, stored as currency='foreign'):
+        payment dimension → OWNER_MANUAL_PAYMENT   # the merchant's checkout currency cannot be changed by an owner entry; the live-checkout guard would void every attempt — the owner pays outside the system
+    else payment dimension → OWNER_INPUT_REQUIRED   # unmarked/uncertain/unparseable quote only: no conversion, ever; NOT INVALID — the placement parks awaiting_owner with a price-entry card (§6.1) so the owner can supply the USD amount; every other dimension still evaluates; no AUTO_* or purchase approval can exist until the entry lands
 if path.legal_attestation and not validLegalTermsHash(path.legal_terms_hash) → INVALID   # 64 lowercase hex chars; an attestation with no bound agreement text is never actionable (§3.2)
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
@@ -711,8 +722,12 @@ acted on by anyone until enrichment and investigation have run).
 `link-authority` job takes (a) every `qualified` domain with a `best_path_id` and (b) every
 existing placement whose authority rows are STALE — their `decision_inputs_hash` or
 `path_revision_<dimension>` no longer matches the current inputs, or the policy/spend/D30
-inputs changed since `decided_at` — whatever the domain's aggregate state; and, per domain,
-inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses the Waves
+inputs changed since `decided_at` — whatever the domain's aggregate state (when it
+re-decides a placement that already holds an open purchase — `reserved`/`submitting`/
+`close_pending`/`ambiguous` — the §6.3 budget input `month_spend_cents` EXCLUDES that
+placement's own open reservation, exactly as the pre-mint check and the renewal claim do, so
+a purchase that filled the remaining budget is never double-counted into a downgrade); and,
+per domain, inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses the Waves
 money page for the placement (scorer topic mapping → `targetPageOf`; homepage for
 listing-style paths) and, for signup-lane paths, **one placement per GBP location**
 (`location_key`, from `config/locations.js` — the existing runner's per-location identity,
@@ -1040,9 +1055,17 @@ advisory-lock shape as the first send), `follow_up_attempted_at` (stamped at cla
 the same lock exactly like `outreach_attempted_at`; the retained `dailySendCount` is extended
 to count it — `(outreach_attempted_at >= since)::int + (follow_up_attempted_at >= since)::int +
 prior attempts` — so a follow-up consumes the policy cap and the hard cap like an initial
-send and initial + follow-up sends can never exceed the daily limit) — and leased with `claim(?type=outreach&mode=followup)`,
-whose predicate accepts `contacted` rows with `outreach_status='sent'`, `follow_up_status='due'`
-and the send authority still valid. One follow-up per placement, ever. It runs **with a
+send and initial + follow-up sends can never exceed the daily limit). A due follow-up is
+**drafted before it can be sent**, exactly like the first message: `mode=draft` ALSO leases
+`contacted` rows with `follow_up_status='due'` (draft-only, grants nothing beyond composing
+the follow-up; `outcome='drafted'` flips `due → drafted` and stores the draft + its hash on
+the placement), the draft passes `comms-lint` and the §6.4 classifier, and the bridge then
+evaluates `AUTO_OUTREACH` on THAT draft or parks the placement for a `communication/outreach_followup`
+approval whose `action_hash` binds it. Only then is it leased with
+`claim(?type=outreach&mode=followup)`, whose predicate accepts `contacted` rows with
+`outreach_status='sent'`, `follow_up_status='drafted'` and a send authority valid for the
+follow-up instance (`followup:1`) bound to that draft's hash — text that was never linted or
+approved can never be sent. One follow-up per placement, ever. It runs **with a
 fail-closed reply check**: today the sender stores only a
 Gmail thread reference and detects nothing, so step 4 adds, inside the locked send claim, a
 Gmail thread reconciliation (`threads.get` on `outreach_thread_ref`; any message not from
@@ -1202,7 +1225,12 @@ Implementations, in order:
    location_key)` — never by domain alone, so two locations or two account paths on one
    site can't resume each other's cookies or half-filled form; a shared-account site that
    hosts several location profiles is modelled as one session key with the profile selected
-   explicitly per placement, serialized by the domain lock).
+   explicitly per placement, serialized by a **durable session lease** — a `lease_token`/
+   `lease_expires_at` on the `seo_link_credentials` row (§3.3b account identity), taken inside
+   the placement claim and held for the whole external execution, released on the report; a
+   second placement on the same shared account is not leasable while the session lease is
+   held. The transaction-scoped `claimProspectDomain` admission lock (released at commit,
+   `prospect-domain-lock.js`) is NOT relied on for this).
 2. **`openai_cua` / `claude_cu` / `stagehand` / `grok`** — same interface, run in the
    benchmark (§10), **non-payment, non-credentialed steps only** (credential + payment
    boundaries above). A provider never
@@ -1250,11 +1278,14 @@ that cannot complete it. Outreach: `OutreachProvider` = drafter + `link-prospect
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
   and per `domain` into `seo_link_learning` (small table, replaced each night). The
   per-`(source, acquisition_type)` aggregate reads ONLY placements whose acquisition Waves
-  executed: rows with `source='existing_backlink'`, placements whose current path has
-  `baseline=true`, and placements with no successful `seo_link_attempts` row tied to that
-  path are excluded — they may feed the per-`domain` aggregate (a statement about the host,
-  not the path), so an imported baseline with a real sampled D30 never credits an acquisition
-  type Waves never used. The scorer reads them:
+  executed — it JOINS each sampled placement to its successful `seo_link_attempts` row and
+  credits the outcome to THAT attempt's `path_id`/`acquisition_type_snapshot` (never to the
+  placement's current path, which §3.2 may have repointed to a superseding path after the
+  acquisition); rows with `source='existing_backlink'`, placements whose acquiring path has
+  `baseline=true`, and placements with no successful attempt at all are excluded — they may
+  feed the per-`domain` aggregate (a statement about the host, not the path), so an imported
+  baseline with a real sampled D30 never credits an acquisition type Waves never used, and a
+  genuine outcome is never discarded because its path was later replaced. The scorer reads them:
 
 ```
 Expected Link Value  ≈ quality(DR, traffic, spam, relevance)
