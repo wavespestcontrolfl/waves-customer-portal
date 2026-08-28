@@ -2838,7 +2838,7 @@ function AcceptanceRecordCard({ acceptance }) {
       <div style={{ display: 'grid', gap: 6, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
         {lines.map((line, i) => <div key={i}>{line}</div>)}
       </div>
-      <div style={{ marginTop: 12, fontSize: 13, lineHeight: 1.5, color: ESTIMATE_MUTED }}>{meta.join(' · ')}</div>
+      <div style={{ marginTop: 12, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_MUTED }}>{meta.join(' · ')}</div>
     </section>
   );
 }
