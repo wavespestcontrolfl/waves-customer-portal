@@ -187,11 +187,12 @@ describe('reschedule() choke point', () => {
     expect(result.seriesMoveId).toBe('sm-1');
     expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledWith('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS,
-      // The FULL scheduling pin rides along (duration too), and the retry
-      // identity is minted here so the series path records it.
+      // The FULL scheduling pin rides along (duration too).
       expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', estimated_duration_minutes: 60 },
-      operationKey: `svc-1:${TARGET}:13:00:-`,
     });
+    // A DERIVED key is never handed over as a client key (that would lose
+    // its retry horizon / supersession) — the series path derives it itself.
+    expect(SmartRebooker.rescheduleSeries.mock.calls[0][5]).not.toHaveProperty('operationKey');
     expect(db.transaction).not.toHaveBeenCalled();
   });
 

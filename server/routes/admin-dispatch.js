@@ -14059,7 +14059,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       }
       markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified')) || markers;
     } catch (err) {
-      logger.warn(`[dispatch] series_moves lease failed for ${seriesMoveId}: ${err.message}`);
+      // Without a held lease no marker write can land (they are fenced on
+      // the owner), so effects run here would be unrecorded and repeated by
+      // the reconciler — and could race a concurrent pass. The committed row
+      // IS the durable retry: report retryable and let the reconciler run it.
+      logger.warn(`[dispatch] series_moves lease unavailable for ${seriesMoveId} — effects deferred to the reconciler: ${err.message}`);
+      return { notificationSent: false, notificationError: 'lease_unavailable', conflicts, seriesMoveId, inProgress: true };
     }
   }
   const stampMarker = async (col, extra = {}) => {

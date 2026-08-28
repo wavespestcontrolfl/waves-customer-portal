@@ -827,7 +827,9 @@ class SmartRebooker {
           }
           if (Object.keys(pin).length) seriesOptions.expectAnchor = pin;
         }
-        seriesOptions.operationKey = opKey.key;
+        // A caller-minted key rides along in seriesOptions; a DERIVED key is
+        // never handed over as one — rescheduleSeries derives the identical
+        // key itself and keeps its retry-horizon / supersession semantics.
         return this.rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, seriesOptions);
       }
     }
