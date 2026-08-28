@@ -927,9 +927,15 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     maxPerDay, slotGridMinutes, dayStartMin, dayEndMin,
     lunchStartMin: lunchStart, lunchEndMin: lunchEnd,
   } = bookingSlotWindow(config);
+  // excludeSupersededSelfBookings: same filter the commit-time counter
+  // applies — a booking whose live visit was moved off its original day (or
+  // cancelled) must release that day's cap here too, or the offer keeps a
+  // phantom slot the commit would grant.
+  const { excludeSupersededSelfBookings } = require('../services/availability');
   const bookingCounts = await db('self_booked_appointments')
     .whereNot('status', 'cancelled')
     .whereBetween('date', [rangeFrom, rangeTo])
+    .modify(excludeSupersededSelfBookings)
     .select('date')
     .count('* as count')
     .groupBy('date');

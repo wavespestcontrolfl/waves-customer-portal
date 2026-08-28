@@ -62,6 +62,9 @@ function selfBookedBuilder() {
       return b;
     },
     modify(fn) { fn(b); return b; },
+    // Superseded-copy filter passthrough — these fixtures have no linked
+    // scheduled_services rows, so every copy stands.
+    whereNotExists() { return b; },
     count() { counting = true; return b; },
     first() {
       return Promise.resolve(counting ? { count: rows().length } : rows()[0]);

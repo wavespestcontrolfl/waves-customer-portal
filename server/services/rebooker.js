@@ -55,6 +55,32 @@ function seriesOccurrenceWindow(win, sib, options = {}) {
 // the Feb-Oct walk, so this file's own nextRecurringDate cannot drift from it.
 const { SEASONAL_FEB_OCT, seasonalFebOctDate, clampDateToSeason, customerPrefersNoWeekends } = require('./recurring-appointment-seeder');
 
+// Series sibling-projection clash horizon (rescheduleSeries): a shifted
+// FUTURE occurrence only hard-aborts the sweep when its recomputed date
+// lands within this many days of today. Beyond it the calendar is
+// placeholder-land — the recurring seeder itself commits overlapping
+// 12:00–13:00 placeholder rows months out, and auto-dispatch/admin re-place
+// stops as their dates approach — so a far-future "clash" is not a real
+// double-booking. Hard-aborting on one made most self-serve series
+// reschedules impossible for customers with a second plan (2026-08-14 field
+// report: every offered slot 409'd because a projection collided with a
+// seeded placeholder 6 months out). The ANCHOR row — the visit the customer
+// actually picked — is always hard-checked regardless of this horizon, as
+// are siblings landing inside it. A beyond-horizon overlap commits at its
+// cadence date and is flagged (`conflicted`) so route callers can park an
+// admin review notification.
+const SERIES_SIBLING_CLASH_HORIZON_DAYS = Math.max(
+  1,
+  Number(process.env.REBOOKER_SIBLING_CLASH_HORIZON_DAYS) || 60
+);
+
+// True when a projected sibling date is close enough to today that an
+// occupancy overlap there is a real double-booking (see the horizon const).
+function siblingClashWithinHorizon(dateStr) {
+  const horizonEnd = etDateString(addETDays(new Date(), SERIES_SIBLING_CLASH_HORIZON_DAYS));
+  return String(dateStr).split('T')[0] <= horizonEnd;
+}
+
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
 // the new anchor date, or moving the anchor to a new weekday would keep
@@ -1308,9 +1334,16 @@ class SmartRebooker {
         // resolution. The series path fixes each sibling's date
         // deterministically from the cadence (nextRecurringDate) and has no
         // tolerance search to slide an occurrence into a free window, so an
-        // unplaceable sibling aborts the whole all-or-none shift the same way
-        // the anchor and single-visit paths signal an unresolvable conflict —
-        // throw SLOT_TAKEN, roll back, commit nothing overlapping.
+        // unplaceable NEAR-TERM sibling aborts the whole all-or-none shift
+        // the same way the anchor and single-visit paths signal an
+        // unresolvable conflict — throw SLOT_TAKEN, roll back, commit
+        // nothing overlapping. BEYOND the clash horizon (see
+        // SERIES_SIBLING_CLASH_HORIZON_DAYS) the overlap is with
+        // placeholder-land, not a real route: commit the cadence date the
+        // owner ruling calls for and flag the occurrence (`conflicted`) for
+        // the callers' admin-review parking instead of dead-ending the
+        // customer.
+        let sibClashBeyondHorizon = false;
         if (!isAnchor && updateData.window_start) {
           // Kept-tech slot-reserve lock (rung 3) — same lock the anchor and
           // single-visit paths take, keeping the global order even though the
@@ -1345,14 +1378,27 @@ class SmartRebooker {
             excludeStatuses: TERMINAL,
           });
           if (occClash.length) {
-            if (!overlapAdvisory) {
-              throw Object.assign(new Error('That window conflicts with another job on the technician\'s route'), {
+            if (overlapAdvisory) {
+              // Staff-advisory mode (admin dispatch): overlaps never block a
+              // save — collect the date for the warnings[] the route returns.
+              overlapWarnDates.add(String(date).split('T')[0]);
+            } else if (siblingClashWithinHorizon(date)) {
+              // A near-term projection onto an occupied window is a real
+              // double-booking — abort all-or-none. subcode lets customer
+              // surfaces explain that the DAY doesn't fit the plan, instead
+              // of the misleading "that time was just taken" retry loop
+              // (code stays SLOT_TAKEN — rain-out and admin callers branch
+              // on it and must keep working unchanged).
+              throw Object.assign(new Error('That day doesn\'t work with this plan\'s upcoming visits — pick a different day'), {
                 statusCode: 409,
                 isOperational: true,
                 code: 'SLOT_TAKEN',
+                subcode: 'SERIES_PROJECTION',
               });
+            } else {
+              sibClashBeyondHorizon = true;
+              logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} lands on an occupied window ${String(date).split('T')[0]} ${updateData.window_start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committing at cadence, flagged for review`);
             }
-            overlapWarnDates.add(String(date).split('T')[0]);
           }
         }
 
@@ -1419,12 +1465,13 @@ class SmartRebooker {
           date,
           windowStart: win.start || sib.window_start,
           windowEnd: win.end || sib.window_end,
-          // Always false now: a sibling that would land on an occupied window
-          // aborts the whole series (SLOT_TAKEN) instead of committing an
-          // unassigned-but-overlapping row, so no occurrence is ever parked.
-          // Retained for the callers that still read it (admin-dispatch and
-          // reschedule-public park-for-dispatch filters) — they now see none.
-          conflicted: false,
+          // True only for a BEYOND-horizon occurrence committed onto an
+          // occupied (placeholder-land) window — near-term clashes abort the
+          // whole trx above and never reach here. Callers (admin-dispatch,
+          // reschedule-public) park flagged occurrences as a
+          // schedule_conflict admin notification; the tech is KEPT (an
+          // unassigned row would still occupy its window).
+          conflicted: sibClashBeyondHorizon,
         });
       }
 

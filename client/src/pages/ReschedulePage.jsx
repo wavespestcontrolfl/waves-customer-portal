@@ -1278,7 +1278,13 @@ export default function ReschedulePage() {
         } else {
           await load();
         }
-        setSubmitError('That time was just taken — here are the latest open times.');
+        // SERIES_PROJECTION: the DAY conflicts with this plan's upcoming
+        // visits (a shifted future occurrence would double-book), so "just
+        // taken — try again" would loop the customer through the same
+        // refusal. Steer to a different day instead.
+        setSubmitError(body.subcode === 'SERIES_PROJECTION'
+          ? 'That day doesn\'t work with your plan\'s upcoming visits — please pick a different day, or text us and we\'ll sort it out.'
+          : 'That time was just taken — here are the latest open times.');
         return;
       }
       setSubmitError(body.error || 'Something went wrong. Please try again, or text us and we\'ll help.');

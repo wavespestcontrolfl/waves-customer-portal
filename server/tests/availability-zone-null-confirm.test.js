@@ -69,6 +69,9 @@ function chain(overrides = {}) {
     orWhereRaw: jest.fn().mockReturnThis(),
     leftJoin: jest.fn().mockReturnThis(),
     modify: jest.fn(function modify(fn) { fn(builder); return builder; }),
+    // Superseded-copy filter passthrough (excludeSupersededSelfBookings) —
+    // no linked live rows in these fixtures, so every copy stands.
+    whereNotExists: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     first: jest.fn().mockResolvedValue(undefined),

@@ -37,6 +37,27 @@ async function acquireSelfBookingDayCapLock(trx, dateStr) {
   );
 }
 
+// A self_booked_appointments row is the booking's ORIGINAL slot copy; the
+// linked scheduled_services row (self_booking_id) is the LIVE visit. The
+// public reschedule path syncs the copy when the visit moves, but admin
+// moves don't — a visit moved off its booked day left the copy holding a
+// phantom day-cap slot on the old date (2026-08-14 field find: a re-service
+// moved-and-completed days earlier still counted against its original day).
+// Superseded = a linked live row exists AND it either moved off the copy's
+// date or went inactive (same inactive set the voice-row counter uses).
+// No linked row (legacy bookings, pre-visit-creation) → the copy stands.
+function excludeSupersededSelfBookings(q) {
+  q.whereNotExists(function supersededProbe() {
+    this.select(1)
+      .from('scheduled_services as live_visit')
+      .whereRaw('live_visit.self_booking_id = self_booked_appointments.id')
+      .where(function movedOrInactive() {
+        this.whereRaw('live_visit.scheduled_date <> self_booked_appointments.date')
+          .orWhereIn('live_visit.status', ['cancelled', 'rescheduled', 'skipped']);
+      });
+  });
+}
+
 // Same non-cancelled predicate the availability builder counts full days
 // with. excludeSelfBookingId: a same-day reschedule replaces its own row —
 // counting the row being moved would reject the move on a full day even
@@ -45,6 +66,7 @@ async function countActiveSelfBookingsForDay(trx, dateStr, { excludeSelfBookingI
   const row = await trx('self_booked_appointments')
     .where('date', String(dateStr))
     .whereNot('status', 'cancelled')
+    .modify(excludeSupersededSelfBookings)
     .modify((q) => {
       if (excludeSelfBookingId) q.whereNot('id', excludeSelfBookingId);
     })
@@ -616,3 +638,4 @@ module.exports = new AvailabilityEngine();
 // createSelfBooking (lazily, so the route ↔ service load order can't cycle).
 module.exports.acquireSelfBookingDayCapLock = acquireSelfBookingDayCapLock;
 module.exports.countActiveSelfBookingsForDay = countActiveSelfBookingsForDay;
+module.exports.excludeSupersededSelfBookings = excludeSupersededSelfBookings;

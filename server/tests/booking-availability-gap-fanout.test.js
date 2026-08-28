@@ -54,6 +54,10 @@ function wireDayCapCounts(rows = []) {
     where: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     whereBetween: jest.fn().mockReturnThis(),
+    // Superseded-copy filter (excludeSupersededSelfBookings) rides in via
+    // .modify + whereNotExists — passthroughs; no linked live rows here.
+    modify(fn) { fn(builder); return builder; },
+    whereNotExists: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),

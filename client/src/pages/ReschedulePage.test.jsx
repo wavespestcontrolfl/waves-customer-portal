@@ -221,6 +221,30 @@ describe('ReschedulePage Waves AI search', () => {
     expect(screen.getByText('1:00 PM–3:00 PM')).toBeInTheDocument();
   });
 
+  it('v2: a SERIES_PROJECTION 409 steers to a different day — never the "just taken" retry loop', async () => {
+    // The commit refused the DAY (a shifted future occurrence of the plan
+    // would double-book) — retrying the same day can only refuse again, so
+    // the generic "just taken" copy would loop the customer.
+    stubFetch({
+      post: jsonResponse({
+        error: 'That day doesn\'t work with this plan\'s upcoming visits — pick a different day',
+        code: 'SLOT_TAKEN',
+        subcode: 'SERIES_PROJECTION',
+      }, 409),
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole('option', { name: /Sunday, July 12/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Choose 1:00 PM on Sunday, July 12/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/doesn't work with your plan's upcoming visits/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/just taken/)).not.toBeInTheDocument();
+  });
+
   it('v2: best-times strip surfaces the ranked pick and pre-selects it', async () => {
     const payload = reschedulablePayload();
     payload.availability.slots = [

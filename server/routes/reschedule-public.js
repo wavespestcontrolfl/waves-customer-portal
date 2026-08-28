@@ -37,9 +37,11 @@
  * re-arm every shifted occurrence silently and send ONE
  * appointment_series_rescheduled text); the dispatch board gets a live
  * job_update broadcast per moved row; the office gets the same internal
- * alert text a self-booked appointment fires. Shifted siblings whose kept
- * tech would double-book were committed UNASSIGNED inside the rebooker trx
- * and are parked as a schedule_conflict admin notification here.
+ * alert text a self-booked appointment fires. A shifted sibling landing on
+ * an occupied window ABORTS the commit when it's near-term (rebooker clash
+ * horizon); a beyond-horizon overlap with placeholder-land commits with its
+ * tech kept, comes back flagged (occ.conflicted), and is parked as a
+ * schedule_conflict admin notification here.
  */
 
 const express = require('express');
@@ -722,7 +724,14 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
         );
     } catch (err) {
       if (err?.statusCode) {
-        return res.status(err.statusCode).json({ error: err.message, code: err.code || null });
+        // subcode (e.g. SERIES_PROJECTION) rides along so the page can
+        // explain a plan-level conflict honestly instead of the "that time
+        // was just taken" retry loop; code semantics are unchanged.
+        return res.status(err.statusCode).json({
+          error: err.message,
+          code: err.code || null,
+          ...(err.subcode ? { subcode: err.subcode } : {}),
+        });
       }
       throw err;
     }
@@ -936,30 +945,31 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     }
 
-    // Series-shift conflicts: the rebooker validated each shifted sibling
-    // INSIDE the commit trx and cleared the tech on any that would have
-    // double-booked a route (occ.conflicted) — nothing double-booked ever
-    // commits. Owner model is hands-off + exception-based: park the
-    // unassigned ones as an admin notification for reassignment from
-    // dispatch.
+    // Series-shift conflicts: the rebooker hard-aborts any NEAR-TERM
+    // occurrence that would land on an occupied window (nothing
+    // double-booked commits inside the clash horizon). A BEYOND-horizon
+    // occurrence that overlaps placeholder-land commits at its cadence date
+    // with its tech KEPT and comes back flagged (occ.conflicted). Owner
+    // model is hands-off + exception-based: park the flagged ones as an
+    // admin notification for review from dispatch.
     const siblingConflicts = (shiftedOccurrences || [])
       .filter((occ) => occ.conflicted)
       .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
     if (siblingConflicts.length) {
-      logger.warn(`[reschedule-public] series re-anchor for ${svc.id} unassigned ${siblingConflicts.length} conflicting sibling(s): ${JSON.stringify(siblingConflicts)}`);
+      logger.warn(`[reschedule-public] series re-anchor for ${svc.id} committed ${siblingConflicts.length} far-out occurrence(s) onto occupied placeholder windows: ${JSON.stringify(siblingConflicts)}`);
       try {
         const NotificationService = require('../services/notification-service');
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           'Series re-anchor needs a look',
-          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} pulled a recurring visit forward; ${siblingConflicts.length} shifted future visit(s) landed on already-booked windows and were left UNASSIGNED (${siblingConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
+          `${[svc.cust_first_name, svc.cust_last_name].filter(Boolean).join(' ') || 'A customer'} moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) landed on windows that already hold another visit (${siblingConflicts.map((c) => c.date).join(', ')}). Both kept their times — review from dispatch as those dates approach.`,
           { metadata: { customerId: svc.customer_id, scheduledServiceId: svc.id, conflicts: siblingConflicts } }
         );
         if (!notif) {
-          logger.error(`[reschedule-public] schedule_conflict notification insert FAILED for ${svc.id} — unassigned siblings: ${JSON.stringify(siblingConflicts)}`);
+          logger.error(`[reschedule-public] schedule_conflict notification insert FAILED for ${svc.id} — flagged occurrences: ${JSON.stringify(siblingConflicts)}`);
         }
       } catch (err) {
-        logger.error(`[reschedule-public] schedule_conflict notification failed for ${svc.id}: ${err.message} — unassigned siblings: ${JSON.stringify(siblingConflicts)}`);
+        logger.error(`[reschedule-public] schedule_conflict notification failed for ${svc.id}: ${err.message} — flagged occurrences: ${JSON.stringify(siblingConflicts)}`);
       }
     }
 
