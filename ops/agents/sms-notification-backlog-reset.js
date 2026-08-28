@@ -87,8 +87,9 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
           -- unread legacy inbound row means the thread still wants an answer
           -- (rows execution would mirror-read via the closer messages excluded)
           SELECT 1 FROM sms_log l WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE)
+            AND l.created_at > now() - interval '30 days'
+            AND NOT EXISTS (SELECT 1 FROM messages mm WHERE mm.twilio_sid = l.twilio_sid AND mm.channel='sms')
             AND n.link = '/admin/communications?thread=' || l.customer_id::text
-            AND NOT (l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($1::uuid[]) AND twilio_sid IS NOT NULL))
         )`, [[...wouldRead]]);
     console.log(`inbound_sms bells with no remaining unread message (would clear): ${orphanBells.rows.length}`);
     // Exactly what would change (ids only — no bodies, no PII).
@@ -131,7 +132,11 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
         WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)
           AND n.link = '/admin/communications?thread=' || cv.customer_id::text)
       AND NOT EXISTS (
+        -- legacy-ONLY (no unified twin) and recent — historical sms_log rows
+        -- were initialized unread and never mirrored
         SELECT 1 FROM sms_log l WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE)
+          AND l.created_at > now() - interval '30 days'
+          AND NOT EXISTS (SELECT 1 FROM messages mm WHERE mm.twilio_sid = l.twilio_sid AND mm.channel='sms')
           AND n.link = '/admin/communications?thread=' || l.customer_id::text)`, [tag]);
   console.log(`pass 2 (bells with no unread message): marked ${r2.rowCount} notifications read`);
   await c.query('COMMIT');

@@ -252,6 +252,11 @@ router.post('/sms', async (req, res) => {
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
+    // A tapback on a question we asked ("Reacted 👍 to \"Does 9am work?\"") is
+    // the ANSWER, not a closer — same awaiting-answer rule as a standalone 👍
+    // (codex P1). Such a reaction falls through as a normal inbound: bell,
+    // push, owner forward, unread; only the AI reply paths still skip it.
+    const quietReaction = smsReaction && !(await lastOutboundAskedQuestion(From, To));
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
@@ -326,7 +331,7 @@ router.post('/sms', async (req, res) => {
       // Reactions and pure courtesy closers never needed a human to "open"
       // them — write the row already read so the Messages unread dot and
       // the Unread chip only count messages that want an answer.
-      isRead: smsReaction || courtesyOnly,
+      isRead: quietReaction || courtesyOnly,
       messageType: smsReaction ? 'sms_reaction' : undefined,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
@@ -620,7 +625,7 @@ router.post('/sms', async (req, res) => {
         : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
-    if (smsReaction) {
+    if (quietReaction) {
       await db('sms_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound', from_phone: From, to_phone: To,
@@ -985,7 +990,7 @@ router.post('/sms', async (req, res) => {
     // for this message — the legacy owner-SMS forward must not re-alert
     // (codex #3232 r4).
     let knownInboundNotified = rescheduleFlagged;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !quietReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         // Re-check right before writing the bell: if the thread was opened
@@ -1058,7 +1063,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !quietReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length

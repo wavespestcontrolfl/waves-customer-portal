@@ -961,6 +961,19 @@ router.post('/messages/read', async (req, res, next) => {
     // recordTouchpoint fails soft, so sms_log stays the fallback source of
     // truth and must agree with the unified row (hook P1).
     const mirrorSids = (await q.clone().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+    // A human viewing a thread supersedes any backlog-reset read state on
+    // it: drop the reset marker so the printed rollback (keyed on marker +
+    // batch timestamp) leaves these rows alone (codex P2). Fail-soft.
+    try {
+      await db('messages')
+        .where({ channel: 'sms', direction: 'inbound' })
+        .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
+        .andWhere(function scope() {
+          if (ids.length) this.whereIn('id', ids);
+          if (conversationIds.length) this.orWhere(function conv() { this.whereIn('conversation_id', conversationIds).where('created_at', '<=', readBefore); });
+        })
+        .update({ metadata: db.raw("metadata - 'backlog_reset'") });
+    } catch (e) { logger.warn(`[communications] backlog-reset marker clear failed: ${e.message}`); }
     const updated = await q.update({
       is_read: true,
       read_at: now,
@@ -1009,11 +1022,18 @@ router.post('/messages/read', async (req, res, next) => {
               .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); });
           })
           // …and no unread LEGACY inbound row either (dual-write can fail).
+          // Legacy rows count only when they are legacy-ONLY (no unified twin —
+          // the dual-write failed) and recent: historical sms_log rows were
+          // initialized unread and never mirrored (codex P1).
           .whereNotExists(function stillUnreadLegacy() {
             this.select(1).from('sms_log as l')
               .whereRaw('l.customer_id = cv.customer_id')
               .where({ 'l.direction': 'inbound' })
-              .andWhere(function unread() { this.where({ 'l.is_read': false }).orWhereNull('l.is_read'); });
+              .where('l.created_at', '>', new Date(Date.now() - 30 * 24 * 60 * 60 * 1000))
+              .andWhere(function unread() { this.where({ 'l.is_read': false }).orWhereNull('l.is_read'); })
+              .whereNotExists(function hasTwin() {
+                this.select(1).from('messages as mm').whereRaw('mm.twilio_sid = l.twilio_sid').where({ 'mm.channel': 'sms' });
+              });
           })
           .distinct('cv.customer_id');
         const NotificationService = require('../services/notification-service');
