@@ -416,7 +416,7 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
       uniqueness_gate_result: uniquenessGate,
       comparison_table_result: comparisonGate,
       topic_targeting_result: topicTargeting,
-      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate),
+      gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate, topicTargeting),
       seo_completion: seoCompletion,
     } : null,
     review_actions: reviewActions({ opportunity, run }),
@@ -541,8 +541,13 @@ function buildSeoRequirementsSummary(contract = {}) {
   };
 }
 
-function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
+function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}, topicGate = null) {
   const hard = Array.isArray(qualityGate?.hard_failures) ? qualityGate.hard_failures : [];
+  // Topic-targeting verdict (pre-draft result + post-draft framing/ownership):
+  // topic_ok is null when the gate did not run for this run.
+  const topicFindings = topicGate
+    ? [...(Array.isArray(topicGate.findings) ? topicGate.findings : []), ...(Array.isArray(topicGate.framing?.findings) ? topicGate.framing.findings : [])]
+    : [];
   const soft = Array.isArray(qualityGate?.soft_failures) ? qualityGate.soft_failures : [];
   const uniqueness = Array.isArray(uniquenessGate?.failed_reasons) ? uniquenessGate.failed_reasons : [];
   const comparisonFindings = Array.isArray(comparisonGate?.findings) ? comparisonGate.findings : [];
@@ -563,6 +568,8 @@ function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}) {
       ? comparisonGate?.pass !== false
       : null,
     comparison_findings: comparisonFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
+    topic_ok: topicGate ? (topicGate.ok !== false && topicGate.framing?.ok !== false) : null,
+    topic_findings: topicFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message, ...(f.cities ? { cities: f.cities } : {}), ...(f.owners ? { owners: f.owners } : {}) })),
   };
 }
 

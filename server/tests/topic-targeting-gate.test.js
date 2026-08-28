@@ -864,3 +864,39 @@ describe('slug collision scope (hook, PR codex r17 push)', () => {
     expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo', title: 'Foo', slug: '/foo/', category: 'mosquito' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
   });
 });
+
+describe('PR codex r18 (fa945c056)', () => {
+  test('nationwide domestic targeting is out of footprint', () => {
+    for (const t of ['United States pest control guide', 'USA termite treatment', 'U.S. pest control costs', 'pest control nationwide']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('american cockroach control in sarasota').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('let us help with ants').scope).toBe('none');
+  });
+  test('a slug with a query string or fragment collides with the live route', () => {
+    const index = gate.indexCorpus(CORPUS);
+    for (const slug of ['/pest-control/in-wall-pest-control/?utm_source=x', '/pest-control/in-wall-pest-control/#faq']) {
+      const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'in wall pest control basics', title: 'Basics', slug, category: 'pest-control' }, { index });
+      expect(r.findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    }
+  });
+  test('a framing failure also reports a bad semantic city on the first attempt', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'New-Construction Pest Control in Florida', slug: '/pest-control/new-construction-pest-control-florida/', primary_keyword: 'new construction pest control', city: 'Boise' } }, { index, service: 'pest' });
+    expect(r.ok).toBe(false);
+    expect(r.stage).toBe('framing');
+    expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_STATEWIDE, gate.CODES.GEO_OUT_OF_AREA]);
+    expect(r.findings[1].cities).toEqual(['Boise']);
+  });
+  test('a served town (Osprey included) is never an owned topic entity', () => {
+    const owner = { url: '/mosquito/osprey-mosquito-control/', body: "---\ntitle: Mosquito Control in Osprey\nslug: /mosquito/osprey-mosquito-control/\nprimary_keyword: mosquito control osprey\nmeta_description: Mosquito control for Osprey homes.\ncategory: mosquito\n---\n\nHomes in Osprey sit near the bay. Most Osprey yards hold water, and Osprey breezes carry mosquitoes.\n" };
+    const idx = gate.indexCorpus([owner]);
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'osprey mosquito pools', title: 'Mosquito Pools in Osprey Backyards', slug: '/mosquito/osprey-mosquito-pools/', category: 'mosquito' }, { index: idx });
+    expect(r.ok).toBe(true);
+  });
+  test('the species/plant scrub applies to the served-city match too', () => {
+    expect(gate.classifyGeoScope('Texas Mountain Laurel Pests in Florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('California Laurel Pests in Florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('pest control in laurel fl').scope).toBe('footprint');
+  });
+});

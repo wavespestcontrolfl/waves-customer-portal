@@ -245,6 +245,11 @@ describe('run observability exposure', () => {
       run: { id: 'run-t', outcome: 'skipped_gate_fail', skip_reason: 'topic_targeting:TOPIC_CANNIBALIZES_EXISTING', topic_targeting_result: JSON.stringify(verdict), quality_gate_result: '{}', uniqueness_gate_result: '{}', comparison_table_result: '{}', draft_payload: '{}' },
     });
     expect(item.run.topic_targeting_result).toEqual(verdict);
+    // …and the rendered gate summary carries it (the client reads gate_summary).
+    expect(item.run.gate_summary.topic_ok).toBe(false);
+    expect(item.run.gate_summary.topic_findings[0]).toMatchObject({ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', owners: ['/pest-control/in-wall-pest-control/'] });
+    expect(summarizeGates({ ok: true }, { ok: true }, {}, { ok: true, findings: [], framing: { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_GEO_STATEWIDE', message: 'x' }] } })).toMatchObject({ topic_ok: false, topic_findings: [{ code: 'TOPIC_GEO_STATEWIDE' }] });
+    expect(summarizeGates({ ok: true }, { ok: true }, {}).topic_ok).toBeNull();
     const bare = buildReviewItem({ opportunity: { id: 'opp-u', status: 'pending_review' }, brief: null, run: { id: 'run-u', outcome: 'completed_pending_review', quality_gate_result: '{}', uniqueness_gate_result: '{}', comparison_table_result: '{}', draft_payload: '{}' } });
     expect(bare.run.topic_targeting_result).toBeNull();
   });

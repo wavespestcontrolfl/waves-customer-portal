@@ -250,6 +250,8 @@ const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:
 // …) after a governed product name are not state abbreviations — scrubbed
 // before the abbreviation matchers. "Columbia SC pest control" still is.
 const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bifen|bifenthrin|suspend|fipro|tengard|cyzmic|onslaught|dominion|premise|altriset|transport|alpine|phantom|demand|talstar|tempo|celsius|advion|blindside|headway|prodiamine|dimension|arena|acelepryn|merit|safari|xylecore|specticle|certainty|manuscript|tribute|sedgehammer|quali-pro|lesco|adjourn|floramite|roundup\s+quikpro|quikpro|essentria|mavrik|avid|orthene|sevin|spinosad|conserve|eagle|heritage|banner\s+maxx|prostar|fame|pillar|velocity|monument|katana|revolver|negate|drive\s+xlr8|tenacity|speedzone|trimec|q4|barricade|pendulum|gallery|snapshot|ronstar|regalkade)\s+(?:sc|cs|wp|wsb|ec|wg|wdg|sg|me|ew|ulv|xt|zc|g|p|pro|total|ls|sl|sc\/ls|xlr8|maxx)\b|\b[a-z][a-z-]*\s+(?:sc|cs|wp|wdg|wg|ec|ls|sl)\s+(?:for|mosquito|mosquitoes|mite|mites|weed|weeds|insect|insects|termite|termites|lawn|turf|control|application|applications|rate|rates|label|mix|mixing|per|oz|ounces|gallon|gallons|spray|treatment|termiticide|insecticide|fungicide|herbicide|miticide)\b/gi;
+// Nationwide domestic targeting is not footprint-anchored either.
+const NATIONWIDE_RE = /\b(?:united states|u\.s\.a?\.?|usa|nationwide|across the (?:country|nation|us|usa)|all 50 states|every state)(?![a-z])/i;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
@@ -423,17 +425,20 @@ function classifyGeoScope(text) {
   const t = foldDiacritics(text);
   // Florida vernacular that contains a served-city name (the same scrub the
   // publisher's inferServiceAreas applies): not a footprint anchor.
-  const footprint = [
-    ...findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
-    ...findAll(footprintContextRe(), t),
-  ];
-  // State-named species / plants ("Texas sage", "Maine Coon") and metro-named
-  // compounds ("San Jose scale", "Portland cement") are not markets.
+  // State-named species / plants ("Texas sage", "Maine Coon"), metro-named
+  // compounds ("San Jose scale", "Portland cement") and formulations are not
+  // markets — scrubbed for BOTH the served-city and the out-of-area scans
+  // ("Texas Mountain Laurel" is a plant, not Laurel, FL).
   const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
+  const footprint = [
+    ...findAll(cityRe(footprintCities()), tg.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
+    ...findAll(footprintContextRe(), tg),
+  ];
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), tg),
     ...findAll(OUT_OF_STATE_RE, tg),
     ...findAll(OUT_OF_COUNTRY_RE, tg),
+    ...findAll(NATIONWIDE_RE, tg),
     ...findAll(NAME_STATE_RE, tg),
     ...findAll(CONTEXT_PLACE_RE, tg),
     ...findAll(STATE_ABBR_RE, tg).map((s) => s.toUpperCase()),
@@ -530,7 +535,10 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
       );
       extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE);
     } catch { extra = []; }
-    return { ...framing, findings: [...framing.findings, ...extra], stage: 'framing' };
+    // Semantic-city failures too: the single retry must hear about a bad
+    // brief / emitted city as well as the framing.
+    const cityList = [...new Set([city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].map((c) => String(c || '').trim()).filter(Boolean))];
+    return { ...framing, findings: [...framing.findings, ...semanticCityFindings(cityList), ...extra], stage: 'framing' };
   }
   // The EMITTED category is authoritative (the publisher writes it); the
   // slug and the coarse service are fallbacks inside evaluate().
@@ -672,7 +680,9 @@ function targetingText(fields) {
 }
 
 function normalizeSlug(s) {
-  const raw = String(s || '').replace(/^https?:\/\/[^/]+/, '').trim().toLowerCase();
+  // Same normalization as the publisher's slugPathFromFrontmatter: origin,
+  // query and fragment dropped before the route is compared.
+  const raw = String(s || '').replace(/^https?:\/\/[^/]+/, '').split(/[?#]/)[0].trim().toLowerCase();
   if (!raw) return '';
   return `/${raw.replace(/^\/+|\/+$/g, '')}/`;
 }
@@ -712,7 +722,9 @@ let cityTokenCache = null;
 // qualifiers too — a city is never the entity a post owns.
 function cityTokens() {
   if (cityTokenCache) return cityTokenCache;
-  cityTokenCache = new Set(footprintCities().flatMap((c) => tokenize(c)));
+  // Every served locality (Osprey included — contextual matching is for the
+  // geography classifier only): a town is never an owned topic entity.
+  cityTokenCache = new Set(servedCities().flatMap((c) => tokenize(c)));
   return cityTokenCache;
 }
 
@@ -818,6 +830,12 @@ function dfForCategory(idx, category) {
   return idx.dfByCategory.get(category);
 }
 
+function semanticCityFindings(cities) {
+  const bad = cities.filter((c) => !isServedCityValue(c));
+  if (!bad.length) return [];
+  return [{ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: bad, message: `Row city "${bad.join('", "')}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` }];
+}
+
 /**
  * evaluate(candidate, { corpus | index, requireCorpus })
  *   candidate: { query, title, slug, city, category, service, targeting, actionType, pageType }
@@ -855,12 +873,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // The city is a SEMANTIC field the writer is prompted with ("City:
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
-  if (cities.length && !findings.length && !ownershipOnly) {
-    const bad = cities.filter((c) => !isServedCityValue(c));
-    if (bad.length) {
-      findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: bad, message: `Row city "${bad.join('", "')}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
-    }
-  }
+  if (cities.length && !findings.length && !ownershipOnly) findings.push(...semanticCityFindings(cities));
   if (findings.length) return { ...base, ok: false, findings, geo };
 
   const idx = index || (corpus ? indexCorpus(corpus) : null);
