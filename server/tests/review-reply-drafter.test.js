@@ -156,6 +156,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, we have a price break waiting for you because of this review. Marcus got the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, this review has earned you a little something. Marcus got the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, we hope to earn five stars from you next time. Marcus got the ants.'))).toBe('banned_phrase');
+    // codex r64: perfect-score solicitations + "acted normally".
+    expect(verify(good('Hi Dana, we hope to earn a perfect score from you next time. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, perhaps next time we can earn full marks from you. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, we would love that fifth star next visit. Marcus got the ants.'))).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad your pets acted normally after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids went about their day as usual after the treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, we hope you will consider a five-star rating next time. Marcus got the ants.'))).toBe('banned_phrase');
     // codex r61: "didn't slow your pets down".
     expect(verify(good("Hello there, glad the pest treatment didn't slow your pets down."), gpets)).toBe('banned_phrase');
@@ -341,6 +347,10 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    // codex r64: the low-rating prompt mandates "the owner wants to make it right" — ordinary verbs after a role noun are not names.
+    const glow = grounding({ rating: 2, text: 'Ants came back after a week.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hi Dana, we are sorry the experience fell short. Our owner wants to make it right with you, so please call the office directly.'), glow)).toBe(null);
+    expect(verify(good('Hi Dana, we are sorry the experience fell short. Our manager personally apologizes and hopes to make it right, so please call the office.'), glow)).toBe(null);
     expect(verify(good('Hi Dana,\n\nWe will keep the ants out. Marcus says thanks.'))).toBeNull();
   });
   test('service / treatment claims need provenance from the review or the account categories', () => {

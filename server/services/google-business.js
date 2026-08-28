@@ -84,6 +84,15 @@ const MISSING_REVIEW_GRACE_MS = 48 * 60 * 60 * 1000;
 // produces an opaque SyntaxError that bubbles up to the user as "Unexpected
 // token '<'". Read as text first, only JSON.parse when the body looks like
 // JSON, and surface the raw status + a truncated body on anything else.
+// A mutation whose request was sent but whose response never arrived
+// (ECONNRESET, socket hang-up, abort) may have been applied by Google.
+// Flag it so the reply publisher parks for reconciliation instead of
+// treating it as a definitive rejection and retrying the write (codex r64).
+async function mutationFetch(url, init) {
+  try { return await fetch(url, init); }
+  catch (e) { if (e && typeof e === 'object') e.transport = true; throw e; }
+}
+
 async function readJsonOrThrow(res, label) {
   const text = await res.text();
   const ct = (res.headers.get('content-type') || '').toLowerCase();
@@ -299,7 +308,7 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }), ...(signal ? { signal } : {}) });
+    const res = await mutationFetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }), ...(signal ? { signal } : {}) });
     return readJsonOrThrow(res, 'GBP replyToReview');
   }
 
@@ -329,7 +338,7 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
+    const res = await mutationFetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);

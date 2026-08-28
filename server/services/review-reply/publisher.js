@@ -451,7 +451,10 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // human could publish a replacement the late PUT then overwrites).
         // Return a disposition instead; the claim is abandoned OUTSIDE the
         // callback, where `outcome` exists.
-        if (e.timedOut) return { timedOut: true, error: e };
+        // A transport failure after the request was sent (ECONNRESET,
+        // socket hang-up) is just as ambiguous as a timeout: Google may have
+        // applied the write. Only a definitive HTTP rejection is a failure.
+        if (e.timedOut || e.transport) return { timedOut: true, error: e };
         throw e;
       }
       return true;
@@ -693,7 +696,10 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       try {
         await withDeadline((signal) => gbp.deleteReply(resourceName, review.location_id, { signal }), 'GBP deleteReply');
       } catch (e) {
-        if (e.timedOut) return { timedOut: true, error: e };
+        // A transport failure after the request was sent (ECONNRESET,
+        // socket hang-up) is just as ambiguous as a timeout: Google may have
+        // applied the write. Only a definitive HTTP rejection is a failure.
+        if (e.timedOut || e.transport) return { timedOut: true, error: e };
         throw e;
       }
       return true;

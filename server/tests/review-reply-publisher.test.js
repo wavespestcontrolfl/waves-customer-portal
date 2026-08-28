@@ -510,6 +510,26 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
+  test('a Google PUT that fails at the transport layer after sending (ECONNRESET) → GOOGLE_UNCERTAIN, row parked, claim abandoned (codex r64)', async () => {
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { const e = new Error('fetch failed: ECONNRESET'); e.transport = true; throw e; });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+  });
+
+  test('a definitive HTTP rejection from Google (no transport flag) stays GOOGLE_FAILED / retryable', async () => {
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { throw new Error('GBP replyToReview 429: quota'); });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
+    expect(out.abandonClaim).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+  });
+
   test('a Google PUT that never completes hits the total deadline → GOOGLE_UNCERTAIN, row parked for reconciliation', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
