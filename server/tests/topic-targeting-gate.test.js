@@ -601,3 +601,23 @@ describe('PR codex r6 (3203b54ac): every emitted targeting field is ownership ev
     expect((await gate.evaluateBlogPostRow({ ...row, content: '## Your first quarter\n\ntext' }, { index: index() })).ok).toBe(true);
   });
 });
+
+describe('PR codex r7 (f50a87557)', () => {
+  test('a trailing non-word ambiguous abbreviation after "<service> <locality>" is out-of-state; "pest control near me" is not', () => {
+    expect(gate.classifyGeoScope('pest control omaha ne').out_of_area).toContain('NE');
+    expect(gate.classifyGeoScope('termite treatment boulder co').out_of_area).toContain('CO');
+    expect(gate.classifyGeoScope('exterminator services nearby ok?').scope).toBe('none'); // ok = English word, never
+    for (const t of ['pest control near me', 'pest control for me', 'termite treatment cost or price', 'lawn care is it ok']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('a hyphenated brand in prose ("Pestie-Pro") yields the same proper-noun tokens the targeting counts use', () => {
+    const owner = { url: '/pest-control/pestie-pro-review/', body: "---\ntitle: Pestie-Pro Review\nslug: /pest-control/pestie-pro-review/\nprimary_keyword: pestie-pro subscription\nmeta_description: Is Pestie-Pro worth it?\ncategory: pest-control\n---\n\nWe tried Pestie-Pro for a season. Most Pestie-Pro boxes ship monthly, and Pestie-Pro support answered fast.\n" };
+    const idx = gate.indexCorpus([owner]);
+    expect(idx.properNouns.has('pestie')).toBe(true);
+    expect(idx.properNouns.has('pestie-pro')).toBe(false);
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'pestie-pro vs local pest control', title: 'Pestie-Pro or a Local Company?', slug: '/pest-control/pestie-pro-vs-local/', category: 'pest-control' }, { index: idx });
+    expect(r.ok).toBe(false);
+    expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['pestie'] });
+  });
+});

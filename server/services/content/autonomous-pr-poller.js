@@ -228,6 +228,50 @@ function deriveBlogRouteUrl(run, brief = {}) {
   return origin ? canonicalUrlForSlug(routeSlug, origin) : canonicalUrlForSlug(routeSlug);
 }
 
+// The blog file the publisher committed for this run, relative to the astro
+// repo (extension resolved by the caller): ASTRO_BLOG_DIR + the same route
+// slug deriveBlogRouteUrl composes. null when it cannot be derived — never
+// guess.
+function blogFilePathForRun(run, brief = {}) {
+  let internals;
+  try { internals = require('../content-astro/astro-publisher')._internals || {}; } catch (_) { return null; }
+  const { categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory } = internals;
+  if ([categoryRouteSlug, slugPathFromFrontmatter, normalizeAutonomousCategory].some((f) => typeof f !== 'function')) return null;
+  const frontmatter = parseJsonObject(run.draft_payload).frontmatter || {};
+  let slugPath;
+  try { slugPath = slugPathFromFrontmatter(frontmatter); } catch (_) { return null; }
+  const routeSlug = categoryRouteSlug(slugPath, normalizeAutonomousCategory(frontmatter, brief || {}));
+  return routeSlug ? `src/content/blog/${routeSlug}` : null;
+}
+
+// → { ok } | { ok: false, reason }. Reads the PR head's blog file and re-runs
+// the topic-targeting gate (framing on its own title/slug, ownership on every
+// targeting field) against a fresh live index.
+async function recheckTopicTargeting(run, pr, gh) {
+  let brief = {};
+  try { brief = await briefCategorySignalsForRun(run); } catch (err) { return { ok: false, reason: `brief lookup failed: ${err.message}` }; }
+  const base = blogFilePathForRun(run, brief);
+  if (!base) return { ok: false, reason: 'blog file path could not be derived from the draft slug' };
+  let file = null;
+  for (const ext of ['.mdx', '.md']) {
+    file = await gh.getFile(`${base}${ext}`, pr.head?.ref);
+    if (file && typeof file.content === 'string') break;
+    file = null;
+  }
+  if (!file) return { ok: false, reason: `branch file ${base}.mdx unreadable at ${pr.head?.ref}` };
+  try {
+    const topicGate = require('./topic-targeting-gate');
+    const { parse } = require('../content-astro/frontmatter');
+    const data = parse(file.content)?.data || {};
+    const index = await topicGate.loadLiveIndex();
+    const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });
+    if (res.ok) return { ok: true };
+    return { ok: false, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
+  } catch (err) {
+    return { ok: false, reason: `gate could not run: ${err.message}` };
+  }
+}
+
 /**
  * The category signals deriveBlogRouteUrl needs from the run's brief
  * (normalizeAutonomousCategory reads brief.service + brief.target_keyword).
@@ -956,6 +1000,20 @@ async function maybeAutoMerge(run, pr) {
   if (!(await queueRowStillParked(run))) {
     logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during head-gate checks (operator action)`);
     return { pending: true, reason: 'queue_row_moved_during_gating' };
+  }
+
+  // 3.7 Owner rulings 2026-08-27: the topic-targeting gate ran pre/post-draft,
+  //     but this PR may have waited while another post claimed its entity, or
+  //     remediation may have changed its targeting. Re-run it on the HEAD's
+  //     blog file against a fresh live corpus — the same assertion mergeAstro
+  //     makes — before the direct merge below. Fails closed (unreadable file /
+  //     corpus outage defers to the next tick).
+  if (run.action_type === 'new_supporting_blog') {
+    const topic = await recheckTopicTargeting(run, pr, gh);
+    if (!topic.ok) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
+      return { pending: true, reason: `topic_targeting_blocked: ${topic.reason}` };
+    }
   }
 
   // 4. The merge itself is pinned to the head commit the gates above were

@@ -136,14 +136,19 @@ const STATE_ABBR_RE = new RegExp(
   `(?:^\\s*|\\b[a-z]+,?\\s+)(${STATE_ABBR_SAFE})\\b(?![a-z])`
   + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
   + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`
-  // "pest control in va" — an ambiguous abbreviation right after a geo
-  // preposition, at the end of the phrase ("ants in or around" is not).
-  + `|\\b(?:in|near|around|serving|across)\\s+(${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
+  // "pest control in va" — a non-word ambiguous abbreviation right after a
+  // geo preposition, at the end of the phrase ("pest control near me" and
+  // "ants in or around" are not: me/or are English words).
+  + `|\\b(?:in|near|around|serving|across)\\s+(${STATE_ABBR_SEMI}|${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
   + `|\\b[a-z]+\\s+(${STATE_ABBR_SEMI})\\s+(?:${SERVICE_INTENT})\\b`
   // "al termite treatment" / "pa pest control laws" — a non-word ambiguous
   // abbreviation LEADING the text before a service ("in wall pest control"
   // and "or pest control" never: in/or are English words, not in SEMI).
-  + `|^\\s*(${STATE_ABBR_SEMI})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`,
+  + `|^\\s*(${STATE_ABBR_SEMI})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`
+  // "pest control omaha ne" / "termite treatment boulder co" — service, an
+  // optional service noun, a locality word, then a non-word ambiguous
+  // abbreviation ending the phrase ("pest control near me": me ∉ SEMI).
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?[a-z]+\\s+(${STATE_ABBR_SEMI})(?=\\s*(?:$|[,:;|?!–—-]))`,
   'i'
 );
 // Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
@@ -566,10 +571,16 @@ function accumulateProperNounStats(prose, stats) {
     const word = m[2];
     const sentenceStart = pre === '' || /[.!?]\s+$/.test(pre) || /\n\s*$/.test(pre) || /[-*]\s$/.test(pre);
     if (sentenceStart) continue;
-    const tok = word.toLowerCase().replace(/[’']s$/, '').replace(/[’']/g, ''); // same possessive rule as tokenize()
-    const s = stats.get(tok) || { cap: 0, low: 0 };
-    if (/^[A-Z]/.test(word)) s.cap++; else s.low++;
-    stats.set(tok, s);
+    // Same normalization as tokenize(): possessive stripped, a hyphenated
+    // brand ("Pestie-Pro") counted per part, short/stop parts dropped — so
+    // the proper-noun keys are the tokens the targeting counts intersect.
+    for (const part of word.split(/-+/)) {
+      const tok = part.toLowerCase().replace(/[’']s$/, '').replace(/[’']/g, '');
+      if (tok.length <= 2 || STOP_WORDS.has(tok)) continue;
+      const s = stats.get(tok) || { cap: 0, low: 0 };
+      if (/^[A-Z]/.test(part)) s.cap++; else s.low++;
+      stats.set(tok, s);
+    }
   }
 }
 

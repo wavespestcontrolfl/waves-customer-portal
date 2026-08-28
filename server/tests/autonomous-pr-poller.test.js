@@ -42,6 +42,12 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
   // exercise the genuine derivation rather than a hand-written copy.
   _internals: jest.requireActual('../services/content-astro/astro-publisher')._internals,
 }));
+// Pre-merge topic-targeting recheck (PR #3549): the gate module is stubbed
+// clean by default; the block test overrides evaluateDraftTargeting.
+jest.mock('../services/content/topic-targeting-gate', () => ({
+  loadLiveIndex: jest.fn().mockResolvedValue({ posts: [] }),
+  evaluateDraftTargeting: jest.fn(() => ({ ok: true, findings: [] })),
+}));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
 }));
@@ -56,6 +62,7 @@ const pagesPoll = require('../services/content-astro/pages-poll');
 const publisher = require('../services/content-astro/astro-publisher');
 const indexNow = require('../services/seo/indexnow-submit');
 const social = require('../services/social-media');
+const topicGate = require('../services/content/topic-targeting-gate');
 const poller = require('../services/content/autonomous-pr-poller');
 
 const CANONICAL = 'https://www.wavespestcontrol.com/blog/test-post/';
@@ -72,6 +79,7 @@ function makeRun(overrides = {}) {
       type: 'draft',
       frontmatter: {
         canonical: CANONICAL,
+        slug: '/pest-control/test-post/',
         primary_keyword: 'test keyword',
         service_areas_tag: ['Venice'],
         title: 'Test Post',
@@ -207,6 +215,10 @@ function runUpdates(updates) {
 }
 
 beforeEach(() => {
+  // Default: the PR head's blog file is readable and the topic recheck is
+  // clean (the recheck fails closed on an unreadable file).
+  gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
+  topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: true, findings: [] }));
   // Default: merged targets respond live (production deploy already done).
   // Individual tests override to exercise the awaiting_live_deploy gate.
   pagesPoll.liveUrlResponds.mockResolvedValue(true);
@@ -671,6 +683,43 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, stage: 'ownership', findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'Entity "taexx" is already owned by a live post' }] }));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: P0 TOPIC_CANNIBALIZES_EXISTING/) });
+    // The head file — not the stored draft — is what was re-evaluated, against a fresh index.
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', expect.any(String));
+    expect(topicGate.loadLiveIndex).toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Test Post');
+  });
+
+  test('an unreadable head file fails the recheck closed (deferred, not merged)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.getFile.mockResolvedValue(null);
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: branch file .* unreadable/) });
   });
 
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {
