@@ -45,8 +45,6 @@ const TRIGGER_BELL_DENYLIST = new Set([
   'payment_refunded',
   'dashboard_alert',
   'internal_admin_alert',
-  // Shares the new_lead category but is an applicant, not a customer.
-  'new_job_application',
 ]);
 
 
@@ -76,6 +74,10 @@ const OVERRIDABLE_CATEGORIES = [
   'payment',
   'billing',
   'dispute',
+  // Applicants are not customers: own category (was new_lead) so the owner
+  // can re-enable it without re-enabling job-application bells for staff
+  // via the customer new_lead lane (hook P1).
+  'job_application',
   'estimate_converted',
   'estimate_measurement_review',
   'alert',

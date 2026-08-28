@@ -159,7 +159,9 @@ const TRIGGER_REGISTRY = {
   // link, in the admin-only queue.
   new_job_application: {
     label: 'New job application',
-    category: 'new_lead',
+    // Own category: an applicant is not a customer lead. Silent by default
+    // under the bell policy, owner-overridable (Settings → Notifications).
+    category: 'job_application',
     priority: 'high',
     group: 'Leads & Sales',
     // Recruiting is requireAdmin — a technician receiving this bell/push

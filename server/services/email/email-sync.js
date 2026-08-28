@@ -413,6 +413,16 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // to false (Codex r10).
   const approvalControl = approvalControlEarly;
 
+  // Control messages never ring AND must never reach the recovery sweep,
+  // which would otherwise read their unclassified row as a crash recovery
+  // and run the classifier (auto-actions) over them. Pre-claim the bell so
+  // the sweep skips them (hook P1). Best-effort: a miss here is caught by
+  // the sweep's own control check.
+  if ((proofHandled || approvalControl) && await bellClaimColumnExists()) {
+    await db('emails').where({ id: email.id }).whereNull('customer_bell_claimed_at')
+      .update({ customer_bell_claimed_at: new Date() }).catch(() => {});
+  }
+
   // Classify in background (don't block sync)
   if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
     const { classifyEmail } = require('./email-classifier');
@@ -465,13 +475,26 @@ async function sweepUnclaimedCustomerEmailBells() {
     .whereNotNull('customer_id')
     .where('received_at', '>', new Date(Date.now() - CUSTOMER_EMAIL_BELL_MAX_AGE_MS))
     .where({ is_archived: false })
+    // Terminal exclusions the DB can see (bulk class, List-Unsubscribe)
+    // never occupy the page (hook P1 — starvation).
+    .whereNull('list_unsubscribe')
+    .where((b) => b.whereNull('classification').orWhereNotIn('classification', [...NEVER_RING_CLASSES]))
     .orderBy('received_at', 'asc')
     .limit(50);
   let rung = 0;
   for (const row of rows) {
     const parsed = { from_name: row.from_name, from_address: row.from_address, subject: row.subject, label_ids: row.label_ids || [] };
-    await recoverLostCustomerEmailBell(row, { customerId: row.customer_id, parsed, backfill: false }).catch(() => {});
-    rung += 1;
+    const outcome = await recoverLostCustomerEmailBell(row, { customerId: row.customer_id, parsed, backfill: false }).catch(() => null);
+    if (outcome === 'ineligible' || outcome === 'control') {
+      // Terminally ineligible (unauthenticated sender, not in INBOX, control
+      // message): mark handled so it stops occupying the oldest-50 page and
+      // can't starve newer eligible rows (hook P1). Only the sweep stamps —
+      // the history-replay caller leaves the row for a later replay.
+      await db('emails').where({ id: row.id }).whereNull('customer_bell_claimed_at')
+        .update({ customer_bell_claimed_at: new Date() }).catch(() => {});
+    } else if (outcome === 'offered') {
+      rung += 1;
+    }
   }
   return rung;
 }
@@ -480,9 +503,27 @@ async function sweepUnclaimedCustomerEmailBells() {
 const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor', 'vendor_invoice', 'vendor_communication']);
 
 /**
+ * Is this row a control message (newsletter proof reply / [EA-…] content
+ * approval reply)? Same two gated checks the insert path makes before
+ * classification — the sweep must never classify these (hook P1).
+ */
+async function isControlMessage(row) {
+  try {
+    const proof = require('../newsletter-proof');
+    if (proof.isProofApprovalEnabled() && proof.parseProofToken(row.subject)) return true;
+  } catch { /* module unavailable = not proof traffic */ }
+  try {
+    const { isApprovalControlMessage } = require('../content/email-approvals');
+    return await isApprovalControlMessage({ subject: row.subject, from_address: row.from_address });
+  } catch { return false; }
+}
+
+/**
  * A row that exists but was never notified (sync died between insert and
  * bell): if it is still an eligible candidate and no bell carries its id,
  * ring now. Idempotent — the bell payload stores emailId.
+ * Returns 'ineligible' | 'control' | 'offered' (the sweep stamps the first
+ * two as handled; 'offered' means the claim was attempted).
  */
 async function recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }) {
   // A persisted NON-bulk classification (the crash window is after the
@@ -497,8 +538,9 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
     fromAddress: existing.from_address,
     receivedAt: existing.received_at,
     backfill,
-  })) return;
-  if (existing.is_archived) return;
+  })) return 'ineligible';
+  if (existing.is_archived) return 'ineligible';
+  if (await isControlMessage(existing)) return 'control';
   // A row the crash left UNCLASSIFIED (insert landed, classifier never
   // wrote) gets the same awaited classification the insert path gives a
   // bell candidate — otherwise spam without a List-Unsubscribe header could
@@ -515,6 +557,7 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
     }
   }
   await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified });
+  return 'offered';
 }
 
 /**
@@ -584,4 +627,4 @@ function customerEmailBellEligible({ customerId, classification, listUnsubscribe
   return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
 }
 
-module.exports = { syncEmails, customerEmailBellEligible };
+module.exports = { syncEmails, customerEmailBellEligible, sweepUnclaimedCustomerEmailBells };

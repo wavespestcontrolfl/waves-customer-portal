@@ -64,6 +64,7 @@ const BELL_CATEGORY_LABELS = {
   payment: "Payment failures",
   billing: "Billing follow-ups",
   dispute: "Payment disputes",
+  job_application: "Job applications",
   estimate_converted: "Estimate conversion follow-ups",
   estimate_measurement_review: "Estimate measurement challenges",
   alert: "Operational alerts",

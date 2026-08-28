@@ -31,6 +31,12 @@ jest.mock('../services/dashboard-alerts', () => ({
 jest.mock('../services/dashboard-alerts-cron', () => ({
   COUNT_ESCALATION_COOLDOWN_MS: {},
 }));
+jest.mock('../services/email/email-classifier', () => ({ classifyEmail: jest.fn(() => Promise.resolve(null)) }));
+jest.mock('../services/newsletter-proof', () => ({
+  isProofApprovalEnabled: () => true,
+  parseProofToken: (s) => (/\[PROOF-/.test(String(s || '')) ? 'tok' : null),
+}));
+jest.mock('../services/content/email-approvals', () => ({ isApprovalControlMessage: jest.fn(() => Promise.resolve(false)) }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     req.technicianId = 'admin-1';
@@ -51,12 +57,13 @@ const bellPolicy = require('../services/notification-bell-policy');
 function chainMock(result) {
   const chain = {};
   const methods = [
-    'join', 'where', 'whereNull', 'whereRaw', 'whereIn', 'orderBy',
+    'join', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy',
     'limit', 'offset', 'select', 'first', 'insert', 'update',
     'count', 'returning', 'onConflict', 'merge',
   ];
   for (const m of methods) chain[m] = jest.fn(() => chain);
   chain.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  chain.catch = (reject) => Promise.resolve(result).catch(reject);
   return chain;
 }
 
@@ -123,21 +130,23 @@ describe('NotificationService.create under the bell policy', () => {
     expect(silenced.suppressed).toBe(true);
   });
 
-  test('gate on: trigger denylist beats the category allowlist (new_job_application)', async () => {
+  test('gate on: job applications are silent by default (own overridable category, not new_lead)', async () => {
     gateOn();
     const notifications = chainMock([{ id: 'n3' }]);
     mockTables({ notifications, notification_preferences: chainMock([]) });
 
-    // new_job_application shares the new_lead category but is denylisted:
-    // an applicant is not a customer (owner ruling 2026-08-28).
+    // An applicant is not a customer (owner ruling 2026-08-28): the trigger
+    // carries its own job_application category — silent by default, and the
+    // owner can re-enable it without touching the customer new_lead lane.
     const silenced = await NotificationService.notifyAdmin(
-      'new_lead', 'New job application', 'Applicant',
+      'job_application', 'New job application', 'Applicant',
       { metadata: { triggerKey: 'new_job_application' } },
     );
     expect(notifications.insert).not.toHaveBeenCalled();
     expect(silenced.suppressed).toBe(true);
+    expect(bellPolicy.OVERRIDABLE_CATEGORY_SET.has('job_application')).toBe(true);
 
-    // …while new_lead (allowlisted trigger, same category) rings.
+    // …while new_lead (allowlisted category) rings.
     const rang = await NotificationService.notifyAdmin(
       'new_lead', 'New lead submitted', 'Prospect',
       { metadata: { triggerKey: 'new_lead' } },
@@ -477,7 +486,7 @@ describe('bellAllowed decision order', () => {
     for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
-    for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['new_lead', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
+    for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['job_application', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(false);
     }
   });
@@ -688,5 +697,28 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, customer_id: null })).toBe(false);
     expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T00:00:00Z' } })).toBe(false);
     expect(missedCallEligible({ ...base, metadata: JSON.stringify({ missed_call_notified_at: 'x' }) })).toBe(false);
+  });
+});
+
+describe('customer-email bell retry sweep — terminal rows are stamped, control mail is never classified (hook P1 ×2)', () => {
+  const { sweepUnclaimedCustomerEmailBells } = require('../services/email/email-sync');
+  const { classifyEmail } = require('../services/email/email-classifier');
+  const fresh = new Date().toISOString();
+  const aligned = 'dkim=pass header.d=customer-domain.com';
+  test('unauthenticated and control rows are claimed without a bell so they cannot occupy the oldest-50 page', async () => {
+    const rows = [
+      { id: 'e-spoof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'hi', label_ids: ['INBOX'], received_at: fresh, authentication_results: 'dkim=fail', classification: null, is_archived: false },
+      { id: 'e-proof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'Re: ACT: [PROOF-ab12cd34] Lineup', label_ids: ['INBOX'], received_at: fresh, authentication_results: aligned, classification: null, is_archived: false },
+    ];
+    const emails = chainMock(rows);
+    db.schema = { hasColumn: jest.fn(() => Promise.resolve(true)) };
+    mockTables({ emails });
+    const rung = await sweepUnclaimedCustomerEmailBells();
+    expect(rung).toBe(0);
+    expect(classifyEmail).not.toHaveBeenCalled();
+    const stamps = emails.update.mock.calls.filter(([arg]) => arg && arg.customer_bell_claimed_at instanceof Date);
+    expect(stamps).toHaveLength(2);
+    const stampedIds = emails.where.mock.calls.filter(([arg]) => arg && typeof arg === 'object' && arg.id).map(([arg]) => arg.id);
+    expect(stampedIds).toEqual(expect.arrayContaining(['e-spoof', 'e-proof']));
   });
 });
