@@ -893,6 +893,25 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
     expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-off')).toBe(true);
   });
 
+  test('a fallback that expires no later than the card ahead of it is never reached — same-month or earlier expiry is skipped in the same breath (GitHub r3 P2)', async () => {
+    const [ty, tm] = TODAY.split('-');
+    const nextMonth = addDays(`${ty}-${tm}-28`, 5).split('-'); // first days of next month
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_payment_method_id: 'pm-ptr' })],
+      paymentMethods: [
+        { ...CHARGEABLE_CARD, id: 'pm-ptr', exp_month: String(Number(tm)), exp_year: ty },        // expires this month
+        { ...CHARGEABLE_CARD, id: 'pm-same', exp_month: String(Number(tm)), exp_year: ty },       // same month → unreachable
+        { ...CHARGEABLE_CARD, id: 'pm-next', exp_month: String(Number(nextMonth[1])), exp_year: nextMonth[0] }, // outlives ptr → reachable
+        { ...CHARGEABLE_CARD, id: 'pm-far' },                                                     // 2099 → reachable, and stops the walk
+        { ...CHARGEABLE_CARD, id: 'pm-later' },
+      ],
+    });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-ptr', 'pm-next', 'pm-far']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-same')).toBe(true);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-later')).toBe(true);
+  });
+
   test('a pointer valid THROUGH the horizon (or a healthy bank pointer) is the only vector — a legacy fallback expiring this week is never reached (GitHub r2 P2)', async () => {
     const [ty, tm] = TODAY.split('-');
     route({

@@ -3644,9 +3644,24 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
         listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow }),
       ]).then(([expiringFirst, eligibleToday]) => {
+        // Expiry as a month index (bank rows never expire). charge() only
+        // moves PAST a method once it has expired, so a fallback is
+        // reachable only if it is still valid AFTER every method ahead of
+        // it has expired — one expiring the same month as (or before) its
+        // predecessor is skipped in the same breath (r3 P2).
+        const expiryIndex = (m) => {
+          if (isBankMethodType(m.method_type)) return Infinity;
+          const rawYear = Number(m.exp_year);
+          const year = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
+          return year * 12 + Number(m.exp_month);
+        };
         const reachable = [];
+        let latestPredecessorExpiry = -Infinity;
         for (const m of eligibleToday) {
+          const expiry = expiryIndex(m);
+          if (reachable.length && !(expiry > latestPredecessorExpiry)) continue;
           reachable.push(m);
+          latestPredecessorExpiry = Math.max(latestPredecessorExpiry, expiry);
           if (isBankMethodType(m.method_type) || !isExpiredCardMethod(m, horizonNoon)) break;
         }
         return [...new Set(
