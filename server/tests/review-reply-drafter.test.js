@@ -148,6 +148,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
     expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r68: "no worse off", arbitrary spelled-out durations, promise-shaped guarantees.
+    expect(verify(good('Hello there, the treatment left your pets no worse off.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after thirty-five minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, we are glad access resumed after a dozen minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    const ggone = grounding({ text: 'Great service. The ants are gone.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we promise the ants will not return.'), ggone)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the ants will stay gone permanently.'), ggone)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the ants are gone for good now.'), ggone)).toBe('banned_phrase');
     // codex r67: "did not skip a step" / "never broke stride".
     expect(verify(good('Hello there, your pets did not skip a step after the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the kids never broke stride after the pest treatment.'), gpets)).toBe('banned_phrase');
