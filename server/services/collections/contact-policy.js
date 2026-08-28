@@ -77,9 +77,27 @@ const CALL_WINDOW_END_HOUR = 18; // exclusive
 // origination's claim-boundary recheck must agree — via datetime-et, never
 // raw new Date() ET math (the timestamptz trap).
 function isWithinCallWindow(now) {
+  if (callWindowOverrideActive(now)) return true;
   const et = etParts(now);
   const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
   return weekday && et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
+}
+
+// Owner-run shakedown override (owner-approved 2026-08-27): an ISO instant in
+// COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL lets the window pass until that
+// instant. Self-expiring, and capped at 24h ahead so a mistyped year can never
+// become a standing bypass — an unparseable or too-far value is IGNORED (fail
+// closed), never treated as "open". Unset the var to end it early. While it is
+// on, only supervised (hand-dialed) cases can go out: the autodial sweep has
+// its own gate and is expected to stay off during a shakedown.
+const CALL_WINDOW_OVERRIDE_MAX_MS = 24 * 60 * 60 * 1000;
+function callWindowOverrideActive(now) {
+  const raw = process.env.COLLECTIONS_CALL_WINDOW_OVERRIDE_UNTIL;
+  if (!raw) return false;
+  const until = Date.parse(raw);
+  const nowMs = new Date(now).getTime();
+  if (!Number.isFinite(until) || !Number.isFinite(nowMs)) return false;
+  return until > nowMs && until - nowMs <= CALL_WINDOW_OVERRIDE_MAX_MS;
 }
 
 // Reassigned-number staleness: no customer-initiated contact from the number
