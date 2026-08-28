@@ -140,6 +140,9 @@ t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
 t.string('authority');            // authority level under which this placement was/will be acted on
 t.text('source_detail');
+t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
+t.timestamp('renews_at');         // = paid_through; written ONLY when a purchase reaches `charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
+t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
 and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
@@ -412,6 +415,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   (`agent_state='watching'`) if the policy no longer authorizes it. A renewal never charges
   without its own reservation and, where the merchant does not support one-off renewal, its
   own owner approval.
+- **A reservation is charged against the month it is submitted in.** The
+  `reserved → submitting` transition (under the budget lock) first compares the row's
+  `budget_month` with the current ET month; if the month has rolled over since reservation,
+  the row is `voided` and a fresh reservation is attempted under the **new** month's lock and
+  budget (same idempotency rules, new `budget_month`) before anything continues — a
+  reservation can never consume last month's ledger while the card is used this month, so the
+  two months' ceilings cannot stack.
 - **`submitting` before the external call — non-retryable.** Immediately after that
   validation (the last point at which nothing has been charged) the row is `submitting`
   (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
@@ -537,11 +547,18 @@ durable links, not just which produced one.
 Two phases, because an acquisition action is irreversible and the board allows one
 conversation/placement per domain:
 1. **Replay phase (non-submitting, technically enforced):** every provider runs
-   `investigate()` and `completeForm()` on the same domains inside a **replay sandbox**: the
-   browser context blocks every mutating network request (POST/PUT/PATCH/DELETE, form
-   submissions, `sendBeacon`, WebSocket) at the request-interception layer and answers them
-   with a synthetic 204, so page JavaScript, autosaves and agent mis-clicks cannot create an
-   account, send a message or start a checkout; the identity packet is a **non-production
+   `investigate()` and `completeForm()` on the same domains inside a **replay sandbox** that
+   is non-mutating by construction, not by HTTP method: the browser context's request
+   interception allows ONLY requests it can classify as read-only — top-level navigations
+   recorded during the investigator's own crawl, same-origin GETs for static assets
+   (script/style/image/font) — and **fails closed on everything else** (any POST/PUT/PATCH/
+   DELETE, any GET to a URL not in the recorded read set, form submissions by any method,
+   `sendBeacon`, WebSocket, third-party XHR), answering with a synthetic 204 and recording the
+   blocked request as replay evidence. Where a provider cannot run under that interception
+   it runs against a **no-egress fixture** (the investigator's saved page snapshots served
+   locally) instead. So page JavaScript, GET-action confirmation links, autosaves and agent
+   mis-clicks cannot create an account, send a message or start a checkout; the identity
+   packet is a **non-production
    test identity and inbox** (never the canonical NAP, never `HERMES_SIGNUP_EMAIL`); no card
    is minted; the session is discarded. Outputs (fields, path, evidence) are scored against
    the investigator's ground truth and each other. Replay attempts are `sandbox=true`.
