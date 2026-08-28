@@ -3717,6 +3717,44 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(9);
   });
 
+  test('bodyImageRefs: reference definitions, "[ref]" tails and link titles are never rendered — image syntax inside them does not count (GH r5)', () => {
+    const body = [
+      '[ref]: /contact/ "![hidden](/images/blog/x/body-1.webp)"',
+      '[Get a quote](/contact/ "![t](/images/blog/x/body-2.webp)")',
+      '[label][![r](/images/blog/x/body-3.webp)]',
+      '',
+      '![real](/images/blog/x/body-4.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-4.webp']);
+  });
+
+  test('imageDHash: an RGBA picture hashes like its opaque twin (alpha flattened, channel-aware indexing); undecodable bytes are a deterministic BLOG_BODY_IMAGES_FAILED (GH r5)', async () => {
+    const { imageDHash, hammingDistance } = AstroPublisher._internals;
+    const sharp = require('sharp');
+    const w = 40; const h = 30;
+    const rgb = Buffer.alloc(w * h * 3); const rgba = Buffer.alloc(w * h * 4);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const v = ((x * 255) / w) | 0; const u = ((y * 255) / h) | 0; const i = y * w + x;
+      rgb[i * 3] = v; rgb[i * 3 + 1] = u; rgb[i * 3 + 2] = 128;
+      rgba[i * 4] = v; rgba[i * 4 + 1] = u; rgba[i * 4 + 2] = 128; rgba[i * 4 + 3] = 255;
+    }
+    const opaque = await sharp(rgb, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    const alpha = await sharp(rgba, { raw: { width: w, height: h, channels: 4 } }).png().toBuffer();
+    expect(hammingDistance(await imageDHash(opaque), await imageDHash(alpha))).toBe(0);
+    let thrown;
+    try { await imageDHash(Buffer.from('definitely not an image')); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+  });
+
+  test('fail-closed: a committed draft image Sharp cannot decode parks deterministically instead of retry-looping (GH r5)', async () => {
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/bad.webp' ? { content: '', sha: 'b', raw: { content: Buffer.from('corrupt bytes').toString('base64') } } : null));
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![bad](/images/2026/08/bad.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/could not be decoded/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);

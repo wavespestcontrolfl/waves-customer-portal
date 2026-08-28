@@ -1647,11 +1647,33 @@ const NEAR_DUPLICATE_MAX_DISTANCE = 12;
 
 // 64-bit difference hash: grayscale 9×8, each bit = left pixel darker than
 // its right neighbour. Robust to resize/recompress, blind to palette.
+// Alpha is flattened onto white first and pixels are indexed by the channel
+// count Sharp actually returned — an RGBA source must hash like its opaque
+// twin, never as interleaved luma/alpha bytes. A buffer Sharp cannot decode
+// (corrupt file, pixel limit) is a DETERMINISTIC body-image failure: the
+// same bytes fail the same way every run, so the run parks instead of
+// retry-looping.
 async function imageDHash(buffer) {
   const sharp = require('sharp');
-  const { data } = await sharp(buffer).grayscale().resize(9, 8, { fit: 'fill' }).raw().toBuffer({ resolveWithObject: true });
+  let data;
+  let info;
+  try {
+    ({ data, info } = await sharp(buffer)
+      .flatten({ background: '#ffffff' })
+      .grayscale()
+      .resize(9, 8, { fit: 'fill' })
+      .raw()
+      .toBuffer({ resolveWithObject: true }));
+  } catch (err) {
+    const e = new Error(`body image could not be decoded for the distinctness check: ${err.message}`);
+    e.code = 'BLOG_BODY_IMAGES_FAILED';
+    e.cause = err;
+    throw e;
+  }
+  const ch = Math.max(1, Number(info?.channels) || 1);
+  const at = (x, y) => data[(y * 9 + x) * ch];
   const bits = new Array(64);
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits[y * 8 + x] = data[y * 9 + x] < data[y * 9 + x + 1] ? 1 : 0;
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits[y * 8 + x] = at(x, y) < at(x + 1, y) ? 1 : 0;
   return bits;
 }
 function hammingDistance(a, b) {
@@ -1739,7 +1761,11 @@ function blankJsxAndExpressions(text) {
 }
 
 function renderedBodyLines(body) {
-  return blankJsxAndExpressions(contentGuardrails.blankNonRenderedMarkdown(String(body || ''))).split('\n');
+  // Shared stripper (code, spans, comments, <pre>) → reference definitions /
+  // "[ref]" tails / link titles (never rendered) → tags + MDX expressions.
+  return blankJsxAndExpressions(
+    contentGuardrails.blankLinkDefinitionsAndTitles(contentGuardrails.blankNonRenderedMarkdown(String(body || ''))),
+  ).split('\n');
 }
 
 function bodyImageRefs(body) {

@@ -253,14 +253,22 @@ function blankExpressions(str) {
 // the tail of the URL behind as attributable text. This is a balanced,
 // escape-aware scanner; anything malformed blanks WHOLE so no fragment of it
 // can attribute.
-function blankMarkdownLinkDestinations(str) {
-  // REFERENCE links render only their label: "[Local plan][1]" plus a
-  // "[1]: https://…/Orkin" definition showed readers a local price while the
-  // invisible definition supplied the attribution (Codex r10). Blank the
-  // definition lines and the "[ref]" tails; labels stay where they are.
-  const text = String(str || '')
+// REFERENCE links render only their label: "[Local plan][1]" plus a
+// "[1]: https://…/Orkin" definition showed readers a local price while the
+// invisible definition supplied the attribution (Codex r10). Blank the
+// definition lines, the "[ref]" tails and inline link TITLES
+// ("[a](/x \"title\")" — the title is never rendered text); labels and
+// destinations stay where they are. Length-preserving. Also the body-image
+// scanner's non-rendered-link pass (astro-publisher).
+function blankLinkDefinitionsAndTitles(str) {
+  return String(str || '')
     .replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan)
-    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan);
+    .replace(/\]\s*\[[^\]\n]*\]/g, blankSpan)
+    .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
+}
+
+function blankMarkdownLinkDestinations(str) {
+  const text = blankLinkDefinitionsAndTitles(str);
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
   for (let i = 0; i < text.length; i += 1) {
@@ -4632,6 +4640,7 @@ module.exports = {
   // parallel regex).
   eachTag,
   blankExpressions,
+  blankLinkDefinitionsAndTitles,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,
   unsupportedBodySyntaxAdded,
