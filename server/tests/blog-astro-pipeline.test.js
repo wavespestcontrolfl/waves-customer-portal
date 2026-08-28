@@ -3430,6 +3430,22 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(slots.map((sl) => sl.heading)).not.toContain('not a heading inside a fence');
   });
 
+  test('bodyImageSlots: H3 prose rolls up into its H2 (slot after the last sub-section paragraph); an image under an H3 marks the H2 illustrated', () => {
+    const body = [
+      'Intro.', '',
+      '## Colony locations', '',
+      '### Window frames', '', 'Frames first.', '',
+      '### Fascia boards', '', 'Fascia second.', '',
+      '## Illustrated section', '',
+      '### Sub', '', 'Text.', '', '![already](/images/x.webp)', '',
+      '## Third', '', 'Third prose.',
+    ].join('\n');
+    const slots = bodyImageSlots(body, 2, { title: 'T' });
+    expect(slots.map((sl) => sl.heading)).toEqual(['Colony locations', 'Third']);
+    expect(body.split('\n')[slots[0].insertAt - 1]).toBe('Fascia second.');
+    expect(slots[0].lead).toBe('Frames first.');
+  });
+
   test('bodyImageSlots: sections that already carry an image are skipped; the intro backfills when sections run out', () => {
     const body = 'Intro prose here.\n\n## Only section\n\nProse.\n\n![existing](/images/x.webp)\n';
     const slots = bodyImageSlots(body, 2, { title: 'Title' });

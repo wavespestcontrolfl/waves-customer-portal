@@ -1701,10 +1701,14 @@ function bodyImageSlots(body, wanted, { title = '' } = {}) {
     const heading = line.match(/^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
     if (heading) {
       closePara(i);
-      sections.push(cur);
-      cur = heading[1].length === 2
-        ? { heading: heading[2].trim(), start: i }
-        : { heading: cur.heading, start: i, sub: true };
+      // Only an H2 opens a new section: H3+ sub-headings stay INSIDE the
+      // current H2 range, so their prose, images and lead roll up to it (an
+      // H2 whose prose lives entirely under H3s is still eligible, and an
+      // image under an H3 marks the H2 illustrated). Any H1 closes the range.
+      if (heading[1].length === 2 || heading[1].length === 1) {
+        sections.push(cur);
+        cur = heading[1].length === 2 ? { heading: heading[2].trim(), start: i } : { heading: cur.heading, start: i, sub: true };
+      }
       continue;
     }
     if (/!\[[^\]]*\]\([^)]*\)/.test(line)) cur.hasImage = true;
@@ -1714,9 +1718,6 @@ function bodyImageSlots(body, wanted, { title = '' } = {}) {
   closePara(lines.length);
   sections.push(cur);
 
-  // H3 sub-sections roll up into their H2 for eligibility (an image inside a
-  // sub-section still illustrates the H2 topic), but the slot stays at the
-  // end of the sub-section's own prose.
   const eligible = sections.filter((sec) => !sec.intro && !sec.sub && !sec.hasImage
     && sec.lastProse != null && !BODY_IMAGE_SKIP_HEADING_RE.test(sec.heading));
   const picked = [];
