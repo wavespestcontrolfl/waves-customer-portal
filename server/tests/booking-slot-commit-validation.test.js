@@ -431,7 +431,7 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     // existence check — the column FKs estimates; a stale link books UNLINKED.
     // Ownership columns ride the fetch so the post-resolution gate below can
     // decide the link without a second query.
-    expect(block).toMatch(/await db\('estimates'\)\.where\('id', srcEstIdStr\)\.first\('id', 'customer_id', 'customer_phone', 'customer_email'\)/);
+    expect(block).toMatch(/await db\('estimates'\)\.where\('id', srcEstIdStr\)\.first\('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'terms_version'\)/);
     expect(block).toMatch(/proceeds unlinked/);
     // …and the dispatch row actually carries it
     expect(src).toMatch(/source_estimate_id: sourceEstimateId,/);
@@ -454,7 +454,9 @@ describe('createSelfBooking commit-path wiring (source guards)', () => {
     expect(gateIdx).toBeGreaterThan(customerFetchIdx); // after resolution (incl. just-created)
     expect(stampIdx).toBeGreaterThan(gateIdx); // the ONLY stamp lives inside the gate
     expect(src.indexOf('sourceEstimateId = srcEstIdStr;', stampIdx + 1)).toBe(-1);
-    const gateBlock = src.slice(gateIdx, gateIdx + 1600);
+    // Window covers the gate + the acceptance-ownership fan-out that now
+    // sits inside the owned branch (acceptance-terms lane 2026-08-28).
+    const gateBlock = src.slice(gateIdx, gateIdx + 3200);
     // linked estimate → must be THIS customer's
     expect(gateBlock).toMatch(/String\(sourceEstimateRow\.customer_id\) === String\(custId\)/);
     // unlinked estimate → contact match: last-10 phone, email only when the
