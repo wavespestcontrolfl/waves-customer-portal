@@ -1296,13 +1296,20 @@ const StripeService = {
   async _disableAutopayIfMethodRemoved(customerId, removedCard, knex = db) {
     if (!removedCard?.autopay_enabled) return;
     try {
-      await knex('customers')
-        .where({ id: customerId })
-        .update({ autopay_enabled: false, autopay_payment_method_id: null });
-      const { logAutopay } = require('./autopay-log');
-      await logAutopay(customerId, 'autopay_disabled', {
-        details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
-        db: knex,
+      // SAVEPOINT (knex nests a transaction on a trx handle): the caller's
+      // removal transaction must survive a failed cascade — a swallowed
+      // error inside an aborted PG transaction would roll back the local
+      // delete AFTER Stripe already detached the method (GH codex r4 P2).
+      await knex.transaction(async (sp) => {
+        await sp('customers')
+          .where({ id: customerId })
+          .update({ autopay_enabled: false, autopay_payment_method_id: null });
+        const { logAutopay } = require('./autopay-log');
+        await logAutopay(customerId, 'autopay_disabled', {
+          details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+          db: sp,
+          required: true,
+        });
       });
     } catch (err) {
       logger.warn(`[stripe] autopay cleanup after card removal failed for ${customerId}: ${err.message}`);

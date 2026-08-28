@@ -104,6 +104,14 @@ test('an EXPIRED pointer falls through to the chargeable walk for display, but s
   expect(body.autopay_selected_method_ids.sort()).toEqual(['pm-1234', 'pm-5678']);
 });
 
+test('a chargeable pointer on a NON-default row still reads as active (resolver normalization preserved through the display re-read)', async () => {
+  state.payment_methods.find((p) => p.id === 'pm-5678').is_default = false;
+  const { body } = await getAutopay();
+  expect(body.autopay_payment_method_id).toBe('pm-5678');
+  expect(body.state).toBe('active');
+  expect(body.autopay_enabled).toBe(true);
+});
+
 test('removal_guard echoes the gate so the row hierarchy flips with the server guard', async () => {
   mockGateOn = true;
   const { body } = await getAutopay();

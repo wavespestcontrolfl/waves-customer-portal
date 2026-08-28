@@ -149,6 +149,16 @@ describe('PUT /billing/autopay — Auto Pay-off notice sent once (GH codex r1 P2
       expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledTimes(1);
     }));
 
+  test('no pointer (legacy enrollment) → the notice names the default+enabled fallback collection would bill', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = null;
+      state.payment_methods.find((p) => p.id === 'pm-old').autopay_enabled = true; // is_default already true
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-old' }));
+    }));
+
   test('the notice names the method in charge UNDER THE LOCK, not the stale pre-read pointer', () =>
     withServer('/billing/autopay', router(), async (baseUrl) => {
       state.customers[0].autopay_enabled = true;

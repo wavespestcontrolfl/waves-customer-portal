@@ -109,14 +109,18 @@ router.get('/', async (req, res, next) => {
     // collection charged 5678. Same resolver as stripe.js charge() and the
     // expiry warnings; re-read the full row for the funding/brand fields.
     const resolvedAutopayMethod = await getChargeableAutopayMethod(customer, db);
+    // The resolver returns the pointer row NORMALIZED (is_default:true —
+    // charge() honors the pointer regardless of the stored flag); the
+    // re-read only adds the display fields, it must not overwrite that
+    // (GH codex r4 P1: a raw is_default:false would fail the recheck
+    // below and show "off" while collection still charges the pointer).
     const chargeableAutopayMethod = resolvedAutopayMethod
-      ? await db('payment_methods')
-        .where({ id: resolvedAutopayMethod.id, customer_id: req.customerId })
-        .first(
-          'id', 'processor', 'method_type', 'stripe_payment_method_id',
-          'is_default', 'autopay_enabled', 'card_funding', 'card_brand',
-          'exp_month', 'exp_year', 'ach_status'
-        )
+      ? {
+        ...(await db('payment_methods')
+          .where({ id: resolvedAutopayMethod.id, customer_id: req.customerId })
+          .first('card_funding', 'card_brand', 'stripe_payment_method_id', 'method_type', 'exp_month', 'exp_year', 'ach_status') || {}),
+        ...resolvedAutopayMethod,
+      }
       : null;
     // Row-hierarchy identity for the Payment Methods list: every row Auto
     // Pay is USING (resolver pick + pointer, expired included) — the same
@@ -402,6 +406,13 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       // the disable, read under the lock — the pre-lock `current` read can
       // be stale if a switch landed in between (GH codex r2 P2).
       disabledMethodId = locked?.autopay_payment_method_id || null;
+      if (disabledTransition && !disabledMethodId) {
+        // Legacy enrollment without a pointer: the method in charge is the
+        // default+enabled fallback collection would bill — resolve it under
+        // the lock BEFORE the flags are cleared below (GH codex r4 P2).
+        const fallback = await getChargeableAutopayMethod({ id: req.customerId, ...locked }, trx);
+        disabledMethodId = fallback?.id || null;
+      }
       // Re-verify the method under lock (pre-push r1 P0 — shared protocol
       // with DELETE /cards/:id, which holds the row FOR UPDATE across its
       // detach): pointing Auto Pay at a row a concurrent removal just

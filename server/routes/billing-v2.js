@@ -849,7 +849,8 @@ router.delete('/cards/:id', async (req, res, next) => {
         }
       }
 
-      const wasEnabled = !!customer?.autopay_enabled;
+      // Nullable flag: only explicit false is off (resolver parity, GH codex r4 P2).
+      const wasEnabled = customer?.autopay_enabled !== false;
       await StripeService.removeCard(req.customerId, req.params.id, { cascadeAutopay: !removalGuard, db: trx });
       removedCard = card;
       // Did Auto Pay actually go off with this removal? Only the legacy

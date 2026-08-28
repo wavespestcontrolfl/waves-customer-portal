@@ -247,6 +247,19 @@ describe('DELETE /billing/cards/:id — gate OFF (legacy)', () => {
       }));
     }));
 
+  test('NULL autopay_enabled (on, per the nullable rule) + cascade flipped it → autopayDisabled true', () =>
+    withServer(async (baseUrl) => {
+      mockGateOn = false;
+      state.customers[0].autopay_enabled = null;
+      StripeService.removeCard.mockImplementation(async () => {
+        state.customers[0].autopay_enabled = false;
+        return { success: true };
+      });
+      const res = await del(baseUrl, 'pm-live');
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendPaymentMethodRemoved).toHaveBeenCalledWith(expect.objectContaining({ autopayDisabled: true }));
+    }));
+
   test('cascade swallowed a failure (customer still enabled) → the notice must NOT claim Auto Pay went off', () =>
     withServer(async (baseUrl) => {
       mockGateOn = false;

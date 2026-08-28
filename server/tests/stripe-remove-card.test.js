@@ -87,6 +87,22 @@ describe('StripeService.removeCard', () => {
     expect(deleted).toEqual(['pm-db']);
   });
 
+  test('legacy cascade inside the caller trx runs under a SAVEPOINT — a failed customers update is contained, the delete survives', async () => {
+    const StripeService = require('../services/stripe');
+    let savepoints = 0;
+    const sp = (table) => {
+      const b = builder(table);
+      if (table === 'customers') b.update = jest.fn(async () => { throw new Error('customers write failed'); });
+      return b;
+    };
+    const trx = (table) => builder(table);
+    trx.transaction = jest.fn(async (cb) => { savepoints += 1; return cb(sp); });
+    await expect(StripeService.removeCard('cust-1', 'pm-db', { db: trx })).resolves.toEqual({ success: true });
+    expect(savepoints).toBe(1);
+    expect(deleted).toEqual(['pm-db']);
+    expect(customersUpdate).toEqual([]);
+  });
+
   test('cascadeAutopay:false (removal guard on) → detaches and NEVER writes customers.autopay_*', async () => {
     const StripeService = require('../services/stripe');
     await StripeService.removeCard('cust-1', 'pm-db', { cascadeAutopay: false });
