@@ -813,6 +813,9 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               {" "}
               <button
                 onClick={() => {
+                  // An ordinary manual edit carries no draft identity (codex r55).
+                  setDraftToken(null);
+                  setGroundingToken(null);
                   setEditing(true);
                   setReplyText(review.reply);
                 }}
@@ -957,8 +960,13 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               {editing && (
                 <button
                   onClick={() => {
+                    // Cancel discards the draft AND its identity: a later
+                    // manual reply on this card must not carry the tokens of
+                    // a draft that was thrown away (codex r55).
                     setEditing(false);
                     setReplyText(review.reply || "");
+                    setDraftToken(null);
+                    setGroundingToken(null);
                   }}
                   style={{
                     padding: "8px 14px",

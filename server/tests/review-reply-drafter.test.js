@@ -137,6 +137,8 @@ describe('verifyReplyText — public-surface safety net', () => {
     const gpets = grounding({ text: 'Great pest treatment. We have pets.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hello there, we are glad the treatment agreed with your pets.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
+    // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
+    expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
     // codex r53: "easy on your pets".
     expect(verify(good('Hello there, we are glad the pest treatment was easy on your pets.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the product is gentle enough on the kids.'), gpets)).toBe('banned_phrase');
@@ -160,6 +162,7 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, we are glad your pets sailed through the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad the yard reopened after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad everyone returned after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     // codex r44: "did not trouble your pets".
     expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
