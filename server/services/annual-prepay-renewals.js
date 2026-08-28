@@ -3749,12 +3749,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
     const { splitTerminalCompletionInvoice, COMPLETION_TERMINAL_INVOICE_STATUSES } = require('./completion-invoice-candidate');
     const { resolveAppointmentCardLane, resolveExtendedLane, resolveCompletionChargeCap } = require('./completion-charge-verdict');
     const completionAutopayChargeEnabled = require('../config/feature-gates').gates.completionAutopayCharge === true;
-    // Account credit (resolved per CUSTOMER after the loop — see there):
-    // every collectible invoice the window's completions will present to
-    // the credit apply, and every charge this loop decides, deferred.
-    const creditExposureByCustomer = new Map();
-    const deferredCharges = [];
-    const creditGateOn = require('../config/feature-gates').gates.autoApplyAccountCredit === true;
     // Real columns only: the payer is resolved by the payer authority
     // (scheduled_services.payer_id → self-pay override → customers.payer_id,
     // payer.resolveForInvoice — the same resolver completion uses), and
@@ -3904,7 +3898,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
           }
         })
         .orderBy('created_at', 'desc')
-        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id', 'scheduled_service_id', 'credit_applied', 'stripe_payment_intent_id');
+        .select('id', 'status', 'subtotal', 'total', 'discount_amount', 'line_items', 'notes', 'payer_id', 'service_record_id', 'scheduled_service_id');
       const statusOf = (inv) => String(inv?.status || '').toLowerCase();
       // A REFUNDED invoice on the visit PARKS the completion (no mint, no
       // reuse — completionTerminalInvoiceLookup / reconcileLiveVsRefunded):
@@ -3936,23 +3930,14 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // A reused invoice with FROZEN payer ownership is owed by the payer's
       // AP inbox — every saved-card rail requires !invoice.payer_id.
       if (reused && reused.payer_id) continue;
-      // Credit exposure (see the per-customer resolution after the loop):
-      // the route applies account credit to THIS invoice at completion
-      // whether or not a card rail fires afterwards. A pending mint's
-      // final total is unknown here → its consumption is unbounded.
-      let creditEntry = null;
-      if (creditGateOn) {
-        creditEntry = { pendingMint: !reused, eligible: false, remainingDue: null, invoiceId: reused ? String(reused.id) : null };
-        if (reused && !reused.stripe_payment_intent_id) {
-          const activePlan = await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id');
-          if (!activePlan) {
-            creditEntry.eligible = true;
-            creditEntry.remainingDue = Math.max(0, Math.round((Number(reused.total || 0) - Math.max(0, Number(reused.credit_applied) || 0)) * 100) / 100);
-          }
-        }
-        if (!creditExposureByCustomer.has(customerId)) creditExposureByCustomer.set(customerId, []);
-        creditExposureByCustomer.get(customerId).push(creditEntry);
-      }
+      // Account credit is deliberately NOT a projected exemption: the route
+      // applies the customer's balance to this invoice at completion, but
+      // that balance is unreserved and fungible — dunning touches, sends
+      // and any invoice minted before the visit draw it down first
+      // (autoApplyAccountCreditIfEnabled) — so no snapshot can prove a
+      // future completion will not reach the card (hook + GitHub P1s).
+      // Credit that HAS been applied is already modeled: a fully covered
+      // invoice is 'prepaid' and excluded above.
       // The invoice completion will charge: the reused row, else the row it
       // is about to MINT — priced by the same completionInvoiceAmount
       // precedence the prediction reports (the setup-fee allowance rides
@@ -3963,7 +3948,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       const invoiceForVerdict = reused || {
         id: `pending-mint:${v.id}`, status: 'draft', subtotal: prediction.amount, total: prediction.amount,
         discount_amount: 0, payer_id: null, notes: '', line_items: [], scheduled_service_id: v.id, service_record_id: null,
-        credit_applied: 0, stripe_payment_intent_id: null,
       };
       // An OPEN invoice not bound to THIS visit cannot be card-charged on
       // the extended / hold / appointment rails (the money boundaries
@@ -4095,29 +4079,17 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         } catch (e) { parkedHere = false; }
         if (parkedHere) continue;
       }
-      // The appointment lane's credit apply revalidates the one-time lane
-      // under its locks (requireOneTimeLane: billing_mode per_application,
-      // membership/annual lane, recurring visit → credit refused); the
-      // exposure entry above becomes ineligible for that lane's charge.
-      if (creditEntry?.eligible && apptLaneCharge
-        && (v.billing_mode === 'per_application' || lane.mode === 'monthly_membership' || lane.mode === 'annual_prepay' || v.is_recurring === true)) {
-        creditEntry.eligible = false;
-        creditEntry.remainingDue = null;
-      }
       // Only an auto_charge touches the saved card at completion ('invoice'
-      // — gate off or a priced callback — goes out as a pay-link). Resolve
+      // — gate off or a priced callback — goes out as a pay-link). Record
       // the METHOD each firing rail will use: the Auto Pay lanes charge the
       // walk's method(s); the hold rail charges the card frozen on the hold
       // (attachCardHoldPaymentMethod saves it enableAutopay:false, so it
       // is routinely NOT the Auto Pay card — matched back to its
       // payment_methods row; no row → unresolved, every method warns).
-      // Recording is DEFERRED to the per-customer credit resolution below.
-      const methodIds = [];
       if (autopayLaneCharges) {
-        const ids = await autopayWalkMethodIds({
+        await recordAutopayWalk(customerId, {
           id: v.customer_id, ach_status: v.customer_ach_status, autopay_payment_method_id: v.customer_autopay_payment_method_id,
         });
-        if (ids.length) methodIds.push(...ids); else methodIds.push(null);
       }
       if (holdCharges) {
         const { isExpiredCardMethod } = require('./autopay-eligibility');
@@ -4127,61 +4099,8 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
             .first('id', 'method_type', 'exp_month', 'exp_year')
           : null;
         const holdCardValidThroughHorizon = holdMethod?.id != null && !isExpiredCardMethod(holdMethod, horizonNoon);
-        methodIds.push(holdCardValidThroughHorizon ? String(holdMethod.id) : null);
+        recordCharge(customerId, holdCardValidThroughHorizon ? String(holdMethod.id) : null);
       }
-      deferredCharges.push({ customerId, methodIds, creditEntry });
-    }
-
-    // ── Account credit (customer-credit.js, gate autoApplyAccountCredit) ──
-    // The route applies the customer's account credit to the collectible
-    // self-pay invoice BEFORE every card rail (admin-dispatch completion:
-    // applyAccountCreditToInvoice runs ahead of chargeInvoiceWithSavedCard
-    // and the hold charge, which then finds the invoice prepaid →
-    // invoice_not_collectible). A FULLY covered invoice never touches a
-    // card, so it is not a charge vector. Credit is NOT reserved: the
-    // window's visits complete in no guaranteed order (hook P1), and other
-    // payment-ask seams draw the SAME balance down against unrelated open
-    // invoices first (autoApplyAccountCreditIfEnabled — dunning touches,
-    // sends, project reports; GitHub P1). So coverage is judged per
-    // CUSTOMER against the SUM of every competing credit-eligible
-    // obligation: the window's collectible invoices ∪ ALL the customer's
-    // open self-pay invoices the apply would accept (collectible status,
-    // no payer, no attached PaymentIntent, no active payment plan) — the
-    // window's charges are covered only when the balance settles all of
-    // them, so no order of consumption can leave one short. Any pending
-    // mint in the window (final total unknown → its consumption
-    // unbounded) disables coverage for the customer; a credit-ineligible
-    // window invoice consumes nothing and stays a charge. Partial coverage
-    // leaves residuals the card collects → every charge stays. A missing
-    // balance row reads as 0.
-    const { getBalance } = require('./customer-credit');
-    const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
-    const remainingDueOf = (inv) => Math.max(0, Math.round((Number(inv.total || 0) - Math.max(0, Number(inv.credit_applied) || 0)) * 100) / 100);
-    const creditCoveredCustomers = new Set();
-    for (const [customerId, exposure] of creditExposureByCustomer) {
-      if (!deferredCharges.some((d) => d.customerId === customerId && d.creditEntry?.eligible)) continue;
-      if (exposure.some((e) => e.pendingMint)) continue;
-      const dueByInvoice = new Map();
-      for (const e of exposure) if (e.eligible && e.invoiceId) dueByInvoice.set(e.invoiceId, e.remainingDue);
-      const competing = await conn('invoices')
-        .where({ customer_id: customerId })
-        .whereNull('payer_id')
-        .whereNull('stripe_payment_intent_id')
-        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
-        .whereNotExists(function activePlan() {
-          this.from('payment_plans').whereRaw('payment_plans.invoice_id = invoices.id').where('payment_plans.status', 'active').select('payment_plans.id');
-        })
-        .select('id', 'total', 'credit_applied');
-      for (const inv of competing || []) {
-        if (inv?.id != null && !dueByInvoice.has(String(inv.id))) dueByInvoice.set(String(inv.id), remainingDueOf(inv));
-      }
-      const sumDue = [...dueByInvoice.values()].reduce((sum, due) => sum + due, 0);
-      const balance = Number(await getBalance(customerId, conn));
-      if (Number.isFinite(balance) && Math.round(balance * 100) >= Math.round(sumDue * 100)) creditCoveredCustomers.add(customerId);
-    }
-    for (const d of deferredCharges) {
-      if (d.creditEntry?.eligible && creditCoveredCustomers.has(d.customerId)) continue;
-      for (const id of d.methodIds) recordCharge(d.customerId, id);
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
