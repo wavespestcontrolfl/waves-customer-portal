@@ -408,7 +408,9 @@ async function runAcceptanceCopySweep() {
     // category; then the next sweep retries).
     const escalate = async (estimate, body) => {
       const NotificationService = require('./notification-service');
-      const notification = await NotificationService.notifyAdmin('estimate', `Acceptance copy not delivered: ${estimate?.customer_name || 'customer'}`, body);
+      // dedupeKey: once per acceptance — a crash between this insert and
+      // the copy_escalated_at stamp must not re-ring tomorrow (GH Codex r9 P2).
+      const notification = await NotificationService.notifyAdmin('estimate', `Acceptance copy not delivered: ${estimate?.customer_name || 'customer'}`, body, { dedupeKey: `acceptance_copy_escalation:${row.id}` });
       if (notification?.id) {
         await db('estimate_acceptances').where({ id: row.id }).update({ copy_escalated_at: new Date() });
         escalated += 1;
@@ -417,13 +419,16 @@ async function runAcceptanceCopySweep() {
       }
     };
     try {
-      const delivered = await db('email_messages')
+      // EVERY sent-ish attempt under this key (initial + corrective): any one
+      // carrying the copy fulfils the promise (GH Codex r9 P2).
+      const deliveredRows = await db('email_messages')
         .where('idempotency_key', 'like', `${baseKey}%`)
         .whereIn('status', SENT_ISH)
-        .first('id', 'text_snapshot', 'html_snapshot');
+        .select('id', 'text_snapshot', 'html_snapshot');
+      const delivered = deliveredRows[0] || null;
       if (delivered) {
-        const carriesCopy = [delivered.text_snapshot, delivered.html_snapshot]
-          .some((b) => typeof b === 'string' && b.includes(ACCEPTANCE_COPY_MARKER));
+        const carriesCopy = deliveredRows.some((m) => [m.text_snapshot, m.html_snapshot]
+          .some((b) => typeof b === 'string' && b.includes(ACCEPTANCE_COPY_MARKER)));
         if (carriesCopy) {
           // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
           await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')

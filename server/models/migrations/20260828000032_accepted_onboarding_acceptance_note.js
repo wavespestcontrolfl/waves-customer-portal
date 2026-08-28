@@ -100,11 +100,16 @@ exports.down = async function down(knex) {
   for (const v of versions) {
     const patch = {};
     const blocks = parseBlocks(v.blocks);
+    let removedSeededBlock = false;
     if (blocks) {
       const filtered = blocks.filter((b) => !(b && b.seeded_by === MIGRATION_KEY && b.content === NEW_BLOCK.content));
-      if (filtered.length !== blocks.length) patch.blocks = JSON.stringify(filtered);
+      removedSeededBlock = filtered.length !== blocks.length;
+      if (removedSeededBlock) patch.blocks = JSON.stringify(filtered);
     }
-    if (typeof v.text_body === 'string' && v.text_body.includes(TEXT_FRAGMENT)) {
+    // The text fragment goes only with a version this migration still owns
+    // (its marked block was just removed). An admin-edited version lost the
+    // marker on save and keeps its text intact (GH Codex r9 P2).
+    if (removedSeededBlock && typeof v.text_body === 'string' && v.text_body.includes(TEXT_FRAGMENT)) {
       patch.text_body = v.text_body.replace(TEXT_FRAGMENT, '');
     }
     if (Object.keys(patch).length) {

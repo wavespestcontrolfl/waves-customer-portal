@@ -109,6 +109,22 @@ test('a sent-ish row WITHOUT the copy (template lost the block) → escalated no
   expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_escalated_at: expect.any(Date) }));
 });
 
+test('an older copy-less send plus a later corrective send that carried it → fulfilled, no resend', async () => {
+  mockTemplate.carriesNote = true;
+  emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat, your plan is confirmed.' }, { id: 'm2', text_snapshot: 'Hi Pat. You accepted electronically on …' }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
+  expect(sendEstimateAcceptedOnboarding).not.toHaveBeenCalled();
+  expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_emailed_at: expect.any(Date) }));
+});
+
+test('escalation alerts carry a per-acceptance dedupeKey', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValueOnce({ sent: false, outcome: 'no_address' });
+  acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 8 * 86400000).toISOString() }];
+  await runAcceptanceCopySweep();
+  expect(notifyAdmin.mock.calls[0][3]).toEqual({ dedupeKey: 'acceptance_copy_escalation:acc-1' });
+});
+
 test('once the active template carries the block again → corrective resend under a distinct copy key', async () => {
   mockTemplate.carriesNote = true;
   emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat, your plan is confirmed.' }];
