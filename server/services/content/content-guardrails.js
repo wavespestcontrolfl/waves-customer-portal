@@ -283,7 +283,11 @@ function isInterruptingBlock(line) {
 // line ending is allowed between label and destination). Callers pass the
 // code/comment-stripped text (a definition inside a fence is code).
 const REF_DEFINITION_LABEL_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*/;
-const REF_DESTINATION_RE = /^(?:<([^>\n]*)>|(\S+))/;
+// The WHOLE remainder must be a destination plus an optional quoted or
+// parenthesized title — trailing junk (`/dest.webp trailing-junk`) makes the
+// line an ordinary paragraph in CommonMark, so its label defines nothing and
+// `![alt][label]` renders as literal text, not a picture.
+const REF_DESTINATION_RE = /^(?:<([^<>\n]*)>|(\S+))(?:[ \t]+(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\)))?[ \t]*$/;
 function normalizeReferenceLabel(label) {
   return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
@@ -322,62 +326,95 @@ function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false } = {})
 // tails are kept for the image scanner to resolve against the body's
 // definitions (markdownReferenceDefinitions); reference-style LINKS are
 // blanked to their label either way.
+// Number of consecutive backslashes immediately before `idx` — odd = the
+// character at `idx` is escaped (Markdown escape parity).
+function backslashRunBefore(text, idx) {
+  let n = 0;
+  for (let k = idx - 1; k >= 0 && text[k] === '\\'; k -= 1) n += 1;
+  return n;
+}
+
+// THE balanced Markdown link/image scanner. Yields one span per `[label]`
+// whose label closes: `isImage` (an unescaped `!` precedes the label),
+// `labelStart`/`labelEnd` (the brackets), and `kind`:
+//   'inline'    — `](dest)` with balanced parentheses: destStart..destEnd
+//                 is the text inside the parentheses;
+//   'reference' — `][label]` tail: refStart..refEnd is the text inside;
+//   'malformed' — `](` never closes: `end` is where scanning stopped;
+//   'none'      — a bare `[label]` (shortcut reference or plain brackets).
+// Labels may nest brackets (`[Technician [close-up]]`) and escape them
+// (`\]`); a label or destination stops at a paragraph end. An escaped
+// opening bracket (`\[x](y)`) is still scanned as a link — the citation
+// rules rely on that (an escaped link is literal text, so blanking its
+// destination errs toward "uncited", the safe direction); only the `!`
+// image marker honours escape parity. Every consumer that needs to know
+// where a link or image is asks here — the blanker below and the
+// body-image scanner alike.
+function* eachMarkdownLink(text) {
+  const str = String(text || '');
+  for (let i = 0; i < str.length; i += 1) {
+    if (str[i] !== '[') continue;
+    const isImage = i > 0 && str[i - 1] === '!' && backslashRunBefore(str, i - 1) % 2 === 0;
+    let depth = 0;
+    let j = i;
+    for (; j < str.length; j += 1) {
+      const ch = str[j];
+      if (ch === '\\') { j += 1; continue; }
+      if (ch === '[') depth += 1;
+      else if (ch === ']') { depth -= 1; if (depth === 0) break; }
+      else if (ch === '\n' && str[j + 1] === '\n') break; // paragraph end
+    }
+    if (j >= str.length || str[j] !== ']') continue;
+    const span = { isImage, start: isImage ? i - 1 : i, labelStart: i, labelEnd: j, kind: 'none', end: j };
+    if (str[j + 1] === '[') {
+      const tailEnd = str.indexOf(']', j + 2);
+      const tail = tailEnd > 0 ? str.slice(j + 2, tailEnd) : '';
+      if (tailEnd >= 0 && !tail.includes('\n')) {
+        span.kind = 'reference'; span.refStart = j + 2; span.refEnd = tailEnd - 1; span.end = tailEnd;
+      }
+    } else if (str[j + 1] === '(') {
+      let k = j + 1;
+      let pdepth = 0;
+      for (; k < str.length; k += 1) {
+        const ch = str[k];
+        if (ch === '\\') { k += 1; continue; }
+        if (ch === '(') pdepth += 1;
+        else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
+        else if (ch === '\n' && str[k + 1] === '\n') break;
+      }
+      if (k >= str.length || str[k] !== ')') { span.kind = 'malformed'; span.end = Math.min(k, str.length - 1); }
+      else { span.kind = 'inline'; span.destStart = j + 2; span.destEnd = k - 1; span.end = k; }
+    }
+    yield span;
+    // A bare `[label]` is not consumed: a link nested inside it (`[a [b](x)]`)
+    // is still found by the continuing scan.
+    if (span.kind !== 'none') i = span.end;
+  }
+}
+
 function blankMarkdownLinkDestinations(str, { keepImages = false } = {}) {
   const text = blankLinkDefinitionsAndTitles(str, { keepReferenceTails: keepImages });
   const out = text.split('');
   const blank = (from, to) => { for (let k = from; k <= to && k < text.length; k += 1) if (out[k] !== '\n') out[k] = ' '; };
-  for (let i = 0; i < text.length; i += 1) {
-    if (text[i] !== '[') continue;
-    const isImage = i > 0 && text[i - 1] === '!';
-    // Balanced label scan.
-    let depth = 0;
-    let j = i;
-    for (; j < text.length; j += 1) {
-      const ch = text[j];
-      if (ch === '\\') { j += 1; continue; }
-      if (ch === '[') depth += 1;
-      else if (ch === ']') { depth -= 1; if (depth === 0) break; }
-      else if (ch === '\n' && text[j + 1] === '\n') break; // paragraph end
-    }
-    if (j >= text.length || text[j] !== ']') continue;
-    const labelStart = i;
-    const labelEnd = j;
-    if (text[j + 1] === '[') {
+  for (const span of eachMarkdownLink(text)) {
+    const { isImage, labelStart, labelEnd, end } = span;
+    if (span.kind === 'reference') {
       // Reference tail `[label]` (only reachable with keepReferenceTails).
-      const tailEnd = text.indexOf(']', j + 2);
-      const tail = tailEnd > 0 ? text.slice(j + 2, tailEnd) : '';
-      if (tailEnd < 0 || tail.includes('\n')) continue;
       if (!(isImage && keepImages)) {
         blank(labelStart, labelStart);       // "["
-        blank(labelEnd, tailEnd);            // "][label]"
+        blank(labelEnd, end);                // "][label]"
       }
-      i = tailEnd;
-      continue;
-    }
-    if (text[j + 1] !== '(') continue;
-    // Balanced destination scan.
-    let k = j + 1;
-    let pdepth = 0;
-    for (; k < text.length; k += 1) {
-      const ch = text[k];
-      if (ch === '\\') { k += 1; continue; }
-      if (ch === '(') pdepth += 1;
-      else if (ch === ')') { pdepth -= 1; if (pdepth === 0) break; }
-      else if (ch === '\n' && text[k + 1] === '\n') break;
-    }
-    if (k >= text.length || text[k] !== ')') {
+    } else if (span.kind === 'malformed') {
       // Malformed: blank everything we scanned so no fragment attributes.
-      blank(isImage ? labelStart - 1 : labelStart, Math.min(k, text.length - 1));
-      i = Math.min(k, text.length - 1);
-      continue;
+      blank(isImage ? labelStart - 1 : labelStart, end);
+    } else if (span.kind === 'inline') {
+      if (isImage) {
+        if (!keepImages) blank(labelStart - 1, end); // an image renders no text at all
+      } else {
+        blank(labelStart, labelStart);       // "["
+        blank(labelEnd, end);                // "](destination)"
+      }
     }
-    if (isImage) {
-      if (!keepImages) blank(labelStart - 1, k); // an image renders no text at all
-    } else {
-      blank(labelStart, labelStart);       // "["
-      blank(labelEnd, k);                  // "](destination)"
-    }
-    i = k;
   }
   return out.join('');
 }
@@ -4719,6 +4756,7 @@ module.exports = {
   blankMarkdownLinkDestinations,
   markdownReferenceDefinitions,
   normalizeReferenceLabel,
+  eachMarkdownLink,
   isThematicBreak,
   blankHiddenContent,
   // fail-closed park for bodies outside the writer's plain Markdown subset

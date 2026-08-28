@@ -980,6 +980,8 @@ async function maybeAutoMerge(run, pr) {
   //    the post file on the PR branch is re-validated here, and a miss
   //    WITHHOLDS the merge for a human (the same posture as the pin/
   //    eligibility withholds above). Off → no-op.
+  //    (rewrite_title_meta PRs never reach this step: the metadata lane is
+  //    withheld for a human merge above — `awaiting_human_merge_metadata_lane`.)
   if (['new_supporting_blog', 'refresh_existing_page'].includes(run.action_type) && typeof publisher.assertBodyImagesAtHead === 'function') {
     let bodyImages;
     try {

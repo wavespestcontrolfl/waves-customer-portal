@@ -20,6 +20,7 @@ jest.mock('../services/content-astro/github-client', () => ({
   deleteFile: jest.fn(),
   closePr: jest.fn(),
   deleteRef: jest.fn(),
+  getBlob: jest.fn(),
 }));
 jest.mock('../services/content-astro/author-service', () => ({
   getAuthor: jest.fn(),
@@ -3988,6 +3989,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(thrown?.message).toMatch(/changed since it was read/);
     expect(thrown?.code).toBeUndefined();
     expect(gh.commitFiles).not.toHaveBeenCalled();
+    // The just-cut branch is deleted (GH r11) — no orphan per retry.
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
     expect(gh.putFile).not.toHaveBeenCalled();
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/shrub-diseases-sarasota-fl.md', expect.stringMatching(/^content\/refresh-/));
   });
@@ -4007,6 +4010,25 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(thrown?.message).toContain('GitHub 502');
     expect(thrown?.code).toBeUndefined();
     expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
+  test('bodyImageRefs: image labels with nested or escaped brackets are parsed whole (balanced scanner), so the picture is validated (GH r11)', async () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![Technician [close-up]](/images/blog/x/hero.webp)\n![a \\] b](/images/blog/x/body-1.webp "t")\n![nested [ref]][r]\n\n[r]: /images/blog/x/body-2.webp');
+    expect(refs.map((r) => [r.alt, r.src])).toEqual([['Technician [close-up]', '/images/blog/x/hero.webp'], ['a \\] b', '/images/blog/x/body-1.webp'], ['nested [ref]', '/images/blog/x/body-2.webp']]);
+    const res = await AstroPublisher._internals.validateBodyImageRefs({ body: '![Technician [close-up]](/images/blog/x/hero.webp)', heroSrc: '/images/blog/x/hero.webp', getFile: async () => ({ content: 'x' }) });
+    expect(res.reason).toMatch(/embeds the hero image/);
+  });
+
+  test('committedImageBuffer: a contents-API response without inline bytes (file over 1 MB) falls back to the blob by SHA (GH r11)', async () => {
+    const { committedImageBuffer } = AstroPublisher._internals;
+    const bytes = Buffer.from('big-picture');
+    gh.getBlob.mockResolvedValueOnce({ content: bytes.toString('base64'), encoding: 'base64' });
+    const buf = await committedImageBuffer('public/images/2024/big-hero.jpg', async () => ({ content: '', sha: 'blobsha', raw: { sha: 'blobsha', content: '', encoding: 'none', size: 2_000_000 } }));
+    expect(buf.equals(bytes)).toBe(true);
+    expect(gh.getBlob).toHaveBeenCalledWith('blobsha');
+    // Still null when the blob has nothing either.
+    gh.getBlob.mockResolvedValueOnce({ content: '', encoding: 'base64' });
+    expect(await committedImageBuffer('public/images/2024/empty.jpg', async () => ({ content: '', sha: 'e', raw: { sha: 'e', content: '' } }))).toBeNull();
   });
 
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {

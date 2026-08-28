@@ -4684,6 +4684,9 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     const multi = guardrails.markdownReferenceDefinitions('[pic]:\n  /images/blog/x/body-1.webp "t"\n[angle]:\n</a b.webp>\n[none]:\n\ntext');
     expect([...multi.entries()]).toEqual([['pic', '/images/blog/x/body-1.webp'], ['angle', '/a b.webp']]);
     expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n  /dest.webp\nprose')).toBe('      \n            \nprose');
+    // Full-grammar remainder: a quoted / parenthesized title is fine, trailing junk makes the line a paragraph (no definition).
+    const strict = guardrails.markdownReferenceDefinitions(['[a]: /a.webp "t"', "[b]: /b.webp 't'", '[c]: /c.webp (t)', '[d]: /d.webp trailing-junk', '[e]: /e.webp "t" junk', '[f]: </f g.webp>  (paren "quote")'].join('\n'));
+    expect([...strict.keys()]).toEqual(['a', 'b', 'c', 'f']);
   });
 
   test('blankMarkdownLinkDestinations keepImages: reference-style IMAGE tails are kept, reference-style LINK tails are blanked; default path unchanged', () => {
@@ -4691,6 +4694,18 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     expect(guardrails.blankMarkdownLinkDestinations(src, { keepImages: true })).toBe('![pic][ref] and  link       and  text      ');
     // Default path (no keepImages) is byte-for-byte what it was before reference tails were image-aware.
     expect(guardrails.blankMarkdownLinkDestinations(src)).toBe('![pic       and [link       and  text      ');
+  });
+
+  test('eachMarkdownLink: nested and escaped brackets in labels, inline/reference/none/malformed kinds, escape parity on `!` and `[`', () => {
+    const spans = (t) => [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.isImage, sp.kind, t.slice(sp.labelStart + 1, sp.labelEnd), sp.kind === 'inline' ? t.slice(sp.destStart, sp.destEnd + 1) : sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
+    expect(spans('![Technician [close-up]](/x.webp) and ![a \\] b](/y.webp)')).toEqual([[true, 'inline', 'Technician [close-up]', '/x.webp'], [true, 'inline', 'a \\] b', '/y.webp']]);
+    expect(spans('[t][ref] ![i][] [s] ![m](oops')).toEqual([[false, 'reference', 't', 'ref'], [true, 'reference', 'i', ''], [false, 'none', 's', null], [true, 'malformed', 'm', null]]);
+    // `\\![x](y)` is a literal "!" followed by a LINK (not an image); an escaped `\\[z](/w)` is still scanned as a link (citation rules rely on it).
+    expect(spans('\\![x](/y) \\[z](/w) \\\\![img](/v)')).toEqual([[false, 'inline', 'x', '/y'], [false, 'inline', 'z', '/w'], [true, 'inline', 'img', '/v']]);
+    // A link nested inside bare brackets is still found.
+    expect(spans('[outer [in](/i)]')).toEqual([[false, 'none', 'outer [in](/i)', null], [false, 'inline', 'in', '/i']]);
+    expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)', { keepImages: true })).toBe('![Technician [close-up]](/x.webp)');
+    expect(guardrails.blankMarkdownLinkDestinations('![Technician [close-up]](/x.webp)')).toBe('                                 ');
   });
 
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {

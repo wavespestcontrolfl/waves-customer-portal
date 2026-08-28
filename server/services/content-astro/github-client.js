@@ -289,6 +289,14 @@ async function updatePr(number, { title, body } = {}) {
   return ghFetch(`/repos/${owner}/${repo}/pulls/${number}`, { method: 'PATCH', body: fields });
 }
 
+// Blob by SHA (git data API): base64 content up to 100 MB — the fallback
+// for a committed asset whose contents-API response carries metadata but no
+// inline bytes (files over 1 MB).
+async function getBlob(sha) {
+  const { owner, repo } = env();
+  return ghFetch(`/repos/${owner}/${repo}/git/blobs/${encodeURIComponent(sha)}`);
+}
+
 async function deleteRef(branch) {
   const { owner, repo } = env();
   return ghFetch(`/repos/${owner}/${repo}/git/refs/heads/${encodeURIComponent(branch)}`, {
@@ -324,6 +332,7 @@ module.exports = {
   getPr,
   closePr,
   updatePr,
+  getBlob,
   deleteRef,
   verifyAccess,
 };

@@ -1696,7 +1696,15 @@ function hammingDistance(a, b) {
 // outage must instead propagate so the runner retries the publish.
 async function committedImageBuffer(repoPath, getFile = (path) => gh.getFile(path)) {
   const file = await getFile(repoPath);
-  const b64 = file?.raw?.content;
+  if (!file) return null;
+  let b64 = file?.raw?.content;
+  // The contents API omits inline bytes for files over 1 MB (metadata with
+  // an empty `content`): the blob is fetched by SHA instead — a large legacy
+  // hero is a real, verifiable picture, not a missing one.
+  if (!b64 && file?.raw?.sha && typeof gh.getBlob === 'function') {
+    const blob = await gh.getBlob(file.raw.sha);
+    b64 = blob?.content;
+  }
   if (!b64) return null;
   const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
   return buffer.length ? buffer : null;
@@ -1811,7 +1819,6 @@ function bodyImagesEnabled() {
 // `![alt][]` (collapsed), `![alt]` (shortcut). A reference form renders a
 // picture only when its label has a definition in the body — an undefined
 // label is text, not an image.
-const RENDERED_IMAGE_ANY_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\](?:\(((?:[^()\s]|\([^()\s]*\))*)(?:\s[^)]*)?\)|\[([^\]\n]*)\])?/g;
 // An angle-bracketed inline destination (`](</images/a b.webp>)`, valid
 // CommonMark, may hold spaces) is rewritten to its equivalent bare form
 // (`](/images/a%20b.webp)`) BEFORE tag masking — `</images/…>` otherwise
@@ -1825,15 +1832,26 @@ function normalizeAngleDestinations(text) {
 function decodeDestination(src) {
   try { return decodeURIComponent(src); } catch (_) { return src; }
 }
-// Every image a rendered line shows, inline destinations normalized and
-// reference labels resolved through `defs` (markdownReferenceDefinitions).
+// Every image a rendered line shows — inline (`![alt](dest "title")`),
+// full/collapsed/shortcut reference (`![alt][label]`, `![alt][]`, `![alt]`)
+// — found with the guardrails' balanced scanner (labels may nest and escape
+// brackets), inline destinations normalized, reference labels resolved
+// through `defs` (markdownReferenceDefinitions). A malformed image is text.
 function imageRefsInLine(line, defs) {
   const out = [];
-  for (const m of String(line || '').matchAll(RENDERED_IMAGE_ANY_RE)) {
-    const alt = m[1];
-    if (m[2] !== undefined) { out.push({ alt: alt.trim(), src: decodeDestination(m[2]) }); continue; }
-    const label = contentGuardrails.normalizeReferenceLabel(m[3] ? m[3] : alt);
-    if (label && defs && defs.has(label)) out.push({ alt: alt.trim(), src: defs.get(label) });
+  const str = String(line || '');
+  for (const span of contentGuardrails.eachMarkdownLink(str)) {
+    if (!span.isImage) continue;
+    const alt = str.slice(span.labelStart + 1, span.labelEnd).trim();
+    if (span.kind === 'inline') {
+      const dest = str.slice(span.destStart, span.destEnd + 1).trim().split(/\s/)[0] || '';
+      out.push({ alt, src: decodeDestination(dest) });
+      continue;
+    }
+    if (span.kind === 'malformed') continue;
+    const tail = span.kind === 'reference' ? str.slice(span.refStart, span.refEnd + 1) : '';
+    const label = contentGuardrails.normalizeReferenceLabel(tail || alt);
+    if (label && defs && defs.has(label)) out.push({ alt, src: defs.get(label) });
   }
   return out;
 }
@@ -2876,6 +2894,11 @@ async function publishRefresh(draft, brief = {}) {
   if (refreshImages.files.length) {
     const onBranch = await gh.getFile(filePath, branch);
     if (!onBranch || onBranch.sha !== existing.sha) {
+      // No PR references the branch yet — drop it, or every collision
+      // (the runner retries with a fresh shortId) leaves an orphan ref.
+      try { await gh.deleteRef(branch); } catch (cleanupErr) {
+        logger.warn(`[astro-publisher] could not delete refresh branch ${branch} after a lock mismatch: ${cleanupErr.message}`);
+      }
       throw new Error(`refresh target ${filePath} changed since it was read (expected ${existing.sha}, found ${onBranch?.sha || 'missing'} on ${branch}) — retry against the live content`);
     }
   }
