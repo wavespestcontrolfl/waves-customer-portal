@@ -12,7 +12,7 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -183,6 +183,11 @@ router.post('/sms', async (req, res) => {
     // ("I won't be home") carry no scheduling keyword — the AI auto-reply
     // gates must stand down for these too.
     const rescheduleAsk = Body ? hasRescheduleOrAwayIntent(Body) : false;
+    // Pure courtesy closer ("Thanks!", "Ok great", "👍"): lands in the thread
+    // already read, no bell/push/owner forward, no AI auto-reply. The shadow
+    // drafter still sees it (knowing when NOT to reply is a judged class).
+    // isCourtesyOnly is fail-safe: any question/scheduling/mixed content → false.
+    const courtesyOnly = !smsReaction && isCourtesyOnly(Body);
 
     // ── Idempotency claim (must run before spam-block + all side-effects) ──
     // Twilio can redeliver the same MessageSid (edge retry, a slow handler
@@ -307,7 +312,12 @@ router.post('/sms', async (req, res) => {
       authorType: 'customer',
       twilioSid: MessageSid,
       media: inboundMedia,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type },
+      // Reactions and pure courtesy closers never needed a human to "open"
+      // them — write the row already read so the Messages unread dot and
+      // the Unread chip only count messages that want an answer.
+      isRead: smsReaction || courtesyOnly,
+      messageType: smsReaction ? 'sms_reaction' : undefined,
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
@@ -946,7 +956,7 @@ router.post('/sms', async (req, res) => {
     // for this message — the legacy owner-SMS forward must not re-alert
     // (codex #3232 r4).
     let knownInboundNotified = rescheduleFlagged;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !rescheduleFlagged) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         const stats = await triggerNotification('sms_reply', {
@@ -993,7 +1003,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
@@ -1045,7 +1055,7 @@ router.post('/sms', async (req, res) => {
     // through to Virginia's inbox.
     const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
 
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -1139,10 +1149,12 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
     } else if (smsReaction && aiAutoReplyOn) {
       logger.info('[sms-intent] SMS reaction detected; skipping auto-reply');
+    } else if (courtesyOnly && aiAutoReplyOn) {
+      logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction) {
+    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
         const ContextAggregator = require('../services/context-aggregator');
         const ResponseDrafter = require('../services/response-drafter');

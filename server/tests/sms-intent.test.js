@@ -1,4 +1,4 @@
-const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 
 describe('SMS intent helpers', () => {
   test('detects scheduling changes and schedule lookups', () => {
@@ -47,6 +47,42 @@ describe('SMS intent helpers', () => {
     ]) {
       expect(isSmsReaction(body)).toBe(false);
       expect(hasRescheduleOrAwayIntent(body)).toBe(true);
+    }
+  });
+});
+
+describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)', () => {
+  // iOS 17.4+ renders any-emoji tapbacks as `Reacted <emoji> to "…"`. The
+  // quoted text is OUR outbound — scanning it as customer prose tripped the
+  // scheduling detector on "Your service is scheduled …".
+  test('detects the iOS emoji tapback formats (incl. skin tone + ZWJ)', () => {
+    expect(isSmsReaction('Reacted ❤️ to "Good afternoon! Your service is scheduled for Thursday"')).toBe(true);
+    expect(isSmsReaction('Reacted 👍🏽 to \u201cok\u201d')).toBe(true);
+    expect(isSmsReaction('Reacted 👨‍👩‍👧 to an image')).toBe(true);
+    expect(isSmsReaction('Removed ❤️ from "Thanks for the update"')).toBe(true);
+    expect(isSmsReaction('I reacted badly to the spray')).toBe(false);
+    expect(hasSchedulingIntent('Reacted ❤️ to "Your service is scheduled for Thursday"')).toBe(true); // still prose to that detector — the webhook gates on isSmsReaction first
+  });
+
+  test('pure courtesy closers are detected', () => {
+    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Okay', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'Np', 'Great', 'Got it', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Tyler', 'Sounds good']) {
+      expect([t, isCourtesyOnly(t)]).toEqual([t, true]);
+    }
+  });
+
+  test('anything that wants an answer is NOT courtesy (fail-safe direction)', () => {
+    for (const t of [
+      'Yes', 'No', // answer a question we asked → drafter replies
+      'Thanks again Adam. Your opinion do you think the second session is going to be enough?',
+      'Thanks, but you missed the backyard',
+      'Sure, 8 AM works',
+      'Ok. I won\u2019t be home then Thanks for stopping by.',
+      'Thanks! Can we reschedule to Friday?',
+      'Hey Adam', 'Hello Adam, good afternoon.',
+      'Sounds good let me know if you have any issues or need me! Appreciate it.',
+      'Thanks — the invoice says $81', '', null,
+    ]) {
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
     }
   });
 });

@@ -964,7 +964,32 @@ router.post('/messages/read', async (req, res, next) => {
       updated_at: now,
     });
 
-    res.json({ success: true, updated });
+    // Opening the thread IS reading its "SMS from …" bell rows: those
+    // notifications carry the thread only in their link
+    // (/admin/communications?thread=<customerId>, see notification-triggers
+    // sms_reply) and used to stay unread forever unless tapped from the bell
+    // itself — the main reason the badge sat at four digits. Fail-soft: a
+    // miss here never fails the read receipt.
+    let notificationsCleared = 0;
+    try {
+      const convIds = new Set(conversationIds);
+      if (ids.length) {
+        const rows = await db('messages').whereIn('id', ids).whereNotNull('conversation_id').distinct('conversation_id');
+        for (const r of rows) convIds.add(r.conversation_id);
+      }
+      if (convIds.size) {
+        const customerIds = await db('conversations').whereIn('id', [...convIds]).whereNotNull('customer_id').distinct('customer_id').pluck('customer_id');
+        if (customerIds.length) {
+          notificationsCleared = await db('notifications')
+            .where({ category: 'inbound_sms' })
+            .whereNull('read_at')
+            .whereIn('link', customerIds.map((cid) => `/admin/communications?thread=${cid}`))
+            .update({ read_at: now });
+        }
+      }
+    } catch (e) { logger.warn(`[communications] bell cross-clear on thread read failed: ${e.message}`); }
+
+    res.json({ success: true, updated, notificationsCleared });
   } catch (err) { next(err); }
 });
 

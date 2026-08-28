@@ -57,6 +57,44 @@ const TIME_RE = /\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)\b|\b(?:noon|midn
 const SMS_REACTION_TARGET_RE = '(?:[\\u201c"][^\\u201d"]+[\\u201d"]|an?\\s+(?:image|photo|video|audio message|attachment|message))';
 const SMS_REACTION_RE = new RegExp(`^(liked|loved|disliked|laughed at|emphasized|questioned)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
 const REMOVED_SMS_REACTION_RE = new RegExp(`^removed\\s+(?:a|an)\\s+(?:like|heart|dislike|laugh|emphasis|question mark)\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+// iOS 17.4+/18 emoji tapbacks arrive as `Reacted ❤️ to "…"` / `Removed ❤️ from
+// "…"` (any emoji, incl. skin-tone + ZWJ sequences). Missed until 2026-08-28:
+// the quoted appointment text then read as prose and tripped the scheduling
+// detector + the full bell/push pipeline.
+const EMOJI_SEQ_RE = '(?:\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|\\u200d|\\ufe0f|\\p{Regional_Indicator})+';
+const EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+${EMOJI_SEQ_RE}\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+const REMOVED_EMOJI_SMS_REACTION_RE = new RegExp(`^removed\\s+${EMOJI_SEQ_RE}\\s+from\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+
+// Pure conversation-closers: the whole message is courtesy — "Thanks!",
+// "Ok great", "Sounds good, see you then", "👍". Deliberately narrow: a bare
+// "yes"/"no" is NOT courtesy (it answers a question we asked), a question
+// mark or any scheduling/reschedule signal disqualifies, and anything mixed
+// ("Thanks, but you missed the backyard") falls through to the normal
+// pipeline. The drafter's own contract already defines this class as
+// "warrants NO reply" — this is the deterministic notification-side twin.
+const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|kk?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|you\s+bet|sure|yep|yup|all\s+good|good\s+deal|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|see\s+(?:you|ya)\s+(?:then|soon|tomorrow|there)|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|good\s+(?:morning|afternoon|evening|night)|bye|later|cheers|my\s+pleasure|(?:you'?re\s+)?welcome|anytime|(?:so|very)\s+much|again|a\s+lot|for\s+(?:the\s+)?(?:update|info|heads\s+up|letting\s+(?:me|us)\s+know)|i\s+appreciate\s+(?:it|you|that)|we\s+appreciate\s+(?:it|you|that)|(?:that'?s|that\s+is)\s+(?:great|perfect|fine|awesome)|all\s+set|(?:will|talk\s+to\s+you)\s+(?:then|soon|later))`;
+const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
+// One trailing name after a thanks ("Thanks Adam", "Appreciate it Don!").
+const COURTESY_WITH_NAME_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,4}[a-z]{2,15}[,.!]*$`, 'iu');
+const STRIP_EMOJI_RE = new RegExp(EMOJI_SEQ_RE, 'gu');
+const COURTESY_MAX_CHARS = 60;
+
+/**
+ * True when the message is a pure courtesy closer (no question, no
+ * scheduling/reschedule/away signal, no substantive content). Emoji-only
+ * bodies ("👍", "🙏🙏") count. Fail-safe direction: any doubt → false, so a
+ * real request never gets quieted.
+ */
+function isCourtesyOnly(body) {
+  const raw = String(body || '').trim();
+  if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
+  if (/[?]/.test(raw)) return false;
+  const stripped = raw.replace(STRIP_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
+  if (!stripped) return true; // emoji-only
+  if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
+  if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
+  return COURTESY_ONLY_RE.test(stripped) || COURTESY_WITH_NAME_RE.test(stripped);
+}
 
 function hasSchedulingIntent(body) {
   if (!body || typeof body !== 'string') return false;
@@ -89,7 +127,8 @@ function hasSchedulingIntent(body) {
 function isSmsReaction(body) {
   if (!body || typeof body !== 'string') return false;
   const text = body.trim();
-  return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text);
+  return SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text)
+    || EMOJI_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text);
 }
 
 // Reschedule/away intent — a strict SUBSET of scheduling intent. Scheduling
@@ -251,4 +290,4 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent };
+module.exports = { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent };
