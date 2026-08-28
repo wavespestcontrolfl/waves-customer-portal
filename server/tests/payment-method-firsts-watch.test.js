@@ -1,11 +1,7 @@
 // payment-method-firsts-watch — one ops email per "first", persisted marker,
 // self-retiring, never marks a first the email failed to deliver.
 
-jest.mock('../models/db', () => {
-  const fn = jest.fn();
-  fn.fn = { now: () => 'NOW()' };
-  return fn;
-});
+jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/email', () => ({ send: jest.fn(async () => ({ ok: true })) }));
 
@@ -26,6 +22,7 @@ function builderFor(table) {
     return b;
   });
   b.whereIn = jest.fn((col, vals) => { conds.push((r) => vals.includes(r[col])); return b; });
+  b.whereNotNull = jest.fn((col) => { conds.push((r) => r[col] != null); return b; });
   b.whereRaw = jest.fn((_sql, [templateKey]) => {
     conds.push((r) => {
       try { return JSON.parse(r.metadata).template_key === templateKey; } catch { return false; }
@@ -35,7 +32,21 @@ function builderFor(table) {
   b.orderBy = jest.fn(() => b);
   b.select = jest.fn(() => b);
   b.first = jest.fn(async () => rows()[0] || null);
-  b.insert = jest.fn(async (row) => { (state[table] = state[table] || []).push(row); return [1]; });
+  b.insert = jest.fn((row) => {
+    // knex upsert chain: insert(...).onConflict(key).merge(patch)
+    const chain = {
+      onConflict: (key) => ({
+        merge: async (patch) => {
+          const list = (state[table] = state[table] || []);
+          const existing = list.find((r) => r[key] === row[key]);
+          if (existing) Object.assign(existing, patch); else list.push(row);
+          return [1];
+        },
+      }),
+      then: (resolve, reject) => { (state[table] = state[table] || []).push(row); return Promise.resolve([1]).then(resolve, reject); },
+    };
+    return chain;
+  });
   b.update = jest.fn(async (vals) => { rows().forEach((r) => Object.assign(r, vals)); return rows().length; });
   b.then = (resolve, reject) => Promise.resolve(rows()).then(resolve, reject);
   return b;
@@ -48,7 +59,7 @@ const interaction = (templateKey, extra = {}) => ({
 
 beforeEach(() => {
   delete process.env.PM_GUARD_FIRSTS_WATCH;
-  state = { autopay_log: [], customer_interactions: [], system_settings: [] };
+  state = { autopay_log: [], customer_interactions: [], ops_email_send_state: [] };
   db.mockClear();
   db.mockImplementation((table) => builderFor(table));
   email.send.mockClear();
@@ -59,7 +70,7 @@ test('nothing happened yet → no email, no markers', async () => {
   const res = await runPaymentMethodFirstsWatch();
   expect(res).toEqual({ reported: [] });
   expect(email.send).not.toHaveBeenCalled();
-  expect(state.system_settings).toEqual([]);
+  expect(state.ops_email_send_state).toEqual([]);
 });
 
 test('first refusal → one ops email with the ids, marker persisted, no repeat on the next tick', async () => {
@@ -73,7 +84,7 @@ test('first refusal → one ops email with the ids, marker persisted, no repeat 
     body: expect.stringContaining('customer_id: cust-1'),
   }));
   expect(email.send.mock.calls[0][0].body).toContain('paused: yes');
-  expect(state.system_settings).toEqual([expect.objectContaining({ key: `${MARKER_PREFIX}removal_refused`, value: '2026-08-28T12:00:00.000Z' })]);
+  expect(state.ops_email_send_state).toEqual([expect.objectContaining({ email_key: `${MARKER_PREFIX}removal_refused`, last_sent_at: expect.any(Date) })]);
 
   email.send.mockClear();
   const again = await runPaymentMethodFirstsWatch();
@@ -96,16 +107,21 @@ test('an undelivered ops email leaves the first unmarked so the next tick retrie
   email.send.mockImplementation(async () => ({ ok: false, error: 'smtp down' }));
   const res = await runPaymentMethodFirstsWatch();
   expect(res).toEqual({ reported: [] });
-  expect(state.system_settings).toEqual([]);
+  expect(state.ops_email_send_state).toEqual([]);
 });
 
 test('all three reported → the watch retires (no reads of the watched tables)', async () => {
-  state.system_settings = ['removal_refused', 'autopay_disabled_email', 'method_removed_email']
-    .map((n) => ({ key: `${MARKER_PREFIX}${n}`, value: 'x' }));
+  state.ops_email_send_state = ['removal_refused', 'autopay_disabled_email', 'method_removed_email']
+    .map((n) => ({ email_key: `${MARKER_PREFIX}${n}`, last_sent_at: new Date() }));
   const res = await runPaymentMethodFirstsWatch();
   expect(res).toEqual({ retired: true });
   expect(db).not.toHaveBeenCalledWith('autopay_log');
   expect(db).not.toHaveBeenCalledWith('customer_interactions');
+});
+
+test('marker keys fit ops_email_send_state.email_key varchar(60)', () => {
+  const { FIRSTS } = require('../services/payment-method-firsts-watch');
+  for (const f of FIRSTS) expect(`${MARKER_PREFIX}${f.name}`.length).toBeLessThanOrEqual(60);
 });
 
 test('kill switch PM_GUARD_FIRSTS_WATCH=off → no-op', async () => {

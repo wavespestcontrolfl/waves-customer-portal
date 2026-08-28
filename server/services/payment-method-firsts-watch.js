@@ -11,10 +11,11 @@
  *      (both recorded by payment-lifecycle-email as customer_interactions
  *      email_outbound rows carrying template_key + status in metadata).
  *
- * Each first is reported ONCE: the reported-at timestamp is persisted in
- * system_settings (`pm_guard_firsts.<name>`), so a restart or a deploy
- * overlap can never re-send, and once all three are recorded the tick
- * no-ops — the watch retires itself. Read-only on the watched tables;
+ * Each first is reported ONCE: the send is stamped in ops_email_send_state
+ * (the repo's durable ops-email marker — same table every digest/watcher
+ * uses; key `pm-guard-first:<name>`), so a restart or a deploy overlap can
+ * never re-send, and once all three are stamped the tick no-ops — the
+ * watch retires itself. Read-only on the watched tables;
  * sends no customer-facing communications (ops inbox only).
  *
  * Kill switch: PM_GUARD_FIRSTS_WATCH=off (same convention as
@@ -25,7 +26,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const OPS_TO = 'contact@wavespestcontrol.com';
-const MARKER_PREFIX = 'pm_guard_firsts.';
+// ops_email_send_state.email_key is varchar(60); longest key here is 35 chars.
+const MARKER_PREFIX = 'pm-guard-first:';
 
 const FIRSTS = [
   {
@@ -91,24 +93,20 @@ function markerKey(name) {
 }
 
 async function loadMarkers() {
-  const rows = await db('system_settings')
-    .whereIn('key', FIRSTS.map((f) => markerKey(f.name)))
-    .select('key', 'value');
-  return new Set(rows.map((r) => r.key));
+  const rows = await db('ops_email_send_state')
+    .whereIn('email_key', FIRSTS.map((f) => markerKey(f.name)))
+    .whereNotNull('last_sent_at')
+    .select('email_key');
+  return new Set(rows.map((r) => r.email_key));
 }
 
-async function writeMarker(name, at) {
-  const key = markerKey(name);
-  const row = {
-    key,
-    value: new Date(at || Date.now()).toISOString(),
-    category: 'pm_guard_firsts',
-    description: `First occurrence reported to ops by payment-method-firsts-watch`,
-    updated_at: db.fn.now(),
-  };
-  const existing = await db('system_settings').where({ key }).first('key');
-  if (existing) await db('system_settings').where({ key }).update(row);
-  else await db('system_settings').insert(row);
+// Same upsert shape as promised-estimate-watcher / turf-variance-digest.
+async function stampMarker(name) {
+  const now = new Date();
+  await db('ops_email_send_state')
+    .insert({ email_key: markerKey(name), last_sent_at: now, updated_at: now })
+    .onConflict('email_key')
+    .merge({ last_sent_at: now, updated_at: now });
 }
 
 function isOff() {
@@ -154,7 +152,7 @@ async function runPaymentMethodFirstsWatch() {
       logger.error(`[pm-guard-firsts] ops email for ${first.name} did not send${res?.error ? `: ${res.error}` : ''}`);
       continue;
     }
-    await writeMarker(first.name, hit.at);
+    await stampMarker(first.name);
     sent.push(first.name);
     logger.info(`[pm-guard-firsts] reported ${first.name} (seen ${new Date(hit.at).toISOString()})`);
   }
