@@ -376,6 +376,13 @@ export class ApiClient {
     return this.request('/auth/me');
   }
 
+  updateAccountCreditPreference(autoApplyAccountCredit) {
+    return this.request('/auth/credit-preference', {
+      method: 'PUT',
+      body: JSON.stringify({ autoApplyAccountCredit: !!autoApplyAccountCredit }),
+    });
+  }
+
   getAuthProperties() {
     return this.request('/auth/properties');
   }

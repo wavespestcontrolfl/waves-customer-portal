@@ -51,7 +51,9 @@ const CUSTOMER = {
   monthlyRate: null, // per-application billing — no monthly subscription rate
   memberSince: '2024-03-14',
   referralCode: 'JORDAN941',
-  accountCredit: 0,
+  accountCredit: 45,
+  // portal slider (owner ruling 2026-08-28) — starts OFF; the stub below flips it
+  autoApplyAccountCredit: false,
   credits: [],
   annualPrepay: null,
   notificationPrefs: {
@@ -328,6 +330,7 @@ Object.assign(api, {
   // notifications
   getNotificationPrefs: async () => NOTIFICATION_PREFS,
   updateNotificationPrefs: async () => ({ success: true }),
+  updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
   getPropertyNotificationPrefs: async () => ({
     properties: [{
       id: 'cust-demo-1',

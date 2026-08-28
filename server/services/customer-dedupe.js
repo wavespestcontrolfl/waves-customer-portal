@@ -1338,6 +1338,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
       autopayRestrictions.autopay_enabled = false;
     }
+    // The account-credit auto-apply opt-in (owner ruling 2026-08-28) is
+    // consent the same way: the loser's ledger and cached balance move to
+    // the winner, so a retired row that said "don't apply my credit" must
+    // keep that answer on the surviving row — its credit would otherwise
+    // be consumed by the next automatic seam. Journaled + undone with the
+    // other most-restrictive columns.
+    if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
+      autopayRestrictions.auto_apply_account_credit = false;
+    }
     const pauseTs = (v) => (v ? new Date(v).getTime() : null);
     const loserPause = pauseTs(loser.autopay_paused_until);
     const winnerPause = pauseTs(winner.autopay_paused_until);

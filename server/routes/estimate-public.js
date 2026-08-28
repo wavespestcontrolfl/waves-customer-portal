@@ -10838,6 +10838,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             await applyAccountCreditToInvoice({
               invoiceId: invoiceIdResult,
               createdBy: 'system:prepay_accept',
+              // Customer-initiated, not automatic: the customer just
+              // accepted a prepay price presented net of this balance
+              // (inspection-credit offer + existing credit), so the apply
+              // proceeds regardless of the portal auto-apply slider
+              // (owner ruling 2026-08-28 gates AUTOMATIC seams only).
+              customerRequested: true,
               // Visit-scoped live payer guard IN the apply's own lock (hook
               // P0 r19): a payer assignment committing after the
               // converter's snapshot must not have this transaction consume
