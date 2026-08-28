@@ -39,6 +39,14 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  *    channel='sms').
  * 11. The commercial-schedule admin notification is deferred: dispatched
  *    exactly once after commit, never when the accept transaction rolls back.
+ *
+ * Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS, owner ruling 2026-08-28):
+ * 12. Gate on + the client attests the served version → ONE estimate_acceptances
+ *    row (verbatim snapshot, ip, ua, accepted_at) written in the accept
+ *    transaction, estimates.terms_version + customers.accepted_terms_version
+ *    stamped; a rolled-back accept leaves no record. A stale version 409s
+ *    TERMS_VERSION_STALE before any mutation. An absent version (older
+ *    bundle) or a gate-off server records nothing.
  */
 
 // ── In-memory fake knex ────────────────────────────────────────────────────
@@ -201,6 +209,16 @@ jest.mock('../services/lead-estimate-link', () => ({
   markLinkedLeadEstimateAccepted: jest.fn(async () => ({})),
   markLinkedLeadEstimateViewed: jest.fn(async () => ({})),
 }));
+// Gate values are fixed at module load; this passthrough lets the acceptance
+// -terms cases flip GATE_ESTIMATE_ACCEPTANCE_TERMS per test.
+const mockGateState = { acceptanceTerms: false };
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return {
+    ...actual,
+    isEnabled: (gate) => (gate === 'estimateAcceptanceTerms' ? mockGateState.acceptanceTerms : actual.isEnabled(gate)),
+  };
+});
 jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({})),
 }));
@@ -1117,5 +1135,110 @@ describe('P1 — accept txn lock order: rung 1 before every estimate row mutatio
     expect(storedEstimate().price_locked_at == null).toBe(true);
     expect(db.__state.tables.customers).toHaveLength(0);
     expect(InvoiceService.sendViaSMSAndEmail).not.toHaveBeenCalled();
+  });
+});
+
+describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
+  const acceptanceTerms = require('../services/acceptance-terms-text');
+  const CURRENT = acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
+
+  function conversionOk() {
+    EstimateConverter.convertEstimate.mockResolvedValueOnce({
+      customerId: 'cust-1',
+      tier: 'Bronze',
+      monthlyRate: 60,
+      firstScheduledServiceId: null,
+      recurringConversionSkipped: false,
+      welcomeSms: null,
+      membershipEmail: null,
+      deferredFollowUpReminderRows: [],
+    });
+  }
+
+  function seed(overrides) {
+    resetStore(recurringPestEstimate(overrides));
+    db.__state.tables.estimate_acceptances = [];
+  }
+
+  afterEach(() => { mockGateState.acceptanceTerms = false; });
+
+  test('gate on + attested version: one verbatim record in the accept txn, estimate + customer stamped', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-1', token: 'tok-terms-1-x0123456789' });
+    conversionOk();
+
+    const res = await fetch(`${base}/api/estimates/tok-terms-1-x0123456789/accept`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 (iPhone) Safari/604.1', 'X-Forwarded-For': '203.0.113.9' },
+      body: JSON.stringify({ termsVersion: CURRENT }),
+    });
+    expect(res.status).toBe(200);
+
+    const records = db.__state.tables.estimate_acceptances;
+    expect(records).toHaveLength(1);
+    // The accept path minted the customer row itself — the record follows
+    // that id, not the converter's.
+    const customerId = storedEstimate().customer_id;
+    expect(customerId).toBeTruthy();
+    expect(records[0]).toMatchObject({
+      estimate_id: 'est-terms-1',
+      customer_id: customerId,
+      method: 'public_estimate',
+      terms_version: CURRENT,
+      terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+      ip: '203.0.113.9',
+      user_agent: 'Mozilla/5.0 (iPhone) Safari/604.1',
+    });
+    expect(records[0].accepted_at).toBeTruthy();
+    expect(storedEstimate().terms_version).toBe(CURRENT);
+    expect(db.__state.tables.customers.find((c) => c.id === customerId).accepted_terms_version).toBe(CURRENT);
+  });
+
+  test('a rolled-back accept leaves no record and no stamps', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-2', token: 'tok-terms-2-x0123456789' });
+    EstimateConverter.convertEstimate.mockRejectedValueOnce(new Error('conversion boom'));
+
+    const failed = await putAccept('tok-terms-2-x0123456789', { termsVersion: CURRENT });
+    expect(failed.status).toBeGreaterThanOrEqual(500);
+    expect(storedEstimate().status).toBe('sent');
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+    expect(db.__state.tables.customers.some((c) => c.accepted_terms_version)).toBe(false);
+  });
+
+  test('stale version → 409 TERMS_VERSION_STALE before any mutation', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-3', token: 'tok-terms-3-x0123456789' });
+
+    const stale = await putAccept('tok-terms-3-x0123456789', { termsVersion: 'v2000-01' });
+    expect(stale.status).toBe(409);
+    expect(stale.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+  });
+
+  test('absent version (gate on) records nothing; attested version with the gate OFF records nothing', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
+    conversionOk();
+    const noVersion = await putAccept('tok-terms-4-x0123456789', {});
+    expect(noVersion.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+
+    mockGateState.acceptanceTerms = false;
+    seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
+    conversionOk();
+    const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
+    expect(gateOff.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+    // Gate off ⇒ a stale version is not even inspected.
+    seed({ id: 'est-terms-6', token: 'tok-terms-6-x0123456789' });
+    conversionOk();
+    const gateOffStale = await putAccept('tok-terms-6-x0123456789', { termsVersion: 'v2000-01' });
+    expect(gateOffStale.status).toBe(200);
   });
 });

@@ -104,6 +104,7 @@ const {
   createEstimateAddServiceRequest,
 } = require('../services/estimate-add-service-request');
 const featureGates = require('../config/feature-gates');
+const acceptanceTerms = require('../services/acceptance-terms-text');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
 const {
   parcelOverlayEnabled,
@@ -252,6 +253,34 @@ async function registerAcceptedEstimateAppointmentReminder({
 // First-view side-effects (status flip + admin in-app notification) use the
 // same gate; a filtered preview must not make the estimate look customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
+
+/** Customer-facing IP: first two octets only (IPv6: first two groups). */
+function maskIpForCustomer(ip) {
+  if (!ip || typeof ip !== 'string') return null;
+  if (ip.includes(':')) {
+    const g = ip.split(':').filter(Boolean);
+    return g.length >= 2 ? `${g[0]}:${g[1]}:…` : null;
+  }
+  const o = ip.split('.');
+  return o.length === 4 ? `${o[0]}.${o[1]}.x.x` : null;
+}
+
+/** Coarse device label for the acceptance record ("iPhone · Safari"). */
+function deviceLabelFromUserAgent(ua) {
+  if (!ua || typeof ua !== 'string') return null;
+  const device = /iPhone/i.test(ua) ? 'iPhone'
+    : /iPad/i.test(ua) ? 'iPad'
+      : /Android/i.test(ua) ? 'Android'
+        : /Macintosh/i.test(ua) ? 'Mac'
+          : /Windows/i.test(ua) ? 'Windows'
+            : 'Device';
+  const browser = /Edg\//i.test(ua) ? 'Edge'
+    : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'
+      : /Firefox\//i.test(ua) ? 'Firefox'
+        : /Safari\//i.test(ua) ? 'Safari'
+          : 'Browser';
+  return `${device} · ${browser}`;
+}
 
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
@@ -8705,6 +8734,27 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // setup fee.
     const isCommercialAccept = isCommercialAutoAcceptEstimate(estimate);
 
+    // Acceptance-terms attestation (GATE_ESTIMATE_ACCEPTANCE_TERMS). The
+    // client sends the version it RENDERED above the Accept button (same
+    // render-bound pattern as cardHoldDisclosureVersion). A version that no
+    // longer matches the copy this server serves means the tab is stale —
+    // refuse before any mutation so the customer reloads and sees the
+    // current line. An ABSENT version (older bundle mid-deploy, or gate off)
+    // records nothing: nothing was shown, so nothing is claimed.
+    const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
+      ? req.body.termsVersion.trim().slice(0, 40)
+      : '';
+    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms');
+    if (acceptanceTermsActive && acceptedTermsVersion
+      && acceptedTermsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
+      return res.status(409).json({
+        error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
+        code: 'TERMS_VERSION_STALE',
+      });
+    }
+    const recordAcceptanceTerms = acceptanceTermsActive
+      && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
+
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
     const slotId = req.body && typeof req.body.slotId === 'string' ? req.body.slotId.trim() : '';
@@ -10178,6 +10228,31 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
+      }
+
+      // Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): the verbatim
+      // terms the customer saw above Accept, the authorization instant, and
+      // the device — written in the SAME transaction as the accepted state
+      // so an estimate can never be accepted without its record (or vice
+      // versa). Retries of an already-accepted estimate never reach here
+      // (the guarded UPDATE above 409s first).
+      if (recordAcceptanceTerms) {
+        await trx('estimate_acceptances').insert({
+          estimate_id: estimate.id,
+          customer_id: customerId || null,
+          method: 'public_estimate',
+          terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION,
+          terms_text: acceptanceTerms.acceptanceTermsSnapshot(),
+          accepted_at: acceptAuthorizedAt,
+          ip: clientIp(req) || null,
+          user_agent: (req.get('user-agent') || '').slice(0, 1000) || null,
+        });
+        await trx('estimates').where({ id: estimate.id })
+          .update({ terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
+        if (customerId) {
+          await trx('customers').where({ id: customerId })
+            .update({ accepted_terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
+        }
       }
 
       // Copy the estimate's service-preference selections onto the customer
@@ -23414,6 +23489,34 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       }
     }
 
+    // Acceptance record for the document (GATE_ESTIMATE_ACCEPTANCE_TERMS):
+    // only for an accepted estimate that was recorded under the gate. The
+    // customer-facing shape masks the IP to its first two octets and reduces
+    // the user-agent to a family label — enough to say "this device, this
+    // moment" without printing raw telemetry on a PDF.
+    let acceptanceRecord = null;
+    if (estimate.status === 'accepted' && estimate.terms_version
+      && featureGates.isEnabled('estimateAcceptanceTerms')) {
+      try {
+        const row = await db('estimate_acceptances')
+          .where({ estimate_id: estimate.id })
+          .orderBy('accepted_at', 'desc')
+          .first();
+        if (row) {
+          acceptanceRecord = {
+            recordId: `ACC-${String(row.id).slice(0, 8).toUpperCase()}`,
+            termsVersion: row.terms_version,
+            termsText: row.terms_text,
+            acceptedAt: row.accepted_at,
+            ipMasked: maskIpForCustomer(row.ip),
+            device: deviceLabelFromUserAgent(row.user_agent),
+          };
+        }
+      } catch (e) {
+        logger.warn(`[estimate-data] acceptance record read failed for estimate ${estimate.id}: ${e.message}`);
+      }
+    }
+
     res.json({
       ...(propertyGroup ? { propertyGroup } : {}),
       // Authored commercial proposal, rendered on-page under the commercial
@@ -23448,6 +23551,12 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       // its "draft preview, not sent" banner + accept guards off this. Absent
       // (not false) otherwise so customer responses stay byte-identical.
       ...(adminDraftPreview ? { adminDraftPreview: true } : {}),
+      // Acceptance terms (GATE_ESTIMATE_ACCEPTANCE_TERMS): the line + drawer
+      // the page renders above Accept, served by the SERVER so the copy the
+      // customer sees is the copy the accept route records. Absent when the
+      // gate is off ⇒ response byte-identical to today.
+      ...(featureGates.isEnabled('estimateAcceptanceTerms') ? { acceptanceTerms: acceptanceTerms.acceptanceTermsPayload() } : {}),
+      ...(acceptanceRecord ? { acceptance: acceptanceRecord } : {}),
       ...(showYourWorkEnabled ? { showYourWork } : {}),
       // "Does the lawn size look off?" challenge sheet — the link renders
       // only when this is true, so gate-off responses stay byte-identical

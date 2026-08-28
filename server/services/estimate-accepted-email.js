@@ -18,9 +18,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const featureGates = require('../config/feature-gates');
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -46,6 +47,29 @@ function appointmentLineFor(appointment) {
   return `Your first visit is scheduled for ${formatETDay(start)}, ${formatETDate(start)} with a ${formatETTime(start)}–${formatETTime(end)} arrival window.`;
 }
 
+// Acceptance-terms copy promised "we ... email you a copy"
+// (GATE_ESTIMATE_ACCEPTANCE_TERMS). This is that copy: the verbatim line the
+// customer accepted (from the recorded row, never the live constant), the
+// instant, and where the full terms print. EMPTY when nothing was recorded —
+// renderBlocks drops the empty paragraph, so a gate-off email reads exactly
+// as before.
+async function acceptanceNoteFor(estimateId) {
+  if (!featureGates.isEnabled('estimateAcceptanceTerms')) return '';
+  const row = await db('estimate_acceptances')
+    .where({ estimate_id: estimateId })
+    .orderBy('accepted_at', 'desc')
+    .first('terms_version', 'terms_text', 'accepted_at');
+  if (!row) return '';
+  const estimate = await db('estimates').where({ id: estimateId }).first('token');
+  const at = row.accepted_at ? new Date(row.accepted_at) : null;
+  const when = at && !Number.isNaN(at.getTime())
+    ? ` on ${formatETDay(at)}, ${at.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: TZ })} at ${formatETTime(at)} ET`
+    : '';
+  const line = String(row.terms_text || '').split('\n')[0].trim();
+  const where = estimate?.token ? ` The full terms are printed on your accepted estimate: ${portalUrl(`/estimate/${estimate.token}`)}` : '';
+  return `You accepted electronically${when} (terms ${row.terms_version}): \u201c${line}\u201d${where}`;
+}
+
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment } = {}) {
   try {
     if (!customerId || !estimateId) return null;
@@ -64,6 +88,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
         first_name: clean(customer.first_name) || 'there',
         service_type: clean(serviceLabel) || 'service',
         appointment_line: appointmentLineFor(appointment),
+        acceptance_note: await acceptanceNoteFor(estimateId),
         customer_portal_url: portalUrl('/login'),
         company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
       },
@@ -87,4 +112,4 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
   }
 }
 
-module.exports = { sendEstimateAcceptedOnboarding, _private: { appointmentLineFor } };
+module.exports = { sendEstimateAcceptedOnboarding, _private: { appointmentLineFor, acceptanceNoteFor } };

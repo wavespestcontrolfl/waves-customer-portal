@@ -32,6 +32,15 @@ const LINE = '#C9CED4';
 const FONT = "'Inter', 'DM Sans', system-ui, -apple-system, 'Segoe UI', sans-serif";
 const PORTAL_FALLBACK = 'https://portal.wavespestcontrol.com';
 
+function formatAcceptedAt(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short',
+  });
+}
+
 // Same precedence as ServiceReportDocument.portalBase: the headless renderer
 // reaches this page through an internal hostname, so window.location.origin
 // would bake a non-customer host into the document — the server's canonical
@@ -603,6 +612,24 @@ export default function EstimateProposalDocument({ data, token }) {
             </p>
           )}
         </div>
+
+        {/* Acceptance record (GATE_ESTIMATE_ACCEPTANCE_TERMS): only when the
+            server served one — an accepted estimate recorded under the gate.
+            Prints the verbatim line + terms the customer saw and the
+            when/where/what-device of the tap, on this last page (owner
+            2026-08-28: never an added page). */}
+        {cta.terminalState === 'accepted' && data?.acceptance?.termsText ? (
+          <div className="doc-keep" data-testid="acceptance-record">
+            <SectionHeader>Service &amp; payment authorization</SectionHeader>
+            {String(data.acceptance.termsText).split('\n').map((line, i) => (
+              <p key={i} style={{ margin: '3px 0', fontSize: 11, lineHeight: 1.5, color: INK }}>{line}</p>
+            ))}
+            <div style={{ marginTop: 8, fontSize: 10.5, lineHeight: 1.6, color: MUTED }}>
+              <div><strong style={{ color: INK }}>Accepted electronically</strong> · {formatAcceptedAt(data.acceptance.acceptedAt)}</div>
+              <div>Terms {data.acceptance.termsVersion}{data.acceptance.device ? ` · ${data.acceptance.device}` : ''}{data.acceptance.ipMasked ? ` · IP ${data.acceptance.ipMasked}` : ''} · Record {data.acceptance.recordId}</div>
+            </div>
+          </div>
+        ) : null}
 
         {/* Footer */}
         <div style={{ marginTop: 16, paddingTop: 6, borderTop: `1px solid ${LINE}`, fontSize: 9.5, color: MUTED, lineHeight: 1.5 }}>

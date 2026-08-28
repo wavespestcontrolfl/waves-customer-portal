@@ -2776,7 +2776,47 @@ function MeasurementReviewSheet({ token, measuredBasis, onClose }) {
   );
 }
 
-export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false }) {
+/**
+ * Acceptance line + inline "View terms" drawer (GATE_ESTIMATE_ACCEPTANCE_TERMS,
+ * owner ruling 2026-08-28: same steps, least words, no extra page). Renders
+ * the copy the SERVER served (data.acceptanceTerms) — never a client constant —
+ * so what the customer reads is what the accept route records. The Accept
+ * tap itself is the acceptance; there is deliberately no checkbox. The
+ * drawer is a toggle (same pattern as InlineAutoPayCapture's "View full
+ * terms"), never a link off the estimate.
+ */
+function AcceptanceTermsLine({ terms }) {
+  const [open, setOpen] = useState(false);
+  if (!terms || !terms.line) return null;
+  const toggleId = 'estimate-acceptance-terms';
+  return (
+    <div data-testid="acceptance-terms" style={{ marginTop: 14, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
+      <span>{terms.line} </span>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-controls={toggleId}
+        style={{ background: 'none', border: 'none', padding: 0, fontSize: 14, color: ESTIMATE_TEXT, fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 3, whiteSpace: 'nowrap' }}
+      >
+        {open ? 'Hide terms' : 'View terms'}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          {open ? <path d="m18 15-6-6-6 6" /> : <path d="m6 9 6 6 6-6" />}
+        </svg>
+      </button>
+      {open ? (
+        <div id={toggleId} style={{ ...estimateInnerBox({ padding: '12px 14px', marginTop: 10 }), display: 'grid', gap: 8, fontSize: 14, lineHeight: 1.5, color: ESTIMATE_BODY }}>
+          <div style={{ fontSize: 12, letterSpacing: '0.06em', textTransform: 'uppercase', color: ESTIMATE_MUTED, fontWeight: 600 }}>Terms · {terms.version}</div>
+          {(terms.terms || []).map((t) => (
+            <div key={t.label}><strong style={{ color: ESTIMATE_TEXT }}>{t.label}</strong> — {t.text}</div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paymentPreference, secondsRemaining, onConfirm, onCancel, invoiceMode, invoiceOnly = false, siteConfirmationHold = false, manualScheduling = false, serviceMode, depositNote, submitting = false, autoPaySlot = null, acceptanceTermsSlot = null, confirmLabelOverride = null, confirmDisabled = false, submittingLabel = null, prefSwitch = null, prepayInLane = false, prepayCardCapture = false }) {
   const usingExistingAppointment = !!existingAppointment;
   const recurringPayPerApplication = serviceMode !== 'one_time' && paymentPreference === 'pay_at_visit';
   // A held (site-confirmation) recurring accept mints NO invoice whatever the
@@ -2853,6 +2893,7 @@ export function ReviewPhase({ slotId, slotMeta = null, existingAppointment, paym
       </div>
       {!usingExistingAppointment && !invoiceOnly && !manualScheduling ? <div style={{ marginTop: 16 }}><CountdownLine secondsRemaining={secondsRemaining} /></div> : null}
       {autoPaySlot}
+      {acceptanceTermsSlot}
       <div style={{ display: 'grid', gap: 12, marginTop: 16 }}>
         <button
           type="button"
@@ -4889,6 +4930,12 @@ function EstimateViewPageInner() {
           // have no other consent surface). Bump in lockstep with the
           // disclosure sentence.
           cardHoldDisclosureVersion: (serviceMode === 'one_time' && data?.cardHoldPolicy?.requiredForOneTime) ? 'sticky_v1' : undefined,
+          // Attests which acceptance-terms copy THIS TAB RENDERED above the
+          // Accept button — render-bound like cardHoldDisclosureVersion: sent
+          // only when the server served acceptanceTerms (gate on), with the
+          // version it served. The server records the verbatim text for that
+          // version, or 409s TERMS_VERSION_STALE if the copy moved under us.
+          termsVersion: data?.acceptanceTerms?.version || undefined,
           serviceMode,
           selectedFrequency,
           serviceCadences: serviceCadences || undefined,
@@ -4952,6 +4999,13 @@ function EstimateViewPageInner() {
           throw new Error(body.error || 'Save a card for Auto Pay to confirm your recurring plan.');
         }
         if (r.status === 409) {
+          if (body.code === 'TERMS_VERSION_STALE') {
+            // The acceptance copy changed since this tab loaded — refetch so
+            // the line above Accept is the one the server will record, keep
+            // the reservation and preference, and ask for one more tap.
+            await loadEstimate();
+            throw new Error(body.error || 'The terms were updated — please review the line above Accept and confirm again.');
+          }
           if (body.code === 'PREPAY_QUOTE_STALE') {
             // The acknowledged prepay total drifted (credit/deposit change
             // during the round trip — Codex #3492 r17). NOT a scheduling
@@ -6387,6 +6441,9 @@ function EstimateViewPageInner() {
                 onStateChange={handleInlineCardState}
                 prepay={paymentPreference === 'prepay_annual'}
               />
+            ) : null}
+            acceptanceTermsSlot={data?.acceptanceTerms ? (
+              <AcceptanceTermsLine terms={data.acceptanceTerms} />
             ) : null}
             confirmLabelOverride={inlineAutoPayActive && inlineCardIntent
               ? (paymentPreference === 'prepay_annual' ? 'Confirm & pay the 12-month plan' : 'Confirm booking & save card')
