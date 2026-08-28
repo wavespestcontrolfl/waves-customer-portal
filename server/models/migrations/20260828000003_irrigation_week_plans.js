@@ -14,6 +14,9 @@ exports.up = async function up(knex) {
     t.jsonb('weather_inputs').notNullable().defaultTo('{}');
     t.jsonb('restriction_policy');
     t.jsonb('week_plan').notNullable();
+    // sha1 of the plan JSON: mark-sent binds to the decision that was
+    // actually emailed, never to a stale unsent row from an earlier attempt.
+    t.string('decision_hash', 40).notNullable();
     // Set once the provider accepts the email built from this plan. A row
     // left null is a decision that was never delivered (send failed or was
     // suppressed) and is discarded by the sweep; the report renders only

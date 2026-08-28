@@ -172,25 +172,32 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
   });
 
-  test('persist inserts once and ignores a conflict; mark-sent stamps only unsent rows; discard deletes only unsent', async () => {
+  test('persist replaces only an UNSENT row and returns the decision hash; mark-sent binds to that hash; discard deletes only unsent', async () => {
     const calls = {};
     db.mockImplementation(() => ({
       insert(r) { calls.insert = r; return this; },
       onConflict(cols) { calls.conflict = cols; return this; },
+      merge(r) { calls.merged = r; return this; },
       ignore: async () => { calls.ignored = true; },
-      merge: async () => { calls.merged = true; },
-      where(w) { calls.where = w; return this; },
       whereNull(c) { calls.whereNull = c; return this; },
+      then(resolve) { return Promise.resolve(1).then(resolve); },
+      where(w) { calls.where = w; return this; },
       update: async (patch) => { calls.update = patch; return 1; },
       del: async () => { calls.deleted = true; return 1; },
     }));
-    expect(await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'hold' }, restriction: POLICY, decisionInputs: { runMinutes: 20 } })).toBe(true);
+    const plan = { action: 'hold', reasons: [] };
+    const hash = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 } });
+    expect(hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify(plan)).digest('hex'));
     expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
-    expect(calls.ignored).toBe(true);
-    expect(calls.merged).toBeUndefined();
+    expect(calls.merged.decision_hash).toBe(hash);
+    expect(calls.whereNull).toBe('irrigation_week_plans.sent_at'); // a SENT row is never replaced
+    expect(calls.ignored).toBeUndefined();
     expect(calls.insert.sent_at).toBeNull();
     expect(JSON.parse(calls.insert.weather_inputs)).toEqual({ runMinutes: 20 });
-    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
+    // mark-sent: keyed on the hash, unsent rows only; no hash → no-op.
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: hash })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: hash });
     expect(calls.whereNull).toBe('sent_at');
     expect(calls.update.sent_at).toBeInstanceOf(Date);
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });

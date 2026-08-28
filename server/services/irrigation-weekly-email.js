@@ -1046,7 +1046,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // a failed/blocked send discards it so the next run's plan is the
         // one both sent and stored.
         snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p };
-        await persistWeekPlan(snapshotArgs);
+        snapshotArgs.decisionHash = await persistWeekPlan(snapshotArgs);
       } else if (decision.weekPlanUnavailable) {
         summary.plan.unavailable += 1;
       }
@@ -1084,14 +1084,17 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
 
       if (snapshotArgs) {
-        if (result.sent && !result.deduped) {
-          // Pre-send insert may have failed transiently — one more try, then stamp.
-          await persistWeekPlan(snapshotArgs);
-          await markWeekPlanSent({ customerId: customer.id, weekEnding });
+        // The email built from THIS decision reached the provider — including
+        // the accepted-then-superseded race the library reports as
+        // sent+deduped+providerAttempted. A pure pre-send dedupe (nothing
+        // reached the provider) leaves the original send's row alone.
+        if (result.sent && (!result.deduped || result.providerAttempted)) {
+          // Pre-send write may have failed transiently — one more try, then
+          // stamp the row whose hash is this decision's.
+          const hash = snapshotArgs.decisionHash || await persistWeekPlan(snapshotArgs);
+          await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
         } else if (!result.deduped) {
-          // Blocked / not sent: this decision was never delivered. (A deduped
-          // rerun leaves whatever the original send stored — never a
-          // fabricated row from this run.)
+          // Blocked / not sent: this decision was never delivered.
           await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
         }
       }

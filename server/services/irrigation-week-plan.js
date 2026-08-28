@@ -20,6 +20,7 @@
  * your controller off"; "your permitted watering day" — never a weekday we
  * have not legally validated.
  */
+const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
@@ -236,17 +237,27 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
 /**
  * Snapshot lifecycle — exactness contract: the row the report renders is the
  * decision the SENT email was built from.
- *   persistWeekPlan()      before the send: insert, first write wins
- *   markWeekPlanSent()     after the provider accepts: stamp sent_at
+ *   persistWeekPlan()       before the send: insert, or REPLACE an existing
+ *                           UNSENT row (a died/failed earlier attempt) with
+ *                           this decision; a SENT row is never touched.
+ *                           Returns the decision hash.
+ *   markWeekPlanSent()      after the provider accepts: stamp sent_at on the
+ *                           row whose decision_hash matches — a stale row
+ *                           from another decision can never be stamped.
  *   discardUnsentWeekPlan() send failed/blocked/threw: drop the undelivered
- *                          row so the next run's (possibly different) plan is
- *                          the one that gets sent AND stored
+ *                           row so the next run's plan is the one both sent
+ *                           and stored.
  * A deduped rerun with no row (both inserts failed on the original run) is
  * left absent — the report shows no plan rather than one that was never
  * emailed. None of these throw — a snapshot problem must never block a send.
  */
-async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan, sentAt = null } = {}) {
-  if (!customerId || !weekEnding || !plan) return false;
+function decisionHash(plan) {
+  return crypto.createHash('sha1').update(JSON.stringify(plan)).digest('hex');
+}
+
+async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan } = {}) {
+  if (!customerId || !weekEnding || !plan) return null;
+  const hash = decisionHash(plan);
   try {
     const row = {
       customer_id: customerId,
@@ -255,24 +266,27 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
       weather_inputs: JSON.stringify(decisionInputs || {}),
       restriction_policy: JSON.stringify(restriction || null),
       week_plan: JSON.stringify(plan),
-      sent_at: sentAt,
+      decision_hash: hash,
+      sent_at: null,
       updated_at: db.fn.now(),
     };
     await db('irrigation_week_plans')
       .insert({ ...row, created_at: db.fn.now() })
       .onConflict(['customer_id', 'week_ending'])
-      .ignore();
-    return true;
+      .merge(row)
+      .whereNull('irrigation_week_plans.sent_at');
+    return hash;
   } catch (err) {
     logger.warn(`[irrigation-week-plan] snapshot failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return false;
+    return null;
   }
 }
 
-async function markWeekPlanSent({ customerId, weekEnding, sentAt = new Date() } = {}) {
+async function markWeekPlanSent({ customerId, weekEnding, decisionHash: hash, sentAt = new Date() } = {}) {
+  if (!hash) return false;
   try {
     const n = await db('irrigation_week_plans')
-      .where({ customer_id: customerId, week_ending: weekEnding })
+      .where({ customer_id: customerId, week_ending: weekEnding, decision_hash: hash })
       .whereNull('sent_at')
       .update({ sent_at: sentAt, updated_at: db.fn.now() });
     return n > 0;
@@ -345,5 +359,5 @@ module.exports = {
   markWeekPlanSent,
   discardUnsentWeekPlan,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash },
 };
