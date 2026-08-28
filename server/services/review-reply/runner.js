@@ -319,10 +319,16 @@ async function bell(row, { title, body, reason, action = false, extra = {}, link
 // park for a person to reconcile (the publish claim was abandoned by the
 // publisher and self-expires, blocking competitors meanwhile). Used by both
 // the cron path and Post-now.
-async function parkPersistFailed(row, draft, err) {
+async function parkPersistFailed(row, draft, err, { snapshot = undefined } = {}) {
   await db('google_reviews').where({ id: row.id }).update({
     auto_reply_status: STATUS.PARKED, auto_reply_reason: 'persist_failed', auto_reply_error: err.message,
-    ...(draft?.text ? { auto_reply_draft: draft.text, auto_reply_version: draft.version || null, auto_reply_mode: draft.mode || null } : {}),
+    ...(draft?.text ? {
+      auto_reply_draft: draft.text, auto_reply_version: draft.version || null, auto_reply_mode: draft.mode || null,
+      // The reply is LIVE: keep the draft's provenance so the sync that later
+      // confirms it as posted leaves full metadata (codex r32).
+      auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(),
+      ...(snapshot !== undefined ? { auto_reply_grounding: JSON.stringify(snapshot || null) } : {}),
+    } : {}),
     auto_reply_claimed_until: null,
   }).catch((e2) => logger.error(`[review-auto-reply] persist_failed bookkeeping also failed for ${row.id}: ${e2.message}`));
   // The next sync will record the live reply and the row leaves the default
@@ -592,7 +598,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   } catch (err) {
     let code = err instanceof ReviewReplyError ? err.code : 'unexpected';
     if (code === CODES.PERSIST_FAILED) {
-      await parkPersistFailed(merged, draft, err);
+      await parkPersistFailed(merged, draft, err, { snapshot });
       return { outcome: 'parked', reason: 'persist_failed' };
     }
     if (code === CODES.GOOGLE_UNCERTAIN) {
@@ -720,7 +726,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // request; inside the claim the current draft slot must equal it.
   if (expectedDraft !== undefined) {
     const shown = humanDraftOn(row)
-      || (row.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status) ? row.auto_reply_draft : null);
+      || (row.auto_reply_draft && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status) ? row.auto_reply_draft : null);
     if (String(expectedDraft || '').trim() !== String(shown || '').trim()) {
       await releaseClaim(row);
       throw new ReviewReplyError(CODES.STALE, 'The draft on this review changed since the page was loaded — reload it and read the current draft first.', { status: 409 });
@@ -737,7 +743,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   const humanDraft = humanDraftOn(row);
   let existing = humanDraft
     || (row.auto_reply_draft
-      && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status)
+      && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status)
       && storedFp === reviewFingerprint(row)
       && storedGrounding?.accountFingerprint === accountFpNow
       ? row.auto_reply_draft : null);
@@ -836,6 +842,9 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
 // once the reviewer edits it. Reconciliation parks (google_uncertain /
 // persist_failed: a PUT may be live) and human drafts are left alone.
 const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED]);
+// States whose stored pipeline draft is still offered to a person (Use Draft /
+// Post now): an admin Skip leaves the pipeline but keeps the draft useful.
+const DRAFT_HOLDING_STATUSES = [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED, STATUS.SKIPPED];
 // review_edited_after_post: a POSTED reply parked for a person after the
 // reviewer's first edit keeps that park (and Retract) through later edits.
 const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft', 'review_edited_after_post']);
@@ -1066,7 +1075,7 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
       try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
       if (current !== (gAccount || '')) return 'the customer facts changed since this draft was generated — reload and draft again';
     }
-    const holdsDraft = !!fresh.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(fresh.auto_reply_status);
+    const holdsDraft = !!fresh.auto_reply_draft && DRAFT_HOLDING_STATUSES.includes(fresh.auto_reply_status);
     const isStoredDraft = holdsDraft && submitted === String(fresh.auto_reply_draft).trim();
     // Draft identity travels with the request ("Use Draft" stamps the
     // review fingerprint the draft was loaded under): the editor keeps its

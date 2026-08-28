@@ -819,6 +819,30 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
+  test('PERSIST_FAILED park keeps drafted_at + grounding so a later sync confirmation has full metadata (codex r32)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('persist_failed', 'row write failed after the PUT', { status: 500 }); });
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_draft: GOOD_DRAFT.text });
+    expect(state.rows[0].auto_reply_drafted_at).toBeTruthy();
+    expect(JSON.parse(state.rows[0].auto_reply_grounding)).toMatchObject({ version: 'grounding-v1' });
+  });
+
+  test('a skipped row keeps its pipeline draft usable: Use Draft passes the guard and Post now reuses it (codex r32)', async () => {
+    const draft = 'Hi Dana, glad Marcus got the ants. Thanks for having us.';
+    const base = row({ id: 'sk', customer_id: 'c1', auto_reply_status: 'skipped', auto_reply_reason: 'admin_skip', auto_reply_draft: draft, review_reply: '[DRAFT] ' + draft });
+    const fresh = { ...base, auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' } };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(draft, { draftToken: Runner.reviewFingerprint(base) })(fresh)).toBeNull();
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [fresh];
+    const r = await Runner.postNow('sk', { type: 'admin' }, { expectedDraft: draft });
+    expect(r.outcome).toBe('posted');
+    expect(mockDraft).not.toHaveBeenCalled();
+  });
+
   test('a reused (retry) draft keeps its original drafted_at through retries and the eventual publish (codex r30)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

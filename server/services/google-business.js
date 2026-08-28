@@ -1126,8 +1126,16 @@ class GoogleBusinessService {
         if (identityCorroborated) {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
-        await db('google_reviews').where({ id: existing.id }).update(upd);
-        await this._reconcileReviewEdit(existing, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
+        // Content update + reviewer-edit reconciliation commit together (same
+        // reason as the authoritative upsert): a crash between them would
+        // leave the next sync seeing the edited text as the existing
+        // fingerprint. The action bell fires only after commit.
+        const placesEdit = { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id };
+        const edited = await db.transaction(async (trx) => {
+          await trx('google_reviews').where({ id: existing.id }).update(upd);
+          return this._reconcileReviewEdit(existing, placesEdit, { conn: trx, bell: false });
+        });
+        if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
         // A Places owner reply that differs from the local one goes through
         // the canonical sync path: it fills an empty slot, replaces a
         // "[DRAFT]", and — when the owner edited our POSTED reply directly

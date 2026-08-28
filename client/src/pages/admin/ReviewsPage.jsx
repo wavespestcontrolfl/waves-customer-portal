@@ -384,7 +384,14 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   // The card keeps its key across reloads; when the live reply changes
   // underneath it (retract, sync, Google-side edit) the editor must follow,
   // or a retracted reply could be re-posted from stale editor text.
-  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null); }, [review.reply]);
+  // The draft slot this editor session observed (sent as expectedDraft). A
+  // reload that changes the saved draft resets the editor too, so the
+  // observed value can never drift from what the editor was seeded with.
+  const [observedDraft, setObservedDraft] = useState(review.draftReply || null);
+  useEffect(() => {
+    setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null);
+    setObservedDraft(review.draftReply || null);
+  }, [review.reply, review.draftReply]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -393,7 +400,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: review.draftReply || null });
+      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: observedDraft });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);

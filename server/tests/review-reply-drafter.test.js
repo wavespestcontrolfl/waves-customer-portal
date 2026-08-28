@@ -132,6 +132,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r32: compromise / well-being family.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments don't compromise your pets' well-being."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with your family\'s welfare in mind.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and nothing we use will interfere with your dogs."))).toBe('banned_phrase');
     // codex r30: adverb-wrapped / "have an adverse effect" no-effect claims.
     expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't adversely affect your pets."))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and the product will not have an adverse effect on your dogs.'))).toBe('banned_phrase');

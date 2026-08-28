@@ -104,12 +104,15 @@ const BANNED_RE = new RegExp([
   '\\blethal\\w*\\b', '\\bfatal\\w*\\b', '\\bdeath\\w*\\b', '\\bdeadly\\b', '\\bd(?:ie|ies|ied|ying)\\b',
   '\\bkill\\w*\\s+(?:off\\s+)?(?:your\\s+|the\\s+|our\\s+|any\\s+|all\\s+|other\\s+|beneficial\\s+|good\\s+|small\\s+|young\\s+)?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|animals|birds|fish|reptiles|plants|flowers|grass|lawn|turf|trees?|shrubs?|garden|people|humans|anyone|anybody|everything|anything|bees|butterflies|pollinators|wildlife|beneficial\\w*|ladybugs)\\b',
   '\\bsick\\w*\\b', '\\bill\\b', '\\billness(?:es)?\\b', '\\bdisease\\w*\\b', '\\bsymptoms?\\b', '\\bailments?\\b', '\\bunwell\\b', '\\ballerg\\w*\\b', '\\birritat\\w*\\b', '\\bnause\\w*\\b', '\\bmedical\\b', '\\bhealth\\s+(?:risk|concern|hazard|issue|problem|effect|scare)s?\\b',
-  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)(?:\\s+[\\w'-]+){0,3}?\\s+(?:harm|hurt|affect|effect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos|kill|die|lethal|fatal|deadly|damag|distress|irritat|react)\\w*\\b",
+  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|nothing|none|nobody|neither|nor|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)(?:\\s+[\\w'-]+){0,3}?\\s+(?:harm|hurt|affect|effect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos|kill|die|lethal|fatal|deadly|damag|distress|irritat|react|compromis|jeopard|undermin|interfer|worr|concern)\\w*\\b",
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
   '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\bsuitab\\w*\\b',
   // "Benign / innocuous / inert / gentle / mild / non-harmful" — the same
   // pesticide-safety assertion in softer clothes (codex r28).
+  // Well-being / welfare / compromise family (codex r32): "won't compromise
+  // your pets' well-being" is the same assertion.
+  '\\bcompromis\\w*\\b', '\\bwell[- ]?being\\b', '\\bwelfare\\b', '\\bwellness\\b', '\\bpeace\\s+of\\s+mind\\b',
   '\\bbenign\\b', '\\binnocuous\\b', '\\binert\\b', '\\bgentle\\b', '\\bmild\\b', '\\bnon[- ]?(?:harmful|lethal|hazardous|irritating|aggressive|invasive|toxic|poisonous)\\b', '\\blow[- ](?:risk|impact|toxicity|odou?r)\\b',
   // Suitability / tolerance framing in any wrapper ("suitable around pets",
   // "appropriate for use near children", "no problem with your dogs"), and
