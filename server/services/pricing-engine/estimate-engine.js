@@ -759,7 +759,10 @@ function generateEstimate(input) {
       // only a row the resolver SIGNED for this input's address is
       // honored (trustedUnitBand) — a hand-built or transplanted snapshot
       // prices on the standard ladder.
-      const bandVerdict = trustedUnitBand(input, 'pest', { requestedFrequency: services.pest.frequency || 'quarterly' });
+      const bandVerdict = trustedUnitBand(input, 'pest', {
+        requestedFrequency: services.pest.frequency || 'quarterly',
+        roachType: services.pest.roachType || 'none',
+      });
       const result = bandVerdict.status === 'trusted'
         ? pricePestControlUnitBand(property, {
           band: bandVerdict.band,
@@ -1181,7 +1184,7 @@ function generateEstimate(input) {
     if (propertyIsCommercial) {
       addCommercialManualQuote('pest_control');
     } else {
-      const oneTimeVerdict = trustedUnitBand(input, 'oneTimePest');
+      const oneTimeVerdict = trustedUnitBand(input, 'oneTimePest', { roachType: services.oneTimePest.roachType || 'none' });
       const result = oneTimeVerdict.status === 'trusted'
         ? priceOneTimePestUnitBand(property, {
           band: oneTimeVerdict.band,

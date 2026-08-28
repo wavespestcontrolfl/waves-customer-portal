@@ -40,7 +40,9 @@ jest.mock('../models/db', () => {
   const dbMock = jest.fn((table) => makeBuilder(table));
   // withClarifyLock: transaction executor doubles as the query builder; the
   // advisory-lock raw() is a no-op here.
-  const trx = Object.assign((table) => makeBuilder(table), { raw: async () => ({}) });
+  const trx = Object.assign((table) => makeBuilder(table), {
+    raw: async (sql, params) => { if (/pg_advisory_xact_lock/.test(String(sql))) mockState.locks.push(params); return {}; },
+  });
   dbMock.transaction = async (callback) => callback(trx);
   dbMock.raw = async () => ({});
   return dbMock;
@@ -102,7 +104,7 @@ const {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [] };
+  mockState = { existingDraft: null, firstQueue: [], inserts: [], updates: [], updateResults: [], locks: [] };
   mockIsEnabled.mockImplementation((key) => key === 'estimateClarifyAsks');
   mockNotifyAdmin.mockResolvedValue({ id: 'bell-1' });
 });
@@ -872,6 +874,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     };
     const result = await handleClarifyReply({ phone: '+19415550142', body: "It's a 2 bedroom, thanks" });
     expect(result.handled).toBe(true);
+    await result.repricePromise;
     expect(mockState.updates.some((u) => u.table === 'leads' || u.table === 'customers')).toBe(false);
     const bookkeeping = mockState.updates.find((u) => u.table === 'message_drafts');
     const flags = JSON.parse(bookkeeping.payload.flags);
@@ -885,6 +888,23 @@ describe('bedroom_count ask (unit-band lane)', () => {
       skipIntentGate: true, skipCooldown: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 2,
     }));
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('flag patches take the phone-scoped clarify lock (advisory xact lock) — never an unlocked read-modify-write; the webhook returns before the re-draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    let releaseDraft;
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: new Promise((resolve) => { releaseDraft = resolve; }) });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+    };
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    // Returned while the re-draft is still running (detached from the webhook).
+    expect(result.handled).toBe(true);
+    releaseDraft({ created: true, estimateId: 'x' });
+    await result.repricePromise;
+    // one lock for the reply record + one per flag stamp (pending, then cleared)
+    expect(mockState.locks.filter((l) => l[1] === '9415550142')).toHaveLength(3);
   });
 
   test('a VOICE-origin draft re-runs from its original call with the answer applied (the SMS thread has no quote evidence)', async () => {
@@ -901,6 +921,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
     const result = await handleClarifyReply({ phone: '+19415550142', body: 'one bedroom' });
     expect(result.handled).toBe(true);
+    await result.repricePromise;
     expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
       callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 1,
     });
@@ -924,7 +945,8 @@ describe('bedroom_count ask (unit-band lane)', () => {
     const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9' } }) };
     mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red', reasons: ['composer skipped'] });
-    await handleClarifyReply({ phone: '+19415550142', body: '2 bedroom' });
+    const failed = await handleClarifyReply({ phone: '+19415550142', body: '2 bedroom' });
+    await failed.repricePromise;
     const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
     expect(stamps[stamps.length - 1].reprice_pending).toMatchObject({ estimate_id: 'est-1', bedroom_count: 2 });
     expect(stamps.some((f) => f.repriced_estimate_id)).toBe(false);
@@ -947,7 +969,8 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
     // Detached thread draft: the re-price waits on its outcome.
     mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: Promise.resolve({ created: true, estimateId: 'est-2b' }) });
-    await handleClarifyReply({ phone: '+19415550142', body: 'studio' });
+    const smsResult = await handleClarifyReply({ phone: '+19415550142', body: 'studio' });
+    await smsResult.repricePromise;
     expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
     expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-2', bedroomCountOverride: 0 }));
     const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));

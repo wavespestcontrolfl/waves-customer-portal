@@ -47,8 +47,13 @@ const withGate = (value, fn) => withEnv('GATE_UNIT_BAND_PRICING', value, fn);
 
 // Snapshot signing needs the server secret (fail closed without it).
 const TEST_SECRET = 'unit-band-test-secret';
-beforeAll(() => { process.env.JWT_SECRET = TEST_SECRET; });
-afterAll(() => { delete process.env.JWT_SECRET; });
+let priorJwtSecret;
+beforeAll(() => { priorJwtSecret = process.env.JWT_SECRET; process.env.JWT_SECRET = TEST_SECRET; });
+afterAll(() => {
+  // process.env persists across files on one worker — restore, never delete.
+  if (priorJwtSecret === undefined) delete process.env.JWT_SECRET;
+  else process.env.JWT_SECRET = priorJwtSecret;
+});
 
 // Minimal knex stand-in for residential_unit_pricing reads.
 function fakeDb(rows, { fail = false } = {}) {
@@ -367,6 +372,26 @@ describe('snapshot integrity (hook P0 — engineInputs are browser-controlled)',
     // A cadence row whose signature is off is untrusted even when the primary verifies.
     const forged = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly, bi_monthly: { ...biMonthly, recurringPrice: 1 } } } };
     expect(verdict(forged, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'signature' });
+  });
+  test('eligibility is re-checked on replay: a real unit sqft, a roach program, or commercial makes a signed snapshot INELIGIBLE (standard pricer, not fail-closed)', () => {
+    const base = { address: ADDRESS, unitBandPricing: { pest: signed() } };
+    expect(verdict({ ...base, homeSqFt: 780 }, 'pest')).toEqual({ status: 'ineligible', reason: 'unit_sqft_resolved' });
+    expect(verdict({ ...base, footprintSqFt: 600 }, 'pest').status).toBe('ineligible');
+    expect(verdict({ ...base, isCommercial: true }, 'pest')).toEqual({ status: 'ineligible', reason: 'commercial_intent' });
+    expect(verdict(base, 'pest', { roachType: 'german' })).toEqual({ status: 'ineligible', reason: 'roach_program' });
+    const measured = generateEstimate({
+      services: { pest: { frequency: 'quarterly' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
+      address: ADDRESS, homeSqFt: 780, unitBandPricing: { pest: signed() },
+    }).lineItems.find((l) => l.service === 'pest_control');
+    expect(measured.pricingBasis).toBeUndefined();
+    expect(measured.quoteRequired).toBeFalsy();
+    expect(measured.perApp).toBeGreaterThan(0);
+    const roach = generateEstimate({
+      services: { pest: { frequency: 'quarterly', roachType: 'german' } }, propertyType: 'unknown', stories: 1, isCommercial: false,
+      address: ADDRESS, unitBandPricing: { pest: signed() },
+    }).lineItems.find((l) => l.service === 'pest_control');
+    expect(roach.pricingBasis).toBeUndefined();
+    expect(roach.roachType).toBe('german');
   });
   test('an untrusted snapshot FAILS CLOSED in the engine: quote-required line with no dollars, never the footprint ladder (hook P0)', () => {
     const line = generateEstimate({

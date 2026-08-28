@@ -227,6 +227,10 @@ function verifyUnitBandSnapshot(band, subjectAddress) {
  * The engine's ONLY door to a band row. Verdicts:
  *   { status: 'absent' }                 — no snapshot for this key: the
  *                                          standard footprint pricer runs.
+ *   { status: 'ineligible', reason }     — a snapshot exists but the CURRENT
+ *                                          input no longer qualifies for a
+ *                                          band (real sqft, roach program,
+ *                                          commercial): standard pricer.
  *   { status: 'trusted', band }          — signed for this input's address,
  *                                          names this engine key, carries
  *                                          the REQUESTED cadence.
@@ -245,10 +249,22 @@ function verifyUnitBandSnapshot(band, subjectAddress) {
  * from one stored input; the row for the requested cadence is selected
  * here, so a quarterly row can never authorize a bi-monthly price.
  */
-function trustedUnitBand(engineInput, key, { requestedFrequency } = {}) {
+function trustedUnitBand(engineInput, key, { requestedFrequency, roachType } = {}) {
   const snapshot = engineInput?.unitBandPricing;
   const primary = snapshot?.[key];
   if (!primary || typeof primary !== 'object') return { status: 'absent' };
+  // Eligibility is re-checked against the CURRENT input on every replay
+  // (the admin save path recomputes from client-edited inputs): a unit
+  // that now carries a real measurement prices on the standard ladder,
+  // and a roach program keeps its own rules — a still-valid signature
+  // must not pin the band once the inputs that justified it are gone.
+  // These are legitimate re-pricings, so the verdict is 'ineligible'
+  // (standard pricer), not 'untrusted' (fail closed).
+  const measured = [engineInput.homeSqFt, engineInput.footprintSqFt, engineInput.footprint, engineInput.livingAreaSqFt, engineInput.buildingSqFt]
+    .some((v) => Number(v) > 0);
+  if (measured) return { status: 'ineligible', reason: 'unit_sqft_resolved' };
+  if (engineInput.isCommercial === true) return { status: 'ineligible', reason: 'commercial_intent' };
+  if (String(roachType || 'none').toLowerCase() !== 'none') return { status: 'ineligible', reason: 'roach_program' };
   let band = primary;
   if (key === 'pest') {
     const cadence = bandFrequencyForIntent(requestedFrequency || primary.intentFrequency || 'quarterly');

@@ -310,19 +310,24 @@ async function parkClarifyAsk({
 // deterministic split. Returns { address, serviceTail }.
 // Merge a patch into the ask row's flags (read-modify-write; null values
 // delete the key). Bookkeeping only — never touches status/copy.
-async function stampClarifyFlags(draftId, patch) {
+async function stampClarifyFlags(digits, draftId, patch) {
+  // UNDER the phone-scoped clarify lock every other flags mutation takes —
+  // an unlocked read-modify-write could overwrite a concurrent reply's
+  // committed missing/answered_at/linkage state.
   try {
-    const row = await db('message_drafts').where({ id: draftId }).first('flags');
-    if (!row) return false;
-    let current = {};
-    try { current = typeof row.flags === 'string' ? JSON.parse(row.flags) : (row.flags || {}); } catch { current = {}; }
-    const next = { ...current };
-    for (const [k, v] of Object.entries(patch || {})) {
-      if (v === null || v === undefined) delete next[k];
-      else next[k] = v;
-    }
-    await db('message_drafts').where({ id: draftId }).update({ flags: JSON.stringify(next) });
-    return true;
+    return await withClarifyLock(digits, async (trx) => {
+      const row = await trx('message_drafts').where({ id: draftId }).first('flags');
+      if (!row) return false;
+      let current = {};
+      try { current = typeof row.flags === 'string' ? JSON.parse(row.flags) : (row.flags || {}); } catch { current = {}; }
+      const next = { ...current };
+      for (const [k, v] of Object.entries(patch || {})) {
+        if (v === null || v === undefined) delete next[k];
+        else next[k] = v;
+      }
+      await trx('message_drafts').where({ id: draftId }).update({ flags: JSON.stringify(next) });
+      return true;
+    });
   } catch (err) {
     logger.warn(`[estimate-clarify] flag stamp failed: ${err.message}`);
     return false;
@@ -618,65 +623,66 @@ async function handleClarifyReply({ phone, body }) {
       ? String(flags.estimate_id)
       : null;
     if (repriceTarget) {
-      await stampClarifyFlags(awaiting.id, {
+      await stampClarifyFlags(digits, awaiting.id, {
         reprice_pending: { estimate_id: repriceTarget, bedroom_count: bedroomCount, at: new Date().toISOString() },
       });
     }
-    let repriceOutcome = null;
 
-    // Resume drafting when the SMS engine lane is armed — the thread now
-    // carries the answer, so the composer gets everything in one pass. The
-    // engine's own duplicate guard and bell dedupe absorb re-runs.
-    try {
-      const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
-      // A bedroom answer re-prices the draft it was asked FOR: the
-      // fallback-priced yellow draft linked on the ask is superseded by
-      // a re-draft (retired atomically with the replacement insert — a
-      // red/skip outcome leaves it standing). A VOICE-origin draft re-runs
-      // from its original call (the quote evidence — enriched extraction
-      // + transcript — lives there; the SMS thread holds only the
-      // question and the answer, so its composer would skip); an
-      // SMS-origin draft re-drafts from the thread. Address/service
-      // answers have no linked draft (red-path asks) and resume as before.
-      const supersedeEstimateId = recorded.includes('bedroom_count') && flags.estimate_id
-        ? String(flags.estimate_id)
-        : null;
-      const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
-      if (voiceCallLogId) {
-        const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
-        if (estimatorEngineEnabled()) {
-          repriceOutcome = await maybeDraftEstimateForCall({
-            callLogId: voiceCallLogId,
-            quotePromised: true,
-            supersedeEstimateId,
-            supersedeReason: 'clarify_bedroom_reply',
-            bedroomCountOverride: bedroomCount,
+    // The re-draft runs DETACHED: this handler sits on the Twilio inbound
+    // webhook, and a voice re-run does property gathering plus a full
+    // composition — awaiting it would hold the response open past
+    // Twilio's timeout (the SMS path detaches for the same reason). The
+    // answer and the reprice_pending stamp are already durable above.
+    const repricePromise = (async () => {
+      let repriceOutcome = null;
+      try {
+        const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
+        // A bedroom answer re-prices the draft it was asked FOR: the
+        // fallback-priced yellow draft linked on the ask is superseded by
+        // a re-draft (retired atomically with the replacement insert — a
+        // red/skip outcome leaves it standing). A VOICE-origin draft re-runs
+        // from its original call (the quote evidence — enriched extraction
+        // + transcript — lives there; the SMS thread holds only the
+        // question and the answer, so its composer would skip); an
+        // SMS-origin draft re-drafts from the thread. Address/service
+        // answers have no linked draft (red-path asks) and resume as before.
+        const supersedeEstimateId = repriceTarget;
+        const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
+        if (voiceCallLogId) {
+          const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
+          if (estimatorEngineEnabled()) {
+            repriceOutcome = await maybeDraftEstimateForCall({
+              callLogId: voiceCallLogId,
+              quotePromised: true,
+              supersedeEstimateId,
+              supersedeReason: 'clarify_bedroom_reply',
+              bedroomCountOverride: bedroomCount,
+            });
+          } else {
+            logger.warn('[estimate-clarify] bedroom answer recorded but the estimator engine is gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+          }
+        } else if (smsThreadDraftsEnabled()) {
+          const started = await startSmsThreadDraft({
+            phone,
+            triggerBody: body,
+            skipIntentGate: true,
+            skipCooldown: true,
+            ...(supersedeEstimateId
+              ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: bedroomCount }
+              : {}),
           });
-        } else {
-          logger.warn('[estimate-clarify] bedroom answer recorded but the estimator engine is gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+          // The thread draft is itself detached — wait for its outcome only
+          // when a re-price depends on it.
+          repriceOutcome = supersedeEstimateId && started?.draftPromise ? await started.draftPromise : started;
+        } else if (supersedeEstimateId) {
+          logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
         }
-      } else if (smsThreadDraftsEnabled()) {
-        const started = await startSmsThreadDraft({
-          phone,
-          triggerBody: body,
-          skipIntentGate: true,
-          skipCooldown: true,
-          ...(supersedeEstimateId
-            ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: bedroomCount }
-            : {}),
-        });
-        // The thread draft is detached — wait for its outcome only when a
-        // re-price depends on it.
-        repriceOutcome = supersedeEstimateId && started?.draftPromise ? await started.draftPromise : started;
-      } else if (supersedeEstimateId) {
-        logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+      } catch (resumeErr) {
+        logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
       }
-    } catch (resumeErr) {
-      logger.warn(`[estimate-clarify] resume failed (answer recorded): ${resumeErr.message}`);
-    }
-    if (repriceTarget) {
+      if (!repriceTarget) return repriceOutcome;
       if (repriceOutcome?.created === true) {
-        await stampClarifyFlags(awaiting.id, {
+        await stampClarifyFlags(digits, awaiting.id, {
           reprice_pending: null,
           repriced_at: new Date().toISOString(),
           repriced_estimate_id: repriceOutcome.estimateId || null,
@@ -702,10 +708,14 @@ async function handleClarifyReply({ phone, body }) {
           logger.warn(`[estimate-clarify] reprice-pending bell failed (stamp stands): ${bellErr.message}`);
         }
       }
-    }
+      return repriceOutcome;
+    })();
+    repricePromise.catch((err) => logger.warn(`[estimate-clarify] detached re-draft failed: ${err.message}`));
 
     logger.info('[estimate-clarify] clarify reply recorded', { draftId: awaiting.id, recorded });
-    return { handled: true };
+    // repricePromise is exposed for callers/tests that must observe the
+    // detached outcome; the webhook never awaits it.
+    return { handled: true, repricePromise };
   } catch (err) {
     logger.warn(`[estimate-clarify] reply handling failed: ${err.message}`);
     return { handled: false };
