@@ -131,17 +131,19 @@ function liveReviewChanged(live, row) {
     || (!!liveName && liveName !== String(row.reviewer_name || '').trim().toLowerCase());
 }
 
-async function recordLiveOwnerReply(reviewId, live) {
+async function recordLiveOwnerReply(reviewId, live, fresh) {
   const liveReply = String(live?.reviewReply?.comment || '').trim();
   if (!liveReply) return;
+  // ONE status writer for "Google shows an owner reply" (codex r37): the
+  // sync's syncReplyFields — pending states close as owner_replied_on_google,
+  // a POSTED automatic reply the owner edited on Google closes as
+  // skipped/edited_on_google (Retract must not delete their edit), a
+  // reconciliation park whose live text is our draft closes as posted. The
+  // publish claim we hold is ours, so the snapshot is judged without it.
+  const { syncReplyFields } = require('./runner');
+  const fields = syncReplyFields({ ...(fresh || {}), publish_claimed_until: null }, { owner_reply: liveReply, owner_reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() });
   await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-    .update({
-      review_reply: liveReply,
-      reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(),
-      auto_reply_status: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'skipped' ELSE auto_reply_status END"),
-      auto_reply_reason: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'already_replied' ELSE auto_reply_reason END"),
-      auto_reply_claimed_until: null,
-    })
+    .update({ ...fields, auto_reply_claimed_until: null })
     .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
 }
 
@@ -326,7 +328,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         if (liveReply) {
-          await recordLiveOwnerReply(reviewId, live);
+          await recordLiveOwnerReply(reviewId, live, fresh);
           throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }
         // The LIVE review itself must still be the one the reply was drafted
@@ -365,7 +367,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           : (hasRealReply(review.review_reply) ? String(review.review_reply).trim() : '');
         if (liveReply !== seenReply) {
           if (liveReply) {
-            await recordLiveOwnerReply(reviewId, live);
+            await recordLiveOwnerReply(reviewId, live, fresh);
             throw new ReviewReplyError(CODES.STALE, 'The reply on Google changed since this review was loaded — reload it and try again.', { status: 409 });
           }
           // The owner deleted the reply directly in Google: a stale editor

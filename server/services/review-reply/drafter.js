@@ -115,6 +115,9 @@ const BANNED_RE = new RegExp([
   // "Unaffected / untouched / no negative consequences" (codex r34): the
   // outcome nouns and un-* adjectives are banned outright.
   '\\bunaffected\\b', '\\buntouched\\b', '\\bunbothered\\b', '\\bunscathed\\b', '\\bunharmed\\b', '\\bunhurt\\b', '\\bintact\\b', '\\bconsequences?\\b', '\\bside[- ]?effects?\\b', '\\bafter[- ]?effects?\\b', '\\brepercussions?\\b', '\\bdownsides?\\b', '\\bdrawbacks?\\b', '\\b(?:negative|adverse|ill|bad|unwanted|harmful|lasting)\\s+(?:[\\w-]+\\s+){0,2}?(?:effects?|outcomes?|reactions?|impacts?|results?)\\b',
+  // Quality-of-life / preserve / safeguard framing (codex r37).
+  '\\bquality\\s+of\\s+life\\b', '\\bpreserv\\w*\\b', '\\bsafeguard\\w*\\b', '\\bshield\\w*\\b',
+  '\\b(?:protect|defend|keep|look\\s+after|watch\\s+over|care\\s+for)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|loved\\s+ones|people|animals|grandkids|grandchildren)\\b',
   '\\bcompromis\\w*\\b', '\\bwell[- ]?being\\b', '\\bwelfare\\b', '\\bwellness\\b', '\\bpeace\\s+of\\s+mind\\b',
   '\\bbenign\\b', '\\binnocuous\\b', '\\binert\\b', '\\bgentle\\b', '\\bmild\\b', '\\bnon[- ]?(?:harmful|lethal|hazardous|irritating|aggressive|invasive|toxic|poisonous)\\b', '\\blow[- ](?:risk|impact|toxicity|odou?r)\\b',
   // Suitability / tolerance framing in any wrapper ("suitable around pets",

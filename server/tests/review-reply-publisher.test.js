@@ -121,13 +121,15 @@ describe('publishReviewReply', () => {
   });
 
   test('automation checks Google\'s LIVE owner reply inside the claim and yields to it', async () => {
+    state.rows[0].auto_reply_status = 'queued';
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner replied in Google directly', updateTime: '2026-08-27T10:00:00Z' } });
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBe('Owner replied in Google directly');
-    // Pending pipeline state is closed in the same write (raw CASE — the mock stores the raw object).
-    expect(state.rows[0].auto_reply_status).toBeDefined();
+    // Pending pipeline state is closed in the same write, through the sync's
+    // own status writer (codex r37).
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });
     expect(state.rows[0].auto_reply_claimed_until).toBeNull();
     // A read failure fails closed (retry later), never posts.
     state.rows[0].review_reply = null;
@@ -214,6 +216,10 @@ describe('publishReviewReply', () => {
       .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBe('Owner rewrote this in Google');
+    // codex r37: recording the owner's Google edit over OUR posted reply closes
+    // the automatic state the same way the sync does — Retract must not be
+    // offered for their text.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' });
     // Matching live reply → the overwrite proceeds.
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner rewrote this in Google' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     let r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
