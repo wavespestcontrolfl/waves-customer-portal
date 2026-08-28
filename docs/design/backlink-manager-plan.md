@@ -362,6 +362,7 @@ t.text('merchant_idempotency_key');                 // sent to the merchant/chec
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
+t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
 
@@ -437,10 +438,17 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   placement whose purchase is `submitting` or `ambiguous`, so a reclaimed lease cannot
   re-submit the same checkout. A reported timeout/disconnect after submission →
   `ambiguous` directly.
-- **Ambiguity is reconciled, not retried.** `ambiguous` rows count against the month's
-  budget and are cleared only by `reconcile` (card-issuer transaction lookup by
-  `merchant_idempotency_key`/amount/time, or the owner card) → `reconciled_charged` /
-  `reconciled_not_charged`. A `reserved` row whose attempt fails *before* `submitting` is
+- **Ambiguity is reconciled, not retried — and the card is frozen first.** The moment a
+  row becomes `ambiguous` (reported timeout, or the sweep on an abandoned `submitting`), the
+  worker/sweep **closes the single-use card at the issuer immediately** — before any
+  reconciliation, before any budget accounting changes — and records `card_closed_at`. A
+  merchant retry or late capture therefore has no live instrument to hit. `ambiguous` rows
+  keep consuming the month's budget until `reconcile` (issuer transaction lookup by
+  `issuer_card_id`/amount/time, or the owner card) settles them: `reconciled_charged` when a
+  capture exists; `reconciled_not_charged` **only when the issuer confirms the card is
+  irrevocably closed AND shows no captured or pending authorization** — that confirmation is
+  the precondition for releasing the budget and allowing a new generation, never a lookup
+  that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
 - **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
   prior state (`reserved→submitting`, `submitting→charged|voided|ambiguous`); a stale lease
