@@ -163,4 +163,26 @@ describe('resolveApplicationRate', () => {
     expect(resolveApplicationRate({ systemType: ['drip', 'rotor'] }).headType).toBe('rotor');
     expect(resolveApplicationRate({ systemType: ['spray', 'rotor'] }).rateInPerHr).toBeNull();
   });
+
+  test('typed inches never produce per-zone minutes for mixed / drip-only / missing head types (events-only)', () => {
+    const typed = { explicitInchesPerWeek: 2, runMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'] };
+    for (const systemType of [['spray', 'rotor'], ['drip'], [], null]) {
+      const r = resolveApplicationRate({ ...typed, systemType });
+      expect(r.rateSource).toBeNull();
+      expect(r.rateInPerHr).toBeNull();
+      const p = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, ...typed, systemType });
+      expect(p.action).toBe('run');
+      expect(p.minutesPerEvent).toBeNull();
+    }
+  });
+
+  test('a measured rate yields whole minutes; a default rate rounds to 5', () => {
+    // 1.8"/wk over 20 min × 4 days = 1.35 in/hr measured → ¾" in 33 min (not 35)
+    const measured = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, explicitInchesPerWeek: 1.8, ...SPRAY });
+    expect(measured.rateSource).toBe('measured');
+    expect(measured.minutesPerEvent).toBe(33);
+    const assumed = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(assumed.rateSource).toBe('system_type_default');
+    expect(assumed.minutesPerEvent).toBe(30);
+  });
 });

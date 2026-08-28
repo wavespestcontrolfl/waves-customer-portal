@@ -220,18 +220,24 @@ function finiteOrNull(v) {
  */
 function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDays, systemType } = {}) {
   const inputs = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
+  // A per-zone runtime needs ONE turf head type: a mixed system's zones put
+  // down water at very different rates, drip doesn't irrigate turf, and an
+  // unknown/missing type can't be converted — all stay events-only, even
+  // when weekly inches were typed (a whole-system average is not a per-zone
+  // minute figure).
+  const turfHeads = inputs.headTypes.filter((h) => h !== 'drip');
+  if (turfHeads.length !== 1 || HEAD_PRECIP_RATE_IN_PER_HR[turfHeads[0]] == null) {
+    return { rateInPerHr: null, rateSource: null, headType: null };
+  }
+  const headType = turfHeads[0];
   const explicit = finiteOrNull(explicitInchesPerWeek);
   if (explicit != null && explicit > 0 && inputs.runMinutes != null && inputs.wateringDays.length) {
     const rate = explicit / ((inputs.runMinutes / 60) * inputs.wateringDays.length);
     if (rate >= MEASURED_RATE_MIN && rate <= MEASURED_RATE_MAX) {
-      return { rateInPerHr: round2(rate), rateSource: 'measured', headType: inputs.headTypes.length === 1 ? inputs.headTypes[0] : null };
+      return { rateInPerHr: round2(rate), rateSource: 'measured', headType };
     }
   }
-  const turfHeads = inputs.headTypes.filter((h) => h !== 'drip');
-  if (turfHeads.length === 1 && HEAD_PRECIP_RATE_IN_PER_HR[turfHeads[0]] != null) {
-    return { rateInPerHr: HEAD_PRECIP_RATE_IN_PER_HR[turfHeads[0]], rateSource: 'system_type_default', headType: turfHeads[0] };
-  }
-  return { rateInPerHr: null, rateSource: null, headType: null };
+  return { rateInPerHr: HEAD_PRECIP_RATE_IN_PER_HR[headType], rateSource: 'system_type_default', headType };
 }
 
 /**
@@ -324,7 +330,11 @@ function buildWeekPlan({
     if (maxEvents === 0) return { events: 0, depthInches: null, minutesPerEvent: null };
     const events = clamp(Math.ceil(needInches / EVENT_DEPTH_MAX_INCHES), 1, maxEvents);
     const depth = round2(clamp(needInches / events, EVENT_DEPTH_MIN_INCHES, EVENT_DEPTH_MAX_INCHES));
-    const minutes = rate.rateInPerHr ? roundTo5((depth / rate.rateInPerHr) * 60) : null;
+    // A MEASURED rate earns a whole-minute figure ("run 23 minutes"); a
+    // published default is an estimate and rounds to 5 ("about 20 minutes").
+    const minutes = rate.rateInPerHr
+      ? (rate.rateSource === 'measured' ? Math.max(1, Math.round((depth / rate.rateInPerHr) * 60)) : roundTo5((depth / rate.rateInPerHr) * 60))
+      : null;
     return { events, depthInches: depth, minutesPerEvent: minutes };
   };
 
