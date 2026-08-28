@@ -875,8 +875,13 @@ class GoogleBusinessService {
         const liveReplyFields = syncReplyFields(live, normalized, { fnNow: db.fn.now() });
         await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null });
         // A reviewer edit: a POSTED reply parks for a person, a pipeline
-        // draft is cleared and requeued (compare-and-set on the LIVE state).
-        return this._reconcileReviewEdit(live, normalized, { conn: trx, bell: false });
+        // draft is cleared and requeued. Judged on the row AFTER the reply
+        // sync (a landed google_uncertain / persist_failed write promoted to
+        // posted just above must park like any posted reply — codex r39),
+        // with the review CONTENT from the pre-update snapshot.
+        const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
+        const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
+        return this._reconcileReviewEdit(basis, normalized, { conn: trx, bell: false });
       });
       // The action bell only after the park is durable.
       if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);
@@ -1147,7 +1152,8 @@ class GoogleBusinessService {
           // Same live re-read under the lock as the authoritative upsert.
           const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
           await trx('google_reviews').where({ id: existing.id }).update(upd);
-          const reconciled = await this._reconcileReviewEdit(live, placesEdit, { conn: trx, bell: false });
+          // Owner reply first (a landed uncertain write becomes posted), then
+          // the reviewer-edit reconciliation on the post-sync row (codex r39).
           // A Places owner reply that differs from the local one goes through
           // the canonical sync path: it fills an empty slot, replaces a
           // "[DRAFT]", and — when the owner edited our POSTED reply directly
@@ -1164,7 +1170,9 @@ class GoogleBusinessService {
               await applySyncReplyFields(existing.id, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx, expectedReply: after.review_reply ?? null });
             }
           }
-          return reconciled;
+          const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
+          const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
+          return this._reconcileReviewEdit(basis, placesEdit, { conn: trx, bell: false });
         });
         if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);
         // Reinstatement clear, mirroring _upsertGbpReview: the main update

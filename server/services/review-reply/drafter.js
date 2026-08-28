@@ -101,6 +101,7 @@ const BANNED_RE = new RegExp([
   // Lethal-effect family: lethal / fatal / death / deadly / die outright;
   // "kill" when its object is anything but a pest ("won't kill your pets",
   // "kills the grass"), and in the negated wrapper below.
+  '\\bperil\\w*\\b', '\\bimperil\\w*\\b', '\\bdetriment\\w*\\b', '\\bnoxious\\b', '\\bmenac\\w*\\b',
   '\\blethal\\w*\\b', '\\bfatal\\w*\\b', '\\bdeath\\w*\\b', '\\bdeadly\\b', '\\bd(?:ie|ies|ied|ying)\\b',
   '\\bkill\\w*\\s+(?:off\\s+)?(?:your\\s+|the\\s+|our\\s+|any\\s+|all\\s+|other\\s+|beneficial\\s+|good\\s+|small\\s+|young\\s+)?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|animals|birds|fish|reptiles|plants|flowers|grass|lawn|turf|trees?|shrubs?|garden|people|humans|anyone|anybody|everything|anything|bees|butterflies|pollinators|wildlife|beneficial\\w*|ladybugs)\\b',
   '\\bsick\\w*\\b', '\\bill\\b', '\\billness(?:es)?\\b', '\\bdisease\\w*\\b', '\\bsymptoms?\\b', '\\bailments?\\b', '\\bunwell\\b', '\\ballerg\\w*\\b', '\\birritat\\w*\\b', '\\bnause\\w*\\b', '\\bmedical\\b', '\\bhealth\\w*\\b', '\\bthriv\\w*\\b', '\\bflourish\\w*\\b',

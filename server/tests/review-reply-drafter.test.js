@@ -133,6 +133,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r39: peril / detriment / noxious / menace.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments pose no peril to your pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing we use is a detriment to your dogs.'))).toBe('banned_phrase');
     // codex r38: activity-continuation framing.
     expect(verify(good('Hi Dana, Marcus got the ants and our treatments let your pets keep enjoying the yard.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and the kids can carry on playing outside as usual.'))).toBe('banned_phrase');

@@ -464,7 +464,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     // defers under our claim): record the reply as parked/
     // review_edited_after_post instead (never a clean 'posted') and ring
     // the same action bell the sync would have.
-    const base = () => db('google_reviews')
+    const base = (conn = db) => conn('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
       // Non-overwriting callers: the reply slot must still be empty or the
@@ -486,34 +486,44 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     // r38): compare the current account fingerprint with the snapshot the
     // pipeline stamped; a mismatch — or a failed read — parks instead of
     // recording a clean 'posted'. Only pipeline drafts carry a snapshot.
+    const snapshot = (() => { try { return autoFields?.auto_reply_grounding ? JSON.parse(autoFields.auto_reply_grounding) : null; } catch { return null; } })();
+    // Account read + persistence decision + write are ONE transaction (codex
+    // r39): the review row and the linked customer row are locked FOR UPDATE
+    // so a concurrent city correction cannot commit between the fingerprint
+    // read and the state write; a mismatch or a failed read parks.
     let accountStale = false;
     let accountCause = null;
-    const snapshot = (() => { try { return autoFields?.auto_reply_grounding ? JSON.parse(autoFields.auto_reply_grounding) : null; } catch { return null; } })();
-    if (snapshot?.accountFingerprint) {
-      try {
-        const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('./grounding');
-        const row = await db('google_reviews').where({ id: reviewId }).first();
-        const nowFp = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)));
-        if (nowFp !== snapshot.accountFingerprint) { accountStale = true; accountCause = 'account facts changed'; }
-      } catch (e) {
-        accountStale = true; accountCause = `account facts could not be re-read (${e.message})`;
+    let updated = 0;
+    await db.transaction(async (trx) => {
+      const locked = await trx('google_reviews').where({ id: reviewId }).forUpdate().first();
+      if (snapshot?.accountFingerprint) {
+        try {
+          const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('./grounding');
+          const customerId = groundingCustomerId(locked || {});
+          if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');
+          const nowFp = accountFingerprint(await loadAccountFacts(customerId, trx));
+          if (nowFp !== snapshot.accountFingerprint) { accountStale = true; accountCause = 'account facts changed'; }
+        } catch (e) {
+          accountStale = true; accountCause = `account facts could not be re-read (${e.message})`;
+        }
       }
-    }
-    let updated = accountStale ? 0 : await base().modify((qb) => whereSameContent(qb, prePutContent)).update(clean);
-    if (updatedCount(updated) === 0) {
-      current = await db('google_reviews').where({ id: reviewId }).first();
-      if (current && !current.missing_since && (accountStale || reviewFingerprint(current) !== prePutFingerprint)) {
-        editedDuringPut = true;
-        if (accountStale) logger.warn(`[review-reply] ${reviewId}: ${accountCause} while the reply posted — parked for a person`);
-        // Only a PIPELINE-owned reply (automation, or Post now stamping
-        // 'posted') takes the automatic park — a human's reply keeps the
-        // caller's own close fields so the UI never offers auto-reply
-        // Retract for it (hook P1). The bell rings for both.
-        const pipelineOwned = isAuto || autoFields?.auto_reply_status === 'posted';
-        const stamp = pipelineOwned ? { auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null } : {};
-        updated = await base().update({ ...clean, ...stamp });
+      const baseTrx = () => base(trx);
+      updated = accountStale ? 0 : await baseTrx().modify((qb) => whereSameContent(qb, prePutContent)).update(clean);
+      if (updatedCount(updated) === 0) {
+        current = locked;
+        if (current && !current.missing_since && (accountStale || reviewFingerprint(current) !== prePutFingerprint)) {
+          editedDuringPut = true;
+          if (accountStale) logger.warn(`[review-reply] ${reviewId}: ${accountCause} while the reply posted — parked for a person`);
+          // Only a PIPELINE-owned reply (automation, or Post now stamping
+          // 'posted') takes the automatic park — a human's reply keeps the
+          // caller's own close fields so the UI never offers auto-reply
+          // Retract for it (hook P1). The bell rings for both.
+          const pipelineOwned = isAuto || autoFields?.auto_reply_status === 'posted';
+          const stamp = pipelineOwned ? { auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null } : {};
+          updated = await baseTrx().update({ ...clean, ...stamp });
+        }
       }
-    }
+    });
     if (updatedCount(updated) === 0) {
       // Defensive only — unreachable while the claim defers stamping.
       throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });
@@ -590,6 +600,15 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
       if (String(fresh.review_reply || '') !== String(review.review_reply || '')) {
         throw new ReviewReplyError(CODES.STALE, 'The reply changed while you were retracting — reload and check the current reply.', { status: 409 });
+      }
+      // …and it must STILL be the pipeline's reply (codex r39): an admin who
+      // posted an identical replacement through the editor meanwhile moved
+      // the row to skipped/manual_reply with the same text — that reply is
+      // theirs now and Retract must not delete it.
+      const stillPipelines = fresh.auto_reply_status === 'posted'
+        || (fresh.auto_reply_status === 'parked' && fresh.auto_reply_reason === 'review_edited_after_post');
+      if (!stillPipelines) {
+        throw new ReviewReplyError(CODES.STALE, 'This reply is no longer the pipeline\'s (a person posted it meanwhile) — reload and check the current reply.', { status: 409 });
       }
       // And Google's LIVE reply must be the one the admin confirmed: an owner
       // edit made directly in GBP after the last sync is invisible locally,

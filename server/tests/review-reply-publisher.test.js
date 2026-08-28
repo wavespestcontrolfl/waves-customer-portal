@@ -54,6 +54,7 @@ jest.mock('../models/db', () => {
       modify(fn) { fn(api); return api; },
       whereNotIn(col, vals) { filters.push((r) => !vals.includes(r[col])); return api; },
       orWhereNotIn() { return api; },
+      forUpdate() { return api; },
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
@@ -68,6 +69,8 @@ jest.mock('../models/db', () => {
   };
   dbFn.fn = { now: () => 'NOW()' };
   dbFn.raw = (sql) => ({ sql });
+  // Transaction = same in-memory store (row locks are a no-op here).
+  dbFn.transaction = async (fn) => fn(dbFn);
   return dbFn;
 });
 
@@ -185,6 +188,19 @@ describe('publishReviewReply', () => {
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
+  });
+
+  test('retract re-validates pipeline ownership inside the claim (codex r39): an identical human replacement posted meanwhile is theirs', async () => {
+    state.rows[0].review_reply = 'Thanks Dana.';
+    state.rows[0].auto_reply_status = 'posted';
+    mockLock.mockImplementationOnce(async (id, fn) => {
+      // Between the pre-claim read and the claim, an admin posted the same text via the editor.
+      state.rows[0].auto_reply_status = 'skipped'; state.rows[0].auto_reply_reason = 'manual_reply';
+      return fn();
+    });
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.STALE });
+    expect(mockGbp.deleteReply).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Thanks Dana.');
   });
 
   test('activity_log never carries the reviewer name', async () => {
