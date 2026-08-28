@@ -1125,7 +1125,7 @@ function RecommendationsCard({ data, customer }) {
       <div style={{
         display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_SHELL.soft, border: `1px solid ${PORTAL_SHELL.softBorder}`, color: B.glassNavy, fontSize: 12, fontWeight: 850, marginLeft: -10,
       }}>
-        <Icon name="sparkles" size={14} strokeWidth={2} />Recommended
+        <Icon name="sparkles" size={14} strokeWidth={2} />Recommendations
       </div>
       <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>For your property</div>
       <div style={{ marginTop: 4, fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.45 }}>Services that fit this property and your current plan.</div>
@@ -3221,6 +3221,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
 
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={dashboardLabel}><Icon name="chart" size={14} strokeWidth={2} />At a glance</div>
+          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Billing, visits, and membership in one place.</div>
           <div style={{ display: 'grid', gap: 12, marginTop: 14 }}>
             {[
               annualPrepay
@@ -3692,6 +3693,7 @@ function ServicesTab() {
           box) read as clutter on a phone (owner 08-28). */}
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="search" size={14} strokeWidth={2} />Filter Visits</div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Narrow by service type, year, or a note.</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr 1fr' : '1fr 1fr 2fr', gap: 10, marginTop: 12 }}>
           <label style={{ display: 'block', minWidth: 0 }}>
             <div style={filterLabel}>Type</div>
@@ -6116,6 +6118,7 @@ function BillingTab({ customer, refreshCustomer }) {
           <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
             <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Saved methods</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cards and bank accounts on file for Auto Pay and invoices.</div>
           </div>
           <button
             type="button"
@@ -6338,7 +6341,8 @@ function BillingTab({ customer, refreshCustomer }) {
       {(totalCredits > 0 || credits.length > 0 || autoApplyCredit) && (
         <div data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={sectionTitle}><Icon name="coins" size={14} strokeWidth={2} />Credits</div>
-          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Adjustments</div>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Adjustments</div>
+          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Referral, service, and promo credits on your account.</div>
           {totalCredits > 0 && (
             <div style={{
               padding: '10px 14px',
@@ -6434,6 +6438,7 @@ function BillingTab({ customer, refreshCustomer }) {
           <div>
             <div style={sectionTitle}><Icon name="clock" size={14} strokeWidth={2} />Payment History</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{historyDescription}</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every payment and receipt, newest first.</div>
           </div>
         </div>
 
@@ -6552,7 +6557,8 @@ function BillingTab({ customer, refreshCustomer }) {
 
       <div data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="mail" size={14} strokeWidth={2} />Billing Preferences</div>
-        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, marginBottom: 14 }}>Recipients</div>
+        <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Recipients</div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45, marginBottom: 14 }}>Where invoices, receipts, and reminders go.</div>
 
         {billingPrefsLoadError && (
           <div role="alert" style={{ marginBottom: 14, fontSize: 14, color: B.glassNavy, background: '#FFF7ED', border: '1px solid #FED7AA', borderRadius: 8, padding: '10px 12px' }}>
@@ -8547,7 +8553,6 @@ function LearnTab({ customer }) {
     <section data-glass="card" style={{ ...card, padding: 20, minWidth: 0 }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <span style={iconTile}><Icon name={icon} size={18} strokeWidth={2} /></span>
           <div>
             <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
             <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{posts.length} item{posts.length === 1 ? '' : 's'}</div>
@@ -8686,7 +8691,6 @@ function LearnTab({ customer }) {
       {alerts.length > 0 && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-            <span style={iconTile}><Icon name="warning" size={18} strokeWidth={2} /></span>
             <div>
               <div style={sectionTitle}><Icon name="megaphone" size={14} strokeWidth={2} />SWFL Alerts</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>Local pest and lawn notices.</div>
@@ -8724,7 +8728,6 @@ function LearnTab({ customer }) {
       {monthlyTip && (
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-            <span style={iconTile}><Icon name="sparkles" size={18} strokeWidth={2} /></span>
             <div style={{ minWidth: 0, flex: 1 }}>
               <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />{monthlyTip.month} Homeowner Tip</div>
               <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
@@ -8755,16 +8758,12 @@ function LearnTab({ customer }) {
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
-            <span style={iconTile}><Icon name="waves" size={18} strokeWidth={2} /></span>
             <div>
               <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
               <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{sortedBlogPosts.length} article{sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <a href="https://wavespestcontrol.com/blog/" target="_blank" rel="noopener noreferrer" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 7, position: 'relative' }}>
-              Visit Blog
-            </a>
             {hasMoreBlogPosts && (
               <button data-glass-accent="" type="button" onClick={() => setShowAllPosts(v => !v)} style={secondaryButton}>
                 {showAllPosts ? 'Show less' : `View all (${sortedBlogPosts.length})`}
@@ -8815,7 +8814,6 @@ function LearnTab({ customer }) {
         <section data-glass="card" style={{ ...card, padding: 20 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', flexWrap: 'wrap', marginBottom: 14 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
-              <span style={iconTile}><Icon name="message" size={18} strokeWidth={2} /></span>
               <div>
                 <div style={sectionTitle}><Icon name="message" size={14} strokeWidth={2} />Pest & Lawn FAQ</div>
                 <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{totalFaqQuestions} answer{totalFaqQuestions === 1 ? '' : 's'} available</div>
@@ -10528,6 +10526,7 @@ function MyPlanTab({ customer, focusService }) {
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="calendar" size={14} strokeWidth={2} />Year At A Glance</div>
             <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 20, fontWeight: 850 }}>{currentYear} service calendar</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Scheduled, completed, and overdue visits by month.</div>
             <div style={{ display: 'grid', gap: 10, marginTop: 16 }}>
               {displayedServices.map((svc) => {
                 const scheduleMonths = getScheduledMonthsForService(svc.id);
@@ -10645,6 +10644,7 @@ function MyPlanTab({ customer, focusService }) {
           {Array.isArray(termiteBonds) && termiteBonds.length > 0 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
               <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
+              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Your bond term and renewal date.</div>
               {termiteBonds.map((bond, index) => {
                 const renewalDiff = etDayDiff(bond.renewsAt);
                 const renewalPast = renewalDiff != null && renewalDiff < 0;
@@ -10718,6 +10718,7 @@ function MyPlanTab({ customer, focusService }) {
           {hasCancellableAccount && (
           <section data-glass="card" style={{ ...card, padding: 20 }}>
             <div style={sectionTitle}><Icon name="wrench" size={14} strokeWidth={2} />Account Options</div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Pause or cancel your plan any time.</div>
             {!showPauseForm && !showCancelForm && !pauseSubmitted && !cancelSubmitted && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 12 }}>
                 <button type="button" onClick={() => setShowPauseForm(true)} style={smallLinkButton}>Pause My Plan</button>
@@ -12320,6 +12321,7 @@ function ReferTab({ customer, onSwitchTab }) {
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>
               {referrals.length ? `${referrals.length} referral${referrals.length === 1 ? '' : 's'}` : 'No referrals yet'}
             </div>
+            <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Where each referral stands.</div>
           </div>
         </div>
 
@@ -12401,6 +12403,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
             { icon: 'share', title: 'Share', text: 'Send your code or referral link to a neighbor.' },
@@ -12872,11 +12875,11 @@ function DocumentsTab({ customer, onSwitchTab }) {
       </section>
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
-        <div style={{ display: 'flex', gap: 10, alignItems: 'stretch', flexWrap: 'wrap' }}>
-          <div style={{ position: 'relative', flex: '1 1 260px', minWidth: 0 }}>
-            <span style={{ position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)', color: muted, pointerEvents: 'none' }}>
-              <Icon name="search" size={16} strokeWidth={2} />
-            </span>
+        {/* Search + Type on one grid with labels — same control as the
+            Visits / Payment History filters (owner 08-28). */}
+        <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '2fr 1fr', gap: 10 }}>
+          <label style={{ display: 'block', minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Search</div>
             <input
               id="portal-document-search"
               name="documentSearch"
@@ -12887,46 +12890,22 @@ function DocumentsTab({ customer, onSwitchTab }) {
               aria-label="Search documents"
               className="waves-focus-ring"
               style={{
-                width: '100%',
-                minHeight: 40,
-                padding: '10px 12px 10px 38px',
-                borderRadius: 8,
-                border: '1px solid #D8D0C0',
-                fontSize: 14,
-                fontFamily: FONTS.body,
-                color: B.glassNavy,
-                background: '#fff',
-                boxSizing: 'border-box',
+                width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
+                border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
+                fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
               }}
             />
-          </div>
-          <div style={{ display: 'flex', gap: 6, overflowX: 'auto', WebkitOverflowScrolling: 'touch', paddingBottom: 1 }}>
-            {typeFilters.map(f => {
-              const active = typeFilter === f.value;
-              return (
-                <button data-glass-accent={active ? '' : undefined}
-                  key={f.value}
-                  type="button"
-                  onClick={() => setTypeFilter(f.value)}
-                  style={{
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    border: `1px solid ${active ? B.yellow : '#D8D0C0'}`,
-                    background: active ? '#F8FCFE' : '#fff',
-                    color: active ? B.glassNavy : muted,
-                    fontSize: 12,
-                    fontWeight: 850,
-                    cursor: 'pointer',
-                    fontFamily: FONTS.heading,
-                    whiteSpace: 'nowrap',
-                    minHeight: 40,
-                  }}
-                >
-                  {f.label}
-                </button>
-              );
-            })}
-          </div>
+          </label>
+          <label style={{ display: 'block', minWidth: 0 }}>
+            <div style={{ fontSize: 12, fontWeight: 850, color: muted, textTransform: 'uppercase', letterSpacing: 0, marginBottom: 6 }}>Type</div>
+            <select value={typeFilter} onChange={e => setTypeFilter(e.target.value)} aria-label="Document type" className="waves-focus-ring" style={{
+              width: '100%', minHeight: 44, padding: '10px 12px', borderRadius: 8,
+              border: '1px solid #D8D0C0', background: '#fff', color: B.glassNavy,
+              fontSize: 14, fontFamily: FONTS.body, boxSizing: 'border-box',
+            }}>
+              {typeFilters.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+            </select>
+          </label>
         </div>
         {hasActiveFilter && (
           <div style={{ marginTop: 10, fontSize: 12, color: muted }}>
@@ -12943,31 +12922,13 @@ function DocumentsTab({ customer, onSwitchTab }) {
         justifyContent: 'space-between',
         gap: 14,
         flexWrap: 'wrap',
-        background: '#F8FCFE',
-        borderColor: '#CFE7F5',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <span style={{
-            width: 38,
-            height: 38,
-            borderRadius: 8,
-            background: '#fff',
-            color: B.glassNavy,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Icon name="clipboard" size={18} strokeWidth={2} />
-          </span>
-          <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Looking for a recent service report?</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2, lineHeight: 1.45 }}>
-              Reports from every completed service visit appear here — you can also open them any time under Visits → Completed.
-            </div>
-          </div>
+        <div style={{ minWidth: 0, flex: '1 1 100%' }}>
+          <div style={sectionTitle}><Icon name="clipboard" size={14} strokeWidth={2} />Service Reports</div>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Recent service reports</div>
+          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every completed visit’s report is here and under Visits → Completed.</div>
         </div>
-        <button type="button" onClick={() => onSwitchTab?.('services')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative' }}>
+        <button type="button" onClick={() => onSwitchTab?.('services')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative', width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
           Open Completed Visits
         </button>
       </section>
@@ -13002,26 +12963,12 @@ function DocumentsTab({ customer, onSwitchTab }) {
         gap: 14,
         flexWrap: 'wrap',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          <span style={{
-            width: 38,
-            height: 38,
-            borderRadius: 8,
-            background: '#F8FCFE',
-            color: B.glassNavy,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            flexShrink: 0,
-          }}>
-            <Icon name="money" size={18} strokeWidth={2} />
-          </span>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Invoices and receipts</div>
-            <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>Payment records now live in Billing.</div>
-          </div>
+        <div style={{ minWidth: 0, flex: '1 1 100%' }}>
+          <div style={sectionTitle}><Icon name="money" size={14} strokeWidth={2} />Invoices</div>
+          <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Invoices and receipts</div>
+          <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Every invoice and receipt lives in Billing.</div>
         </div>
-        <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative' }}>
+        <button type="button" onClick={() => onSwitchTab?.('billing')} data-glass-accent="" style={{ ...secondaryButton, position: 'relative', width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
           Open Billing
         </button>
       </section>
@@ -13036,21 +12983,21 @@ function DocumentsTab({ customer, onSwitchTab }) {
         gap: 14,
         flexWrap: 'wrap',
       }}>
-        <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
+        <div style={{ minWidth: 0, flex: '1 1 100%' }}>
           <div style={sectionTitle}><Icon name="document" size={14} strokeWidth={2} />Document Request</div>
           <div style={{ marginTop: 6, fontSize: 20, color: B.glassNavy, fontWeight: 850 }}>Request paperwork from Waves</div>
           <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
             Tell us what you need and we will upload it to your portal.
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, width: '100%' }}>
+          <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
             Call
           </a>
-          <a href="sms:+19412975749" data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none' }}>
+          <a href="sms:+19412975749" data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
             Text
           </a>
-          <a href="mailto:contact@wavespestcontrol.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative' }}>
+          <a href="mailto:contact@wavespestcontrol.com?subject=Document%20request" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
             Email
           </a>
         </div>
