@@ -401,15 +401,21 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   return true; // new email
 }
 
+// Bulk/spam classes the classifier may assign after insert — never ring.
+const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor']);
+
 /**
  * A row that exists but was never notified (sync died between insert and
  * bell): if it is still an eligible candidate and no bell carries its id,
  * ring now. Idempotent — the bell payload stores emailId.
  */
 async function recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }) {
+  // A persisted NON-bulk classification (the crash window is after the
+  // classifier wrote, before the bell) must not disqualify the row.
+  const bulk = existing.classification && NEVER_RING_CLASSES.has(existing.classification);
   if (!customerEmailBellEligible({
     customerId: existing.customer_id || customerId,
-    classification: existing.classification,
+    classification: bulk ? existing.classification : null,
     listUnsubscribe: existing.list_unsubscribe,
     labelIds: parsed.label_ids,
     authenticationResults: existing.authentication_results,
@@ -418,16 +424,8 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
     backfill,
   })) return;
   if (existing.is_archived) return;
-  const already = await db('notifications')
-    .where({ category: 'inbound_email' })
-    .whereRaw("metadata->'payload'->>'emailId' = ?", [String(existing.id)])
-    .first('id');
-  if (already) return;
   await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified: Boolean(existing.classification) });
 }
-
-// Bulk/spam classes the classifier may assign after insert — never ring.
-const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor']);
 
 /**
  * Fire the bell for an already-eligible candidate once classification is
@@ -442,13 +440,27 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified }) 
     const row = await db('emails').where('id', email.id).first('classification', 'is_archived');
     if (!row || row.is_archived) return;
     if (classified && row.classification && NEVER_RING_CLASSES.has(row.classification)) return;
+    // Atomic per-email claim (emails.customer_bell_claimed_at): at most one
+    // delivery across insert path, crash recovery, label/history replays and
+    // concurrent pods — and independent of a bell row (push-only admins get
+    // none). A failed trigger releases the claim so a retry can ring.
+    const claimed = await db('emails').where({ id: email.id }).whereNull('customer_bell_claimed_at')
+      .update({ customer_bell_claimed_at: new Date() });
+    if (!claimed) return;
     const { triggerNotification } = require('../notification-triggers');
-    await triggerNotification('customer_email_received', {
-      fromName: parsed.from_name || parsed.from_address,
-      subject: parsed.subject,
-      emailId: email.id,
-      customerId,
-    });
+    let stats = null;
+    try {
+      stats = await triggerNotification('customer_email_received', {
+        fromName: parsed.from_name || parsed.from_address,
+        subject: parsed.subject,
+        emailId: email.id,
+        customerId,
+      });
+    } finally {
+      if (!stats || stats.error) {
+        await db('emails').where({ id: email.id }).update({ customer_bell_claimed_at: null }).catch(() => {});
+      }
+    }
   } catch (e) { logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`); }
 }
 
