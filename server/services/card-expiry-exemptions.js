@@ -45,4 +45,29 @@ function isCardExpiryExemptMethod(exemptions, customerId, paymentMethodId) {
   return !charged.has(String(paymentMethodId));
 }
 
-module.exports = { emptyCardExpiryExemptions, isCardExpiryExemptMethod };
+/**
+ * Customers whose open payment_expiry alerts have nothing left to act on:
+ * the fully exempt ones, plus covered customers with a charge coming
+ * (resolved methods) none of whose CURRENTLY expiring cards will be
+ * charged. `expiringCards` = this run's expiring rows ({ id, customer_id }).
+ * An unresolved charge vector (null) never qualifies — every card warns.
+ * Alerts carry no payment-method identity, so a customer with ANY
+ * expiring card still to be charged keeps every alert (fail toward the
+ * operator seeing it).
+ */
+function cardExpiryAlertResolvableCustomerIds(exemptions, expiringCards = []) {
+  const out = new Set(exemptions?.customerIds instanceof Set ? [...exemptions.customerIds].map(String) : []);
+  if (!(exemptions?.chargeMethodIdsByCustomer instanceof Map)) return out;
+  const chargedExpiring = new Set();
+  for (const card of expiringCards || []) {
+    if (card?.customer_id == null) continue;
+    if (!isCardExpiryExemptMethod(exemptions, card.customer_id, card.id)) chargedExpiring.add(String(card.customer_id));
+  }
+  for (const [customerId, methodIds] of exemptions.chargeMethodIdsByCustomer) {
+    if (!(methodIds instanceof Set)) continue;
+    if (!chargedExpiring.has(String(customerId))) out.add(String(customerId));
+  }
+  return out;
+}
+
+module.exports = { emptyCardExpiryExemptions, isCardExpiryExemptMethod, cardExpiryAlertResolvableCustomerIds };

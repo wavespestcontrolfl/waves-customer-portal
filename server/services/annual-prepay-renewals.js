@@ -3611,26 +3611,43 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
     chargeMethodIdsByCustomer,
   });
   const failedExemptions = () => ({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map(), lookupFailed: true });
-  // The method the Auto Pay rails will charge — the retry sweep
+  // The method(s) the Auto Pay rails will charge — the retry sweep
   // (StripeService.charge) and every completion Auto Pay lane
   // (chargeInvoiceWithSavedCard → getChargeableAutopayMethod under lock)
-  // walk the SAME pointer-first, newest-default order. ignoreCardExpiry:
-  // the walk must land on the expiring card itself (see
-  // autopay-eligibility.js) — charge()'s expiry fallback is exactly what
-  // the warning exists to pre-empt. No method at all → null (unresolved:
-  // every method warns — noise, never a missed charge). Lookup failures
-  // propagate to the outer catch (exempt nobody). One walk per customer.
+  // walk the SAME pointer-first, newest-default order. TWO walks, both
+  // recorded (hook P1): with ignoreCardExpiry the walk lands on the
+  // expiring card itself (the card the warning exists to replace —
+  // charge()'s expiry fallback would route past it); without, it is the
+  // card charge() falls back to TODAY when that pointer/default is
+  // already expired — a real charge on a card that must keep its warning
+  // too. No method on either walk → [] (unresolved: every method warns —
+  // noise, never a missed charge). Lookup failures propagate to the outer
+  // catch (exempt nobody). One pair of walks per customer.
   const walkNow = new Date();
   const autopayWalkMemo = new Map();
-  const autopayWalkMethodId = async (customerLike) => {
+  const autopayWalkMethodIds = async (customerLike) => {
     const key = String(customerLike.id);
     if (!autopayWalkMemo.has(key)) {
       const { getChargeableAutopayMethod } = require('./autopay-eligibility');
-      autopayWalkMemo.set(key, getChargeableAutopayMethod(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true })
-        .then((method) => (method?.id != null ? String(method.id) : null)));
+      autopayWalkMemo.set(key, Promise.all([
+        getChargeableAutopayMethod(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
+        getChargeableAutopayMethod(customerLike, conn, { rethrow: true, now: walkNow }),
+      ]).then((methods) => [...new Set(methods.filter((m) => m?.id != null).map((m) => String(m.id)))]));
     }
     return autopayWalkMemo.get(key);
   };
+  const recordAutopayWalk = async (customerId, customerLike) => {
+    const ids = await autopayWalkMethodIds(customerLike);
+    if (!ids.length) { recordCharge(customerId, null); return; }
+    for (const id of ids) recordCharge(customerId, id);
+  };
+  // A hold charges the card frozen on it. That card is exempt-worthy only
+  // when it will still be VALID at charge time (through the horizon) —
+  // an expiring hold card is a charge that will fail, and no surface
+  // scans hold cards (saved enableAutopay:false), so the Auto Pay card's
+  // warning must stay as the customer's only notice (hook P1): record it
+  // as unresolved. Malformed expiry reads as expired (isExpiredCardMethod).
+  const horizonNoon = parseETDateTime(`${dateOnly(horizon)}T12:00`);
   try {
     // Paid coverage must span the whole window [today, horizon], but it may
     // be SPLIT across adjacent terms (createTermForAnnualPrepay writes a
@@ -3704,7 +3721,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         allowMissingCustomer: true,
       });
       // The sweep charges through StripeService.charge — the Auto Pay walk.
-      if (verdict.collectible) recordCharge(customerId, await autopayWalkMethodId({ id: customerId }));
+      if (verdict.collectible) await recordAutopayWalk(customerId, { id: customerId });
     }
     // The verdict's prepay lookups fail OPEN for the sweep (collect rather
     // than stall); this surface must fail the other way — a lookup failure
@@ -4102,17 +4119,19 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // is routinely NOT the Auto Pay card — matched back to its
       // payment_methods row; no row → unresolved, every method warns).
       if (autopayLaneCharges) {
-        recordCharge(customerId, await autopayWalkMethodId({
+        await recordAutopayWalk(customerId, {
           id: v.customer_id, ach_status: v.customer_ach_status, autopay_payment_method_id: v.customer_autopay_payment_method_id,
-        }));
+        });
       }
       if (holdCharges) {
+        const { isExpiredCardMethod } = require('./autopay-eligibility');
         const holdMethod = holdRow?.stripe_payment_method_id
           ? await conn('payment_methods')
             .where({ customer_id: v.customer_id, stripe_payment_method_id: holdRow.stripe_payment_method_id })
-            .first('id')
+            .first('id', 'method_type', 'exp_month', 'exp_year')
           : null;
-        recordCharge(customerId, holdMethod?.id != null ? String(holdMethod.id) : null);
+        const holdCardValidThroughHorizon = holdMethod?.id != null && !isExpiredCardMethod(holdMethod, horizonNoon);
+        recordCharge(customerId, holdCardValidThroughHorizon ? String(holdMethod.id) : null);
       }
     }
   } catch (err) {

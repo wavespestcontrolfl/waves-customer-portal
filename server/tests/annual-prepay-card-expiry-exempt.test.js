@@ -852,6 +852,7 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
   const isSiblingLookup = (own) => own.some((c) => c[0] === 'whereIn' && c[1] === 'status');
   const liveHold = (over) => [{ id: 'hold-1', status: 'held', accepted_amount: '120.00', stripe_payment_method_id: 'pm_hold', ...over }];
   const pausedOneTime = () => baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON });
+  const HOLD_CARD = { id: 'pm-hold', method_type: 'card', exp_month: '12', exp_year: '2099' };
 
   test('an Auto Pay lane charge records the walk\'s method (pointer-first, expiring card included) — the customer is no longer customer-level exempt', async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})] });
@@ -872,6 +873,17 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
     expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-expired']));
   });
 
+  test("an already-expired pointer/default AND the card charge() falls back to today are BOTH vectors (hook P1)", async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})],
+      paymentMethods: [{ ...CHARGEABLE_CARD, id: 'pm-expired', exp_month: '1', exp_year: '2020' }, { ...CHARGEABLE_CARD, id: 'pm-valid' }],
+    });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-expired', 'pm-valid']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-valid')).toBe(false);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-third')).toBe(true);
+  });
+
   test('no chargeable method at all → the charge is unresolved (null): every card warns', async () => {
     route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], paymentMethods: [] });
     const ex = await getCardExpiryExemptions(HORIZON);
@@ -885,7 +897,7 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
       terms: coveredAlways(['c-prepaid']),
       visits: [pausedOneTime()],
       cardHolds: liveHold(),
-      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ id: 'pm-hold' }] : [CHARGEABLE_CARD]),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [HOLD_CARD] : [CHARGEABLE_CARD]),
     });
     const ex = await getCardExpiryExemptions(HORIZON);
     expect([...ex.customerIds]).toEqual([]);
@@ -904,6 +916,28 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
     expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
   });
 
+  test("a hold card that will NOT be valid through the horizon is a charge that fails — unresolved, the Auto Pay card keeps its warning (hook P1)", async () => {
+    // expired before the horizon month
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [pausedOneTime()], cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ ...HOLD_CARD, exp_month: '1', exp_year: '2020' }] : [CHARGEABLE_CARD]),
+    });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
+    // malformed expiry reads as expired too
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [pausedOneTime()], cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ ...HOLD_CARD, exp_month: null, exp_year: null }] : [CHARGEABLE_CARD]),
+    });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
+    // valid through the horizon's month → resolved
+    const [hy, hm] = HORIZON.split('-');
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [pausedOneTime()], cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ ...HOLD_CARD, exp_month: String(Number(hm)), exp_year: hy }] : [CHARGEABLE_CARD]),
+    });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-hold']));
+  });
+
   test('a collectible retry records the Auto Pay walk (the sweep charges through StripeService.charge)', async () => {
     route({ terms: coveredAlways(['c-prepaid', 'c-other']), payments: (own) => (isSiblingLookup(own) ? [] : armed()) });
     const ex = await getCardExpiryExemptions(HORIZON);
@@ -916,7 +950,7 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
       terms: coveredAlways(['c-prepaid']),
       payments: (own) => (isSiblingLookup(own) ? [] : armed()),
       visits: [pausedOneTime()], cardHolds: liveHold(),
-      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ id: 'pm-hold' }] : [CHARGEABLE_CARD]),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [HOLD_CARD] : [CHARGEABLE_CARD]),
     });
     expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1', 'pm-hold']));
   });

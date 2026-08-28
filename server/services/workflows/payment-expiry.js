@@ -206,7 +206,7 @@ class PaymentExpiry {
     // PER CARD (#3533 follow-up): a covered customer whose only forthcoming
     // charge rides an estimate hold's frozen card is exempt for the OTHER
     // cards — isCardExpiryExemptMethod judges each expiring row.
-    const { emptyCardExpiryExemptions, isCardExpiryExemptMethod } = require('../card-expiry-exemptions');
+    const { emptyCardExpiryExemptions, isCardExpiryExemptMethod, cardExpiryAlertResolvableCustomerIds } = require('../card-expiry-exemptions');
     let exemptions = emptyCardExpiryExemptions();
     try {
       const { getCardExpiryExemptions } = require('../annual-prepay-renewals');
@@ -215,9 +215,13 @@ class PaymentExpiry {
     } catch (exemptErr) {
       logger.warn(`Payment expiry: prepay exemption lookup failed, exempting nobody: ${exemptErr.message}`);
     }
-    // Stale-alert reconciliation stays CUSTOMER-level: only a customer with
-    // no charge coming on any card has nothing left to act on.
-    const exemptIds = exemptions.customerIds;
+    // Stale-alert reconciliation: a customer with no charge coming on any
+    // card, or (hook P1) a covered customer whose forthcoming charge rides
+    // a card that is NOT among this run's expiring rows — their open alert
+    // is about a card nothing will charge. Alerts carry no method
+    // identity, so a customer with any expiring card still to be charged
+    // keeps every alert.
+    const exemptIds = cardExpiryAlertResolvableCustomerIds(exemptions, expiringCards);
     let prepayExempt = 0;
 
     // The skip below only prevents FUTURE alerts — an alert created before
