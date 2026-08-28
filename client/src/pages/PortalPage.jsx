@@ -933,6 +933,310 @@ function PropertyScoreCard({ data, compact }) {
 }
 
 // =========================================================================
+// BET PREVIEWS — design mockups for portal roadmap bets 2/3/6/8. Rendered
+// ONLY when the dev harness (preview-portal.html) sets
+// window.__BET_PREVIEWS__ with demo payloads; production never sets it, so
+// these mount nothing outside the preview. No server API exists yet.
+// =========================================================================
+const PREVIEW_PRIORITY_TONES = {
+  high: { text: 'High priority', background: '#FFF7ED', border: '#FED7AA', color: '#9A3412' },
+  medium: { text: 'Recommended', background: '#F0FDF4', border: '#BBF7D0', color: B.glassNavy },
+  low: { text: 'Optional', background: GLASS_SUBTLE, border: PORTAL_SHELL.border, color: PORTAL_SHELL.muted },
+};
+
+function PreviewSectionLabel({ children }) {
+  return (
+    <div style={{
+      fontSize: 14, fontWeight: 850, color: B.glassNavy,
+      textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: FONTS.heading,
+    }}>
+      {children}
+    </div>
+  );
+}
+
+function PreviewRecommendationsCard({ data, onPurchase }) {
+  if (!data?.cards?.length) return null;
+  const muted = PORTAL_SHELL.muted;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
+      <PreviewSectionLabel>Recommended for your property</PreviewSectionLabel>
+      <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+        {data.cards.map((rec) => {
+          const tone = PREVIEW_PRIORITY_TONES[rec.priority] || PREVIEW_PRIORITY_TONES.low;
+          return (
+            <div key={rec.id} style={{
+              padding: '12px 14px', borderRadius: 10,
+              background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'center', minWidth: 0 }}>
+                  <ShellIconTile icon={rec.icon} size={34} />
+                  <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{rec.title}</div>
+                </div>
+                <div style={{
+                  flexShrink: 0, padding: '3px 10px', borderRadius: 999,
+                  background: tone.background, border: `1px solid ${tone.border}`, color: tone.color,
+                  fontSize: 14, fontWeight: 850, fontFamily: FONTS.heading, whiteSpace: 'nowrap',
+                }}>
+                  {tone.text}
+                </div>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 14, color: muted, lineHeight: 1.5 }}>{rec.body}</div>
+              {rec.perApplication != null && (
+                <div style={{ marginTop: 8, fontSize: 15, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                  ${rec.perApplication} per application
+                </div>
+              )}
+              <div style={{ marginTop: 10 }}>
+                {rec.cta === 'purchase' && (
+                  <button type="button" onClick={onPurchase} style={PORTAL_PRIMARY_ACTION}>{rec.ctaLabel}</button>
+                )}
+                {rec.cta === 'request' && (
+                  <button type="button" data-glass="chip" style={PORTAL_SECONDARY_ACTION}>{rec.ctaLabel}</button>
+                )}
+                {rec.cta === 'none' && (
+                  <div style={{ fontSize: 14, fontWeight: 800, color: B.green }}>{rec.ctaLabel}</div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PreviewOneTapPurchaseSheet({ offer, onClose }) {
+  const [step, setStep] = useState('details');
+  const [slotIdx, setSlotIdx] = useState(0);
+  if (!offer) return null;
+  const muted = PORTAL_SHELL.muted;
+  const row = {
+    display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline',
+    padding: '9px 0', borderBottom: `1px solid ${PORTAL_SHELL.border}`, fontSize: 14,
+  };
+  return createPortal(
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(4,57,94,0.45)',
+        display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        data-glass="card"
+        style={{
+          ...PORTAL_CARD_STYLE, position: 'relative', width: 'min(480px, calc(100% - 20px))',
+          margin: '0 10px 12px', padding: 20, background: '#fff', maxHeight: '85vh', overflowY: 'auto',
+        }}
+      >
+        {step === 'details' && (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+              <div>
+                <PreviewSectionLabel>Add a service</PreviewSectionLabel>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                  {offer.label}
+                </div>
+              </div>
+              <ShellCloseButton onClick={onClose} />
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <div style={row}>
+                <span style={{ color: muted }}>Price</span>
+                <span style={{ fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, fontSize: 16 }}>
+                  ${offer.perApplication} per application
+                </span>
+              </div>
+              <div style={{ ...row, borderBottom: 'none' }}>
+                <span style={{ color: muted }}>Schedule</span>
+                <span style={{ fontWeight: 700, color: B.glassNavy, textAlign: 'right' }}>{offer.cadenceLine}</span>
+              </div>
+            </div>
+            <div style={{
+              marginTop: 6, padding: '10px 12px', borderRadius: 8,
+              background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+            }}>
+              {offer.basis.map((line) => (
+                <div key={line} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 14, color: muted, lineHeight: 1.5 }}>
+                  <Icon name="check" size={15} strokeWidth={2.5} style={{ color: B.green, flexShrink: 0, marginTop: 3 }} />
+                  <span>{line}</span>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setStep('picker')}
+              style={{ ...PORTAL_PRIMARY_ACTION, marginTop: 14, width: '100%', padding: '13px 15px', fontSize: 15 }}
+            >
+              Choose a time
+            </button>
+          </>
+        )}
+        {step === 'picker' && (
+          <>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
+              <div>
+                <PreviewSectionLabel>{offer.label}</PreviewSectionLabel>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+                  Pick your first application
+                </div>
+              </div>
+              <ShellCloseButton onClick={onClose} />
+            </div>
+            <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
+              {offer.slots.map((slot, i) => (
+                <button
+                  key={slot.line}
+                  type="button"
+                  onClick={() => setSlotIdx(i)}
+                  style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10,
+                    padding: '12px 14px', borderRadius: 10, cursor: 'pointer', textAlign: 'left',
+                    fontFamily: FONTS.body, fontSize: 14,
+                    background: i === slotIdx ? '#F0F7FC' : GLASS_SUBTLE,
+                    border: i === slotIdx ? `2px solid ${B.glassNavy}` : `1px solid ${PORTAL_SHELL.border}`,
+                  }}
+                >
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: 'block', fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, fontSize: 15 }}>{slot.line}</span>
+                    {slot.sub && <span style={{ display: 'block', marginTop: 2, color: muted }}>{slot.sub}</span>}
+                  </span>
+                  {i === slotIdx && <Icon name="check" size={18} strokeWidth={2.5} style={{ color: B.glassNavy, flexShrink: 0 }} />}
+                </button>
+              ))}
+            </div>
+            <div style={{ ...row, marginTop: 8 }}>
+              <span style={{ color: muted }}>Payment</span>
+              <span style={{ fontWeight: 700, color: B.glassNavy, textAlign: 'right' }}>{offer.paymentLine}</span>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 14, color: muted, lineHeight: 1.5 }}>{offer.consent}</div>
+            <button
+              type="button"
+              onClick={() => setStep('confirmed')}
+              style={{ ...PORTAL_PRIMARY_ACTION, marginTop: 14, width: '100%', padding: '13px 15px', fontSize: 15 }}
+            >
+              Confirm — Add to My Plan
+            </button>
+          </>
+        )}
+        {step === 'confirmed' && (
+          <div style={{ textAlign: 'center', padding: '10px 4px' }}>
+            <ShellIconTile icon="check" tone="success" size={44} />
+            <div style={{ marginTop: 10, fontSize: 20, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>
+              {offer.label} added
+            </div>
+            <div style={{ marginTop: 8, fontSize: 14, color: muted, lineHeight: 1.5 }}>
+              {`Your first application is booked for ${offer.slots[slotIdx].line}. ${offer.confirmedLine}`}
+            </div>
+            <button
+              type="button"
+              data-glass="chip"
+              onClick={onClose}
+              style={{ ...PORTAL_SECONDARY_ACTION, marginTop: 14, width: '100%', padding: '12px 15px' }}
+            >
+              Done
+            </button>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function PreviewAlertsCard({ data }) {
+  if (!data?.alerts?.length) return null;
+  const muted = PORTAL_SHELL.muted;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <PreviewSectionLabel>Property alerts</PreviewSectionLabel>
+        <div style={{ fontSize: 14, color: muted }}>Based on weather and your visit history</div>
+      </div>
+      <div style={{ marginTop: 12, display: 'grid', gap: 10 }}>
+        {data.alerts.map((alert) => (
+          <div key={alert.id} style={{
+            display: 'flex', gap: 12, alignItems: 'flex-start',
+            padding: '12px 14px', borderRadius: 10,
+            background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+          }}>
+            <ShellIconTile icon={alert.icon} size={36} tone={alert.tone} />
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline', flexWrap: 'wrap' }}>
+                <div style={{ fontSize: 16, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{alert.title}</div>
+                <div style={{ fontSize: 14, color: muted, whiteSpace: 'nowrap' }}>{alert.when}</div>
+              </div>
+              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.5 }}>{alert.body}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PreviewRecapCard({ data }) {
+  if (!data) return null;
+  const muted = PORTAL_SHELL.muted;
+  return (
+    <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+        <PreviewSectionLabel>Your year with Waves</PreviewSectionLabel>
+        <div style={{ fontSize: 14, color: muted }}>{data.windowLabel}</div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 19, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+        {data.headline}
+      </div>
+      <div style={{ marginTop: 14, display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+        {data.stats.map((stat) => (
+          <div key={stat.label} style={{
+            padding: '12px 10px', borderRadius: 10, textAlign: 'center',
+            background: GLASS_SUBTLE, border: `1px solid ${PORTAL_SHELL.border}`,
+          }}>
+            <div style={{ fontSize: 26, fontWeight: 850, color: B.glassNavy, fontFamily: FONTS.heading }}>{stat.value}</div>
+            <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.3 }}>{stat.label}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ marginTop: 12, display: 'grid', gap: 6 }}>
+        {data.detections.map((line) => (
+          <div key={line} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 14, color: muted, lineHeight: 1.5 }}>
+            <Icon name="check" size={15} strokeWidth={2.5} style={{ color: B.green, flexShrink: 0, marginTop: 3 }} />
+            <span>{line}</span>
+          </div>
+        ))}
+      </div>
+      {data.valueLine && (
+        <div style={{
+          marginTop: 12, padding: '10px 12px', borderRadius: 8,
+          background: '#F0FDF4', border: '1px solid #BBF7D0',
+          fontSize: 14, fontWeight: 700, color: B.glassNavy, lineHeight: 1.5,
+        }}>
+          {data.valueLine}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function BetPreviewSection() {
+  const cfg = typeof window !== 'undefined' ? window.__BET_PREVIEWS__ : null;
+  const [sheetOpen, setSheetOpen] = useState(false);
+  if (!cfg) return null;
+  return (
+    <>
+      <PreviewRecommendationsCard data={cfg.recommendations} onPurchase={() => setSheetOpen(true)} />
+      <PreviewAlertsCard data={cfg.alerts} />
+      <PreviewRecapCard data={cfg.recap} />
+      {sheetOpen && <PreviewOneTapPurchaseSheet offer={cfg.purchaseOffer} onClose={() => setSheetOpen(false)} />}
+    </>
+  );
+}
+
+// =========================================================================
 // MINI TREND SPARKLINE — simple SVG line chart for trend data
 // =========================================================================
 function TrendSparkline({ trend, width = '100%', height = 60 }) {
@@ -2096,6 +2400,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService }) {
       </section>
 
       <PropertyScoreCard data={propertyScore} compact={compact} />
+
+      <BetPreviewSection />
 
       {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
         <section data-glass="card" style={{ ...card, padding: 18, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>

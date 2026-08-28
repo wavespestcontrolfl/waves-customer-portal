@@ -434,6 +434,21 @@ Object.assign(api, {
   getActiveTracker: async () => ({ tracker: null }),
   getTodayTracker: async () => ({ tracker: null }),
 
+  // property score (bet 1, live) — demo payload so the score card renders
+  getPropertyScore: async () => ({
+    available: true,
+    overall: { score: 84, delta: 4 },
+    rain: { note: '2.1" of rain in your service area in the last 7 days.' },
+    components: [
+      { key: 'lawn', label: 'Lawn', status: 'scored', score: 88, reason: 'Turf color and density improving through the growing season.', asOf: day(-22) },
+      { key: 'pest', label: 'Pest pressure', status: 'scored', score: 79, pressure: 1.5, maxPressure: 5, pressureLabel: 'Low', reason: 'Light ant activity at the rear perimeter on the last visit.', asOf: day(-22) },
+      { key: 'tree_shrub', label: 'Trees & shrubs', status: 'scored', score: 82, reason: 'Ornamentals healthy; early sooty mold noted on two hibiscus.', asOf: day(-50) },
+      { key: 'termite', label: 'Termite', status: 'active', reason: 'Termite bond active — renews next month.' },
+      { key: 'mosquito', label: 'Mosquito', status: 'none', reason: 'No mosquito program on this property.' },
+      { key: 'irrigation', label: 'Irrigation', status: 'status', waterStatus: 'high', reason: 'Wet-condition watch — about 3.8" of combined rain and irrigation in the last 7 days.' },
+    ],
+  }),
+
   // misc / catch-alls — PortalPage also calls api.request directly
   // ('/tracking/maps-key', '/ai/chat', AuthProvider's '/auth/logout').
   request: async (path) => {
@@ -445,6 +460,104 @@ Object.assign(api, {
   getBadges: async () => ({ badges: [] }),
   notifyBadge: async () => ({ success: true }),
 });
+
+// ── bet previews (roadmap bets 2/3/6/8 design mockups) ─────────────────────
+// PortalPage's BetPreviewSection renders these ONLY when this flag exists.
+const fmtDay = (n) => addDays(n).toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+window.__BET_PREVIEWS__ = {
+  recommendations: {
+    cards: [
+      {
+        id: 'rec-irrigation',
+        icon: 'droplet',
+        priority: 'high',
+        title: 'Skip irrigation this week',
+        body: 'Between rain and your irrigation schedule, your lawn has had about 3.8" of water in the last 7 days — more than it needs. Skipping this week’s cycles protects your St. Augustine from fungus.',
+        cta: 'none',
+        ctaLabel: 'No purchase needed',
+      },
+      {
+        id: 'rec-treeshrub',
+        icon: 'leaf',
+        priority: 'medium',
+        title: 'Tree & Shrub Care',
+        body: 'Your technician noted early sooty mold on two hibiscus at your last visit, and your ornamentals aren’t on a care program. Your beds are already measured — no inspection needed.',
+        perApplication: 84,
+        cta: 'purchase',
+        ctaLabel: 'Add Tree & Shrub Care',
+      },
+      {
+        id: 'rec-mosquito',
+        icon: 'bug',
+        priority: 'low',
+        title: 'Mosquito season note',
+        body: 'Rain and heat this month mean peak mosquito breeding conditions in Parrish. Mosquito coverage can be added to your plan — ask us for a quote.',
+        cta: 'request',
+        ctaLabel: 'Ask about mosquito coverage',
+      },
+    ],
+  },
+  purchaseOffer: {
+    label: 'Tree & Shrub Care',
+    perApplication: 84,
+    cadenceLine: '6 applications per year',
+    paymentLine: 'Visa ending 4242 (card on file)',
+    basis: [
+      'Priced from your property’s measurements on file — no inspection needed',
+      'Pay per application — no setup fee, cancel anytime',
+      'Can ride along with your existing WaveGuard visits',
+    ],
+    slots: [
+      { line: `${fmtDay(5)} — 9 to 11 AM`, sub: 'With your scheduled pest visit — no extra trip' },
+      { line: `${fmtDay(7)} — 1 to 3 PM`, sub: null },
+      { line: `${fmtDay(11)} — 9 to 11 AM`, sub: null },
+    ],
+    consent: 'By confirming, you’re adding Tree & Shrub Care at $84 per application, 6 applications per year, billed to your card on file after each application.',
+    confirmedLine: 'A confirmation is on its way by email and app notification. You can manage or cancel this service anytime from the Plan tab.',
+  },
+  alerts: {
+    alerts: [
+      {
+        id: 'alert-rain',
+        icon: 'cloudRain',
+        tone: 'brand',
+        title: 'Heavy rain this week',
+        body: 'Your service area received about 2.1" of rain in the last 72 hours. We recommend skipping tomorrow’s irrigation cycle.',
+        when: 'Today, 7:45 AM',
+      },
+      {
+        id: 'alert-chinch',
+        icon: 'sun',
+        tone: 'warning',
+        title: 'Chinch bug conditions: elevated',
+        body: 'Heat and sun-stressed turf favor chinch bug activity in Parrish this week. Your lawn was inspected 9 days ago — no activity found.',
+        when: 'Yesterday',
+      },
+      {
+        id: 'alert-mosquito',
+        icon: 'bug',
+        tone: 'warning',
+        title: 'Mosquito pressure increasing',
+        body: 'Recent rain and temperatures point to elevated mosquito breeding pressure near your property this week.',
+        when: fmtDay(-3),
+      },
+    ],
+  },
+  recap: {
+    windowLabel: 'Last 12 months',
+    headline: 'Waves protected your property 14 times this year.',
+    stats: [
+      { value: 11, label: 'Scheduled services' },
+      { value: 3, label: 'Complimentary callbacks' },
+      { value: 2, label: 'Issues caught early' },
+    ],
+    detections: [
+      'Chinch bug activity caught and treated before visible damage (June)',
+      'Overwatering flagged before fungus set in (April)',
+    ],
+    valueLine: 'Every callback was included at no charge — about $486 in included service value this year.',
+  },
+};
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <BrowserRouter>
