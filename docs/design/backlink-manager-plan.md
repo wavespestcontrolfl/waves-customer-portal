@@ -128,13 +128,22 @@ t.string('expected_indexability');                // indexable | noindex | unkno
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
 t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
 t.numeric('confidence', 3, 2);                    // 0–1
-t.integer('revision').notNullable().defaultTo(1);  // +1 whenever ANY authority- or approval-relevant field changes: acquisition_type, submission_url, estimated_cost_cents, renewal_cost_cents, renewal_period, account_required, email_verification, payment_required, legal_attestation, agent_completable, expected_rel, link_type. Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
+t.integer('revision').notNullable().defaultTo(1);  // +1 whenever ANY in-place authority- or approval-relevant field changes: estimated_cost_cents, renewal_cost_cents, renewal_period, account_required, email_verification, payment_required, legal_attestation, agent_completable, expected_rel, link_type (acquisition_type / submission_url changes supersede the row instead — see above). Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
 t.string('authority_last_decided');               // informational copy of the latest §6 decision; NOT versioned, NOT approval-bound — the binding stamp lives on the placement
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
 t.timestamps(true, true);
 t.text('path_key').notNullable();                 // `${acquisition_type}:${normalized submission_url || '-'}` — non-null, so re-investigation upserts instead of duplicating (Postgres UNIQUE treats NULLs as distinct)
+t.uuid('superseded_by');                          // → the path row that replaced this one (identity change); a superseded path is never claimable
+t.timestamp('superseded_at');
 t.unique(['domain_id', 'path_key']);
+// IDENTITY vs REVISION: acquisition_type and submission_url ARE the identity (path_key). A re-investigation that
+// finds a different type/URL does not edit the row in place — it inserts the new path and, in the SAME transaction,
+// marks the old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
+// repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
+// purchase on it. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
+// Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
+// identity match the approval.
 ```
 
 ### 3.3 `seo_link_prospects` — placements (existing; additive columns)
@@ -223,7 +232,8 @@ t.timestamp('consumed_at');                   // set when the leased execution r
 ```
 `seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
-invalidated, not consumed, whose `path_revision` equals the path's current revision AND whose
+invalidated, not consumed, whose `path_id` is the placement's current, non-superseded path,
+whose `path_revision` equals that path's current revision AND whose
 `decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
 numbers, not whatever they became);
 the final-total guard compares `final_cents` to the approval's immutable `max_payable_cents`
@@ -403,7 +413,8 @@ if path.payment_required:
     else → OWNER_PAYMENT
 if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
     → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
-                      and score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
+                      and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
+                      else OWNER_* per reason (no draft yet ⇒ the row simply awaits a draft lease; not an owner card)
 if path.account_required → AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
 else → AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
 ```
@@ -641,6 +652,15 @@ together:
   (an unleased `renewal` reservation is claimable by the runner, §6.3); and the provider requesting
   the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
   the policy has not authorized cannot be leased by any caller.
+- **Draft leases are separate from send authority (no claim-before-draft deadlock).** The
+  drafter (`backlink-outreach-drafter.js`) claims with `?type=outreach&mode=draft`: a draft
+  lease requires only a `prospect` row on a `qualified`/`ready_to_acquire` domain in an
+  outreach lane and grants NOTHING beyond research + composing a draft (report
+  `outcome='drafted'`, never a send). Send authority is decided afterwards: once the draft
+  exists and passes `comms-lint` and the §6.4 classifier, the bridge job evaluates
+  `AUTO_OUTREACH` on that draft; only a `mode=send` lease — which requires the stamped
+  `AUTO_OUTREACH` (or an approval) — may call the sender. Drafting therefore never needs
+  authority, and authority is never granted without a lint-clean draft to grant it for.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
   gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `price_changed`,
   `captcha`); `needs_owner` atomically maps the placement to `status='awaiting_owner'`
