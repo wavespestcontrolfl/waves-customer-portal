@@ -470,9 +470,19 @@ async function pollPending() {
     if (r.mergeDeferred) deferred += 1;
     results.push({ id: post.id, branch: post.astro_branch_name, ...r });
   }
+  // Rows a merge-time topic block parked still owing GitHub a close for the
+  // rejected PR (astro_retire_pr_number) leave the poll set above, so this is
+  // where the close is repeated until verified — a swallowed failure must not
+  // leave the violation human-mergeable. Never blocks the tick.
+  let topicRetire = { count: 0 };
+  try {
+    topicRetire = await require('./astro-publisher').reconcileTopicBlockedPostPrs();
+  } catch (err) {
+    logger.warn(`[pages-poll] topic-blocked PR reconcile failed: ${err.message}`);
+  }
   const note = deferred > 0 ? ` (${autoMerges} merged, ${deferred} deferred past cap ${maxAutoMerges})` : '';
   logger.info(`[pages-poll] polled ${results.length} blog publish states${note}`);
-  return { count: results.length, results, autoMerges, deferred };
+  return { count: results.length, results, autoMerges, deferred, topicRetire };
 }
 
 module.exports = {

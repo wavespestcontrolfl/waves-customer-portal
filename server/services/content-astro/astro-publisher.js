@@ -876,6 +876,86 @@ async function cleanupStaleAstroPr(post) {
   }
 }
 
+// Pay the close a merge-time topic block left owing (astro_retire_pr_number):
+// verify the PR's state on GitHub, close + delete its branch while it is
+// still open, and clear the debt ONLY on a verified terminal state — a
+// swallowed close failure therefore cannot leave the rejected PR
+// human-mergeable, because pages-poll calls this again every tick
+// (reconcileTopicBlockedPostPrs). Bound to the PR NUMBER, not the row's
+// current markers: a republish that opened a fresh PR meanwhile is never the
+// one closed here, and only that PR's own head branch is deleted. Found
+// merged (a human merged it between the park and the close) the violation is
+// live: the row follows the merge — the same transition mergeAstro applies to
+// an already-merged PR — while this PR still is the row's PR. Best-effort;
+// never throws.
+async function retireTopicBlockedPostPr(post) {
+  const prNumber = post.astro_retire_pr_number;
+  if (!prNumber) return { retired: false, reason: 'nothing_owed' };
+  const settle = () => db('blog_posts')
+    .where({ id: post.id, astro_retire_pr_number: prNumber })
+    .update({ astro_retire_pr_number: null, updated_at: new Date() });
+  const terminal = async (state) => {
+    try {
+      const { markPrTerminal } = require('../content/codex-remediation');
+      await markPrTerminal(prNumber, state);
+    } catch (err) {
+      logger.warn(`[astro-publisher] markPrTerminal(${state}) for topic-blocked PR #${prNumber} failed: ${err.message}`);
+    }
+  };
+  try {
+    let pr = await gh.getPr(prNumber);
+    if (!pr) return { retired: false, reason: 'pr_unreadable' };
+    if (pr.state === 'open' && !pr.merged) {
+      await cleanupStaleAstroPr({ id: post.id, astro_pr_number: prNumber, astro_branch_name: pr.head?.ref || null });
+      pr = await gh.getPr(prNumber);
+      if (!pr || (pr.state === 'open' && !pr.merged)) {
+        logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} is still open after the close attempt (retried next pages-poll tick)`);
+        return { retired: false, reason: 'still_open' };
+      }
+    }
+    if (pr.merged || pr.merged_at) {
+      logger.warn(`[astro-publisher] topic-blocked PR #${prNumber} for post ${post.id} was MERGED before it could be retired — the row follows the merge`);
+      if (post.astro_pr_number === prNumber) {
+        await applyMergeEffect(post.id, post, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null);
+      } else {
+        await terminal('merged');
+      }
+      await settle();
+      return { retired: false, merged: true };
+    }
+    await terminal('closed');
+    await settle();
+    logger.info(`[astro-publisher] retired topic-blocked PR #${prNumber} for post ${post.id}`);
+    return { retired: true };
+  } catch (err) {
+    logger.warn(`[astro-publisher] retire of topic-blocked PR #${prNumber} for post ${post.id} failed: ${err.message} (retried next pages-poll tick)`);
+    return { retired: false, reason: err.message };
+  }
+}
+
+// Every pages-poll tick: rows still owing a close (a retire that failed or
+// half-completed, or a PR a human merged meanwhile) are settled again. Cheap
+// — one getPr per owed row, and there are few; random rotation so one
+// persistently failing PR cannot starve the rest past the limit.
+async function reconcileTopicBlockedPostPrs() {
+  let rows = [];
+  try {
+    rows = await db('blog_posts').whereNotNull('astro_retire_pr_number').orderByRaw('random()').limit(25).select('*');
+  } catch (err) {
+    logger.warn(`[astro-publisher] topic-blocked PR reconcile query failed: ${err.message}`);
+    return { count: 0 };
+  }
+  let retired = 0;
+  let merged = 0;
+  for (const post of Array.isArray(rows) ? rows : []) {
+    if (!post || !post.astro_retire_pr_number) continue;
+    const r = await retireTopicBlockedPostPr(post);
+    if (r.retired) retired += 1;
+    if (r.merged) merged += 1;
+  }
+  return { count: rows.length, retired, merged };
+}
+
 // Run the LLM fact-check and throw BLOG_FACTCHECK_FAILED on a P0/P1 finding;
 // advisory P2s are logged. Shared by every blog-content publish path (new
 // admin draft, autonomous draft, refresh) so they all gate identically. The
@@ -2392,23 +2472,20 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       // for cleanupStaleAstroPr) instead of pr_open, which neither
       // publish-astro nor the Retry UI accepts — same transition pages-poll
       // applies on its auto-merge path.
-      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed' } : {}),
+      // …and record the close the row now owes GitHub for the rejected PR
+      // (astro_retire_pr_number) in the SAME write, so the debt is as durable
+      // as the park itself.
+      ...(err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish ? { astro_status: 'publish_failed', astro_retire_pr_number: post.astro_pr_number } : {}),
       updated_at: new Date(),
     });
     if (err.code === 'BLOG_TOPIC_TARGETING_BLOCKED' && !isUnpublish) {
-      // The park is durable (publish_failed) — now retire the PR too. Left
-      // open it stays mergeable on GitHub until the operator republishes,
-      // and a human merge in that window ships the targeting violation the
-      // gate just refused. Same order as the autonomous lane's park (DB
-      // first, GitHub after); cleanupStaleAstroPr is best-effort + idempotent
-      // and republish repeats it, so a lost close converges. Markers stay.
-      await cleanupStaleAstroPr(post);
-      try {
-        const { markPrTerminal } = require('../content/codex-remediation');
-        await markPrTerminal(post.astro_pr_number, 'closed');
-      } catch (termErr) {
-        logger.warn(`[astro-publisher] markPrTerminal after topic-block retire failed for PR #${post.astro_pr_number}: ${termErr.message}`);
-      }
+      // The park is durable — now retire the PR. Left open it stays
+      // mergeable on GitHub until the operator republishes, and a human
+      // merge in that window ships the targeting violation the gate just
+      // refused. Same order as the autonomous lane's park (DB first, GitHub
+      // after); a failed or half-done close is repeated by every pages-poll
+      // tick (reconcileTopicBlockedPostPrs) until the PR is verified closed.
+      await retireTopicBlockedPostPr({ ...post, astro_retire_pr_number: post.astro_pr_number });
     }
     throw err;
   }
@@ -3305,6 +3382,7 @@ function isCodexAuthor(login) {
 
 module.exports = {
   publishAstro,
+  reconcileTopicBlockedPostPrs,
   normalizeCategory,
   serviceAreasForCity,
   publishOrUpdatePage,
@@ -3356,6 +3434,7 @@ module.exports = {
     categoryRouteSlug,
     slugLeafOf,
     blogRouteKey,
+    retireTopicBlockedPostPr,
     canonicalUrlForSlug,
     assertCanonicalMatchesSlug,
     clampMetaDescription,

@@ -3108,6 +3108,12 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
         ? { content: ['---', `title: ${title}`, 'slug: /ant-trails-bradenton/', 'domains:', '  - wavespestcontrol.com', '---', 'Body.'].join('\n') }
         : null));
   }
+  // GitHub as it behaves: the PR reads open until closePr lands, closed after.
+  function prLifecycle(number = 43, ref = 'content/blog-ant-trails') {
+    let closed = false;
+    gh.getPr.mockImplementation(async () => ({ number, state: closed ? 'closed' : 'open', merged: false, head: { ref, sha: HEAD_SHA } }));
+    gh.closePr.mockImplementation(async () => { closed = true; });
+  }
   function cleanReview() {
     gh.getPr.mockResolvedValue({ number: 43, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA } });
     gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
@@ -3136,6 +3142,85 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
     // only AFTER the park is durable (codex r20 P1).
     expect(gh.closePr).toHaveBeenCalledWith(43);
     expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails');
+    // The close the row owes is recorded IN the park write; GitHub still
+    // reports the PR open here, so the debt is not settled.
+    expect(stamp.astro_retire_pr_number).toBe(43);
+    expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(false);
+  });
+
+  test('the owed close is settled only once GitHub confirms the PR closed (hook r21 P1)', async () => {
+    const stamps = [];
+    const queries = [chain({ first: jest.fn().mockResolvedValue(prOpenPost()) })];
+    db.mockImplementation(() => queries.shift() || chain({ update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }) }));
+    cleanReview();
+    prLifecycle();
+    mockBranchFile('Ant Trails in Tampa');
+    await expect(AstroPublisher.mergeAstro('post-gate-1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+    expect(gh.closePr).toHaveBeenCalledWith(43);
+    const park = stamps.findIndex((p) => p.astro_status === 'publish_failed');
+    const settle = stamps.findIndex((p) => p.astro_retire_pr_number === null);
+    expect(park).toBeGreaterThanOrEqual(0);
+    expect(settle).toBeGreaterThan(park);
+  });
+
+  describe('reconcileTopicBlockedPostPrs (every pages-poll tick)', () => {
+    function owedRow(over = {}) {
+      return { id: 'post-gate-1', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton', astro_status: 'publish_failed', astro_pr_number: 43, astro_branch_name: 'content/blog-ant-trails', astro_retire_pr_number: 43, ...over };
+    }
+    function reconcileDb(rows, stamps) {
+      db.mockImplementation(() => chain({
+        orderByRaw: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        select: jest.fn().mockResolvedValue(rows),
+        update: jest.fn((patch) => { stamps.push(patch); return Promise.resolve(1); }),
+      }));
+    }
+
+    test('a close that failed on the park tick is repeated until GitHub confirms it, then settled', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      prLifecycle();
+      const res = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(res).toMatchObject({ count: 1, retired: 1, merged: 0 });
+      expect(gh.closePr).toHaveBeenCalledWith(43);
+      expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails');
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+    });
+
+    test('a close GitHub rejects leaves the debt in place (nothing settled, retried next tick)', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr.mockResolvedValue({ number: 43, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails' } });
+      gh.closePr.mockRejectedValue(new Error('502'));
+      const res = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(res).toMatchObject({ count: 1, retired: 0 });
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(false);
+    });
+
+    test('a PR a human merged before the close: the row follows the merge (no longer parked) and the debt settles', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr.mockResolvedValue({ number: 43, state: 'closed', merged: true, merged_at: '2026-08-28T09:00:00Z', merge_commit_sha: 'm1', head: { ref: 'content/blog-ant-trails' } });
+      const res = await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(res).toMatchObject({ count: 1, retired: 0, merged: 1 });
+      expect(gh.closePr).not.toHaveBeenCalled();
+      expect(stamps.find((p) => p.astro_status === 'merged')).toMatchObject({ status: 'published' });
+      expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+    });
+
+    test('a republished row (fresh PR #44) owes a close for #43 only — #44 and its branch are never touched', async () => {
+      const stamps = [];
+      reconcileDb([owedRow({ astro_pr_number: 44, astro_branch_name: 'content/blog-ant-trails-v2', astro_status: 'pr_open' })], stamps);
+      prLifecycle();
+      await AstroPublisher.reconcileTopicBlockedPostPrs();
+      expect(gh.getPr.mock.calls.every((c) => c[0] === 43)).toBe(true);
+      expect(gh.closePr).toHaveBeenCalledWith(43);
+      expect(gh.closePr).not.toHaveBeenCalledWith(44);
+      expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails');
+      expect(gh.deleteRef).not.toHaveBeenCalledWith('content/blog-ant-trails-v2');
+      expect(stamps.find((p) => p.astro_retire_pr_number === null)).toBeDefined();
+      expect(stamps.some((p) => p.astro_status === 'merged')).toBe(false);
+    });
   });
 
   test('a busy topic-merge lock defers the merge (TOPIC_MERGE_LOCK_BUSY), nothing merged', async () => {
