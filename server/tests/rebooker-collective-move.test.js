@@ -344,9 +344,10 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(updates[0].update).toHaveBeenCalledWith(expect.any(Object), expect.arrayContaining(['updated_at', 'track_token_expires_at', 'scheduled_date']));
     expect(rows[1]).toMatchObject({ id: 'svc-2', anchor: false, before: { scheduled_date: SIB1 }, after: { scheduled_date: dayOffset(19), updated_at: 'stamp-1' } });
     expect(logInsert.insert.mock.calls[0][0]).toMatchObject({ series_move_id: result.seriesMoveId, reason_code: 'admin_series' });
-    // The committed result is stamped post-commit for operation_key replays.
-    expect(seriesMovesDb.update).toHaveBeenCalledWith({ result: expect.stringContaining('"seriesMoveId"') });
-    expect(result).toMatchObject({ deltaDays: 2, skippedCount: 0, exceptionCount: 0, occurrencesRescheduled: 2 });
+    // The replay payload is written WITH the row, inside the move trx.
+    expect(JSON.parse(row.result)).toMatchObject({ success: true, newDate: TARGET, occurrencesRescheduled: 2, deltaDays: 2 });
+    expect(seriesMovesDb.update).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ deltaDays: 2, skippedCount: 0, exceptionCount: 0, occurrencesRescheduled: 2, seriesMoveId: row.id });
   });
 
   test('a repeated operation_key replays the committed result without re-running the sweep', async () => {
@@ -356,6 +357,26 @@ describe('rescheduleSeries — one recorded operation', () => {
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
     expect(result).toEqual({ success: true, newDate: TARGET, occurrencesRescheduled: 2, seriesMoveId: 'sm-prior', replayed: true });
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a replay whose stored result is missing rebuilds the occurrence list from the row snapshots', async () => {
+    wireSeriesMocks([sib('svc-1', BASE)], {
+      priorMove: {
+        id: 'sm-prior', result: null, original_date: BASE, new_date: TARGET, delta_days: 2, skipped_count: 1, exception_count: 0,
+        rows: [
+          { id: 'svc-1', after: { scheduled_date: TARGET, window_start: '09:00:00', window_end: '11:00:00' }, before: { window_start: '09:00:00' } },
+          { id: 'svc-2', after: { scheduled_date: dayOffset(19), window_start: null, window_end: null }, before: { window_start: '09:00:00' } },
+        ],
+      },
+    });
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
+    expect(result).toMatchObject({
+      replayed: true, seriesMoveId: 'sm-prior', occurrencesRescheduled: 2, deltaDays: 2, skippedCount: 1,
+      rescheduledOccurrences: [
+        { id: 'svc-1', date: TARGET, windowStart: '09:00:00', conflicted: false },
+        { id: 'svc-2', date: dayOffset(19), windowStart: null, conflicted: true },
+      ],
+    });
   });
 
   test('a rolled-back sweep records a failed series_moves row outside the transaction and rethrows', async () => {

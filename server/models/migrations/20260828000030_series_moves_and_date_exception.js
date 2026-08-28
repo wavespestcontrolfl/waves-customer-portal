@@ -49,6 +49,11 @@ exports.up = async function up(knex) {
       t.timestamp('notified_at', { useTz: true });
       t.timestamp('conflict_card_at', { useTz: true });
       t.timestamp('reminders_synced_at', { useTz: true });
+      // Post-commit effects run under a short lease held by ONE pass; the
+      // three completion markers above are stamped after each effect lands,
+      // so a pass that dies mid-way leaves an expired lease and unfinished
+      // markers for the next retry — never a permanent skip.
+      t.timestamp('effects_lease_until', { useTz: true });
       t.timestamp('reverted_at', { useTz: true });
       t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
       t.index('anchor_service_id');

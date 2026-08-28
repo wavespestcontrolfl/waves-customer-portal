@@ -177,6 +177,11 @@ class RescheduleSMS {
     }
 
     let smsMoveResult = null;
+    // Future siblings the collective choke point shifted with this reply
+    // (empty for a single-visit move): the timed ones get reminder sync +
+    // the failed-send re-arm below, the windowless ones an operator card.
+    let shiftedSiblings = [];
+    let shiftedTimedSiblings = [];
     if (selectedOption && !alreadyOnSlot) {
       try {
         smsMoveResult = await SmartRebooker.reschedule(
@@ -184,6 +189,9 @@ class RescheduleSMS {
           selectedOption.window, pending.reason_code, 'customer_sms',
           { sourceSurface: 'sms_reply' },
         );
+        shiftedSiblings = (Array.isArray(smsMoveResult?.rescheduledOccurrences) ? smsMoveResult.rescheduledOccurrences : [])
+          .filter((occ) => String(occ.id) !== String(pending.scheduled_service_id));
+        shiftedTimedSiblings = shiftedSiblings.filter((occ) => !occ.conflicted && occ.windowStart);
       } catch (err) {
         // The offer was computed without a route check — rebooker can now
         // refuse it (tech conflict, window elapsed). The pending offer is
@@ -224,9 +232,7 @@ class RescheduleSMS {
         // to its own new date/kept window (same silent sync the web
         // rescheduler runs — reschedule-public.js). Windowless occurrences
         // had their reminder pre-closed in the move trx.
-        const shifted = Array.isArray(smsMoveResult?.rescheduledOccurrences) ? smsMoveResult.rescheduledOccurrences : [];
-        for (const occ of shifted) {
-          if (String(occ.id) === String(pending.scheduled_service_id) || occ.conflicted || !occ.windowStart) continue;
+        for (const occ of shiftedTimedSiblings) {
           try {
             const AppointmentReminders = require('./appointment-reminders');
             await AppointmentReminders.handleReschedule(
@@ -236,6 +242,28 @@ class RescheduleSMS {
             );
           } catch (err) {
             logger.warn(`[reschedule-sms] series reminder sync failed for ${occ.id}: ${err.message}`);
+          }
+        }
+        // Shifted siblings that went WINDOWLESS (projected window held a
+        // seeded placeholder beyond the clash horizon) need an operator to
+        // set a time — the same schedule_conflict card the web and dispatch
+        // series paths park; an SMS reply must not leave them untimed
+        // silently.
+        const siblingConflicts = shiftedSiblings
+          .filter((occ) => occ.conflicted)
+          .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+        if (siblingConflicts.length) {
+          try {
+            const NotificationService = require('./notification-service');
+            const notif = await NotificationService.notifyAdmin(
+              'schedule_conflict',
+              'Series re-anchor needs a look',
+              `A customer's text reply moved a recurring visit; ${siblingConflicts.length} shifted future visit(s) projected onto a window already holding another plan's placeholder (${siblingConflicts.map((c) => c.date).join(', ')}). They kept their dates but have NO time window — set a time from dispatch as those dates approach.`,
+              { metadata: { customerId, scheduledServiceId: pending.scheduled_service_id, seriesMoveId: smsMoveResult?.seriesMoveId || null, conflicts: siblingConflicts } },
+            );
+            if (!notif) logger.error(`[reschedule-sms] schedule_conflict notification insert FAILED for ${pending.scheduled_service_id}: ${JSON.stringify(siblingConflicts)}`);
+          } catch (err) {
+            logger.error(`[reschedule-sms] schedule_conflict notification failed for ${pending.scheduled_service_id}: ${err.message}`);
           }
         }
       }
@@ -369,7 +397,24 @@ class RescheduleSMS {
                 .where('updated_at', reminderGuard.updated_at)
                 .update(rearmUpdate);
             }
-          } else if (reminderGuardReadFailed) {
+          }
+          // The shifted siblings were synced with coverDueWindows above and
+          // the confirmation that was to cover them never went out — re-arm
+          // their reachable windows too (the web series path's compensation),
+          // or their 72h/24h reminders stay silently marked covered.
+          if (shiftedTimedSiblings.length) {
+            await db('appointment_reminders')
+              .whereIn('scheduled_service_id', shiftedTimedSiblings.map((occ) => occ.id))
+              .where({ suppressed_by_sibling: false, cancelled: false })
+              .update({
+                reminder_72h_sent: false,
+                reminder_72h_sent_at: null,
+                reminder_24h_sent: false,
+                reminder_24h_sent_at: null,
+                updated_at: db.fn.now(),
+              });
+          }
+          if (reminderGuardReadFailed) {
             // The pre-send snapshot READ failed (this is not the row-missing
             // case — that skips below), so the re-arm can't be scoped by the
             // pre-send row state. Fall back to the pre-guard re-arm scoped as

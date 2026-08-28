@@ -177,6 +177,36 @@ function snapshotRow(row) {
   return out;
 }
 
+// What an operation_key replay hands back for a committed move: the result
+// stored WITH the row in the move transaction, or — for a row whose result
+// column is somehow empty — the same occurrence list rebuilt from the
+// per-row snapshots, so a replaying caller can always run its effects.
+function replaySeriesMoveResult(prior) {
+  const base = prior.result && typeof prior.result === 'object'
+    ? prior.result
+    : (() => {
+      const rows = Array.isArray(prior.rows) ? prior.rows : [];
+      const rescheduledOccurrences = rows.map((r) => ({
+        id: r.id,
+        date: r.after?.scheduled_date ?? null,
+        windowStart: r.after?.window_start ?? null,
+        windowEnd: r.after?.window_end ?? null,
+        conflicted: !!(r.before?.window_start && !r.after?.window_start),
+      }));
+      return {
+        success: true,
+        originalDate: prior.original_date,
+        newDate: prior.new_date,
+        occurrencesRescheduled: rescheduledOccurrences.length,
+        rescheduledOccurrences,
+        deltaDays: prior.delta_days,
+        skippedCount: prior.skipped_count,
+        exceptionCount: prior.exception_count,
+      };
+    })();
+  return { ...base, seriesMoveId: prior.id, replayed: true };
+}
+
 // Telemetry + audit for a series shift that did NOT commit (written outside
 // the rolled-back transaction, best-effort): the un-gate review reads
 // rollback/failure counts from the same table as the successes.
@@ -1050,9 +1080,7 @@ class SmartRebooker {
       const prior = await db('series_moves')
         .where({ operation_key: options.operationKey, status: 'committed' })
         .first();
-      if (prior) {
-        return { ...(prior.result || {}), seriesMoveId: prior.id, replayed: true };
-      }
+      if (prior) return replaySeriesMoveResult(prior);
     }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
@@ -1164,6 +1192,7 @@ class SmartRebooker {
     let anchorRewound = false;
     let rewoundAnchorRow = null;
     let seriesMoveId = null;
+    let committedResult = null;
     let skippedCount = 0;
     const moveRows = [];
     const failedMoveFields = {
@@ -1710,15 +1739,35 @@ class SmartRebooker {
       // makes two concurrent same-key requests serialize here — the loser
       // rolls back and replays the winner's result (see the catch below).
       seriesMoveId = crypto.randomUUID();
+      // The replay payload is written WITH the row, in this trx — a
+      // committed move whose result a later retry cannot see would let that
+      // retry claim effects without any occurrences to sync.
+      const exceptionCount = moveRows.filter((r) => r.exception).length;
+      const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
+        const { slotOverlapWarning } = require('./scheduling/window-rules');
+        return slotOverlapWarning(d);
+      });
+      committedResult = {
+        success: true,
+        originalDate: dateOnly(service.scheduled_date),
+        newDate,
+        occurrencesRescheduled: touched.length,
+        rescheduledOccurrences: touched,
+        deltaDays,
+        skippedCount,
+        exceptionCount,
+        ...(seriesWarnings.length ? { warnings: seriesWarnings } : {}),
+      };
       await trx('series_moves').insert({
         id: seriesMoveId,
         ...failedMoveFields,
         movable_count: touched.length,
         skipped_count: skippedCount,
-        exception_count: moveRows.filter((r) => r.exception).length,
+        exception_count: exceptionCount,
         conflict_count: touched.filter((t) => t.conflicted).length,
         status: 'committed',
         rows: JSON.stringify(moveRows),
+        result: JSON.stringify(committedResult),
       });
 
       await trx('reschedule_log').insert({
@@ -1746,8 +1795,7 @@ class SmartRebooker {
       throw err;
     });
     if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
-      const prior = occurrencesRescheduled.replayedFrom;
-      return { ...(prior.result || {}), seriesMoveId: prior.id, replayed: true };
+      return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom);
     }
 
     // Live-anchor post-commit cleanup — same pattern as the single-job
@@ -1817,30 +1865,9 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for series anchor ${serviceId}: ${activateErr.message}`);
     }
 
-    const seriesWarnings = [...overlapWarnDates].sort().map((d) => {
-      const { slotOverlapWarning } = require('./scheduling/window-rules');
-      return slotOverlapWarning(d);
-    });
-    const result = {
-      success: true,
-      originalDate: service.scheduled_date,
-      newDate,
-      occurrencesRescheduled: occurrencesRescheduled.length,
-      rescheduledOccurrences: occurrencesRescheduled,
-      seriesMoveId,
-      deltaDays,
-      skippedCount,
-      exceptionCount: moveRows.filter((r) => r.exception).length,
-      ...(seriesWarnings.length ? { warnings: seriesWarnings } : {}),
-    };
-    // The committed result is what an operation_key replay hands back —
-    // best-effort post-commit; a miss only degrades a replay to counts.
-    try {
-      await db('series_moves').where({ id: seriesMoveId }).update({ result: JSON.stringify(result) });
-    } catch (err) {
-      logger.warn(`[rebooker] series_moves result stamp failed for ${seriesMoveId}: ${err.message}`);
-    }
-    return result;
+    // Same payload the row stores (originalDate as the raw column value,
+    // matching the single path's return shape).
+    return { ...committedResult, originalDate: service.scheduled_date, seriesMoveId };
   }
 
   // Read-only preview of what rescheduleSeries would touch — the server
