@@ -773,8 +773,12 @@ class GoogleBusinessService {
   async _upsertGbpReview(normalized, syncStart = null, pendingUnlinkedNotifications = null, pendingRestoredNotifications = null) {
     const existing = await this._findExistingReview(normalized);
     const customerId = await this._findCustomerIdByReviewerName(normalized.reviewer_name);
-    const replyFields = isDraftReply(existing?.review_reply)
-      ? {}
+    // Reply fields from the feed snapshot — deferred under a live publish
+    // claim, replacing a local draft when Google has an owner reply, and
+    // preserving a draft against an empty feed (services/review-reply/runner).
+    const { syncReplyFields } = require('./review-reply/runner');
+    const replyFields = existing
+      ? syncReplyFields(existing, normalized, { fnNow: db.fn.now() })
       : {
           review_reply: normalized.owner_reply,
           reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
@@ -852,12 +856,7 @@ class GoogleBusinessService {
         // (built with existing = null) would overwrite both and bypass the
         // draft-preservation rule above.
         const { review_reply: _loserReply, reply_updated_at: _loserReplyAt, ...providerRow } = row;
-        const winnerReplyFields = isDraftReply(winner.review_reply)
-          ? {}
-          : {
-              review_reply: normalized.owner_reply,
-              reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
-            };
+        const winnerReplyFields = syncReplyFields(winner, normalized, { fnNow: db.fn.now() });
         await db('google_reviews').where({ id: winner.id }).update({
           ...providerRow,
           synced_at: monotonicSyncedAt,
@@ -1062,8 +1061,8 @@ class GoogleBusinessService {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
-          upd.review_reply = ownerReply;
-          upd.reply_updated_at = db.fn.now();
+          const { syncReplyFields } = require('./review-reply/runner');
+          Object.assign(upd, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }));
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
         // Reinstatement clear, mirroring _upsertGbpReview: the main update

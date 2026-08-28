@@ -401,7 +401,41 @@ describe('Google Business review sync', () => {
 
     await service.syncAllReviews();
 
-    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('[DRAFT] We are sorry.');
+    // Rule (auto-reply lane, PR #3559): a local draft survives an EMPTY feed,
+    // but an owner reply that exists on Google replaces it — the review is
+    // answered, and keeping the draft would pin it in the needs-reply queue.
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-1').review_reply).toBe('Public Google reply');
+  });
+
+  test('preserves a local draft reply when the GBP feed carries no owner reply', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'review-2',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-2',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-2',
+      location_id: 'bradenton',
+      reviewer_name: 'Jane Doe',
+      star_rating: 2,
+      review_text: 'Meh',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: '[DRAFT] We are sorry.',
+      reply_updated_at: null,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-2',
+        reviewer: { displayName: 'Jane Doe' },
+        starRating: 'TWO',
+        comment: 'Meh',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    expect(db.__state.rows.google_reviews.find(r => r.id === 'review-2').review_reply).toBe('[DRAFT] We are sorry.');
   });
 
   test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {

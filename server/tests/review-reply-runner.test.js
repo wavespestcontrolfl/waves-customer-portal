@@ -481,6 +481,30 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied', auto_reply_claimed_until: null });
   });
 
+  test('verifier reject after an admin skip: lost claim → no bell, not reported parked', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => {
+      state.rows[0].auto_reply_claimed_until = null; state.rows[0].auto_reply_status = 'skipped';
+      return { ok: false, reason: 'verifier_reject', rejections: ['url'], mode: 'service_quality', version: 'reply-v1' };
+    });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ parked: 0, skipped: 1 });
+    expect(state.rows[0].auto_reply_status).toBe('skipped');
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('syncReplyFields: owner reply on Google replaces a local draft and closes auto state; live claim defers; empty feed keeps a draft', () => {
+    const now = new Date('2026-08-27T15:00:00Z');
+    const drafted = { review_reply: '[DRAFT] hi', auto_reply_status: 'drafted', publish_claimed_until: null };
+    expect(Runner.syncReplyFields(drafted, { owner_reply: 'Owner replied in Google', owner_reply_updated_at: '2026-08-27T14:00:00Z' }, { now }))
+      .toEqual({ review_reply: 'Owner replied in Google', reply_updated_at: '2026-08-27T14:00:00Z', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
+    expect(Runner.syncReplyFields(drafted, { owner_reply: null }, { now })).toEqual({});
+    expect(Runner.syncReplyFields({ review_reply: 'live', publish_claimed_until: '2099-01-01T00:00:00Z' }, { owner_reply: null }, { now })).toEqual({});
+    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'posted', publish_claimed_until: null }, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
+    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'posted', publish_claimed_until: null }, { owner_reply: 'edited' }, { now, fnNow: 'NOW()' })).toEqual({ review_reply: 'edited', reply_updated_at: 'NOW()' });
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

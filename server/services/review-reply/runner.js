@@ -158,10 +158,14 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
   return (res?.rows || []).map((r) => ({ ...r, _claimToken: token }));
 }
 
+// Token-matched release. Returns true only when OUR claim was still on the
+// row — zero rows means a skip/dismiss cleared it meanwhile, and the caller
+// must treat its own outcome as void (no bell, no "parked").
 async function releaseClaim(row, patch = {}) {
-  await db('google_reviews')
+  const n = await db('google_reviews')
     .where({ id: row.id, auto_reply_claimed_until: row._claimToken })
     .update({ auto_reply_claimed_until: null, ...patch });
+  return (Array.isArray(n) ? n.length : n) > 0;
 }
 
 // Ownership guard evaluated by the publisher INSIDE its publish claim, on a
@@ -288,8 +292,9 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     await releaseClaim(row, { ...patch, auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'changed_during_draft' });
     return false;
   }
-  await releaseClaim(row, patch);
-  return true;
+  // No draft text (verifier/provider failure): the state write is still
+  // token-matched — a lost claim means an admin cancelled meanwhile.
+  return releaseClaim(row, patch);
 }
 
 // What a draft was written FOR. A stored draft may only be reused when the
@@ -603,6 +608,34 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * makes the holder's in-lock guard fail).
  */
 /**
+ * Reply fields the GBP sync writes onto an EXISTING row from a feed snapshot.
+ *   - A live publish claim on the row means a publisher is mid-flight: the
+ *     snapshot may predate its PUT, so provider reply fields are deferred to
+ *     the next sync (never overwrite a just-persisted reply with "").
+ *   - An owner reply present on Google REPLACES a local "[DRAFT]" (the draft
+ *     preservation rule only protects a draft against an EMPTY feed) and
+ *     closes any pending auto-reply state, so the row leaves the queue.
+ *   - Otherwise the historical rule: a local draft survives an empty feed;
+ *     anything else mirrors the feed.
+ */
+function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null } = {}) {
+  const ownerReply = String(normalized?.owner_reply || '').trim();
+  const updatedAt = ownerReply ? (normalized.owner_reply_updated_at || fnNow || now.toISOString()) : null;
+  const claimLive = existing?.publish_claimed_until && new Date(existing.publish_claimed_until) > now;
+  if (claimLive) return {};
+  if (ownerReply) {
+    const fields = { review_reply: ownerReply, reply_updated_at: updatedAt };
+    const pending = [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED];
+    if (existing && pending.includes(existing.auto_reply_status)) {
+      Object.assign(fields, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
+    }
+    return fields;
+  }
+  if (isDraftReply(existing?.review_reply)) return {};
+  return { review_reply: null, reply_updated_at: null };
+}
+
+/**
  * Merged into the GBP sync's UPDATE of an existing row: a row that parked on
  * `no_gbp_resource` (first seen via the Places fallback) re-enters the queue
  * the moment the authoritative sync attaches its GBP identity.
@@ -669,6 +702,7 @@ module.exports = {
   dismissCancelFields,
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
+  syncReplyFields,
   reviewFingerprint,
   autoReplyStatus,
   classifyReplyMode,
