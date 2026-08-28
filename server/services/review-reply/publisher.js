@@ -75,7 +75,8 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
   try {
     const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
     if (!loc?.googleLocationResourceName) return null;
-    const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 100);
+    // GBP caps pageSize at 50; the helper pages until exhausted.
+    const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50);
     const rName = (review.reviewer_name || '').toLowerCase();
     const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
     const rRating = Number(review.star_rating) || 0;
