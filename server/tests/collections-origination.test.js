@@ -37,6 +37,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(),
   isWithinCallWindow: jest.fn(() => true),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
@@ -222,6 +223,24 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   const meta = JSON.parse(insertChain._inserted.metadata);
   expect(meta.collectionsIdempotencyKey).toBe(CASE.idempotency_key);
   expect(insertChain._inserted.source).toBe('collections_voice');
+  // Supervision is stamped IMMUTABLY on the call row (codex #3560 P2) —
+  // no approved_by on this fixture ⇒ unsupervised.
+  expect(meta.collectionsSupervised).toBe(false);
+});
+
+test('an admin-approved case stamps collectionsSupervised:true on the call_log row', async () => {
+  const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE, approved_by: 'admin:adam@wavespestcontrol.com' } }), chain('collection_cases', { result: 1 }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined }), insertChain, chain('call_log')],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.dialed).toBe(true);
+  expect(JSON.parse(insertChain._inserted.metadata).collectionsSupervised).toBe(true);
+  expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ supervisedDial: true }));
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
 });
 
 test('idempotency: prior dial under the same key refuses', async () => {
@@ -561,9 +580,32 @@ test('claim boundary re-checks the call window with a fresh clock — after-hour
   });
   const res = await originateCollectionCall('case-1', { now: NOW, clock: () => LATE });
   expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
-  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE);
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE, { supervised: false });
   expect(mockCallsCreate).not.toHaveBeenCalled();
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+// codex P1 on #3555: the owner call-window override reaches only SUPERVISED
+// (admin-approved) cases. Supervision is derived from approved_by and threaded
+// into BOTH window readers — the policy revalidation and the claim recheck.
+describe('supervised vs autodial cases and the call-window override', () => {
+  test.each([
+    ['admin:adam@wavespestcontrol.com', true],
+    ['system:autodial', false],
+    [null, false],
+  ])('approved_by=%s ⇒ supervisedDial/supervised=%s at both window readers', async (approvedBy, supervised) => {
+    ContactPolicy.isWithinCallWindow.mockReturnValue(false); // stop at the claim recheck
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE, approved_by: approvedBy } })],
+      customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+      call_log: [chain('call_log', { first: undefined })],
+    });
+    const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+    expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'voice', supervisedDial: supervised }));
+    expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(NOW, { supervised });
+    expect(mockCallsCreate).not.toHaveBeenCalled();
+  });
 });
 
 test('the claim WHERE compares approval expiry against the fresh clock, not the entry snapshot', async () => {

@@ -41,9 +41,14 @@ jest.mock('../services/collections/contact-policy', () => ({
   loadEligibleInvoices: jest.fn(async () => ([
     { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
   ])),
-  // staffed-hours imports the real window constants from this module.
-  CALL_WINDOW_START_HOUR: 9,
-  CALL_WINDOW_END_HOUR: 18,
+  // staffed-hours delegates to the policy's ONE window predicate — real
+  // 9–18 ET Mon–Fri math here (no override in this suite).
+  isWithinCallWindow: jest.fn((now) => {
+    const { etParts } = jest.requireActual('../utils/datetime-et');
+    const et = etParts(now);
+    return et.dayOfWeek >= 1 && et.dayOfWeek <= 5 && et.hour >= 9 && et.hour < 18;
+  }),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -94,7 +99,9 @@ const CALL_ROW = {
   twilio_call_sid: 'CA1',
   customer_id: 'cust-1',
   to_phone: '+19415551234',
-  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }),
+  // Origination stamps supervision on every row it writes (codex #3560);
+  // legacy stamp-less rows are pinned explicitly below.
+  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false }),
 };
 const CASE_ROW = {
   id: 'case-1',
@@ -302,6 +309,29 @@ test('human escape phrase during staffed hours ⇒ transfer handoff to the actio
   expect(handoffs[0]).toEqual({ next: 'transfer' });
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'conversation_transferred' }));
   expect(mockStreamCalls).toHaveLength(0); // code-level escape, not model-mediated
+});
+
+// codex #3560 P2: the relay leg reads supervision from the immutable
+// call_log stamp and passes it to the staffed-hours predicate.
+test('human escape passes the call row supervision stamp to the staffed-hours predicate', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: true }) } });
+  const { convo } = makeConvo({ now: AFTER_HOURS_NOW });
+  await turn(convo, 'human please');
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(AFTER_HOURS_NOW, { supervised: true });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
+});
+
+test('a legacy stamp-less call row is UNSUPERVISED even when the case carries an admin approver', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  setDb({
+    callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }) },
+    caseRow: { ...CASE_ROW, approved_by: 'admin:adam@wavespestcontrol.com' },
+  });
+  const { convo } = makeConvo({ now: AFTER_HOURS_NOW });
+  await turn(convo, 'human please');
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(AFTER_HOURS_NOW, { supervised: false });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
 });
 
 test('human escape after hours ⇒ callback card + fixed promise', async () => {

@@ -31,6 +31,7 @@ const logger = require('../services/logger');
 const script = require('../services/collections/outbound-voice/script');
 const { isVoiceLatePaymentEnabled } = require('../services/collections/outbound-voice/gates');
 const { isStaffedHours } = require('../services/collections/outbound-voice/staffed-hours');
+const { callSupervision } = require('../services/collections/outbound-voice/supervision');
 const {
   voicemailPermitted, stampVoicemailLeft, isMachineEnd,
 } = require('../services/collections/outbound-voice/voicemail');
@@ -104,11 +105,17 @@ async function loadCollectionsCall(req) {
     .first('id', 'customer_id')
     .catch(() => null);
   if (!linkedCase || String(linkedCase.customer_id) !== String(row.customer_id)) return null;
+  // Supervised (admin-approved) calls may ride the owner call-window
+  // override at answer/press-1 revalidation and for staffed-hours;
+  // autodial calls never do (codex P1 on #3555). Read from the IMMUTABLE
+  // call_log stamp only — never from the case (codex #3560 P2/P0 + hook:
+  // approved_by is mutable). Stamp-less legacy rows are unsupervised.
+  const supervised = callSupervision(meta);
   const customer = await db('customers')
     .where({ id: row.customer_id })
     .first('id', 'first_name');
   if (!customer) return null;
-  return { row, meta, customer, callSid };
+  return { row, meta, customer, callSid, supervised };
 }
 
 /** Metadata-only pre-consent logging: merge keys into the call_log row. */
@@ -227,6 +234,7 @@ router.post('/collections-vestibule', async (req, res) => {
           channel: 'voice',
           purpose: 'late_payment',
           excludeCollectionCaseId: call.meta.collectionCaseId,
+          supervisedDial: call.supervised === true,
         });
       } catch (policyErr) {
         logger.error(`[collections-vestibule] answer-time policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
@@ -293,6 +301,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
           channel: 'voice',
           purpose: 'late_payment',
           excludeCollectionCaseId: call.meta.collectionCaseId,
+          supervisedDial: call.supervised === true,
         });
       } catch (policyErr) {
         logger.error(`[collections-vestibule] press-1 policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
@@ -365,7 +374,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
     }
 
     if (digit === '0') {
-      if (isStaffedHours()) {
+      if (isStaffedHours(new Date(), { supervised: call.supervised === true })) {
         twiml.say(script.TRANSFER_ANNOUNCEMENT);
         const adminPhone = process.env.ADAM_PHONE || '+19415993489';
         twiml.dial(

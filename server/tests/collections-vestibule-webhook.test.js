@@ -34,6 +34,7 @@ jest.mock('../services/collections/outbound-voice/voicemail', () => {
 // Answer-time revalidation (gh prb-r12) — allowed by default; tests flip it.
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [] })),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/outbound-voice/outcomes', () => ({
   writeCallOutcome: jest.fn(async () => ({ ok: true })),
@@ -77,8 +78,11 @@ const CALL_ROW = {
   source: 'collections_voice',
   twilio_call_sid: 'CA1',
   customer_id: 'cust-1',
-  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' }),
+  // Origination stamps supervision on every row it writes (codex #3560);
+  // legacy stamp-less rows are pinned explicitly below.
+  metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false }),
 };
+const LEGACY_META = JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1' });
 const CUSTOMER = { id: 'cust-1', first_name: 'Pat' };
 
 function chain({ first } = {}) {
@@ -262,6 +266,31 @@ test('press 0 staffed hours ⇒ warm transfer <Dial> to the admin bridge phone',
   expect(res.body).toContain('+19415993489');
   expect(res.body).toContain('collections-transfer-complete');
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'vestibule_office' }));
+});
+
+// codex #3560 P2: supervision rides the IMMUTABLE call_log stamp, never the
+// case's mutable approved_by (cleared at outcome time) — a Twilio retry of
+// the same webhook must classify the call exactly as the first attempt.
+test('supervision for staffed-hours + revalidation comes from call_log metadata, not the case', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: true }) } });
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
+});
+
+test('a legacy stamp-less call row is UNSUPERVISED even when the case carries an admin approver — no inference from mutable case state', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  const dbm = require('../models/db');
+  setDb({ callRow: { ...CALL_ROW, metadata: LEGACY_META } });
+  const orig = dbm.getMockImplementation();
+  const cases = [chain({ first: { ...LINKED_CASE, approved_by: 'admin:adam@wavespestcontrol.com' } })];
+  dbm.mockImplementation((table) => (table === 'collection_cases' ? (cases.shift() || chain({ first: LINKED_CASE })) : orig(table)));
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: false });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
 });
 
 test('press 0 after hours ⇒ callback card + fixed promise, no dial', async () => {
@@ -624,7 +653,7 @@ test('a replayed machine callback with the cap already stamped writes the fallba
 test('a replayed transfer-complete files NO duplicate card but keeps the promise', async () => {
   const replayRow = {
     ...CALL_ROW,
-    metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', transfer_miss_card_at: '2026-08-15T18:00:00Z' }),
+    metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: false, transfer_miss_card_at: '2026-08-15T18:00:00Z' }),
   };
   const claimChain = chain();
   claimChain.update = jest.fn(async () => 0); // claim already taken
