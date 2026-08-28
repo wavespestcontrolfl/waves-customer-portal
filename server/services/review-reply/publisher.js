@@ -45,6 +45,7 @@ const CODES = {
   EMPTY: 'empty_text',
   STALE: 'stale_claim',
   PERSIST_FAILED: 'persist_failed',
+  REVIEW_CHANGED: 'review_changed',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
@@ -194,6 +195,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           live = await gbp.getReview(resourceName, review.location_id);
         } catch (e) {
           throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
+        }
+        // The LIVE review itself must still be the one the reply was drafted
+        // for: a reviewer edit after the last sync (5★ praise → 1★ complaint,
+        // rewritten text, renamed account) is invisible locally.
+        const liveRating = { ONE: 1, TWO: 2, THREE: 3, FOUR: 4, FIVE: 5 }[String(live?.starRating || '').toUpperCase()] || Number(live?.starRating) || 0;
+        const liveText = String(live?.comment || '').trim();
+        const liveName = String(live?.reviewer?.displayName || '').trim().toLowerCase();
+        if ((live?.starRating != null && liveRating !== (Number(fresh.star_rating) || 0))
+          || liveText !== String(fresh.review_text || '').trim()
+          || (liveName && liveName !== String(fresh.reviewer_name || '').trim().toLowerCase())) {
+          throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed on Google since it was synced — reply not posted.', { status: 409 });
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         if (liveReply) {

@@ -34,7 +34,7 @@ jest.mock('../services/review-reply/publisher', () => {
   return {
     publishReviewReply: (...a) => mockPublish(...a),
     ReviewReplyError,
-    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed' },
+    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed', REVIEW_CHANGED: 'review_changed' },
   };
 });
 jest.mock('../models/db', () => {
@@ -625,6 +625,16 @@ describe('processDueAutoReplies — state machine', () => {
     state.rows = [{ ...parked }];
     expect(await Runner.applyRequeueOnIdentity('p', parked, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toBe(1);
     expect(state.rows[0].auto_reply_status).toBe('queued');
+  });
+
+  test('publisher REVIEW_CHANGED (live review differs from the synced row) → re-queued for a fresh draft', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('review_changed', 'changed on Google', { status: 409 }));
+    state.rows = [row()];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ retry: 1 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

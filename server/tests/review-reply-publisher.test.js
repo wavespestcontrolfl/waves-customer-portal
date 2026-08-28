@@ -5,7 +5,7 @@
 // that automation never fakes a local-only post.
 const mockGbp = {
   configured: true,
-  getReview: jest.fn(async () => ({ reviewReply: null })),
+  getReview: jest.fn(async () => ({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } })),
   isLocationConfigured: jest.fn(async () => true),
   getAllLocationReviews: jest.fn(async () => []),
   replyToReview: jest.fn(async () => ({ comment: 'ok' })),
@@ -136,6 +136,17 @@ describe('publishReviewReply', () => {
       .rejects.toMatchObject({ code: CODES.STALE });
     expect(guard).toHaveBeenCalledTimes(2);
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+  });
+
+  test('automation compares the LIVE review (rating/text/reviewer) with the synced row before the PUT', async () => {
+    state.rows[0].review_text = 'Great';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'ONE', comment: 'Terrible now', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } });
+    expect(r.googlePosted).toBe(true);
   });
 
   test('activity_log never carries the reviewer name', async () => {

@@ -512,7 +512,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft' });
       return { outcome: 'parked', reason: 'human_draft' };
     }
-    if (code === CODES.STALE && err.message.includes(REVIEW_CHANGED)) {
+    if (code === CODES.REVIEW_CHANGED || (code === CODES.STALE && err.message.includes(REVIEW_CHANGED))) {
       // Not lost to a person — the review itself changed. Back to the queue
       // for a fresh draft against the current rating/text.
       await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: new Date().toISOString(), auto_reply_draft: null, auto_reply_drafted_at: null });

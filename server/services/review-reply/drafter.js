@@ -91,7 +91,7 @@ const BANNED_RE = new RegExp([
   '\\b(?:leave|give|rate)\\b[^.]{0,40}\\bstars?\\b', '\\b(?:update|change|edit|revise)\\b[^.]{0,30}\\b(?:review|rating)\\b',
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
   '\\bsafe(?:r|st|ty|ly)?\\b', '\\bharmless\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
-  '\\bguarantee[ds]?\\b', '\\bwarrant(?:y|ee)\\b',
+  '\\bguarantee\\w*\\b', '\\bwarrant(?:y|ies|ied|ee|eed)\\b',
   // Drying / curing / wait-before language of any form (fixed intervals are
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
