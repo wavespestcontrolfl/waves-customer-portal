@@ -80,7 +80,10 @@ async function ringMissedCallIfUnanswered(callSid) {
     const fenced = () => db('call_log').where({ id: row.id }).whereRaw("metadata->>'missed_call_notified_at' = ?", [token]);
     const settle = () => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_settled_at', ?::text)", [new Date().toISOString()]) });
     // Reclaimed a stale lease: the previous owner may have died after the
-    // bell was written. A bell row for this call means it delivered.
+    // bell was written. A bell row for this call means it delivered. A
+    // push-only delivery leaves no row; a re-send is coalesced by the
+    // per-call push tag (browser replaces same-tag notifications), whereas
+    // settling before dispatch would make the crash a permanent loss.
     if (reclaimed) {
       const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
         .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
@@ -105,15 +108,8 @@ async function ringMissedCallIfUnanswered(callSid) {
       }, {
         // Re-read right before the push (same supersession pattern as the
         // SMS bell): a recording that landed while the badge was computing
-        // must not produce a contradictory missed-call push (hook P1). When
-        // still ours, settle BEFORE dispatch — the channel-independent
-        // receipt a push-only delivery needs so a reclaimed lease can't
-        // repeat the push (codex r5). Undone below if nothing sent.
-        beforePush: async () => {
-          if (!(await stillMissed())) return false;
-          await settle();
-          return true;
-        },
+        // must not produce a contradictory missed-call push (hook P1).
+        beforePush: stillMissed,
       });
     } finally {
       const delivered = Boolean(stats && !stats.error
@@ -121,7 +117,7 @@ async function ringMissedCallIfUnanswered(callSid) {
       if (delivered) {
         await settle().catch(() => {});
       } else {
-        await fenced().update({ metadata: db.raw("metadata - 'missed_call_notified_at' - 'missed_call_settled_at'") }).catch(() => {});
+        await fenced().update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
       }
     }
     // Post-check (hook P1): a recording that persisted between the claim
