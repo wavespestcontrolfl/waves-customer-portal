@@ -195,6 +195,14 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   // The guardrails' own documented exclusions (person names / common nouns).
   'Brandon', 'Sunrise', 'Plantation', 'Cocoa', 'Mobile', 'Stuart', 'Sebastian',
   'Orlando', 'Lakeland',
+  // Major metros that are also names / words (PR #3549 codex r11).
+  'Jackson', 'Lincoln', 'Madison', 'Aurora', 'Mesa', 'Buffalo',
+  'Arlington', 'Springfield', 'Salem', 'Eugene', 'Tyler', 'Garland', 'Irving',
+  'Chandler', 'Gilbert', 'Glendale', 'Riverside', 'Independence', 'Columbia',
+  'Montgomery', 'Concord', 'Providence', 'Manchester', 'Burlington', 'Dover',
+  'Bend', 'Kent', 'Fremont', 'Pasadena', 'Burbank', 'Augusta', 'Macon',
+  'Lafayette', 'Alexandria', 'Rochester', 'Lancaster', 'Warren', 'Sterling',
+  'Henderson',
 ]);
 // Washington and Virginia are common person names (Virginia runs the Waves
 // office), so they count only with state context: "in/near Washington",
@@ -209,6 +217,9 @@ const NAME_STATE_RE = new RegExp(
   + `|\\b(washington|virginia)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`,
   'i'
 );
+// State names that are part of a plant / breed / species name, not a market:
+// stripped before the state, abbreviation and context-place matchers.
+const OUT_OF_STATE_EXEMPT_RE = /\b(?:texas\s+(?:sage|lantana|star\s+hibiscus|ranger|red\s+oak|persimmon|mountain\s+laurel|olive|ebony)|maine\s+coons?|california\s+(?:carpenter\s+bees?|poppy|poppies|king\s*snakes?|pepper\s+trees?|sycamores?|laurel|lilac)|kentucky\s+(?:bluegrass|coffee\s*trees?|wisteria)|carolina\s+(?:jasmine|jessamine|wren|cherry\s+laurel|silverbell)|arizona\s+(?:cypress|ash|bark\s+scorpions?)|louisiana\s+iris(?:es)?|mississippi\s+kites?|indiana\s+bats?|tennessee\s+warblers?|georgia\s+peach(?:es)?|alaska\s+cedars?|colorado\s+(?:blue\s+)?spruce|virginia\s+(?:creeper|pine|bluebells?|opossums?)|washington\s+(?:navel|hawthorn)|new\s+england\s+asters?|nevada\s+jointfir|oregon\s+grape)\b/gi;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
@@ -372,12 +383,14 @@ function classifyGeoScope(text) {
     ...findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
     ...findAll(footprintContextRe(), t),
   ];
+  // State-named species / plants ("Texas sage", "Maine Coon") are not markets.
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ');
   const out_of_area = [
-    ...findAll(cityRe(outOfAreaCityList()), t),
-    ...findAll(OUT_OF_STATE_RE, t),
-    ...findAll(NAME_STATE_RE, t),
-    ...findAll(CONTEXT_PLACE_RE, t),
-    ...findAll(STATE_ABBR_RE, t).map((s) => s.toUpperCase()),
+    ...findAll(cityRe(outOfAreaCityList()), tg),
+    ...findAll(OUT_OF_STATE_RE, tg),
+    ...findAll(NAME_STATE_RE, tg),
+    ...findAll(CONTEXT_PLACE_RE, tg),
+    ...findAll(STATE_ABBR_RE, tg).map((s) => s.toUpperCase()),
     ...(SPLIT_COUNTY_RE.test(t) && !southHillsboroughRe()?.test(t) ? ['Hillsborough County'] : []),
   ];
   const regional = findAll(REGIONAL_RE, t);
@@ -458,8 +471,21 @@ function evaluateDraftFraming(draft = {}) {
  */
 function evaluateDraftTargeting(draft = {}, { index, category = null, service = null, city = null } = {}) {
   const framing = evaluateDraftFraming(draft);
-  if (!framing.ok) return { ...framing, stage: 'framing' };
   const fm = draft?.frontmatter || {};
+  if (!framing.ok) {
+    // The runner grants ONE feedback retry: report the ownership / slug
+    // findings together with the framing failure so the retry can fix all
+    // of it (geo findings from evaluate() would duplicate framing's — dropped).
+    let extra = [];
+    try {
+      const own = evaluate(
+        { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: category || canonicalCategory(fm.category) || null, service, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+        { index, requireCorpus: false, ownershipOnly: true }
+      );
+      extra = (own.findings || []).filter((f) => f.code === CODES.CANNIBALIZES_EXISTING || f.code === CODES.SLUG_COLLIDES_LIVE);
+    } catch { extra = []; }
+    return { ...framing, findings: [...framing.findings, ...extra], stage: 'framing' };
+  }
   // The EMITTED category is authoritative (the publisher writes it); the
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
@@ -538,12 +564,20 @@ function parseTargetingFields(body) {
   return out;
 }
 
+// Every H2/H3 form the blog renderer accepts: ATX (## / ###), Setext (a line
+// underlined with === or ---), and inline HTML/MDX (<h2>…</h2>, <h3>…</h3>).
 function headingsOf(markdown) {
+  const src = String(markdown || '');
   const out = [];
-  const headingRe = /^#{2,3}\s+(.+?)\s*#*\s*$/gm;
+  const clean = (v) => String(v).replace(/<[^>]+>/g, '').replace(/[*_`]/g, '').trim();
   let h;
-  while ((h = headingRe.exec(String(markdown || ''))) !== null) out.push(h[1].replace(/[*_`]/g, ''));
-  return out;
+  const atx = /^#{2,3}\s+(.+?)\s*#*\s*$/gm;
+  while ((h = atx.exec(src)) !== null) out.push(clean(h[1]));
+  const setext = /^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*(?:=+|-{3,})[ \t]*$/gm;
+  while ((h = setext.exec(src)) !== null) out.push(clean(h[1]));
+  const html = /<h([23])\b[^>]*>([\s\S]*?)<\/h\1>/gi;
+  while ((h = html.exec(src)) !== null) out.push(clean(h[2]));
+  return out.filter(Boolean);
 }
 
 // The candidate-side counterpart of targetingText(): every field the corpus
@@ -717,7 +751,7 @@ function dfForCategory(idx, category) {
  * Throws only when a corpus is required for an applicable candidate and none
  * was supplied — the runner maps that to an engine fault, never a pass.
  */
-function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus = true } = {}) {
+function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus = true, ownershipOnly = false } = {}) {
   const applicable = isApplicable(candidate);
   const base = { ok: true, applicable, findings: [], geo: null, entity_owners: [], corpus_size: 0 };
   if (!applicable) return { ...base, skipped: 'not_a_new_blog' };
@@ -732,7 +766,9 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // Pre-draft, statewide is judged only on PINNED framing (an operator
   // working title or slug), each on its own. A bare query is demand — the
   // writer localizes it and evaluateDraftFraming judges the result.
-  const findings = geoFindingsForParts([
+  // (ownershipOnly: the caller already judged geo — evaluateDraftTargeting
+  // collecting ownership findings next to a framing failure.)
+  const findings = ownershipOnly ? [] : geoFindingsForParts([
     { text: query, where: 'Primary keyword', framing: false },
     { text: title, where: 'Pinned title', framing: true },
     { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
@@ -741,7 +777,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // The city is a SEMANTIC field the writer is prompted with ("City:
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
-  if (city && !findings.length) {
+  if (city && !findings.length && !ownershipOnly) {
     if (!isServedCityValue(city)) {
       findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: [city], message: `Row city "${city}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
     }
@@ -830,4 +866,4 @@ module.exports = {
   OWNER_MIN_OCCURRENCES,
   PROPER_NOUN_MIN_RATIO,
 };
-module.exports._internals = { CONTEXT_PLACE_NAMES, proseOf, parseTargetingFields, targetingText, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };
+module.exports._internals = { CONTEXT_PLACE_NAMES, proseOf, parseTargetingFields, targetingText, headingsOf, entityTokens, dfForCategory, compatiblePosts, normalizeSlug, categoryFromSlug, footprintCities, outOfAreaCityList, SERVICE_TO_CATEGORY };

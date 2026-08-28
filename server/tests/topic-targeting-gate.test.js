@@ -702,3 +702,44 @@ describe('PR codex r10 (7854a3c91)', () => {
     }
   });
 });
+
+describe('PR codex r11 (1c55e2875)', () => {
+  test('the remaining major metros block, place-first and service-first; name-like metros need context', () => {
+    for (const t of ['Columbus pest control', 'Omaha termite treatment', 'Boise pest control', 'Portland pest control', 'pest control fresno', 'spokane exterminator cost']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['jackson asked about ghost ants', 'a lincoln log cabin pest inspection', 'the mesa behind the lanai', 'orange oil for termites', 'buffalo grass vs st augustine', 'madison avenue of pests']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+    for (const t of ['pest control in Jackson', 'Madison pest control', 'Springfield, IL exterminator']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    const shared = new Set(gate._internals.outOfAreaCityList().map((c) => c.toLowerCase()));
+    for (const n of gate._internals.CONTEXT_PLACE_NAMES) {
+      if (['orlando', 'lakeland'].includes(n.toLowerCase())) continue;
+      expect(shared.has(n.toLowerCase())).toBe(false);
+    }
+  });
+  test('state-named plants / breeds / species are not out-of-state targeting', () => {
+    for (const t of ['Texas sage pests in Sarasota', 'Maine Coon flea prevention in Sarasota', 'California carpenter bee identification in Sarasota', 'kentucky bluegrass vs st augustine in bradenton', 'carolina jasmine pests venice fl']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('footprint');
+    }
+    expect(gate.classifyGeoScope('texas sage care').scope).toBe('none');
+    expect(gate.classifyGeoScope('pest control in texas').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('maine coon breeders in maine').scope).toBe('out_of_area');
+  });
+  test('Setext and HTML headings are ownership evidence like ATX headings', () => {
+    expect(gate._internals.headingsOf('Intro\n\nWhat Taexx Does\n----------------\n\ntext\n\nAnother Heading\n===\n\n<h2 class="x">Inside <em>Taexx</em> Tubes</h2>\n<h3>Costs</h3>\n## ATX Heading\n')).toEqual(['ATX Heading', 'What Taexx Does', 'Another Heading', 'Inside Taexx Tubes', 'Costs']);
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch' };
+    expect(gate.evaluateDraftTargeting({ frontmatter: generic, body: 'Your first quarter\n---\n\ntext\n\nWhat Taexx Does\n----------------\n\ntext\n' }, { index, service: 'pest' }).ok).toBe(false);
+    expect(gate.evaluateDraftTargeting({ frontmatter: generic, body: '<h2>What Taexx Leaves Out</h2>\n\ntext\n' }, { index, service: 'pest' }).ok).toBe(false);
+  });
+  test('a draft with bad framing AND an owned entity reports both on the first attempt', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = gate.evaluateDraftTargeting({ frontmatter: { title: 'New-Construction Pest Control in Florida', slug: '/pest-control/new-construction-pest-control-florida/', primary_keyword: 'taexx in wall system' } }, { index, service: 'pest' });
+    expect(r.ok).toBe(false);
+    expect(r.stage).toBe('framing');
+    expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_STATEWIDE, gate.CODES.CANNIBALIZES_EXISTING]);
+  });
+});

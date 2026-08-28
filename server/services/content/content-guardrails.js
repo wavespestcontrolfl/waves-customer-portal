@@ -1740,6 +1740,29 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Pittsburgh', 'Philadelphia', 'New York', 'Baltimore',
   'Virginia Beach', 'Indianapolis', 'Milwaukee', 'Oklahoma City',
   'Tulsa', 'Albuquerque', 'Salt Lake City', 'Honolulu',
+  // 2026-08-28 (PR #3549 codex r11): the remaining major US metros. Unique
+  // place names only — person-name / common-word metros (Jackson, Lincoln,
+  // Madison, Aurora, Mesa, Orange, Buffalo, Arlington, Springfield, Salem,
+  // Eugene, …) live in topic-targeting-gate CONTEXT_PLACE_NAMES instead.
+  'Columbus', 'Omaha', 'Boise', 'Portland', 'Fort Worth', 'El Paso', 'Anaheim',
+  'Bakersfield', 'Fresno', 'Long Beach', 'Oakland', 'San Jose', 'Stockton',
+  'Chula Vista', 'Irvine', 'Santa Ana', 'Modesto', 'Santa Rosa', 'Salinas',
+  'Santa Barbara', 'Oxnard', 'Palm Springs', 'Escondido', 'Colorado Springs',
+  'Fort Collins', 'Boulder', 'Wichita', 'Topeka', 'Lexington', 'Newark',
+  'Jersey City', 'Trenton', 'Toledo', 'Akron', 'Dayton', 'Youngstown',
+  'Corpus Christi', 'Laredo', 'Lubbock', 'Plano', 'Amarillo', 'Abilene', 'Waco',
+  'Midland', 'Odessa', 'Brownsville', 'McAllen', 'Killeen', 'Beaumont',
+  'Galveston', 'Spokane', 'Tacoma', 'Bellevue', 'Everett', 'Olympia',
+  'Des Moines', 'Cedar Rapids', 'Little Rock', 'Fayetteville', 'Chattanooga',
+  'Knoxville', 'Greensboro', 'Durham', 'Winston-Salem', 'Asheville',
+  'Chesapeake', 'Norfolk', 'Roanoke', 'St. Paul', 'Anchorage', 'Scottsdale',
+  'Tempe', 'Flagstaff', 'Yuma', 'Provo', 'Ogden', 'Cheyenne', 'Billings',
+  'Missoula', 'Fargo', 'Sioux Falls', 'Albany', 'Syracuse', 'Hartford',
+  'Bridgeport', 'Worcester', 'Huntsville', 'Shreveport', 'Peoria', 'Rockford',
+  'Fort Wayne', 'Evansville', 'Grand Rapids', 'Ann Arbor', 'Lansing', 'Flint',
+  'Erie', 'Scranton', 'Allentown', 'Harrisburg', 'Wilmington', 'Greenville',
+  'Spartanburg', 'Myrtle Beach', 'Santa Fe', 'Las Cruces', 'Nampa', 'Reno',
+  'Carson City', 'Green Bay', 'Kenosha',
 ]);
 
 function outOfAreaCities() {
