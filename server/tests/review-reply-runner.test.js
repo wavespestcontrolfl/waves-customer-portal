@@ -293,6 +293,14 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
+  test('manualReplyCloseFields closes pending/posted state only (raw CASE keeps NULL as NULL)', () => {
+    const raw = jest.fn((sql) => ({ sql }));
+    const f = Runner.manualReplyCloseFields({ raw });
+    expect(f.auto_reply_status.sql).toContain("IN ('queued','drafted','parked','failed','posted') THEN 'skipped' ELSE auto_reply_status");
+    expect(f.auto_reply_reason.sql).toContain("THEN 'manual_reply' ELSE auto_reply_reason");
+    expect(f.auto_reply_claimed_until).toBeNull();
+  });
+
   test('dismissCancelFields cancels pending states only', () => {
     const raw = jest.fn((sql) => ({ sql }));
     const f = Runner.dismissCancelFields({ raw });

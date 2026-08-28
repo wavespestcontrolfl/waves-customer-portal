@@ -251,6 +251,22 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied', review_reply: 'x y z' });
   });
 
+  test('a human (overwriting) PUT that times out persists google_uncertain on the reply slot it observed', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].auto_reply_status = null; // never queued
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+  });
+
   test('a live GET that never completes → GOOGLE_FAILED (retryable), no PUT attempted', async () => {
     mockGbp.getReview.mockImplementationOnce(() => new Promise(() => {}));
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });

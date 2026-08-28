@@ -292,15 +292,24 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     // against the state THIS attempt owned.
     const e = outcome.result.error;
     outcome.abandonClaim();
-    await db('google_reviews').where({ id: reviewId })
-      .whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
-      .where(function ownSlot() {
-        this.whereNull('review_reply');
-        if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
-        if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
-        this.orWhere('review_reply', asDraft(replyText));
-      })
-      .update({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) })
+    const uncertain = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) };
+    const q = db('google_reviews').where({ id: reviewId });
+    if (allowOverwrite) {
+      // Human / IB-edit publishers: the row may be never-queued (NULL) or
+      // skipped/manual_reply with a real prior reply — CAS on the reply
+      // slot exactly as this attempt observed it, so a sync that already
+      // reconciled a newer reply is left alone.
+      if (review.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', review.review_reply);
+    } else {
+      q.whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
+        .where(function ownSlot() {
+          this.whereNull('review_reply');
+          if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
+          if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
+          this.orWhere('review_reply', asDraft(replyText));
+        });
+    }
+    await q.update(uncertain)
       .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
     logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, claim abandoned, parked for reconciliation`);
     throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });

@@ -352,8 +352,9 @@ router.post('/:id/reply', async (req, res, next) => {
       text: replyText,
       actor: { type: 'admin', adminUserId: req.technicianId || null },
       allowOverwrite: true,
-      // A human posting closes out any pending auto-reply state on the row.
-      autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_claimed_until: null },
+      // A human posting closes out a pending/posted auto-reply state on the
+      // row; a never-queued row keeps NULL.
+      autoFields: AutoReply.manualReplyCloseFields(db),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

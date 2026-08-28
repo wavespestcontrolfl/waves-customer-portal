@@ -310,7 +310,7 @@ async function submitReviewReply(reviewId, replyText) {
       // (local + live Google reply checks) and yields to anyone who answered
       // meanwhile.
       allowOverwrite: false,
-      autoFields: { auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_claimed_until: null },
+      autoFields: require('../review-reply/runner').manualReplyCloseFields(db),
       guard: submitGuard,
     });
     const review = await db('google_reviews').where('id', reviewId).first();

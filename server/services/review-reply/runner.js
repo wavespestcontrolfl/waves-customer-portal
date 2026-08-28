@@ -817,6 +817,20 @@ function whereNoLivePublishClaim(qb) {
   qb.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [new Date().toISOString()]);
 }
 
+/**
+ * Merged into a HUMAN reply publish (admin route, IB tool): close automatic
+ * state only when the row actually had one (pending or posted); a
+ * never-queued row keeps its documented NULL.
+ */
+function manualReplyCloseFields(conn = db) {
+  const live = "('queued','drafted','parked','failed','posted')";
+  return {
+    auto_reply_status: conn.raw(`CASE WHEN auto_reply_status IN ${live} THEN 'skipped' ELSE auto_reply_status END`),
+    auto_reply_reason: conn.raw(`CASE WHEN auto_reply_status IN ${live} THEN 'manual_reply' ELSE auto_reply_reason END`),
+    auto_reply_claimed_until: null,
+  };
+}
+
 function dismissCancelFields(conn = db) {
   const pending = "('queued','drafted','parked','failed')";
   return {
@@ -840,7 +854,14 @@ async function autoReplyStatus() {
   for (const c of counts) byStatus[c.auto_reply_status] = Number(c.n);
   const firstDraft = await db('google_reviews').whereNotNull('auto_reply_drafted_at').min('auto_reply_drafted_at as at').first();
   const drafts = await db('google_reviews').whereNotNull('auto_reply_drafted_at').count('* as n').first();
+  // Shadow-exit sample = drafts the future AUTO lane would have posted:
+  // 4-5★ shadow drafts only (parked human-only rows and Post-now publishes
+  // do not exercise that lane).
+  const shadowDrafts = await db('google_reviews').where({ auto_reply_status: STATUS.DRAFTED, auto_reply_reason: 'shadow' }).whereNotNull('auto_reply_drafted_at').count('* as n').first();
+  const firstShadow = await db('google_reviews').where({ auto_reply_status: STATUS.DRAFTED, auto_reply_reason: 'shadow' }).whereNotNull('auto_reply_drafted_at').min('auto_reply_drafted_at as at').first();
   return {
+    shadowDrafts: Number(shadowDrafts?.n || 0),
+    firstShadowDraftAt: firstShadow?.at || null,
     mode: cfg.mode,
     minStars: cfg.minStars,
     delayMinutes: [cfg.delayMin, cfg.delayMax],
@@ -864,6 +885,7 @@ module.exports = {
   postNow,
   skipAutoReply,
   dismissCancelFields,
+  manualReplyCloseFields,
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
   applyRequeueOnIdentity,
