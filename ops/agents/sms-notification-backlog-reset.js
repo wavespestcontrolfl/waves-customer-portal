@@ -136,9 +136,9 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
   console.log(`pass 2 (bells with no unread message): marked ${r2.rowCount} notifications read`);
   await c.query('COMMIT');
   const ts = at.toISOString();
-  console.log(`done. Rollback THIS batch only (rows a human re-read since are left alone; the marker is removed so a second run is a no-op):
+  console.log(`done. Rollback THIS batch only (rows a human re-read since are left alone; the marker is removed so a second run is a no-op). Run in this order — the sms_log revert is keyed to the unified rows still read by this batch, since sms_log has no read timestamp:
+  UPDATE sms_log SET is_read=false, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND twilio_sid IN (SELECT twilio_sid FROM messages WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz AND twilio_sid IS NOT NULL);
   UPDATE messages SET is_read=false, read_at=NULL, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz;
-  UPDATE notifications SET read_at=NULL, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz;
-  UPDATE sms_log SET is_read=false, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}';`);
+  UPDATE notifications SET read_at=NULL, metadata = metadata - 'backlog_reset' WHERE metadata->>'backlog_reset'='${tag}' AND read_at = '${ts}'::timestamptz;`);
   await c.end();
 })().catch(async (e) => { console.error(e.message); process.exit(1); });

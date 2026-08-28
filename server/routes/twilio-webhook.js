@@ -842,6 +842,14 @@ router.post('/sms', async (req, res) => {
         ...(courtesyOnly ? { courtesyOnly: true } : {}),
       }),
     }).returning(['id', 'created_at']);
+    // Close the SELECT→INSERT window (hook P1): if the thread was read between
+    // the check above and this insert, the read mirror found no legacy row —
+    // re-check now that the row exists and mirror the state ourselves.
+    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
+      const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+        .then((r) => r?.is_read === true).catch(() => false);
+      if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
+    }
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
