@@ -117,7 +117,7 @@ jest.mock('../models/db', () => {
     const limit = rest[rest.length - 1];
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
       && (!locs || locs.includes(String(r.location_id).toLowerCase()))
-      && (force ? r.id === rest[0] : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now))
+      && (force ? (r.id === rest[0] && r.auto_reply_status !== 'skipped') : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now))
       && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
     return { rows: hits.map((r) => ({ ...r })) };
@@ -767,6 +767,28 @@ describe('processDueAutoReplies — state machine', () => {
     mockNotify.mockReset().mockResolvedValue({});
   });
 
+  test('a reply that Google accepted but the publisher parked (edited during the PUT) reports parked and rings no "posted" bell (codex r57)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockPublish.mockImplementationOnce(async ({ reviewId }) => { const r = state.rows.find((x) => x.id === reviewId); Object.assign(r, { review_reply: 'Live', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null }); return { googlePosted: true, reviewId, editedDuringPut: true }; });
+    state.rows = [row({ id: 'ep' })];
+    mockNotify.mockClear();
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.parked).toBe(1);
+    expect(stats.posted).toBe(0);
+    expect(mockNotify.mock.calls.some((c) => c[1] === 'Auto-replied to a review')).toBe(false);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+  });
+
+  test('a delayed click auto-link does not invalidate a stored review-only draft; a manual confirmation does (codex r57)', () => {
+    const base = row({ customer_id: null, link_source: null });
+    const fp = Runner.reviewFingerprint(base);
+    expect(Runner.reviewFingerprint({ ...base, customer_id: 'c1', link_source: 'click_auto' })).toBe(fp);
+    expect(Runner.reviewFingerprint({ ...base, customer_id: 'c1', link_source: 'manual' })).not.toBe(fp);
+    // reviewEditFields sees the confirmation as an identity change too.
+    const posted = row({ customer_id: 'c1', link_source: 'click_auto', auto_reply_status: 'posted', review_reply: 'Live' });
+    expect(Runner.reviewEditFields(posted, { star_rating: posted.star_rating, review_text: posted.review_text, reviewer_name: posted.reviewer_name, customer_id: 'c1', link_source: 'manual' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+  });
+
   test('a live review mismatch is bounded: after the ceiling the row parks review_changed_stale_sync with a bell (codex r56)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
@@ -962,9 +984,11 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: Runner.reviewFingerprint(base) })(fresh)).toBeNull();
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     state.rows = [fresh];
-    const r = await Runner.postNow('sk', { type: 'admin' }, { expectedDraft: draft });
-    expect(r.outcome).toBe('posted');
-    expect(mockDraft).not.toHaveBeenCalled();
+    // codex r57: Skip auto is authoritative for Post now — the pipeline never
+    // publishes a skipped draft; a person posts it via Use Draft instead.
+    await expect(Runner.postNow('sk', { type: 'admin' }, { expectedDraft: draft })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
   });
 
   test('a reused (retry) draft keeps its original drafted_at through retries and the eventual publish (codex r30)', async () => {

@@ -9,7 +9,13 @@ const crypto = require('crypto');
  * API (browser-observed review token) without a require cycle.
  */
 function reviewFingerprint(row) {
-  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}|${row.customer_id || ''}`).digest('hex');
+  // An unconfirmed click_auto link grounds review-only (grounding.js
+  // groundingCustomerId), so it is not part of the identity either: a delayed
+  // click auto-link landing after a draft was stored must not invalidate a
+  // draft whose facts did not change (codex r57). A manual confirmation
+  // (link_source moves off click_auto) does change the identity.
+  const grounded = row.link_source === 'click_auto' ? '' : (row.customer_id || '');
+  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}|${grounded}`).digest('hex');
 }
 
 module.exports = { reviewFingerprint };

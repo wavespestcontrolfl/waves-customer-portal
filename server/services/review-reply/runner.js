@@ -200,7 +200,7 @@ async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 
 async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = null } = {}) {
   const token = new Date(now.getTime() + CLAIM_MS).toISOString();
   const nowIso = now.toISOString();
-  const forceClause = force ? 'AND id = ?' : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ?`;
+  const forceClause = force ? "AND id = ? AND auto_reply_status IS DISTINCT FROM 'skipped'" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ?`;
   // Rollout scope is re-applied at claim time (not only at enqueue) so
   // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
   // rows outside it. Post-now (force) is an explicit admin action and ignores it.
@@ -441,7 +441,7 @@ function groundingSnapshot(grounding) {
     accountFingerprint: accountFingerprint(grounding.account),
     // ONE identity mechanism: the canonical reviewFingerprint over the
     // fields the grounding saw (codex r43).
-    fingerprint: reviewFingerprint({ star_rating: grounding.review.rating, review_text: grounding.review.text, reviewer_name: grounding.reviewerName, customer_id: grounding.customerId }),
+    fingerprint: reviewFingerprint({ star_rating: grounding.review.rating, review_text: grounding.review.text, reviewer_name: grounding.reviewerName, customer_id: grounding.customerId, link_source: grounding.linkSource }),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
     provenance: grounding.provenance,
@@ -604,7 +604,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // Publish.
   try {
     const publishedAt = new Date().toISOString();
-    await publishReviewReply({
+    const published = await publishReviewReply({
       reviewId: merged.id,
       text: draft.text,
       actor: actor || { type: 'auto', adminUserId: null },
@@ -628,6 +628,11 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       // save (no GBP creds) must surface as an error, never as posted.
       requireGoogle: true,
     });
+    if (published?.editedDuringPut) {
+      // The publisher recorded the reply parked/review_edited_after_post and
+      // rang the action bell: no contradictory "posted" FYI (codex r57).
+      return { outcome: 'parked', reason: 'review_edited_after_post', mode: draft.mode, live: true };
+    }
     await bell(merged, {
       title: intent === 'post_now' ? 'Review reply posted' : 'Auto-replied to a review',
       body: `${summarize(merged)} — ${draft.mode.replace('_', ' ')} reply is live on Google. Open Reviews to read or retract it.`,
@@ -770,6 +775,13 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
  * asked.
  */
 async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
+  // Skip auto is authoritative (codex r57): a stale Post now must not publish
+  // a draft a person took out of the pipeline. (Use Draft on the editor
+  // route still works for a skipped draft — that is a human posting it.)
+  const pre = await db('google_reviews').where({ id: reviewId }).first('auto_reply_status');
+  if (pre?.auto_reply_status === STATUS.SKIPPED) {
+    throw new ReviewReplyError(CODES.STALE, 'This review was taken out of the automatic pipeline (Skip auto) — post it from the editor with Use Draft, or reply by hand.', { status: 409 });
+  }
   const [row] = await claimDueRows({ limit: 1, force: reviewId });
   if (!row) throw new ReviewReplyError(CODES.LOCK_BUSY, 'This review is being processed — try again in a moment.', { status: 409 });
   if (hasRealReply(row.review_reply)) {
@@ -837,7 +849,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   if (existing) {
     const publishedAt = new Date().toISOString();
     try {
-      await publishReviewReply({
+      const publishedExisting = await publishReviewReply({
         reviewId,
         text: existing,
         actor,
@@ -866,6 +878,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         expectedAccountFingerprint: humanDraft ? undefined : (storedGrounding?.accountFingerprint || undefined),
         requireGoogle: true,
       });
+      if (publishedExisting?.editedDuringPut) return { outcome: 'parked', reason: 'review_edited_after_post', mode: row.auto_reply_mode, live: true };
       return { outcome: 'posted', mode: row.auto_reply_mode };
     } catch (err) {
       if (err instanceof ReviewReplyError && err.code === CODES.PERSIST_FAILED) {
@@ -968,7 +981,7 @@ const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 function reviewEditFields(existing, normalized) {
   if (!existing) return {};
   const before = reviewFingerprint(existing);
-  const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name, customer_id: normalized.customer_id !== undefined ? normalized.customer_id : existing.customer_id });
+  const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name, customer_id: normalized.customer_id !== undefined ? normalized.customer_id : existing.customer_id, link_source: normalized.link_source !== undefined ? normalized.link_source : existing.link_source });
   if (before === after) return {};
   if (existing.auto_reply_status === STATUS.POSTED) {
     return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };

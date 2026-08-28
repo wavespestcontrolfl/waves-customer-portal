@@ -447,6 +447,11 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
       // created and parked; the person reads it, then posts it.
       // Success-shaped (200) so the page reloads the card and RENDERS the
       // draft before another Post now is possible (codex r28).
+      // The reply IS live but the review / customer facts changed while it
+      // posted: recorded parked for a person (codex r57).
+      if (result.reason === 'review_edited_after_post' && result.live) {
+        return res.json({ success: true, outcome: result.outcome, reason: result.reason, message: 'Posted — but the review (or its customer facts) changed while the reply was posting. It is parked for you to check: edit or retract it.' });
+      }
       if (result.drafted) {
         const message = result.reason === 'draft_replaced'
           ? 'The draft you approved was no longer valid (the review or customer facts changed, or it no longer passes the checks). A fresh draft is on the review — read it, then Post now again.'

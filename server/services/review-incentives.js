@@ -1029,6 +1029,10 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
       const { applyReviewEditFields } = require('./review-reply/runner');
       const n = await applyReviewEditFields(beforeRelink.id, beforeRelink, {
         star_rating: beforeRelink.star_rating, review_text: beforeRelink.review_text, reviewer_name: beforeRelink.reviewer_name, customer_id: customerId,
+        // A manual confirmation moves the link off click_auto: the grounding
+        // now USES the customer, so the identity changes even when the
+        // customer id itself is unchanged.
+        link_source: technicianId ? 'manual' : 'manual_no_visit',
       }, { conn: trx });
       if (n > 0 && beforeRelink.auto_reply_status === 'posted') autoReplyParkedPosted = true;
     }

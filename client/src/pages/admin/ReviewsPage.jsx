@@ -2156,7 +2156,7 @@ export default function ReviewsPage() {
     const result = await adminFetch(path, body ? { method: "POST", body: JSON.stringify(body) } : { method: "POST" });
     // Post now on a 1-3★ / unrated review with no surfaced draft: the server
     // drafted + parked instead of posting; reload so the draft is rendered.
-    if (result && result.drafted && result.message) alert(result.message);
+    if (result && result.message) alert(result.message);
     await loadData();
   };
 

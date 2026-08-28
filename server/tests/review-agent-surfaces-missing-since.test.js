@@ -239,7 +239,8 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     // The link being confirmed (or cleared) between verification and the PUT
     // changes what the draft was grounded on → stale, never posted.
     expect(await guards[0]({ ...row, link_source: 'manual' })).toMatch(/could not be re-read|changed/);
-    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toMatch(/changed since this draft was generated/);
+    // Clearing an UNCONFIRMED click link leaves a review-only draft valid (codex r57).
+    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toBeNull();
     expect(await guards[0]({ ...row })).toBeNull();
   });
 
