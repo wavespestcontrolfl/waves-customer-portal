@@ -125,6 +125,7 @@ t.string('expected_indexability');                // indexable | noindex | unkno
 t.string('expected_persistence');                 // durable | rotating | unknown  (+ learned D30 in §8)
 t.string('link_type');                            // board lane the placement will carry (CLAIMABLE_LINK_TYPES)
 t.numeric('confidence', 3, 2);                    // 0–1
+t.integer('revision').notNullable().defaultTo(1);  // +1 on every write; approvals bind to it (§3.6b)
 t.string('authority');                            // decided authority level (§6), stamped by policy
 t.jsonb('investigation');                         // evidence: pages fetched, form fields seen, price text, quotes
 t.timestamp('last_investigated_at');
@@ -197,6 +198,29 @@ runner's create/resume path, and **never** written to `seo_link_attempts.detail`
 evidence, or LLM prompts.
 The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
 (`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths.
+
+### 3.6b Approvals — `seo_link_approvals` (immutable terms snapshot)
+
+Every `OWNER_*` decision and every `OWNER_OVERRIDE` click is a row that freezes exactly
+what was approved; execution is bound to it and it dies if anything it froze changes.
+
+```js
+t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
+t.integer('path_revision').notNullable();     // seo_link_acquisition_paths.revision at approval time (revision bumps on every investigator/edit write)
+t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
+t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
+t.integer('approved_amount_cents');           // for payment/membership: the ceiling the owner approved
+t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
+t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
+t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
+t.timestamp('consumed_at');                   // set when the leased execution reports a terminal outcome
+```
+`seo_link_acquisition_paths` gains `revision` (integer, +1 on every write). The claim predicate
+accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
+invalidated, not consumed, and whose `path_revision` equals the path's current revision;
+the final-total guard compares `final_cents` to `approved_amount_cents` (+ tolerance). Any
+path write re-validates open approvals and invalidates the ones whose snapshot no longer
+matches — the row returns to `awaiting_owner` with a fresh card.
 
 ### 3.7 Purchases — `seo_link_purchases`
 
@@ -309,19 +333,27 @@ the path's attributes and the policy at decision time, then stamped for the audi
 ### 6.2 Policy (`seo_link_policy`, Policy panel on the Agent tab)
 
 ```text
-auto_account_creation        = true
-auto_outreach_min_score      = 80
-auto_outreach_daily_cap      = 10        (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
+# SHIPPED DEFAULTS — every AUTO capability is OFF/null until the owner edits it in the
+# Policy panel (each edit is an audited row). Enabling GATE_LINK_AUTHORITY with these
+# defaults changes nothing: every row still routes to the owner.
+auto_account_creation        = false
+auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
+auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
 owner_price_tolerance_cents  = 0
-monthly_paid_budget_cents    = 50000     ($500 — every money field is integer cents, end to end)
-max_auto_purchase_cents      = 5000      ($50)
-auto_paid_min_score          = 80
-auto_paid_min_d30_confidence = 0.6
+monthly_paid_budget_cents    = 0         (0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
+max_auto_purchase_cents      = 0
+auto_paid_min_score          = null
+auto_paid_min_d30_confidence = null
 min_score                    = 60        (floor for ANY action, auto or owner-routed)
 membership_requires_owner    = true
 legal_attestation_requires_owner = true
 min_path_confidence          = 0.6
 max_spam_score               = 10
+
+# Suggested first working values (owner sets them; recorded here only as the proposal):
+#   auto_account_creation=true · auto_outreach_min_score=80 · auto_outreach_daily_cap=10 ·
+#   monthly_paid_budget_cents=50000 · max_auto_purchase_cents=5000 · auto_paid_min_score=80 ·
+#   auto_paid_min_d30_confidence=0.6
 ```
 
 ### 6.3 Decision (pure function, unit-tested; recorded on the placement)
@@ -358,6 +390,20 @@ required signal proving null / NaN / undefined → INVALID, and one proving OWNE
 refused on INVALID (an unenriched or uninvestigated domain, or invalid money, can never be
 acted on by anyone until enrichment and investigation have run).
 
+**Bridge — how an investigated domain becomes claimable (part of step 4).** A nightly
+`link-authority` job takes every `qualified` domain with a `best_path_id` and, per domain,
+inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses the Waves
+money page for the placement (scorer topic mapping → `targetPageOf`; homepage for
+listing-style paths), creates the `seo_link_prospects` row (`domain_id`, `path_id`,
+`source` = the domain's first-touch source, `link_type` = the path's lane) if none exists
+for that (domain, page), runs the §6.3 decision, stamps `authority` on the placement and
+the path, and advances the registry: `AUTO_*` → `agent_state='ready_to_acquire'` (the row is
+now leasable); `OWNER_*` → `awaiting_owner` (registry stays `qualified` until approval, which
+runs the same stamping and advances it); `DENY` → `agent_state='rejected'` with reasons
+shown (owner override re-enters here); `INVALID` → back to `investigating`. The job is
+idempotent and re-runs the decision when the policy, the path revision or the D30 evidence
+changes.
+
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
 expected rel, D30 confidence, and **Approve** / **Reject** / **Watch**. Approval is a portal
@@ -370,14 +416,16 @@ inferred).** Every paid step, auto or owner-approved, is a row:
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
-t.string('purchase_kind').notNullable().defaultTo('initial'); // initial | renewal — each renewal is its own separately authorized purchase
+t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase_kind IN ('initial','renewal')) — each renewal is its own separately authorized purchase
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
 t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${purchase_kind}:${renewal_period_key || '-'}:${generation}` — NOT month-scoped: a placement's initial purchase is unique for all time
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
-t.string('authority').notNullable();
-t.string('state').notNullable();                    // reserved → voided (pre-exposure only) | reserved → submitting → charged | ambiguous → reconciled_charged | reconciled_not_charged
+t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
+t.string('state').notNullable();                    // CHECK (state IN ('reserved','voided','submitting','charged','ambiguous','reconciled_charged','reconciled_not_charged')) — the complete enum; the budget/duplicate guards enumerate exactly these, so no other value can ever exist
+                                                    // reserved → voided (pre-exposure only) | reserved → submitting → charged | ambiguous → reconciled_charged | reconciled_not_charged
+t.uuid('approval_id');                              // → seo_link_approvals when authority is OWNER_*/OWNER_OVERRIDE; CHECK: required unless authority = AUTO_PAID_WITHIN_POLICY
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
@@ -711,8 +759,11 @@ unset its gate; budget kill = the issuer program's limit.
 - **Comms** — outreach targets are businesses. Today `link-prospect-outreach` only validates
   recipient *syntax*; step 4 adds a **fail-closed customer-recipient exclusion** before any
   auto-send: the recipient email (and its domain, when the domain is a customer's own) is
-  checked against `customers` / `customer_contacts` / lead records inside the send claim, a
-  match or a lookup error routes the draft to the approval queue, and the check is unit-tested.
+  checked inside the send claim against every real contact source — `customers.email`,
+  `customers.service_contact_email`, `customers.service_contact2_email` (and any further
+  slot exposed by `services/customer-contact.js`, which is the canonical fan-out helper and
+  the one place to extend), and `leads.email` — a match or a lookup error routes the draft to
+  the approval queue, and the check is unit-tested against those exact columns.
   The June drafts are released only through this path.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
