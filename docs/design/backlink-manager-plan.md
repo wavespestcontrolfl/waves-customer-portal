@@ -228,6 +228,8 @@ t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE le
 t.integer('approved_amount_cents');           // the amount the owner approved; same-row CHECK (NOT payment_required OR (approved_amount_cents IS NOT NULL AND approved_amount_cents > 0)) — a paid approval without a ceiling cannot exist (a CHECK cannot read the path row, hence the copied flag; the insert also verifies the copied flag equals the path's current value inside the approval transaction)
 t.integer('max_payable_cents');               // IMMUTABLE absolute ceiling = approved_amount_cents + policy.owner_price_tolerance_cents AS OF APPROVAL; CHECK (NOT payment_required OR (max_payable_cents IS NOT NULL AND approved_amount_cents IS NOT NULL AND max_payable_cents >= approved_amount_cents)) — written NULL-safe because a CHECK whose expression is NULL passes; the final-total guard compares against THIS only — a later policy change never widens an existing approval
 t.jsonb('terms_snapshot').notNullable();      // acquisition_type, submission_url, estimated_cost_cents (the quoted initial amount), renewal_period, renewal_cost_cents, legal_attestation, expected_rel, overridden_floors[] — copied, never referenced
+t.string('action').notNullable();             // CHECK (action IN ('acquire','outreach_send','outreach_followup','renewal')) — an approval authorizes exactly one action
+t.text('action_hash');                        // outreach_send/followup: sha256 of (recipient email, subject, body) of the draft the owner saw; renewal: the renewal_period_key — the send claim recomputes it and refuses on mismatch (an edited/replaced draft is a new approval)
 t.string('approved_by').notNullable(); t.timestamp('approved_at').notNullable();
 t.timestamp('invalidated_at'); t.text('invalidated_reason'); // set when path_revision advances or any snapshotted term differs
 t.timestamp('consumed_at');                   // set when the leased execution reports a terminal outcome
@@ -237,7 +239,10 @@ accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approve
 invalidated, not consumed, whose `path_id` is the placement's current, non-superseded path,
 whose `path_revision` equals that path's current revision AND whose
 `decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
-numbers, not whatever they became);
+numbers, not whatever they became), and whose `action` matches the step being leased with
+`action_hash` matching the current draft (send) / follow-up draft (followup, which needs its
+own approval) / period (renewal) — an owner-approved send can only send the exact text and
+recipient that was approved;
 the final-total guard compares `final_cents` to the approval's immutable `max_payable_cents`
 and refuses when the approval lacks one (it cannot, by CHECK, for a paid path — the guard is
 still written null-safe: null ⇒ refuse). Any
@@ -573,7 +578,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   the checkout's card fields by that broker alone, outside any model/provider context (see
   §7 "payment boundary"); they are never written to the ledger, attempts, evidence, sessions,
   logs, prompts, screenshots or traces)
-  that is **closed immediately after `charged`/`voided`/reconciliation** — so an
+  that is **closed at the issuer BEFORE the ledger commits `charged`** (`close_pending →
+  charged` requires issuer-confirmed closure + capture, §6.3), closed the instant a row goes
+  `ambiguous`, and simply never minted for a pre-exposure `voided` row (nothing to close) — so an
   armed auto-renewal, a merchant retry, or a stored-card charge has no live number to hit.
   The provider still selects the non-recurring option or disables auto-renew where offered
   and reports `auto_renew_disabled`. If the issuer cannot mint single-use numbers, purchases
@@ -696,7 +703,12 @@ together:
   old predicate back on; `GATE_LINK_AUTHORITY` only controls whether the policy may *grant*
   an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement `status='prospect'`; registry
   `agent_state='ready_to_acquire'`; the placement's stamped `authority` is an `AUTO_*` level
-  **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row; the path's lane
+  **or** `OWNER_OVERRIDE` / an `OWNER_*` level with a recorded approval row — except
+  `OWNER_HUMAN_STEP`, which is never leasable to an automated provider: its row stays
+  `awaiting_owner` until a human completes the human part and records a **resume checkpoint**
+  (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
+  which the investigator re-marks the remainder `agent_completable=true` and the bridge
+  re-decides; the path's lane
   gate is on (`GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
   `GATE_LINK_PAYMENTS` for ANY `payment_required` path — the payment-lane kill switch — and
   additionally `GATE_LINK_AUTO_PAID` only when the stamped authority is
