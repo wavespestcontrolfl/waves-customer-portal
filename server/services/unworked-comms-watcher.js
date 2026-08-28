@@ -449,9 +449,9 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       -- Endpoint-scoped (codex r45): conversations are unique per
       -- (peer, our number) — a later text to the AI number must not
       -- swallow an unanswered HQ thread from the same phone.
-      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, created_at
+      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, metadata, created_at
       FROM (
-        SELECT message_body, created_at,
+        SELECT message_body, metadata, created_at,
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
                RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
         FROM sms_log
