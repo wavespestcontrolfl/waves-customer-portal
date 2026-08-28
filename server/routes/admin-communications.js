@@ -987,13 +987,17 @@ router.post('/messages/read', async (req, res, next) => {
         const threads = await db('conversations as cv')
           .whereIn('cv.id', [...convIds])
           .whereNotNull('cv.customer_id')
+          // Bells are keyed by CUSTOMER, and a customer can hold one SMS
+          // conversation per Waves number — so the unread check spans every
+          // SMS thread of that customer, not just the one being read (hook P1).
           .whereNotExists(function stillUnread() {
             this.select(1).from('messages as m')
-              .whereRaw('m.conversation_id = cv.id')
+              .join('conversations as c2', 'c2.id', 'm.conversation_id')
+              .whereRaw('c2.customer_id = cv.customer_id')
               .where({ 'm.channel': 'sms', 'm.direction': 'inbound' })
               .andWhere(function unread() { this.where({ 'm.is_read': false }).orWhereNull('m.is_read'); });
           })
-          .select('cv.customer_id');
+          .distinct('cv.customer_id');
         for (const t of threads) {
           notificationsCleared += await db('notifications')
             .where({ category: 'inbound_sms' })

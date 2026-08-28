@@ -66,7 +66,7 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
   });
 
   test('pure courtesy closers are detected', () => {
-    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Okay', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'Np', 'Great', 'Got it', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Tyler', 'Sounds good']) {
+    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Okay', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'Np', 'Great', 'Got it', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'Sounds good']) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, true]);
     }
   });
@@ -82,7 +82,7 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
       'Hey Adam', 'Hello Adam, good afternoon.',
       'Sounds good let me know if you have any issues or need me! Appreciate it.',
       'Thanks — the invoice says $81', '', null,
-      'Ok call', 'Thanks help', 'Thanks spray', 'Thanks reschedule', // request word after a thanks is not a name (hook P1)
+      'Ok call', 'Thanks help', 'Thanks spray', 'Thanks reschedule', 'Thanks spider', 'Got it charge', 'Thanks Tyler', // only KNOWN addressees after a thanks (hook P1 ×2)
       '❓', '🚨', '📞', '🐜', '👍❓', // non-acknowledgement emoji are content (hook P1)
     ]) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, false]);
