@@ -498,8 +498,12 @@ function renderClockBlock(hours, now = new Date()) {
 function isOfficeOpenAt(hours, now = new Date()) {
   if (!hours || !Number.isFinite(hours.startMin) || !Number.isFinite(hours.endMin)) return null;
   if (hours.closedUnknown === true) return null;
+  const { etParts, etDateString } = require('../../utils/datetime-et');
+  // ⭐ MIDNIGHT INVALIDATES THE CLOSURE FLAGS (same rule as renderClockBlock):
+  // they were loaded FOR a specific ET day; once the calendar rolls, that
+  // day's closedToday would be attached to the new date ⇒ unknown.
+  if (hours.closedForDate && etDateString(now) !== hours.closedForDate) return null;
   if (hours.closedToday === true) return false;
-  const { etParts } = require('../../utils/datetime-et');
   const et = etParts(now);
   const minutes = Number(et.hour) * 60 + Number(et.minute);
   if (!Number.isFinite(minutes)) return null;

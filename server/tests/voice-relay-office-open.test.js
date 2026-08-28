@@ -24,6 +24,13 @@ test('a scheduled day off ⇒ false even inside the window', () => {
   expect(isOfficeOpenAt({ ...HOURS, closedToday: true }, ET_10AM)).toBe(false);
 });
 
+test('closure flags loaded for a different ET date (midnight rollover) ⇒ unknown, never reused', () => {
+  const loadedYesterday = { ...HOURS, closedToday: false, closedForDate: '2026-08-27' };
+  expect(isOfficeOpenAt(loadedYesterday, ET_10AM)).toBeNull(); // 2026-08-28 in ET
+  expect(isOfficeOpenAt({ ...HOURS, closedForDate: '2026-08-28' }, ET_10AM)).toBe(true);
+  expect(isOfficeOpenAt({ ...HOURS, closedToday: true, closedForDate: '2026-08-28' }, ET_10AM)).toBe(false);
+});
+
 test('unknown is NEVER open: no hours, bad hours, or closedUnknown ⇒ null', () => {
   expect(isOfficeOpenAt(null, ET_10AM)).toBeNull();
   expect(isOfficeOpenAt({}, ET_10AM)).toBeNull();
