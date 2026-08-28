@@ -865,6 +865,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         pain_points: extracted.pain_points || priorEstimateFields.pain_points || null,
       };
       if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
+      // The accumulated fields ALSO ride the lead write (hook P1): identity
+      // resolution (email match) and fill-forward must see the name/email/
+      // address the FIRST capture gave, not just this retry's new piece.
+      for (const k of ['first_name', 'last_name', 'email', 'address_line1', 'city', 'zip', 'requested_service', 'pain_points']) {
+        if (!extracted[k] && estimateFields[k]) extracted[k] = estimateFields[k];
+      }
       const estimateMissing = estimateRequested
         ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
         : [];
@@ -872,7 +878,11 @@ async function executeTool(name, input = {}, ctx = {}) {
       // travels with the artifact (hook P1): open ⇒ "usually about 15
       // minutes" (urgent for staff); closed ⇒ "when the office opens";
       // unknown ⇒ "as soon as possible". The model only ever repeats it.
-      const officeOpen = typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
+      // Gate OFF (no clock block, no office hours) can never earn the
+      // 15-minute wording (hook P1): only a context-enabled session that
+      // proves the office is open right now may say it.
+      const { isContextEnabled: contextOn } = require('./relay-context');
+      const officeOpen = contextOn() && typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
       const spokenExpectation = officeOpen === true
         ? 'about_15_minutes'
         : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');

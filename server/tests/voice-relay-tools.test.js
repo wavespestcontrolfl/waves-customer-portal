@@ -313,7 +313,10 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     test('existing customer + card persisted ⇒ promise authorized, WHEN from CLOCK DATA', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
+      const relayContext = require('../services/voice-agent/relay-context');
+      const spyCtx = jest.spyOn(relayContext, 'isContextEnabled').mockReturnValue(true);
       const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito', first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est', officeOpenNow: () => true });
+      spyCtx.mockRestore();
       expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.objectContaining({ callSid: 'CA-est', spokenExpectation: 'about_15_minutes' }));
       expect(out).toMatch(/estimate request IS on the office queue/);
       expect(out).toMatch(/usually goes out in about 15 minutes/);
@@ -393,12 +396,27 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       const second = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, email: 'pat@example.com' }, ctx);
       expect(second).toMatch(/IS on the office queue/);
+      // the retry's LEAD WRITE also carries the first capture's identity fields
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr', requested_service: 'mosquito' }), expect.anything());
       // every field from the FIRST capture survives the retry, including the service context
       expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr', requested_service: 'mosquito', pain_points: 'bites on the lanai' }), expect.anything());
       expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: false }));
     });
 
+    test('gate OFF can never earn the 15-minute wording, even if a ctx claims the office is open', async () => {
+      const relayContext = require('../services/voice-agent/relay-context');
+      const spy = jest.spyOn(relayContext, 'isContextEnabled').mockReturnValue(false);
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-off', created: true });
+      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-off', officeOpenNow: () => true });
+      expect(out).toMatch(/as soon as possible — do not name a time/);
+      expect(out).not.toMatch(/15 minutes/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised_expectation: 'as_soon_as_possible' }), expect.anything());
+      spy.mockRestore();
+    });
+
     test('the spoken turnaround is decided from the office clock in code and travels with the artifact', async () => {
+      const relayContext = require('../services/voice-agent/relay-context');
+      const spyOn = jest.spyOn(relayContext, 'isContextEnabled').mockReturnValue(true);
       createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-7', created: true });
       const full = { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' };
       const closed = await executeTool('capture_lead', full, { from: '+19415551234', callSid: 'CA-c', officeOpenNow: () => false });
@@ -410,6 +428,7 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       const open = await executeTool('capture_lead', full, { from: '+19415551234', callSid: 'CA-o', officeOpenNow: () => true });
       expect(open).toMatch(/about 15 minutes/);
       expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised_expectation: 'about_15_minutes' }), expect.anything());
+      spyOn.mockRestore();
     });
 
     test('a complete capture does not hold the call open', async () => {
