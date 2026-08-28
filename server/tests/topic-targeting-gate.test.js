@@ -621,3 +621,33 @@ describe('PR codex r7 (f50a87557)', () => {
     expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['pestie'] });
   });
 });
+
+describe('PR codex r8 (864fcd91a)', () => {
+  test('governed "Florida <species>" names are not statewide framing; "in Florida" still is', () => {
+    for (const t of ['Florida Woods Cockroach Control', 'Florida carpenter ants in the attic', 'florida pusley weed control', 'Florida dampwood termite signs']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+      expect(gate.evaluateDraftFraming({ frontmatter: { title: t, slug: `/pest-control/${t.toLowerCase().replace(/[^a-z]+/g, '-')}/` } }).ok).toBe(true);
+    }
+    expect(gate.classifyGeoScope('Florida Woods Cockroach Control in Florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('cockroach control in florida').scope).toBe('statewide');
+  });
+  test('a leaf-only row slug collides with the live category-qualified post', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const r = await gate.evaluateBlogPostRow({ title: 'In-Wall Pest Control Basics', keyword: 'in wall pest control basics', slug: 'in-wall-pest-control', status: 'draft' }, { index });
+    expect(r.ok).toBe(false);
+    expect(r.findings.find((f) => f.code === gate.CODES.SLUG_COLLIDES_LIVE)).toMatchObject({ url: '/pest-control/in-wall-pest-control/' });
+    expect((await gate.evaluateBlogPostRow({ title: 'Ghost Ants in Sarasota Kitchens', keyword: 'ghost ants sarasota', slug: 'ghost-ants-sarasota-kitchens', status: 'draft' }, { index })).ok).toBe(true);
+  });
+  test('a row city must be a served locality or a footprint region — an unknown city is out-of-area', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', keyword: 'pest control frequency', slug: 'pest-control-frequency', status: 'draft' };
+    for (const city of ['Boise', 'Portland', 'Springfield']) {
+      const r = await gate.evaluateBlogPostRow({ ...generic, city }, { index });
+      expect(r.ok).toBe(false);
+      expect(r.findings[0]).toMatchObject({ code: gate.CODES.GEO_OUT_OF_AREA, cities: [city] });
+    }
+    for (const city of ['Sarasota', 'Lakewood Ranch', 'Apollo Beach', 'Manatee County', 'Southwest Florida']) {
+      expect((await gate.evaluateBlogPostRow({ ...generic, city }, { index })).ok).toBe(true);
+    }
+  });
+});

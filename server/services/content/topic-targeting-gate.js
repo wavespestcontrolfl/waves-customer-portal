@@ -106,8 +106,12 @@ const CODES = Object.freeze({
 const REGIONAL_RE = /\b(southwest florida|sw florida|swfl|gulf coast|suncoast|sun coast|manatee county|sarasota county|charlotte county)\b/i;
 const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
 // Compounds where "Florida"/"fl" is not geography: the Florida room (a
-// lanai-style sunroom) and the fluid ounce.
-const STATEWIDE_EXEMPT_RE = /\bflorida\s+rooms?\b|\bfl\.?\s*oz\b/gi;
+// lanai-style sunroom), the fluid ounce, and the governed pest / weed names
+// that carry the word (service-pricing + the live corpus: Florida woods
+// cockroach, carpenter/harvester ant, dampwood termite, predatory stink bug,
+// pusley, betony, wax/red scale). A title built around one of these is a
+// species topic the writer localizes, not statewide framing.
+const STATEWIDE_EXEMPT_RE = /\bflorida\s+rooms?\b|\bfl\.?\s*oz\b|\bflorida\s+(?:woods?\s+(?:cock)?roach(?:es)?|carpenter\s+ants?|harvester\s+ants?|dampwood\s+termites?|predatory\s+stink\s*bugs?|pusley|betony|wax\s+scales?|red\s+scales?)\b/gi;
 // Any other US state (or territory) named in targeting text is
 // out-of-footprint by construction. "Virginia" and "Washington" are left
 // out — both are common person names (Virginia runs the Waves office).
@@ -500,6 +504,11 @@ function normalizeSlug(s) {
   return `/${raw.replace(/^\/+|\/+$/g, '')}/`;
 }
 
+function slugLeaf(url) {
+  const parts = normalizeSlug(url).split('/').filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
 // Blog URLs are /{category}/{leaf}/ — the category is the first segment.
 function categoryFromSlug(slug) {
   const m = normalizeSlug(slug).match(/^\/([a-z0-9-]+)\/[a-z0-9-]+\/$/);
@@ -661,6 +670,15 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
     { text: city, where: 'Row city', framing: false },
   ]);
+  // The city is a SEMANTIC field the writer is prompted with ("City:
+  // Boise") — it must name a served locality or a footprint region, not
+  // merely be absent from the curated out-of-area gazetteer.
+  if (city && !findings.length) {
+    const cityGeo = classifyGeoScope(city);
+    if (cityGeo.scope !== 'footprint' && cityGeo.scope !== 'regional') {
+      findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: [city], message: `Row city "${city}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
+    }
+  }
   if (findings.length) return { ...base, ok: false, findings, geo };
 
   const idx = index || (corpus ? indexCorpus(corpus) : null);
@@ -669,12 +687,17 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     return { ...base, geo, skipped: 'no_corpus' };
   }
   const selfUrl = normalizeSlug(slug);
-  // A NEW blog may not reuse a live post's URL: that would reach the
-  // publisher's update-in-place path without the refresh safeguards. (Rows
-  // already live are exempted upstream by isLiveRow / refresh_existing_page;
-  // nothing that enters evaluate() legitimately owns an existing URL.)
-  if (selfUrl && idx.posts.some((post) => post.url === selfUrl)) {
-    findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: selfUrl, message: `Slug ${selfUrl} is a LIVE post. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
+  const selfLeaf = slugLeaf(selfUrl);
+  // A NEW blog may not reuse a live post's URL — or its LEAF: the publisher
+  // writes a leaf-only row slug to src/content/blog/<leaf>.md, which can
+  // overwrite the legacy file serving the category-qualified URL. Either way
+  // it reaches the update-in-place path without the refresh safeguards.
+  // (Rows already live are exempted upstream by isLiveRow /
+  // refresh_existing_page; nothing that enters evaluate() legitimately owns
+  // an existing URL.)
+  const collided = selfUrl ? idx.posts.find((post) => post.url === selfUrl || (selfLeaf && slugLeaf(post.url) === selfLeaf)) : null;
+  if (collided) {
+    findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: collided.url, message: `Slug ${selfUrl} collides with the LIVE post ${collided.url}${collided.url === selfUrl ? '' : ' (same leaf — the publisher writes one file per leaf)'}. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
   }
   // Ownership is judged WITHIN a category: a chemical or species name can
   // legitimately anchor a termite post and a mosquito post. Unknown category
