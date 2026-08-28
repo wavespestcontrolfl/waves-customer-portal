@@ -437,6 +437,23 @@ describe('publishReviewReply', () => {
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
   });
 
+  test('recording a landed uncertain draft found by the live GET validates account facts before promoting it (codex r49)', async () => {
+    const draft = 'Hi Dana, glad to keep looking after your Venice home.';
+    state.rows[0] = { ...state.rows[0], review_reply: null, customer_id: 'c1', auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft, auto_reply_grounding: JSON.stringify({ accountFingerprint: 'fp:Venice|new' }) };
+    // Facts moved since the timed-out PUT → recorded, but parked for a person.
+    mockAccountFacts.mockReset().mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
+    expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    // Facts unchanged → clean posted.
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' };
+    mockAccountFacts.mockReset().mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
+    expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'posted', auto_reply_reason: null });
+    mockAccountFacts.mockReset().mockResolvedValue(null);
+  });
+
   test('overwriting callers fail closed when the live review cannot be read', async () => {
     state.rows[0].review_reply = 'Already answered.';
     mockGbp.getReview.mockRejectedValueOnce(new Error('503'));

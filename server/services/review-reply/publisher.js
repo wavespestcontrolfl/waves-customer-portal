@@ -140,11 +140,16 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
   // skipped/edited_on_google (Retract must not delete their edit), a
   // reconciliation park whose live text is our draft closes as posted. The
   // publish claim we hold is ours, so the snapshot is judged without it.
-  const { syncReplyFields } = require('./runner');
-  const fields = syncReplyFields({ ...(fresh || {}), publish_claimed_until: null }, { owner_reply: liveReply, owner_reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() });
-  await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-    .update({ ...fields, auto_reply_claimed_until: null })
-    .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+  // …and a landed google_uncertain / persist_failed draft is promoted only
+  // through the same transactional account-fact validation the sync uses
+  // (codex r49): row locked, facts re-read, mismatch → parked for a person.
+  const { syncReplyFields, validatePromotionAccountFacts } = require('./runner');
+  await db.transaction(async (trx) => {
+    const locked = (await trx('google_reviews').where({ id: reviewId }).forUpdate().first()) || fresh || {};
+    const base = syncReplyFields({ ...locked, publish_claimed_until: null }, { owner_reply: liveReply, owner_reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() });
+    const fields = await validatePromotionAccountFacts(locked, base, { conn: trx });
+    await trx('google_reviews').where({ id: reviewId }).whereNull('missing_since').update({ ...fields, auto_reply_claimed_until: null });
+  }).catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
 }
 
 async function recordLiveOwnerReplyRemoved(reviewId, fresh) {

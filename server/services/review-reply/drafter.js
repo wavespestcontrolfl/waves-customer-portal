@@ -137,7 +137,9 @@ const BANNED_RE = new RegExp([
   // "<protected subject> never noticed / barely knew / didn't mind" (codex r48).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
   // "trouble / bother / faze <protected subject>" as a transitive verb (codex r44).
-  '\\b(?:troubl|bother|faze|inconvenienc|alarm|scar|spook|startl|stress)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|anybody|everyone)\\b', '\\b(?:trouble|worry|stress|hassle|risk|harm)[- ]free\\b',
+  // …with up to four intervening words so "bothered none of your pets",
+  // "troubled neither of the kids" are caught (codex r49).
+  '\\b(?:troubl|bother|faze|inconvenienc|alarm|scar|spook|startl|stress|harm|hurt|affect|upset|disturb)\\w*\\s+(?:[\\w-]+\\s+){0,4}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|anybody|everyone)\\b', '\\b(?:trouble|worry|stress|hassle|risk|harm)[- ]free\\b',
   '\\b(?:keep|kept|keeps|keeping|steer|hold|held)\\s+(?:[\\w-]+\\s+){0,3}?(?:trouble|harm|worry|worries|problems?|issues?|discomfort|stress|risks?)\\s+(?:away|off|out|at\\s+bay)\\b',
   '\\bfrom\\s+(?:any\\s+|all\\s+)?(?:trouble|harm|worry|worries|discomfort|stress|distress|upset|danger|exposure)\\b',
   // Quality-of-life / preserve / safeguard framing (codex r37).
