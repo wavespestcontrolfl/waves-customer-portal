@@ -240,6 +240,16 @@ describe('retractReviewReply', () => {
     expect(mockGbp.deleteReply).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBe('Edited replacement posted first');
   });
+  test('deleted on Google but the local clear failed → PERSIST_FAILED, claim abandoned, no audit', async () => {
+    state.rows[0].review_reply = 'Posted reply';
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
+    mockGbp.deleteReply.mockImplementationOnce(async () => { state.failNextUpdate = true; return true; });
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.PERSIST_FAILED });
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
+    expect(state.activity).toHaveLength(0);
+  });
   test('a stamped review keeps its recorded reply (evidence row)', async () => {
     state.rows[0].review_reply = 'Posted reply';
     mockLock.mockResolvedValueOnce({ blocked: true, missing: false });

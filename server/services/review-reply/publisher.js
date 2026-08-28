@@ -253,8 +253,20 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
     // cases — the recorded reply stays as it was. Nothing to delete on Google.
     throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
   }
+  let abandoned = false;
   try {
-    await db('google_reviews').where({ id: reviewId }).update({ review_reply: null, reply_updated_at: null, ...(autoFields || {}) });
+    try {
+      await db('google_reviews').where({ id: reviewId }).update({ review_reply: null, reply_updated_at: null, ...(autoFields || {}) });
+    } catch (err) {
+      // Google already deleted the reply; the local row still shows it as
+      // live. Mirror publishReviewReply: abandon the claim (self-expires) and
+      // surface a reconciliation error rather than a clean failure that
+      // invites a repeat DELETE.
+      outcome.abandonClaim();
+      abandoned = true;
+      logger.error(`[review-reply] reply deleted on Google for ${reviewId} but local clear failed: ${err.message}`);
+      throw new ReviewReplyError(CODES.PERSIST_FAILED, `The reply was deleted on Google but the local record was not updated (${err.message}) — reload and reconcile by hand.`, { status: 500, cause: err });
+    }
     try {
       await db('activity_log').insert({
         admin_user_id: actor?.adminUserId || null,
@@ -267,7 +279,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
     }
     return { googleDeleted: true, reviewId };
   } finally {
-    await outcome.releaseClaim();
+    if (!abandoned) await outcome.releaseClaim();
   }
 }
 

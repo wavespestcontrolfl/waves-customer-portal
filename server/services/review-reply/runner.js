@@ -199,6 +199,19 @@ async function bell(row, { title, body, reason, action = false, extra = {} }) {
   }
 }
 
+// Google has the reply; only the local record is missing. Never republish —
+// park for a person to reconcile (the publish claim was abandoned by the
+// publisher and self-expires, blocking competitors meanwhile). Used by both
+// the cron path and Post-now.
+async function parkPersistFailed(row, draft, err) {
+  await db('google_reviews').where({ id: row.id }).update({
+    auto_reply_status: STATUS.PARKED, auto_reply_reason: 'persist_failed', auto_reply_error: err.message,
+    ...(draft?.text ? { auto_reply_draft: draft.text, auto_reply_version: draft.version || null, auto_reply_mode: draft.mode || null } : {}),
+    auto_reply_claimed_until: null,
+  }).catch((e2) => logger.error(`[review-auto-reply] persist_failed bookkeeping also failed for ${row.id}: ${e2.message}`));
+  await bell(row, { title: 'Review reply needs reconciling', body: `${summarize(row)} — the reply is LIVE on Google but was not recorded here. Open Reviews and confirm it.`, reason: 'persist_failed', action: true });
+}
+
 function summarize(row) {
   return `${row.star_rating}★ from ${row.reviewer_name || 'a Google reviewer'} (${locationName(row.location_id)})`;
 }
@@ -376,14 +389,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   } catch (err) {
     const code = err instanceof ReviewReplyError ? err.code : 'unexpected';
     if (code === CODES.PERSIST_FAILED) {
-      // Google has the reply; only the local record is missing. Never
-      // republish — park for a person to reconcile (the publish claim was
-      // abandoned and self-expires, blocking competitors meanwhile).
-      await db('google_reviews').where({ id: merged.id }).update({
-        auto_reply_status: STATUS.PARKED, auto_reply_reason: 'persist_failed', auto_reply_error: err.message,
-        auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_claimed_until: null,
-      }).catch((e2) => logger.error(`[review-auto-reply] persist_failed bookkeeping also failed for ${merged.id}: ${e2.message}`));
-      await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — the reply is LIVE on Google but was not recorded here. Open Reviews and confirm it.`, reason: 'persist_failed', action: true });
+      await parkPersistFailed(merged, draft, err);
       return { outcome: 'parked', reason: 'persist_failed' };
     }
     if (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE) {
@@ -484,6 +490,11 @@ async function postNow(reviewId, actor) {
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };
     } catch (err) {
+      if (err instanceof ReviewReplyError && err.code === CODES.PERSIST_FAILED) {
+        // Live on Google, unrecorded locally: park, never back into the retry lane.
+        await parkPersistFailed(row, { text: existing, version: row.auto_reply_version, mode: row.auto_reply_mode }, err);
+        throw err;
+      }
       await releaseClaim(row, { auto_reply_error: err.message });
       throw err;
     }

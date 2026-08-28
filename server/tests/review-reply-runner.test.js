@@ -454,6 +454,18 @@ describe('admin actions', () => {
     expect(mockDraft).toHaveBeenCalledTimes(1);
     expect(mockPublish).toHaveBeenCalledTimes(1);
   });
+  test('postNow: PERSIST_FAILED on an existing draft parks for reconciliation, never back to the retry lane', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('persist_failed', 'live but unrecorded', { status: 500 }));
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality' })];
+    await expect(Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' })).rejects.toMatchObject({ code: 'persist_failed' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
+    // The cron must not pick it up again.
+    await Runner.processDueAutoReplies();
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
   test('postNow refuses a row that already has a real reply', async () => {
     state.rows = [row({ review_reply: 'Real reply' })];
     await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toMatchObject({ code: 'already_replied' });
