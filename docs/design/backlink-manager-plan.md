@@ -463,7 +463,7 @@ t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_
 t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase_kind IN ('initial','renewal')) — each renewal is its own separately authorized purchase
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
-t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${purchase_kind}:${renewal_period_key || '-'}:${generation}` — NOT month-scoped: a placement's initial purchase is unique for all time
+t.string('idempotency_key').notNullable().unique(); // initial: `${prospect_id}:initial:${generation}` (path-INDEPENDENT — a placement is paid for once, whatever path it was moved to); renewal: `${prospect_id}:renewal:${renewal_period_key}:${generation}` — never month-scoped
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();                // CHECK (authority IN (the §6.1 enum))
@@ -481,9 +481,11 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
   → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, close_pending, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
-  → **open/settled-purchase check — all-time, not per month**: if ANY row for
-  `(prospect_id, path_id, purchase_kind, renewal_period_key)` is in `reserved`, `submitting`,
-  `close_pending`, `ambiguous`, `charged` or `reconciled_charged` → no new reservation (409). A placement that
+  → **open/settled-purchase check — all-time, per PLACEMENT, path-independent**: if ANY row
+  for `(prospect_id, purchase_kind, renewal_period_key)` — any `path_id`, superseded or not —
+  is in `reserved`, `submitting`, `close_pending`, `ambiguous`, `charged` or
+  `reconciled_charged` → no new reservation (409). Supersession (§3.2) carries settled
+  purchases with the placement; it never frees a second `initial`. A placement that
   was paid for in March can never be paid for again as `initial` in April; only an explicit
   `renewal` for a *new* period can be reserved, and `claim()` never leases a placement with an
   open (`reserved`/`submitting`/`ambiguous`) purchase of any kind. Otherwise `generation` =
@@ -495,6 +497,14 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   reservation unlocks the card details to the provider. Two workers can never both pass the
   check; the lock is per ET budget month (`link_budget:<budget_month>`), so the policy month
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
+- **Authority is revalidated immediately before the card exists.** The `reserved → submitting`
+  transition, under the budget lock and before minting, re-runs the pure §6.3 decision on the
+  *current* inputs and re-checks the approval (`path_revision`, `decision_inputs_hash`,
+  not invalidated/consumed), the placement's current non-superseded path, and every relevant
+  kill switch (`GATE_LINK_AUTHORITY`, `GATE_LINK_AUTO_PAID`, lane gate) — any change since
+  reservation ⇒ the row is `voided` (no card was ever minted) and re-parked. A gate flipped
+  off, or a domain whose score/spam/confidence moved, between reservation and submission can
+  never reach the merchant.
 - **Final total is validated before `submitting`.** The provider must read the checkout's
   final total (price + tax + fees + renewal terms as displayed) and report it as
   `final_cents` — a safe non-negative integer, else the transition is refused — BEFORE the
@@ -825,8 +835,10 @@ grants no automated lease at all** — every row, pre-existing ones included, is
 (separately arms `AUTO_PAID_WITHIN_POLICY`), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
 the registry's `ready_to_acquire` + stamped authority is the *only* allowlist: the
 authority-aware claim predicate is unconditional (not gated), and `SIGNUP_RUNNER_ALLOWLIST`
-is retired in that PR (its rows are migrated into registry paths with
-`authority=OWNER_OVERRIDE` recorded as the prior owner allowlisting). Kill for any lane =
+is retired in that PR: its domains are migrated into registry rows/paths (`source_detail=
+'signup_runner_allowlist'`) in `awaiting_owner` — **no approval is synthesized**; each gets a
+fresh owner card (the prior allowlisting is shown on it as context) so every override has a
+real click and an immutable snapshot behind it. Kill for any lane =
 unset its gate; budget kill = the issuer program's limit.
 
 ---
