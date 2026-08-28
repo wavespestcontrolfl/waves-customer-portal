@@ -1512,6 +1512,65 @@ describe('seo-completion-gate', () => {
     });
     expect(ownServiceQuote.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // r54: compact "/" and "&" coordinate services without whitespace —
+    // "Termite/Pool Cleaning" carries an unknown service; "24/7" is a figure.
+    for (const anchor of ['Get a Termite/Pool Cleaning Quote', 'Get a Termite&Pool Cleaning Quote']) {
+      const compact = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `T. [${anchor}](/contact/) now.` }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(compact.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    }
+    const figure = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get a 24/7 Termite Quote](/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(figure.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    expect(figure.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // r54: "about" introduces the service after the keyword.
+    const about = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get a Quote About Termite Treatment](/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(about.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(about.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    const aboutWrong = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) or [Get a Quote About Lawn Care](/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(aboutWrong.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+
+    // r54: invitation-shaped service-page links are wording-free CTAs; the
+    // editorial "Get ready for …" shape stays a descriptive link.
+    for (const anchor of ['Need Termite Control?', 'Ready for Termite Control?', 'Looking for Termite Control']) {
+      const invitationService = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `T. [Get My Free Termite Estimate](/contact/) or [${anchor}](/termite-inspection/).` }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(invitationService.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    }
+    const editorialReady = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) or [Get ready for your termite inspection](/termite-inspection/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(editorialReady.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // r54: a /blog/ route with a service keyword in its slug is editorial —
+    // "Get Lawn Care Tips" there is a resource link, not a lawn CTA.
+    const blogRoute = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Termite Estimate](/contact/) and [Get Lawn Care Tips](/blog/lawn-care-tips/).' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(blogRoute.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // Canonical service hubs are service destinations: a request-led anchor
     // on /waveguard-memberships/ needs estimate/quote wording.
     const hubCta = SeoCompletionGate.evaluate({

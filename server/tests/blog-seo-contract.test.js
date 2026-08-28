@@ -225,6 +225,8 @@ describe('blog SEO contract helpers', () => {
     expect(inferLinkReason('/pest-control-punta-gorda-fl/')).toBe('city');
     expect(inferLinkReason('/termite-control-englewood-fl/')).toBe('city');
     expect(inferLinkReason('/termite-control/')).toBe('service');
+    expect(inferLinkReason('/blog/lawn-care-tips/')).toBe('related_blog');
+    expect(inferLinkReason('/blog/termite-control-cost/')).toBe('related_blog');
   });
 
   test('defaults breadcrumbs to the layout trail when the draft carries none', () => {

@@ -533,6 +533,9 @@ function normalizeService(service) {
 function inferLinkReason(url) {
   const path = normalizeUrl(url);
   if (/\/contact\/|quote|estimate|calculator/.test(path)) return 'conversion';
+  // Anything under /blog/ is editorial — a service keyword in the slug
+  // ("/blog/lawn-care-tips/") does not make it a service destination.
+  if (/^\/blog\//.test(path)) return 'related_blog';
   // Alternation is LONGEST-FIRST so 'tree-and-shrub-care' cannot be shadowed by a
   // shorter prefix, and mirrors CITY_SERVICE_SLUG above.
   if (/^\/(?:tree-and-shrub-care|pest-control|lawn-care|mosquito-control|termite-control|rodent-control)-[a-z0-9-]+-fl\/?$/.test(path)) return 'city';

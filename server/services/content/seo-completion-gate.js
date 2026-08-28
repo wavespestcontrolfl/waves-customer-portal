@@ -928,8 +928,9 @@ function ctaLinksWhere(body, accept) {
       // lawn", "on the trees") describe WHERE, not a service, so the
       // place-shaped services (lawn, tree-shrub) are dropped in that form.
       // CTA modifiers may sit between the keyword and the preposition
-      // ("Request a Quote Today for Termite Control").
-      const after = anchor.slice(end).match(/^(?:\s+(?:today|now|online|fast|free|here))*\s+(?:for|on|to|against)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
+      // ("Request a Quote Today for Termite Control"). "about" introduces
+      // the topic the same way ("Get a Quote About Termite Treatment").
+      const after = anchor.slice(end).match(/^(?:\s+(?:today|now|online|fast|free|here))*\s+(?:for|on|to|against|about)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
       if (after) {
         const phrase = after[1];
         // Place-shaped when a determiner sits directly before the place
@@ -950,13 +951,16 @@ function ctaLinksWhere(body, accept) {
       // Coordination is judged across the FULL anchor ("Get a Termite Quote
       // and Pool Cleaning Estimate"), not just the text before the first
       // keyword.
-      const parts = anchor.split(/\s*,\s*|\s*\+\s*|\s+(?:and|&|or|\/|plus)\s+/i);
+      // "&" and "/" coordinate without surrounding whitespace too
+      // ("Termite/Pool Cleaning Quote", "Termite&Pool"); a slash between
+      // digits ("24/7") is a figure, not coordination.
+      const parts = anchor.split(/\s*,\s*|\s*\+\s*|\s+(?:and|or|plus)\s+|\s*&\s*|(?<=[a-z])\s*\/\s*(?=[a-z])/i);
       if (parts.length > 1) {
         // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
         // not separate services; an unlisted noun ("Pool Cleaning") is.
         const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price|control|prevention|treatment|treatments|removal|protection|management|service|services|plan|plans|program|programs|care|maintenance|exclusion|monitoring)\s*)+$/i;
         // A trailing "for/on …" context clause is not a coordinated part.
-        const coordinated = parts.map((part) => part.replace(/\s+(?:for|on)\s+.*$/i, '').trim()).filter(Boolean);
+        const coordinated = parts.map((part) => part.replace(/\s+(?:for|on|about)\s+.*$/i, '').trim()).filter(Boolean);
         const keywordRe = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
         const requestVerbRe = new RegExp(`^(?:${REQUEST_VERB_SOURCE})\\b`, 'i');
         // A part is a SERVICE-REQUEST clause when it carries the estimate/
@@ -1114,10 +1118,19 @@ function isServiceOrCityPath(href) {
   hubs.delete(normalizeInternalPath('/pest-library/'));
   return hubs.has(norm);
 }
+// The invitation shapes the conversion classifier already treats as
+// actionable ("Need Termite Control?", "Ready for Termite Control?",
+// "Looking for …") are CTAs on a service page too. "Get ready for your
+// termite inspection" is the editorial prep shape — its "get ready" opener
+// is the same exemption FORBIDDEN_CTA_ANCHOR_RE grants — so it stays a
+// descriptive link.
+const EDITORIAL_READY_RE = /^(?:please\s+)?get\s+ready\b/i;
 function isServicePageRequestCta(href, anchor) {
   if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;
   if (!isServiceOrCityPath(href)) return false;
-  return REQUEST_LED_RE.test(anchor) && !ESTIMATE_KW_RE.test(anchor);
+  if (ESTIMATE_KW_RE.test(anchor)) return false;
+  if (REQUEST_LED_RE.test(anchor)) return true;
+  return INVITATION_CTA_RE.test(anchor) && !EDITORIAL_READY_RE.test(anchor);
 }
 
 function forbiddenCtaAnchor(body) {
