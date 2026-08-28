@@ -915,6 +915,7 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // own report displays that very number.
       'c.city',
       'c.address_line1',
+      'c.address_line2',
       'c.zip',
       'tp.county as turf_county',
       'tp.municipality as turf_city',
@@ -1070,7 +1071,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
         county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city }),
-        home: { addressLine1: customer.address_line1, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
+        home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
         now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an

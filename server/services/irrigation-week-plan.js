@@ -124,6 +124,7 @@ function decideWeekPlan({
     county,
     home: home ? {
       addressLine1: home.addressLine1 || null,
+      addressLine2: home.addressLine2 || null,
       city: home.city || null,
       zip: home.zip || null,
       latitude: home.latitude ?? null,

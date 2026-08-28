@@ -169,8 +169,8 @@ describe('decideWeekPlan (server glue)', () => {
     expect(restriction.maxDaysPerWeek).toBe(1);
     expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek); // same month, same ET₀ → same target
     expect(decisionInputs.targetBasis).toBe('forecast_et0');
-    const withHome = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, ...SPRAY, county: 'Manatee', home: { addressLine1: '123 Sample Ln', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 }, now: new Date('2026-08-28T12:00:00Z') });
-    expect(withHome.decisionInputs.home).toEqual({ addressLine1: '123 Sample Ln', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 });
+    const withHome = decideWeekPlan({ advice, grassType: 'st_augustine', forecastEt0Inches: 1.6, ...SPRAY, county: 'Manatee', home: { addressLine1: '123 Sample Ln', addressLine2: 'Unit 4', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 }, now: new Date('2026-08-28T12:00:00Z') });
+    expect(withHome.decisionInputs.home).toEqual({ addressLine1: '123 Sample Ln', addressLine2: 'Unit 4', city: 'Bradenton', zip: '34205', latitude: 27.5, longitude: -82.5 });
     expect(decisionInputs.planMonth).toBe(8);
     expect(plan.carryoverInches).toBe(0.5);
     expect(plan.action).toBe('run');

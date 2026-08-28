@@ -128,7 +128,7 @@ describe('sweep — plan mode only on Monday', () => {
     // An UNKNOWN sent-check (unreadable table) falls back to the pre-plan email too.
     expect(src).toMatch(/if \(alreadySent === null\) \{[\s\S]{0,400}weekPlanEnabled: false/);
     // The sweep binds the home (address + coords) it decided for into the snapshot.
-    expect(src).toMatch(/home: \{ addressLine1: customer\.address_line1, city: customer\.city, zip: customer\.zip, latitude: customer\.latitude, longitude: customer\.longitude \}/);
+    expect(src).toMatch(/home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip, latitude: customer\.latitude, longitude: customer\.longitude \}/);
     // A snapshot-claim DB error falls back to the pre-plan email (never silence).
     expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
     // Delivery reconciliation is customer/week scoped (trigger_event_id)…
