@@ -508,6 +508,12 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const e = outcome.result.error;
     outcome.abandonClaim();
     const uncertain = { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) };
+    if (allowOverwrite) {
+      // A manual attempt (admin editor / IB): keep the exact text and mark
+      // the version manual, so the sync that later clears the park hands
+      // that text back to a person instead of the automatic lane (codex r75).
+      Object.assign(uncertain, { auto_reply_draft: replyText, auto_reply_version: auditMeta?.version || 'human', auto_reply_mode: null });
+    }
     const q = db('google_reviews').where({ id: reviewId });
     if (allowOverwrite) {
       // Human / IB-edit publishers: the row may be never-queued (NULL) or

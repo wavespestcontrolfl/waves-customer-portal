@@ -155,6 +155,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, we are glad access resumed after 1 1/2 hours following the pest treatment.'), g1dog)).toBe('banned_phrase');
     // Standalone fraction at the start of a leading-anchored pattern (\b cannot sit between a space and ½).
     expect(verify(good('Hello there, ½ hour before access resumed after the pest treatment.'), g1dog)).toBe('banned_phrase');
+    // codex r75: clock times and day parts are fixed re-entry moments too.
+    const gclock = grounding({ text: 'Great pest treatment. He arrived at 4:30 and was gone by 6.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, access resumed at 4:30 after the pest treatment.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was back in use by 6 pm after the pest treatment.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, by noon the yard was good to go.'), gclock)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the yard was ready by the next morning.'), gclock)).toBe('banned_phrase');
+    // A day part without a re-entry state is not a re-entry claim (trips a different rule, never banned_phrase).
+    expect(verify(good('Hello there, we are glad the treatment went well and the morning visit fit your schedule.'), gclock)).not.toBe('banned_phrase');
     // codex r74: qualified dozens.
     expect(verify(good('Hello there, we are glad access resumed after a couple dozen minutes following the pest treatment.'), g1dog)).toBe('banned_phrase');
     expect(verify(good('Hello there, the yard was ready several dozen minutes after the pest treatment.'), g1dog)).toBe('banned_phrase');

@@ -597,7 +597,9 @@ describe('publishReviewReply', () => {
     await assertion;
     jest.useRealTimers();
     expect(out.abandonClaim).toHaveBeenCalled();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    // codex r75: the manual attempt's exact text + a manual version ride the
+    // park, so the clearing sync hands it back to a person, not the auto lane.
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Thanks Dana.', auto_reply_version: 'human', auto_reply_mode: null });
   });
 
   test('a non-overwriting PUT timeout on a never-queued (NULL state) row still records google_uncertain', async () => {

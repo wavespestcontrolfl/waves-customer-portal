@@ -120,7 +120,7 @@ jest.mock('../models/db', () => {
     const limit = rest[rest.length - 1];
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
       && (!locs || locs.includes(String(r.location_id).toLowerCase()))
-      && (force ? (r.id === rest[0] && r.auto_reply_status !== 'skipped') : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now && r.review_created_at >= cutoff))
+      && (force ? (r.id === rest[0] && !['skipped', 'retracted'].includes(r.auto_reply_status)) : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now && r.review_created_at >= cutoff))
       && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
     return { rows: hits.map((r) => ({ ...r })) };
@@ -412,6 +412,22 @@ describe('processDueAutoReplies — state machine', () => {
     Runner.whereNoReconcilePark(qb);
     // codex r71: NULL-safe — a NULL auto_reply_status row must still be dismissible.
     expect(qb.whereRaw).toHaveBeenCalledWith("NOT COALESCE((auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed')), false)");
+  });
+
+  test('Post now refuses a retracted row and the forced claim never picks one up (codex r75)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ id: 'rt', auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google', review_reply: null })];
+    await expect(Runner.postNow('rt', { type: 'admin' }, { expectedDraft: null })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(await Runner.claimDueRows({ limit: 1, force: 'rt' })).toEqual([]);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'retracted', auto_reply_claimed_until: null });
+  });
+
+  test('whereNotAutoPosted keeps pipeline-posted replies out of Dismiss; human / IB posts stay dismissible (codex r75)', () => {
+    const qb = { whereRaw: jest.fn() };
+    Runner.whereNotAutoPosted(qb);
+    expect(qb.whereRaw).toHaveBeenCalledWith("NOT (COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE)");
   });
 
   test('queued rows older than maxQueueAgeHours leave the lane before a claim instead of auto-posting after a pause (codex r74)', async () => {
@@ -781,6 +797,14 @@ describe('processDueAutoReplies — state machine', () => {
     const now = new Date('2026-08-27T15:00:00Z');
     const uncertain = { review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Hi Dana, thanks.', publish_claimed_until: null };
     expect(Runner.syncReplyFields(uncertain, { owner_reply: null }, { now })).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null });
+    // codex r75: a MANUAL attempt (editor / IB) never re-enters the automatic
+    // lane — its exact text comes back as a human [DRAFT] for a person.
+    for (const version of ['human', 'agent_ops']) {
+      expect(Runner.syncReplyFields({ ...uncertain, auto_reply_version: version }, { owner_reply: null }, { now }))
+        .toEqual({ review_reply: '[DRAFT] Hi Dana, thanks.', reply_updated_at: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared', auto_reply_draft: null, auto_reply_due_at: null, auto_reply_claimed_until: null });
+    }
+    expect(Runner.syncReplyFields({ ...uncertain, auto_reply_version: 'human', auto_reply_draft: null }, { owner_reply: null }, { now }))
+      .toMatchObject({ review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain_cleared' });
     const persistFailed = { ...uncertain, auto_reply_reason: 'persist_failed' };
     expect(Runner.syncReplyFields(persistFailed, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
   });

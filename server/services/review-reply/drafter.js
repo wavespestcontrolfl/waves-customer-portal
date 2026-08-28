@@ -92,6 +92,13 @@ const DURATION_COUNT_BASE = '\\d*\\s?[½¼¾⅓⅔⅛⅜⅝⅞]|\\d+\\s+\\d\\s*\
 // "twenty-odd minutes", "30-some minutes", "ten-ish", "30 plus", "40 or so" (codex r70).
 const DURATION_COUNT = `(?:${DURATION_COUNT_BASE})(?:[- ]?(?:odd|some|plus|ish|or\\s+so|something|and\\s+change|and\\s+a\\s+bit))?`;
 // A complete duration phrase: "<count> minutes", "a half-hour", "quarter-hour", "30min".
+// A fixed re-entry moment can also be a CLOCK time or a day part (codex
+// r75): "access resumed at 4:30", "back in use by 6 pm", "ready by the next
+// morning". Bare "open" / "results" / "working" are deliberately not in the
+// state list — "open at 8 am" is business hours, not re-entry.
+const CLOCK_TIME = "(?:\\d{1,2}:\\d{2}\\s*(?:[ap]\\.?m\\.?)?|\\d{1,2}\\s*(?:[ap]\\.?m\\.?|o'?clock)|(?:high\\s+)?noon|midnight|midday|lunch(?:time)?|dinner(?:time)?|supper(?:time)?|sundown|sunset|dusk|dawn|sunrise|nightfall|bedtime|tonight|tomorrow|(?:first|last)\\s+light|end\\s+of\\s+(?:the\\s+)?day|(?:(?:next|following|same)\\s+)?(?:morning|afternoon|evening|day))";
+const CLOCK_RE_ENTRY_STATE = "(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|reopen\\w*|resum\\w*|access\\w*|re-?entry|re-?enter\\w*|open\\s+again|available\\s+again|back\\s+in\\s+use|allowed\\s+back|let\\s+back|welcome\\s+back|back\\s+in|back\\s+out|back\\s+home|back\\s+inside|back\\s+outside|went\\s+back|came\\s+back|come\\s+back|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in))";
+const CLOCK_PREP = "(?:at|by|after|before|until|till|around|about|past|from)\\s+(?:(?:the|about|around|roughly|just|shortly|approximately)\\s+)*";
 const DURATION_PHRASE = `(?:${DURATION_COUNT})[- ]+(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)|(?:one[- ]|a\\s+)?half[- ]?(?:an?[- ])?hour|(?:three[- ])?quarter[- ]hour|\\d+[- ]?(?:sec|min|hr)s?`;
 const BANNED_RE = new RegExp([
   // Incentives of every flavor (Google review policy).
@@ -230,6 +237,9 @@ const BANNED_RE = new RegExp([
   // provenance question; only the RE-ENTRY shape is banned outright.)
   `\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?|reopen\\w*|resum\\w*|access\\w*|open\\s+again|open|available(?:\\s+again)?|back\\s+in\\s+use|allowed\\s+back|let\\s+back|welcome\\s+back|back\\s+in|back\\s+out|back\\s+on|back\\s+home|back\\s+inside|back\\s+outside|return\\w*|went\\s+back|came\\s+back|come\\s+back|go\\s+back|re-?enter\\w*)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of|at\\s+the|by(?:\\s+the)?|no\\s+later\\s+than|before|under|ahead\\s+of|past)\\s+(?:(?:about|around|roughly|approximately|nearly|almost|just\\s+under|just\\s+over|some|maybe|only|barely|under|over|close\\s+to|less\\s+than|more\\s+than|as\\s+little\\s+as|as\\s+few\\s+as|the\\s+first)\\s+)?(?:(?:${DURATION_COUNT})[- ]+(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)|(?:one[- ]|a\\s+)?half[- ]?(?:an?[- ])?hour|(?:three[- ])?quarter[- ]hour|\\d+[- ]?(?:sec|min|hr)s?)\\b`,
   `\\b(?:after|within|in|inside\\s+of|by|no\\s+later\\s+than|before|under|ahead\\s+of|past)\\s+(?:(?:about|around|roughly|approximately|nearly|almost|just\\s+under|just\\s+over|some|maybe|only|barely|under|over|close\\s+to|less\\s+than|more\\s+than|as\\s+little\\s+as|as\\s+few\\s+as|the\\s+first)\\s+)?(?:(?:${DURATION_COUNT})[- ]+(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?)|(?:one[- ]|a\\s+)?half[- ]?(?:an?[- ])?hour|(?:three[- ])?quarter[- ]hour|\\d+[- ]?(?:sec|min|hr)s?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|welcome\\s+back)\\b`,
+  // re-entry state … at/by <clock time | day part>, and the reverse (codex r75).
+  `\\b${CLOCK_RE_ENTRY_STATE}\\b[^.]{0,30}\\b${CLOCK_PREP}${CLOCK_TIME}(?![\\w:])`,
+  `\\b${CLOCK_PREP}${CLOCK_TIME}(?![\\w:])[^.]{0,30}\\b${CLOCK_RE_ENTRY_STATE}\\b`,
   // Rank claims (claims-ledger rule) and competitor names.
   // Rank / superiority language in ANY grammatical wrapper (claims-ledger rule).
   '\\bbest\\b(?!\\s+(?:regards|wishes))', '\\bnumber\\s*one\\b', '#\\s?1\\b', '\\btop[-\\s]?(?:rated|notch|tier|choice|pick|ranked)\\b', '\\b(?:a|the)\\s+top\\s+(?:pest|lawn|company|team|choice|provider|service)\\b',

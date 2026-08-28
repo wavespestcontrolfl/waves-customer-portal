@@ -988,8 +988,10 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       </div>
       {/* Dismiss — hidden on removed rows: they are retained evidence, the
           Removed filter ignores the flag, and a dismissed+reinstated review
-          would vanish from every live view (server 409s stale pages). */}
-      {onDismiss && !review.missingSince && (
+          would vanish from every live view (server 409s stale pages).
+          Also hidden on a pipeline-posted reply: it must stay reachable for
+          the edited-after-post bell and Retract (server 409s too). */}
+      {onDismiss && !review.missingSince && !(review.autoReply?.status === "posted" && !["human", "agent_ops"].includes(review.autoReply?.version)) && (
         <div style={{ textAlign: "right", marginTop: 8 }}>
           {" "}
           <button

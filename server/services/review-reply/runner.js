@@ -45,6 +45,9 @@ const STATUS = {
 };
 
 const MAX_ATTEMPTS = 3;
+// Reply versions written by a person or the Intelligence Bar — never the
+// pipeline's own drafts.
+const MANUAL_VERSIONS = new Set(['human', 'agent_ops']);
 const CLAIM_MS = 10 * 60 * 1000;
 const RETRY_BACKOFF_MIN = 10;
 const IDENTITY_BACKOFF_MIN = 60;
@@ -225,7 +228,7 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
   if (!force) await expireOverAgeQueued({ now, cfg });
   // The claim re-checks the age itself (a row can age past the cutoff
   // between the expiry sweep and this statement).
-  const forceClause = force ? "AND id = ? AND auto_reply_status IS DISTINCT FROM 'skipped'" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ? AND review_created_at >= ?`;
+  const forceClause = force ? "AND id = ? AND COALESCE(auto_reply_status, '') NOT IN ('skipped','retracted')" : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ? AND review_created_at >= ?`;
   // Rollout scope is re-applied at claim time (not only at enqueue) so
   // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
   // rows outside it. Post-now (force) is an explicit admin action and ignores it.
@@ -838,6 +841,11 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   if (pre?.auto_reply_status === STATUS.SKIPPED) {
     throw new ReviewReplyError(CODES.STALE, 'This review was taken out of the automatic pipeline (Skip auto) — post it from the editor with Use Draft, or reply by hand.', { status: 409 });
   }
+  // A retraction is a deliberate deletion (codex r75): a stale card's Post
+  // now must not regenerate and publish a replacement.
+  if (pre?.auto_reply_status === STATUS.RETRACTED) {
+    throw new ReviewReplyError(CODES.STALE, 'The automatic reply on this review was retracted — reload; reply by hand from the editor if one is still wanted.', { status: 409 });
+  }
   const [row] = await claimDueRows({ limit: 1, force: reviewId });
   if (!row) throw new ReviewReplyError(CODES.LOCK_BUSY, 'This review is being processed — try again in a moment.', { status: 409 });
   if (hasRealReply(row.review_reply)) {
@@ -1168,6 +1176,15 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
   // yields to a late-landing reply) — codex r41. persist_failed (the PUT is
   // known to have landed) stays with a person.
   if (existing?.auto_reply_status === STATUS.PARKED && existing.auto_reply_reason === 'google_uncertain' && !hasRealReply(existing.review_reply)) {
+    // A MANUAL attempt (admin editor / Intelligence Bar; codex r75) never
+    // returns to the automatic lane — the cron could not reuse its text and
+    // would publish a fresh model reply the operator never saw. Surface the
+    // exact attempted text as a human [DRAFT] (Use Draft / Post now publish
+    // it as written) and keep the row with a person.
+    if (MANUAL_VERSIONS.has(existing.auto_reply_version || '')) {
+      const attempted = String(existing.auto_reply_draft || '').trim();
+      return { review_reply: attempted ? asDraft(attempted) : null, reply_updated_at: null, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_draft: null, auto_reply_due_at: null, auto_reply_claimed_until: null };
+    }
     return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null };
   }
   // No owner reply on Google: ours is gone (owner deleted it there).
@@ -1250,6 +1267,16 @@ function manualReplyCloseFields(conn = db) {
 const RECONCILE_PARK_SQL = "COALESCE((auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed')), false)";
 function whereNoReconcilePark(qb) {
   qb.whereRaw(`NOT ${RECONCILE_PARK_SQL}`);
+}
+
+// A pipeline-owned POSTED reply must stay reachable (codex r75): if the
+// reviewer later rewrites the review, the sync parks it as
+// review_edited_after_post with an action bell whose deep link cannot show a
+// dismissed row — the public reply would be neither inspectable nor
+// retractable. Human / IB-posted replies may still be dismissed.
+const AUTO_POSTED_SQL = "(COALESCE(auto_reply_status, '') = 'posted' AND COALESCE(auto_reply_version, '') IN ('human','agent_ops') IS NOT TRUE)";
+function whereNotAutoPosted(qb) {
+  qb.whereRaw(`NOT ${AUTO_POSTED_SQL}`);
 }
 
 function dismissCancelFields(conn = db) {
@@ -1553,6 +1580,7 @@ module.exports = {
   skipAutoReply,
   dismissCancelFields,
   whereNoReconcilePark,
+  whereNotAutoPosted,
   manualReplyCloseFields,
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
