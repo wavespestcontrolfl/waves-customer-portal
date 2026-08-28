@@ -775,7 +775,7 @@ describe('lost-link recovery', () => {
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn });
     expect(r).toEqual(expect.objectContaining({ lostCount: 0, alertedNew: 1, alerted: 1 }));
     const msg = expect.stringMatching(/1 referring domain\(s\) lost — verified by crawl: old\.example DR60 \(page_gone\)/);
-    expect(NotificationService.create).toHaveBeenCalledWith(expect.objectContaining({ recipientType: 'admin', category: 'system', body: msg, link: '/admin/seo', connection: db, metadata: expect.objectContaining({ lane: 'backlink_loss', domains: ['old.example'], backlinkIds: ['old-1'] }) }));
+    expect(NotificationService.create).toHaveBeenCalledWith(expect.objectContaining({ recipientType: 'admin', category: 'system', bell: true, body: msg, link: '/admin/seo', connection: db, metadata: expect.objectContaining({ lane: 'backlink_loss', domains: ['old.example'], backlinkIds: ['old-1'] }) }));
     expect(alertFn).toHaveBeenCalledWith(msg);
     expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted', detail: JSON.stringify({ domains: 1, notification_id: 'n-1' }) }));
     expect(order).toEqual(['bell', 'sms']); // bell + stamps committed BEFORE the SMS copy
@@ -789,6 +789,15 @@ describe('lost-link recovery', () => {
     const warn = logger.warn.mock.calls.map(c => c[0]).find(m => /loss alert SMS copy failed/.test(m));
     expect(warn).toMatch(/code=21211/);
     expect(warn).not.toMatch(/\+1941/); // never the phone number
+
+    // a bell-policy SUPPRESSION sentinel ({ suppressed }) is not a delivered alert: nothing stamped, nothing sent
+    NotificationService.create.mockImplementation(async () => ({ id: null, suppressed: true }));
+    const { events: events4 } = scanWith({ items: [seen], active: [], owed, alerted: [] });
+    const sms4 = jest.fn(async () => {});
+    const r4 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: sms4 });
+    expect(r4).toEqual(expect.objectContaining({ alertedNew: 1, alerted: 0 }));
+    expect(events4.find(e => e && e.event_type === 'loss_alerted')).toBeUndefined();
+    expect(sms4).not.toHaveBeenCalled();
 
     // a failed bell insert stamps NOTHING and sends nothing — the next scan rings
     NotificationService.create.mockImplementation(async () => null);

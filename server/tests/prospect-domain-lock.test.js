@@ -100,7 +100,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain')");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page')");
     const iGate = block.indexOf("ACTIVE_OUTREACH_STATUSES.includes(patch.status) && !ACTIVE_OUTREACH_STATUSES.includes(current.status)");
     const iLock = block.indexOf('claimProspectDomain(trx, current.target_domain)');
     const iUpdate = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).update(patch)");
@@ -112,6 +112,15 @@ describe('every board writer takes the shared lock inside its check+insert trans
     expect(block).toMatch(/inFlight\.id !== current\.id/); // the row itself never blocks its own edit
     expect(block).toMatch(/result\.inFlight\) return res\.status\(409\)/);
     expect(block).not.toMatch(/\bdb\('seo_link_prospects'\)/);
+    // a target_page edit is a placement move: domain lock + canonical placement probe (self excluded) → 409, before the update
+    const iMove = block.indexOf("'target_page' in patch && patch.target_page !== current.target_page");
+    const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
+    const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id })');
+    expect(iMove).toBeGreaterThan(iRead);
+    expect(iMoveLock).toBeGreaterThan(iMove);
+    expect(iMoveProbe).toBeGreaterThan(iMoveLock);
+    expect(iUpdate).toBeGreaterThan(iMoveProbe);
+    expect(block).toMatch(/result\.taken\) return res\.status\(409\)/);
   });
 
   test('strategy agent create_link_prospects: lock → pair re-check → insert on the trx; a raced pair is a duplicate, not a throw', () => {

@@ -429,12 +429,17 @@ class BacklinkMonitor {
       try {
         await db.transaction(async (trx) => {
           const NotificationService = require('../notification-service');
+          // bell: true = explicit site-level tag, wins over GATE_ADMIN_BELL_POLICY's
+          // category allowlist ('system' is not on it). A suppression sentinel
+          // ({ suppressed }) is NOT a delivered alert: treat it as failure so
+          // nothing is stamped and the next scan tries again.
           const created = await NotificationService.create({
             recipientType: 'admin', category: 'system', title: 'Referring domain(s) lost', body: message, link: '/admin/seo',
             metadata: { lane: 'backlink_loss', domains: alertNow.map(d => d.domain), backlinkIds: unrungIds },
+            bell: true,
             connection: trx,
           });
-          if (!created) throw new Error('admin notification insert failed');
+          if (!created || created.suppressed || !created.id) throw new Error(created && created.suppressed ? 'admin notification suppressed' : 'admin notification insert failed');
           for (const id of unrungIds) await this.recordEvent(id, 'loss_alerted', { domains: alertNow.length, notification_id: created.id || null }, trx);
         });
         bellOk = true;
