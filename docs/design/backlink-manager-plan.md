@@ -1208,11 +1208,12 @@ Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
 New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
 `GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`, AND every automated claim
 and every irreversible step re-checks it; **off ⇒ the claim route grants no automated lease
-at all and in-flight `AUTO_*` work stops before its next irreversible action** — every
-PENDING placement that would otherwise receive an automated lease (`prospect` with an
-`AUTO_*` stamp, pre-existing ones included) parks as `awaiting_owner`; verified and terminal
-statuses (`placed`/`live`/`indexed`/`lost`/`rejected`) are Judge-owned history and are never
-rewritten by a gate; only owner-approved rows can be leased), `GATE_LINK_AUTO_PAID`
+at all and in-flight `AUTO_*` work stops before its next irreversible action** — the gate
+changes NO lifecycle status: pending `AUTO_*` placements simply stay `prospect` and are
+refused by the claim predicate while it is off (the Agent tab shows them as "held by
+GATE_LINK_AUTHORITY"), so re-enabling the gate releases them with no restoration step and
+nothing is ever stranded; verified and terminal statuses are Judge-owned history and are
+never touched by a gate; only owner-approved rows can be leased while it is off), `GATE_LINK_AUTO_PAID`
 (separately arms `AUTO_PAID_WITHIN_POLICY` — never required for owner-approved payments),
 `GATE_LINK_PAYMENTS` (the payment-lane kill switch: off ⇒ no purchase of any authority is
 minted or submitted; owner-approved rows wait), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
