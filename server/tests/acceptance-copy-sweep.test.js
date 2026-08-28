@@ -41,7 +41,8 @@ const { runAcceptanceCopySweep } = require('../services/lifecycle-email-sweeps')
 const { notifyAdmin } = require('../services/notification-service');
 
 const ACCEPTANCE = { id: 'acc-1', estimate_id: 'est-1', customer_id: 'cust-1', accepted_at: new Date(Date.now() - 2 * 3600000).toISOString(), copy_escalated_at: null };
-const ESTIMATE = { id: 'est-1', customer_id: 'cust-1', customer_name: 'Pat', address: '1 Main', estimate_data: '{"result":{}}' };
+const ESTIMATE = { id: 'est-1', customer_id: 'cust-1', customer_name: 'Pat', address: '1 Main', estimate_data: '{"result":{}}', updated_at: new Date(Date.now() - 10 * 86400000).toISOString() };
+let customerRow = { id: 'cust-1', updated_at: new Date(Date.now() - 10 * 86400000).toISOString() };
 
 let emailRows;
 let acceptanceRows;
@@ -65,6 +66,7 @@ beforeEach(() => {
   db.mockImplementation((table) => {
     if (table === 'estimate_acceptances') return chainResolving(acceptanceRows);
     if (table === 'estimates') return chainResolving([ESTIMATE]);
+    if (table === 'customers') return chainResolving([customerRow]);
     if (table === 'email_messages') {
       // First query = the sent-ish lookup (LIKE key%), second = the stable-key row.
       emailCall += 1;
@@ -176,6 +178,20 @@ test('a transient failure is retried, never escalated as "no email"', async () =
   expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
   expect(notifyAdmin).not.toHaveBeenCalled();
   expect(acceptanceUpdate).not.toHaveBeenCalled();
+});
+
+test('after escalation: no daily retry unless the customer/estimate row changed since', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: false, blocked: true });
+  acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 20 * 86400000).toISOString(), copy_escalated_at: new Date(Date.now() - 3 * 86400000).toISOString() }];
+  customerRow = { id: 'cust-1', updated_at: new Date(Date.now() - 10 * 86400000).toISOString() };
+  let result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
+  expect(sendEstimateAcceptedOnboarding).not.toHaveBeenCalled();
+  // The office corrected the email (customer row updated after the escalation) → retried.
+  customerRow = { id: 'cust-1', updated_at: new Date().toISOString() };
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: true });
+  result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 1, checked: 1, escalated: 0 });
 });
 
 test('a policy-suppressed alert is NOT stamped — retried next sweep', async () => {

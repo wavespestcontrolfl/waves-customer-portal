@@ -449,8 +449,21 @@ async function runAcceptanceCopySweep() {
         // fall through: corrective resend under the day-scoped copy key
       }
       const wedged = delivered ? { id: delivered.id } : await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
-      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data');
+      const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data', 'updated_at');
       if (!estimate) continue;
+      // Already escalated (no address / suppressed): the office owns it. Retry
+      // only when contact data changed since — a customer or estimate row
+      // updated after the escalation — so a permanently suppressed recipient
+      // does not mint a blocked email_messages row every day forever
+      // (pre-push Codex P1). A corrected email resumes fulfilment by itself.
+      if (row.copy_escalated_at && !delivered) {
+        const since = new Date(row.copy_escalated_at).getTime();
+        const customerId = row.customer_id || estimate.customer_id || null;
+        const customer = customerId ? await db('customers').where({ id: customerId }).first('updated_at') : null;
+        const touched = [estimate.updated_at, customer?.updated_at]
+          .some((t) => t && new Date(t).getTime() > since);
+        if (!touched) continue;
+      }
       const EstimateConverter = require('./estimate-converter');
       let estData = estimate.estimate_data;
       if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
