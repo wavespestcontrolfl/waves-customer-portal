@@ -87,7 +87,7 @@ describe('POST /opportunities/bulk (intake skeleton)', () => {
     const r = await call(post, { body: { text: 'a.example b.example', dryRun: 'true' } });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ inserted: 1 });
-    expect(intake).toHaveBeenCalledWith(expect.anything(), { text: 'a.example b.example', source: 'list_import', sourceDetail: expect.stringMatching(/^paste:\d{4}-\d{2}-\d{2}$/), dryRun: true });
+    expect(intake).toHaveBeenCalledWith(expect.anything(), { text: 'a.example b.example', source: 'list_import', sourceDetail: `paste:${require('../utils/datetime-et').etDateString()}`, dryRun: true }); // ET day, never UTC
     await call(post, { body: { text: 'a.example', source: 'owner_seed', source_detail: '  Adam seed list  ' } });
     expect(intake).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ source: 'owner_seed', sourceDetail: 'Adam seed list', dryRun: false }));
   });

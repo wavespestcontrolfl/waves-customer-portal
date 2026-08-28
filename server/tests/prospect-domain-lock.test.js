@@ -64,7 +64,7 @@ describe('prospect-domain-lock helper', () => {
     const trx = jest.fn(() => q);
     const r = await findPlacementRow(trx, 'WWW.Blog.Example', 'http://www.wavespestcontrol.com/x/?utm=1', { excludeId: 'me' });
     expect(r).toEqual({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' });
-    expect(captured.loc).toEqual(['location_key', '-']); // v2 identity: third key column defaults to '-'
+    expect(captured.loc).toBeUndefined(); // default '-' = location-AGNOSTIC (the legacy 2-col unique is live through the expand phase)
     expect(captured.sql).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
     expect(captured.bind).toEqual(['blog.example']);
     expect(captured.pages[0]).toBe('target_page');
@@ -74,11 +74,11 @@ describe('prospect-domain-lock helper', () => {
     q.first.mockResolvedValueOnce(undefined);
     await expect(findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/')).resolves.toBeNull();
     await expect(findPlacementRow(trx, '', 'https://wavespestcontrol.com/')).resolves.toBeNull();
-    // a location is normalized (trim/lower; 'default' = not scoped)
+    // an explicit location narrows (trim/lower); 'default' means unscoped → no filter
     await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: ' Sarasota ' });
     expect(captured.loc).toEqual(['location_key', 'sarasota']);
     await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'default' });
-    expect(captured.loc).toEqual(['location_key', '-']);
+    expect(captured.loc).toBeUndefined();
   });
 
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {

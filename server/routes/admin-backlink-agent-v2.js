@@ -6,6 +6,7 @@ const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
 const linkIntake = require('../services/seo/link-registry-intake');
+const { etDateString } = require('../utils/datetime-et');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -229,7 +230,7 @@ router.post('/opportunities/bulk', async (req, res, next) => {
     if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'text (domains, URLs, or a pasted list) is required' });
     if (text.length > 200000) return res.status(400).json({ error: 'text too large (200k chars max)' });
     if (!INTAKE_SOURCES.includes(source)) return res.status(400).json({ error: `invalid source; must be one of ${INTAKE_SOURCES.join(', ')}` });
-    const detail = typeof source_detail === 'string' && source_detail.trim() ? source_detail.trim().slice(0, 200) : `paste:${new Date().toISOString().slice(0, 10)}`;
+    const detail = typeof source_detail === 'string' && source_detail.trim() ? source_detail.trim().slice(0, 200) : `paste:${etDateString()}`; // ET calendar day (Railway runs UTC)
     const result = await linkIntake.intake(db, { text, source, sourceDetail: detail, dryRun: dryRun === true || dryRun === 'true' });
     res.json(result);
   } catch (err) { next(err); }

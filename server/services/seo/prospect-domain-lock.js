@@ -94,8 +94,12 @@ function targetPageVariants(url) {
 /**
  * findPlacementRow(q, domain, targetPage, { excludeId, location }) → the board
  * row for this placement under ANY spelling of either textual half of the key —
- * canonical host for target_domain, every page variant for target_page — for
- * the given location ('-' = not location-scoped, the default) — or null. The
+ * canonical host for target_domain, every page variant for target_page — or
+ * null. `location` narrows to one GBP location ONLY when a scoped location is
+ * given; the default '-' is location-AGNOSTIC: an unscoped writer asking "is
+ * (domain, page) taken" must see a location-stamped row too — the legacy
+ * 2-column unique is still live through the step-1 expand phase (an exact
+ * pair would 500 on it, a spelling variant would duplicate). The
  * unique index is textual, so a raw-pair check lets www.example.com + a
  * non-www page coexist with a canonical-equivalent row; every writer's
  * "does this placement already exist" check goes through here.
@@ -103,7 +107,9 @@ function targetPageVariants(url) {
 async function findPlacementRow(q, domain, targetPage, { excludeId = null, location = '-', columns = ['id', 'status', 'target_page'] } = {}) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
-  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage)).where('location_key', locationKeyOf(location));
+  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
+  const loc = locationKeyOf(location);
+  if (loc !== '-') qb = qb.where('location_key', loc);
   if (excludeId) qb = qb.whereNot('id', excludeId);
   return (await qb.first(...columns)) || null;
 }

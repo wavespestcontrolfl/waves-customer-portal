@@ -143,6 +143,16 @@ describe('run — safety gates', () => {
     expect(r.note).toBe('no_allowlist');
     expect(worker.claim).not.toHaveBeenCalled();
   });
+  test('dry-run skips the legacy-attempts catch-up (no writes of any kind); a live run performs it first', async () => {
+    const { backfillLegacyAttempts } = require('../services/seo/link-registry-backfill');
+    backfillLegacyAttempts.mockClear();
+    worker.claim.mockResolvedValue([]);
+    await runner.run({ dryRun: true, allow: ['citysquares.com'] });
+    expect(backfillLegacyAttempts).not.toHaveBeenCalled();
+    await runner.run({ dryRun: false, allow: ['citysquares.com'] });
+    expect(backfillLegacyAttempts).toHaveBeenCalledTimes(1);
+    expect(backfillLegacyAttempts.mock.invocationCallOrder[0]).toBeLessThan(worker.claim.mock.invocationCallOrder.at(-1));
+  });
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });

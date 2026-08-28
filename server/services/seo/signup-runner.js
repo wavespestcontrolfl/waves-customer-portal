@@ -198,8 +198,9 @@ async function leaseGuardedReclassify(p, patch) {
 async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, anthropic } = {}) {
   // Expand/contract catch-up (plan v2 §3.4): a legacy seo_signup_attempts row written
   // by an old pod during the rolling deploy is copied forward here, never lost.
-  // Idempotent (keyed by legacy_attempt_id); a failure never blocks the run.
-  await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
+  // Idempotent (keyed by legacy_attempt_id); a failure never blocks the run. Skipped
+  // on dryRun — a dry run writes nothing (the migration + boot catch-up cover it).
+  if (!dryRun) await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
 
   const allowlist = (allow && allow.length ? allow : String(process.env.SIGNUP_RUNNER_ALLOWLIST || '').split(','))
     .map((d) => normDomain(d)).filter(Boolean);
