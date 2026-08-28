@@ -2280,6 +2280,14 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('{/* <table><tr><td>x</td></tr></table> */}')).toBe(false);
     // Inline code spans render literally, not as tables.
     expect(guardrails.hasRawMarkdownTable('Use `<table><tr><td>x</td></tr></table>` sparingly.')).toBe(false);
+    // A table inside a quoted or static template-literal ATTRIBUTE VALUE
+    // renders as attribute text, not a table; a closing tag hidden in an
+    // attribute does not truncate a REAL table either.
+    expect(guardrails.hasRawMarkdownTable('<span title="<table><tr><td>x</td></tr></table>">x</span>')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable("<span title='<table><tr><td>x</td></tr></table>'>x</span>")).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('<span title={`<table><tr><td>x</td></tr></table>`}>x</span>')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('<table title="</table>"><tr><td>x</td></tr></table>')).toBe(true);
+    expect(guardrails.extractRawMarkdownTables('<table title="</table>"><tr><td>x</td></tr></table>')[0]).toContain('<td>x</td>');
     // 4 spaces before ">" is indented code, not a live blockquote table.
     expect(guardrails.hasRawMarkdownTable('Example:\n\n    > | A | B |\n    > | --- | --- |\n')).toBe(false);
     // A backtick "fence" whose info string contains a backtick is not a fence.

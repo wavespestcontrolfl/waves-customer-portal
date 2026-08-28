@@ -2224,9 +2224,20 @@ function extractRawMarkdownTables(text) {
   // Raw HTML tables are the other non-component table representation —
   // the passive-HTML allowlist admits <table>/<tr>/<td>, so catch them here
   // too (fence-blanked text, whitespace-normalized block).
+  // Quoted (and static template-literal, MDX) ATTRIBUTE VALUES do not
+  // render — `<span title="<table>…</table>">` is tooltip text, not a
+  // table — so the HTML scan reads a length-preserving copy with those
+  // values blanked (same masking the CTA link extractor applies). The
+  // pipe-row scan below keeps the raw lines: GFM splits cells on raw
+  // pipes BEFORE inline HTML is parsed, so a pipe inside an attribute
+  // value really does split a cell.
+  const attrMasked = blanked.replace(/<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|[^>"'])*>/g, (tag) => tag.replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}/g, (q) => {
+    const edge = q[0] === '{' ? 2 : 1;
+    return q.slice(0, edge) + q.slice(edge, -edge).replace(/[^\n]/g, ' ') + q.slice(-edge);
+  }));
   const htmlTable = /<table\b[\s\S]*?<\/table\s*>/gi;
   let hm;
-  while ((hm = htmlTable.exec(blanked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
+  while ((hm = htmlTable.exec(attrMasked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
     // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
     // visible-text requirement — the count match below is the signature.
