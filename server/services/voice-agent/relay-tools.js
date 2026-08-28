@@ -842,7 +842,10 @@ async function executeTool(name, input = {}, ctx = {}) {
       // Fields accumulate across captures on this call (hook P1): a retry that
       // supplies only the missing piece keeps what earlier captures gave.
       const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
-      const emailNow = extracted.email && isValidEmail(String(extracted.email).trim()) ? extracted.email : null;
+      // Whitespace-only is EMPTY (hook P1): a field must carry real text to
+      // count toward a deliverable request.
+      const nz = (v) => (v != null && String(v).trim() !== '' ? String(v).trim() : null);
+      const emailNow = nz(extracted.email) && isValidEmail(nz(extracted.email)) ? nz(extracted.email) : null;
       if (extracted.email && !emailNow) {
         // A garbled/invalid email never reaches the lead (hook P1): the lead
         // writer fills empty fields forward, so persisting it would give the
@@ -852,17 +855,17 @@ async function executeTool(name, input = {}, ctx = {}) {
         extracted.email = null;
       }
       const estimateFields = {
-        first_name: extracted.first_name || priorEstimateFields.first_name || null,
-        last_name: extracted.last_name || priorEstimateFields.last_name || null,
-        email: emailNow || priorEstimateFields.email || null,
-        address_line1: extracted.address_line1 || priorEstimateFields.address_line1 || null,
-        city: extracted.city || priorEstimateFields.city || null,
-        zip: extracted.zip || priorEstimateFields.zip || null,
+        first_name: nz(extracted.first_name) || nz(priorEstimateFields.first_name),
+        last_name: nz(extracted.last_name) || nz(priorEstimateFields.last_name),
+        email: emailNow || nz(priorEstimateFields.email),
+        address_line1: nz(extracted.address_line1) || nz(priorEstimateFields.address_line1),
+        city: nz(extracted.city) || nz(priorEstimateFields.city),
+        zip: nz(extracted.zip) || nz(priorEstimateFields.zip),
         // Service context accumulates too (hook P1): a retry that only adds
         // the email must not file a card that has forgotten what they asked
         // about.
-        requested_service: extracted.requested_service || priorEstimateFields.requested_service || null,
-        pain_points: extracted.pain_points || priorEstimateFields.pain_points || null,
+        requested_service: nz(extracted.requested_service) || nz(priorEstimateFields.requested_service),
+        pain_points: nz(extracted.pain_points) || nz(priorEstimateFields.pain_points),
       };
       if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       // The accumulated fields ALSO ride the lead write (hook P1): identity

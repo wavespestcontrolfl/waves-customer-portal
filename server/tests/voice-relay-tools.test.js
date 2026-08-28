@@ -370,6 +370,14 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       // requested but NOT promised — the lead shows "Quote requested on call" only
       expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_requested: true, quote_promised: false }), expect.anything());
     });
+    test('whitespace-only fields count as MISSING', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-ws', created: true });
+      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: '   ', last_name: 'Lee', email: 'pat@example.com', address_line1: '\t' }, { from: '+19415551234', callSid: 'CA-ws' });
+      expect(out).toMatch(/still missing: first_name, address_line1/);
+      expect(out).not.toMatch(/IS on the office queue/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: false }), expect.anything());
+    });
+
     test('a malformed email counts as MISSING — never authorizes the promise', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-3', created: true });
       const markCaptured = jest.fn();
