@@ -1,19 +1,21 @@
 /**
  * Staffed-hours check for the collections voice lane — 9:00–17:59 ET,
- * Monday–Friday, read from the SAME constants the contact policy enforces
- * (one source of truth: server/services/collections/contact-policy.js).
- * Inside the window a press-0 / "human" escape warm-transfers to the office;
- * outside it the caller gets a callback task instead. The escape hatch
- * itself is ALWAYS available — only the transfer-vs-callback branch moves.
+ * Monday–Friday, via the ONE call-window predicate the contact policy
+ * enforces (server/services/collections/contact-policy.js). Inside the
+ * window a press-0 / "human" escape warm-transfers to the office; outside
+ * it the caller gets a callback task instead. The escape hatch itself is
+ * ALWAYS available — only the transfer-vs-callback branch moves.
+ *
+ * `supervised` (an admin-approved case) lets the owner-run shakedown
+ * override open staffed hours too, so a press-0 on a hand-dialed test call
+ * reaches the transfer branch instead of the after-hours callback copy.
+ * Autodial cases stay on the real clock.
  */
 
-const { etParts } = require('../../../utils/datetime-et');
-const { CALL_WINDOW_START_HOUR, CALL_WINDOW_END_HOUR } = require('../contact-policy');
+const ContactPolicy = require('../contact-policy');
 
-function isStaffedHours(now = new Date()) {
-  const et = etParts(now);
-  const weekday = et.dayOfWeek >= 1 && et.dayOfWeek <= 5;
-  return weekday && et.hour >= CALL_WINDOW_START_HOUR && et.hour < CALL_WINDOW_END_HOUR;
+function isStaffedHours(now = new Date(), { supervised = false } = {}) {
+  return ContactPolicy.isWithinCallWindow(now, { supervised });
 }
 
 module.exports = { isStaffedHours };

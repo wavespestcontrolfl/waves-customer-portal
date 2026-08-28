@@ -101,14 +101,18 @@ async function loadCollectionsCall(req) {
   // closed.
   const linkedCase = await db('collection_cases')
     .where({ id: meta.collectionCaseId })
-    .first('id', 'customer_id')
+    .first('id', 'customer_id', 'approved_by')
     .catch(() => null);
   if (!linkedCase || String(linkedCase.customer_id) !== String(row.customer_id)) return null;
+  // Supervised (admin-approved) cases may ride the owner call-window
+  // override at answer/press-1 revalidation and for staffed-hours;
+  // autodial cases never do (codex P1 on #3555).
+  const supervised = require('../services/collections/contact-policy').isSupervisedApprover(linkedCase.approved_by);
   const customer = await db('customers')
     .where({ id: row.customer_id })
     .first('id', 'first_name');
   if (!customer) return null;
-  return { row, meta, customer, callSid };
+  return { row, meta, customer, callSid, supervised };
 }
 
 /** Metadata-only pre-consent logging: merge keys into the call_log row. */
@@ -227,6 +231,7 @@ router.post('/collections-vestibule', async (req, res) => {
           channel: 'voice',
           purpose: 'late_payment',
           excludeCollectionCaseId: call.meta.collectionCaseId,
+          supervisedDial: call.supervised === true,
         });
       } catch (policyErr) {
         logger.error(`[collections-vestibule] answer-time policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
@@ -293,6 +298,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
           channel: 'voice',
           purpose: 'late_payment',
           excludeCollectionCaseId: call.meta.collectionCaseId,
+          supervisedDial: call.supervised === true,
         });
       } catch (policyErr) {
         logger.error(`[collections-vestibule] press-1 policy read failed for call_log ${call.row.id}: ${policyErr.message} — hanging up (fail closed)`);
@@ -365,7 +371,7 @@ router.post('/collections-vestibule-key', async (req, res) => {
     }
 
     if (digit === '0') {
-      if (isStaffedHours()) {
+      if (isStaffedHours(new Date(), { supervised: call.supervised === true })) {
         twiml.say(script.TRANSFER_ANNOUNCEMENT);
         const adminPhone = process.env.ADAM_PHONE || '+19415993489';
         twiml.dial(

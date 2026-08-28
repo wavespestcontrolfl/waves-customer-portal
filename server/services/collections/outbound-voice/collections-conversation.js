@@ -287,6 +287,9 @@ class CollectionsConversation {
       : (row.metadata || {});
     if (!meta.collectionCaseId) return this._refuse('no_case_linkage');
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
+    // Admin-approved cases may ride the owner call-window override for the
+    // staffed-hours (transfer vs callback) branch; autodial cases never do.
+    this._supervised = require('../contact-policy').isSupervisedApprover(caseRow?.approved_by);
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
         .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip')
@@ -1430,7 +1433,7 @@ class CollectionsConversation {
   // otherwise a callback card for the office.
   async _humanEscape() {
     if (this.ended) return;
-    const staffed = isStaffedHours(this._now());
+    const staffed = isStaffedHours(this._now(), { supervised: this._supervised === true });
     if (staffed) {
       this.say(script.TRANSFER_ANNOUNCEMENT);
       await this._finish('conversation_transferred', {

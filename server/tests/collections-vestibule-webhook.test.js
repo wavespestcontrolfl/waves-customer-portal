@@ -34,6 +34,7 @@ jest.mock('../services/collections/outbound-voice/voicemail', () => {
 // Answer-time revalidation (gh prb-r12) — allowed by default; tests flip it.
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [] })),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/outbound-voice/outcomes', () => ({
   writeCallOutcome: jest.fn(async () => ({ ok: true })),

@@ -37,6 +37,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/collections/contact-policy', () => ({
   evaluate: jest.fn(),
   isWithinCallWindow: jest.fn(() => true),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(),
@@ -561,9 +562,32 @@ test('claim boundary re-checks the call window with a fresh clock — after-hour
   });
   const res = await originateCollectionCall('case-1', { now: NOW, clock: () => LATE });
   expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
-  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE);
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(LATE, { supervised: false });
   expect(mockCallsCreate).not.toHaveBeenCalled();
   expect(ContactLedger.recordContact).not.toHaveBeenCalled();
+});
+
+// codex P1 on #3555: the owner call-window override reaches only SUPERVISED
+// (admin-approved) cases. Supervision is derived from approved_by and threaded
+// into BOTH window readers — the policy revalidation and the claim recheck.
+describe('supervised vs autodial cases and the call-window override', () => {
+  test.each([
+    ['admin:adam@wavespestcontrol.com', true],
+    ['system:autodial', false],
+    [null, false],
+  ])('approved_by=%s ⇒ supervisedDial/supervised=%s at both window readers', async (approvedBy, supervised) => {
+    ContactPolicy.isWithinCallWindow.mockReturnValue(false); // stop at the claim recheck
+    setDb({
+      collection_cases: [chain('collection_cases', { first: { ...CASE, approved_by: approvedBy } })],
+      customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+      call_log: [chain('call_log', { first: undefined })],
+    });
+    const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+    expect(res).toEqual({ dialed: false, reason: 'outside_call_window' });
+    expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'voice', supervisedDial: supervised }));
+    expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(NOW, { supervised });
+    expect(mockCallsCreate).not.toHaveBeenCalled();
+  });
 });
 
 test('the claim WHERE compares approval expiry against the fresh clock, not the entry snapshot', async () => {

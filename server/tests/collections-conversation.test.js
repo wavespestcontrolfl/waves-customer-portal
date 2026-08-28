@@ -41,9 +41,14 @@ jest.mock('../services/collections/contact-policy', () => ({
   loadEligibleInvoices: jest.fn(async () => ([
     { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
   ])),
-  // staffed-hours imports the real window constants from this module.
-  CALL_WINDOW_START_HOUR: 9,
-  CALL_WINDOW_END_HOUR: 18,
+  // staffed-hours delegates to the policy's ONE window predicate — real
+  // 9–18 ET Mon–Fri math here (no override in this suite).
+  isWithinCallWindow: jest.fn((now) => {
+    const { etParts } = jest.requireActual('../utils/datetime-et');
+    const et = etParts(now);
+    return et.dayOfWeek >= 1 && et.dayOfWeek <= 5 && et.hour >= 9 && et.hour < 18;
+  }),
+  isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
