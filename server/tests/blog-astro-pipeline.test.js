@@ -3782,6 +3782,30 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
   });
 
+  test('variation: two draft-authored refs holding the SAME picture, or a draft image repeating the hero, park even when the count is met (hook r11)', async () => {
+    const committedWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/2026/08/') ? { content: '', sha: 'x', raw: { content: committedWebp.toString('base64') } } : null));
+    let thrown;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/b\.webp, a near-duplicate of \/images\/2026\/08\/a\.webp/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+
+    // Draft image = the freshly generated hero's picture → parks too.
+    jest.clearAllMocks();
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[0].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/h.webp' ? { content: '', sha: 'x', raw: { content: heroWebp.toString('base64') } } : null));
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => ({ dataUrl: PATTERNS[0], model: 'm', alt: mode === 'blog-body' ? 'b' : 'h', attempts: [] }));
+    thrown = null;
+    try {
+      await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![h](/images/2026/08/h.webp)\n`), { action_type: 'new_supporting_blog' });
+    } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate of hero/);
+  });
+
   test('imageDHash: identical pictures hash identically, different patterns are far apart, recompression is tolerated', async () => {
     const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
     const toBuf = (dataUrl) => Buffer.from(dataUrl.split(',')[1], 'base64');

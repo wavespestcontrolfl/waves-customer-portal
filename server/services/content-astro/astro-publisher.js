@@ -1909,6 +1909,31 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   }
   // Distinct pictures, not references — two links to one file is one image.
   const draftSrcs = new Set(draftRefs.map((r) => r.src));
+
+  // Every picture the body images must differ from — the hero (fresh bytes,
+  // or a REUSED hero fetched from the repo) and the draft's own committed
+  // images — enters the hash set BEFORE the minimum is judged: two draft
+  // paths holding the same picture, or a draft image that repeats the hero,
+  // are not distinct illustrations and park the run (the draft body is not
+  // ours to rewrite).
+  const seen = [];
+  for (const sib of siblings) {
+    let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
+    if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
+    if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
+  }
+  for (const src of draftSrcs) {
+    const buf = await committedImageBuffer(`public${src}`);
+    if (!buf) continue;
+    const dup = await nearDuplicateOf(buf, seen);
+    if (dup.label) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} references ${src}, a near-duplicate of ${dup.label} — body images must be distinct pictures`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
+    seen.push({ label: src, hash: dup.hash });
+  }
+
   const have = valid.distinct;
   const need = BODY_IMAGE_MIN - have;
   if (need <= 0) return none;
@@ -1926,20 +1951,6 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const placements = [];
   const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
   const heroSubject = String(frontmatter?.primary_keyword || frontmatter?.title || '').trim();
-  // Every picture the body images must differ from — including a REUSED
-  // hero (bytes fetched from the repo) — enters the hash set.
-  const seen = [];
-  for (const sib of siblings) {
-    let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
-    if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
-    if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
-  }
-  // Draft-authored body images (verified committed above) count as siblings
-  // too — a generated image must differ from them as well.
-  for (const src of draftSrcs) {
-    const buf = await committedImageBuffer(`public${src}`);
-    if (buf) seen.push({ label: src, hash: await imageDHash(buf) });
-  }
   // body-N names are allocated past anything the draft already references
   // (a draft carrying body-2.webp must not have it overwritten by a new
   // generation that would then be linked twice).
