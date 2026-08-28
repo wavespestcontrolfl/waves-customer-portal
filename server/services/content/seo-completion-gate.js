@@ -291,9 +291,10 @@ const CTA_ANCHOR_SERVICE_TERMS = {
   spider: /\bspiders?\b/i,
   flea: /\bfleas?\b/i,
   tick: /\bticks?\b/i,
-  // "Stinging insects" and "yellow jackets" are the canonical aliases for
-  // this service (blog-writer's TAG_ALIASES uses the same equivalence).
-  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b|\bstinging[ -]insects?\b|\byellow[ -]?jackets?\b/i,
+  // "Stinging insects", "yellow jackets" and "flying insects" are the
+  // canonical aliases for this service (blog-writer's TAG_ALIASES maps all
+  // three to Stinging Insects).
+  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b|\bstinging[ -]insects?\b|\byellow[ -]?jackets?\b|\bflying[ -]insects?\b/i,
   // WDI (wood-destroying insect) is the established inspection-report
   // acronym alongside WDO — both name this service in CTA wording.
   wdo: /\bwd[oi]\b|wood[- ]destroying/i,
@@ -355,9 +356,12 @@ const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|wa
 // ("…page to reserve service"); a subordinate verb with its own subject
 // ("…customers get after an inspection") is still prose.
 const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|call|click|visit|open|tap|reach|talk|see|view|learn)`;
-// Invitation-shaped conversion anchors ("Ready for Your Free Estimate?")
+// Invitation-shaped conversion anchors ("Ready for Your Free Estimate?",
+// "Need a Termite Estimate?", "Want a Quote?", "Looking for an Estimate?")
 // carry no leading verb yet are plainly CTAs — accepted for PRESENCE only.
-const INVITATION_CTA_RE = /^(?:are\s+you\s+)?(?:get\s+)?ready\s+for\b/i;
+// Each shape is anchored at the START and word-bound, so descriptive noun
+// phrases ("Needed Estimate Documents", "Wanted: Estimates") stay out.
+const INVITATION_CTA_RE = /^(?:(?:are\s+you\s+)?(?:get\s+)?ready\s+for|(?:do\s+you\s+)?(?:need|want)|(?:are\s+you\s+)?looking\s+for)\b/i;
 const ACTION_VERB_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?${ACTION_VERB_SET}\\b|\\bto\\s+${ACTION_VERB_SET}\\b`, 'i');
 function isProseReferenceAnchor(anchor) {
   return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
@@ -513,16 +517,21 @@ function extractLinks(body) {
   // autolink passes (which must keep the original text for real hrefs)
   // skip matches STARTING inside one: `<span title='<a href=…>…</a>'>` is
   // tooltip text, not a clickable anchor.
+  // A STATIC template-literal expression value (`title={\`…\`}`, MDX) is an
+  // attribute value too — evaluated as a string, never rendered as
+  // Markdown — so it is masked the same way (its `{\`` / `\`}` delimiters
+  // are kept, the inner text blanked).
   const attrValueRanges = [];
   {
-    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|[^>"'])*>/g;
-    const quoted = /"[^"]*"|'[^']*'/g;
+    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|[^>"'])*>/g;
+    const quoted = /"[^"]*"|'[^']*'|\{`[^`]*`\}/g;
+    const edge = (q) => (q[0] === '{' ? 2 : 1);
     let tm;
     while ((tm = tagScan.exec(s)) !== null) {
       let qm;
       quoted.lastIndex = 0;
-      while ((qm = quoted.exec(tm[0])) !== null) attrValueRanges.push([tm.index + qm.index + 1, tm.index + qm.index + qm[0].length - 1]);
-      const local = tm[0].replace(/"[^"]*"|'[^']*'/g, (q) => q[0] + q.slice(1, -1).replace(/[^\n]/g, ' ') + q[q.length - 1]);
+      while ((qm = quoted.exec(tm[0])) !== null) attrValueRanges.push([tm.index + qm.index + edge(qm[0]), tm.index + qm.index + qm[0].length - edge(qm[0])]);
+      const local = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}/g, (q) => q.slice(0, edge(q)) + q.slice(edge(q), -edge(q)).replace(/[^\n]/g, ' ') + q.slice(-edge(q)));
       if (local !== tm[0]) sMd = sMd.slice(0, tm.index) + local + sMd.slice(tm.index + tm[0].length);
     }
   }
@@ -590,9 +599,19 @@ function extractLinks(body) {
   // paragraph, so "[Get a Termite" + blank line (or "> Estimate](…)")
   // renders no link and must not satisfy CTA presence. Same-depth quoted
   // continuation and lazy continuation still soft-wrap.
+  // An HTML BLOCK opener that can interrupt a paragraph (CommonMark HTML
+  // block types 1–6: the flow-element tag list, script/pre/style/textarea,
+  // comments, processing instructions, declarations, CDATA) and an MDX
+  // COMPONENT opener (PascalCase JSX tag at the start of a line) end the
+  // paragraph too — "[Get a Termite" + "<div></div>" + "Estimate](…)"
+  // renders no link. Type-7 (any other complete tag on its own line)
+  // cannot interrupt a paragraph and is NOT a boundary.
+  const HTML_FLOW_OPENER_RE = /^ {0,3}<(?:\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)|(?:script|pre|style|textarea)(?:[ \t]|>|$)|!--|\?|![a-z]|!\[CDATA\[)/i;
+  const MDX_FLOW_COMPONENT_RE = /^ {0,3}<[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*(?:[ \t]|\/?>|$)/;
   const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
     if (lineQuoteDepth > openQuoteDepth) return true;
     if (!line.trim()) return true;
+    if (HTML_FLOW_OPENER_RE.test(line) || MDX_FLOW_COMPONENT_RE.test(line)) return true;
     // A setext UNDERLINE ("===", "---") turns the line above into a
     // heading — the paragraph ends there too.
     return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
@@ -972,10 +991,22 @@ const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+
 // editorial "Get ready …" shapes) stay exempt.
 const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE}|call|contact|text)\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
 const ESTIMATE_KW_RE = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
+// A destination is a SERVICE or CITY page when the contract's link-reason
+// heuristic says so OR when it matches the canonical city-service route
+// set (content-guardrails CITY_SERVICE_LINK_RE — the same mechanism the
+// internal-route gate validates against), so every enumerated city
+// service page ("/palm-tree-injections-bradenton-fl/") is classified the
+// same way, not just the families the heuristic spells out.
+function isServiceOrCityPath(href) {
+  const { inferLinkReason } = require('./blog-seo-contract')._internals;
+  if (['service', 'city'].includes(inferLinkReason(href))) return true;
+  const { CITY_SERVICE_LINK_RE, normalizeInternalPath } = require('./content-guardrails')._internals;
+  const norm = normalizeInternalPath(href);
+  return Boolean(norm) && CITY_SERVICE_LINK_RE.test(norm);
+}
 function isServicePageRequestCta(href, anchor) {
   if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;
-  const { inferLinkReason } = require('./blog-seo-contract')._internals;
-  if (!['service', 'city'].includes(inferLinkReason(href))) return false;
+  if (!isServiceOrCityPath(href)) return false;
   return REQUEST_LED_RE.test(anchor) && !ESTIMATE_KW_RE.test(anchor);
 }
 

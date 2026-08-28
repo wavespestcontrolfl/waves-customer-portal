@@ -1243,6 +1243,41 @@ describe('seo-completion-gate', () => {
     });
     expect(attrLink.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
 
+    // A static TEMPLATE-LITERAL attribute value (MDX `title={\`…\`}`) is
+    // attribute text too — masked the same way; a real link beside it
+    // still satisfies presence (r44).
+    const templateAttrLink = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<span title={`[Get a Termite Estimate](/contact/)`}>Info</span> text.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(templateAttrLink.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    const templateAttrPlusReal = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '<span title={`[x](/contact/) > 0`}>Info</span> [Get a Termite Estimate](/contact/) text.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(templateAttrPlusReal.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
+    // An HTML FLOW-BLOCK opener (CommonMark types 1–6) or an MDX component
+    // opener interrupts the paragraph — a label split across it renders
+    // no link. A type-7 inline tag on its own line cannot interrupt and
+    // still soft-wraps (r44).
+    for (const block of ['<div></div>', '<p>', '</section>', '<!-- note -->', '<ComparisonTable rows={[]} />', '<HomeZoneMap>']) {
+      const flowSplitLabel = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `[Get a Termite\n${block}\nEstimate](/contact/) x.` }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(flowSplitLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
+    }
+    const inlineTagLabel = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get a Termite\n<span></span>\nEstimate](/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(inlineTagLabel.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+
     // A line that DEEPENS the quote context interrupts the paragraph — a
     // label split across it renders no link; same-depth quoted labels
     // still soft-wrap.
@@ -1336,6 +1371,21 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(descriptiveServiceLink.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    // EVERY canonical city-service route is a service destination — the
+    // palm-injection city page is enumerated in CITY_SERVICE_LINK_RE even
+    // though the contract's link-reason heuristic reads it as a blog (r44).
+    const palmCityCta = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Tree & Shrub Estimate](/contact/) or [Schedule Palm Tree Injections](/palm-tree-injections-bradenton-fl/).' }),
+      brief: baseBrief({ service: 'tree-shrub' }),
+      shadowMode: true,
+    });
+    expect(palmCityCta.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    const palmCityDescriptive = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Get My Free Tree & Shrub Estimate](/contact/) and our [Palm Tree Injections in Bradenton](/palm-tree-injections-bradenton-fl/).' }),
+      brief: baseBrief({ service: 'tree-shrub' }),
+      shadowMode: true,
+    });
+    expect(palmCityDescriptive.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
     // A BLANK line inside inline link syntax ends the paragraph — no link
     // renders, so presence is not satisfied; a single newline still works.
@@ -1398,7 +1448,8 @@ describe('seo-completion-gate', () => {
 
     // Canonical stinging-insect wording names the wasp service — both the
     // umbrella tag and "yellow jacket" pass on a Stinging Insects post.
-    for (const anchor of ['Request a Stinging Insect Quote', 'Request a Yellow Jacket Quote']) {
+    // "Flying insects" is the third TAG_ALIASES spelling of the same service (r44).
+    for (const anchor of ['Request a Stinging Insect Quote', 'Request a Yellow Jacket Quote', 'Request a Flying Insect Quote']) {
       const stinging = SeoCompletionGate.evaluate({
         draft: baseDraft({ body: `W. [${anchor}](/contact/) now.` }),
         brief: baseBrief({ service: 'Stinging Insects' }),
@@ -1495,6 +1546,22 @@ describe('seo-completion-gate', () => {
       shadowMode: true,
     });
     expect(questionCta.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    // Need/want/looking-for invitation shapes are CTAs too; a descriptive
+    // noun phrase that merely CONTAINS the word is not (r44).
+    for (const anchor of ['Need a Termite Estimate?', 'Want a Termite Quote?', 'Do you need a termite estimate?', 'Looking for a Termite Estimate?']) {
+      const invitation = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body: `T. [${anchor}](/contact/) now.` }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(invitation.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    }
+    const descriptiveNeed = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'T. [Needed Termite Estimate Documents](/contact/) now.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(descriptiveNeed.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(true);
 
     // A FULL-REFERENCE label obeys paragraph boundaries — a blank line
     // inside "[cta\n\nlabel]" renders no link; a soft-wrapped label works.

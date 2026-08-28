@@ -2232,9 +2232,16 @@ function extractRawMarkdownTables(text) {
     // visible-text requirement — the count match below is the signature.
     // A header that IS a list item's content ("- | A | B |") renders with
     // the marker removed, so the marker-stripped form is a candidate too.
+    // A line that is already a BLOCK construct — an ATX heading ("# DIY |
+    // Professional") — is not a paragraph the delimiter can transform:
+    // GFM renders the heading, then the delimiter as ordinary text.
+    const isAtxHeading = (h) => /^ {0,3}#{1,6}(?:[ \t]|$)/.test(h);
     const headerCandidates = [lines[i - 1]];
     const marked = lines[i - 1].match(/^(?:[-*+]|\d+[.)])\s+(.*)$/);
     if (marked) headerCandidates.push(marked[1]);
+    // The list-item form ("- # A | B") is a heading INSIDE the item — no
+    // candidate on that line is a paragraph either.
+    if (isAtxHeading(lines[i - 1]) || (marked && isAtxHeading(marked[1]))) continue;
     // GFM delimiter row: EVERY cell is 1+ hyphens with optional edge colons
     // (":-|-:" valid; ": | -" is not — a cell with no hyphen run breaks it).
     // Header and delimiter pair at the SAME quote depth — "> A | B" over

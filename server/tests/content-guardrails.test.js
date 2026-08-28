@@ -2254,6 +2254,11 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('Example:\n\n```markdown\n| A | B |\n| --- | --- |\n```\n')).toBe(false);
     // Single-dash GFM delimiters count; 4-space-indented examples are code.
     expect(guardrails.hasRawMarkdownTable('A | B\n- | -\n1 | 2')).toBe(true);
+    // An ATX heading is already a block — a delimiter under "# DIY | Pro"
+    // renders a heading plus text, not a table (list-item headings too).
+    expect(guardrails.hasRawMarkdownTable('# DIY | Professional\n--- | ---\nx | y')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('- # DIY | Professional\n  --- | ---')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('#DIY | Professional\n--- | ---')).toBe(true);
     expect(guardrails.hasRawMarkdownTable('Example:\n\n    | A | B |\n    | --- | --- |\n')).toBe(false);
     // Raw HTML tables are tables too — including whitespace before the
     // closing tag's ">".
