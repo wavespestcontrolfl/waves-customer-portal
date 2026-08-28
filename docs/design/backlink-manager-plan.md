@@ -265,7 +265,7 @@ t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
-                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','sandbox_replay' )) -- send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
+                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
 t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
@@ -910,7 +910,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 - **A reservation is charged against the month it is submitted in.** The
   `reserved → submitting` transition (under the budget lock) first compares the row's
   `budget_month` with the current ET month; if the month has rolled over since reservation,
-  the row is `voided` (`outcome='budget_month_rollover'`). Because a voided purchase advances
+  the row is `voided` and a `seo_link_attempts` row with `outcome='budget_month_rollover'` (enum member, §3.4) is written in the same transaction — the purchase row itself carries no outcome column. Because a voided purchase advances
   the generation and an approval binds to the prior `instance_key` (§3.3b), what follows
   depends on the payment authority: for `AUTO_PAID_WITHIN_POLICY` a fresh **next-generation**
   reservation is attempted immediately under the **new** month's lock and budget (same
