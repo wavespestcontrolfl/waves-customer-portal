@@ -33,14 +33,14 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   // 'schedule' category is silenced-by-default, so the key must ring here.
   'appointment_reschedule_intent',
   'customer_voicemail_callback',
+  // An email from someone on the customer list — same class as sms_reply.
+  'customer_email_received',
   'payment_failed',
   'bill_payment_error',
-  'twilio_failure',
-  // Deposit ledger mismatch = money failure: a paid acceptance deposit sat
-  // on the ledger but the first-invoice credit failed — money is in limbo
-  // until a human reconciles it, so it must ring through its 'system'
-  // category's default deny.
-  'estimate_deposit_reconcile_needed',
+  // Owner ruling 2026-08-28: the bell is for what Adam ACTS on today.
+  // Removed from the ring list: twilio_failure (infra — still pushes) and
+  // estimate_deposit_reconcile_needed (deposit ledger mismatch). Both stay
+  // reachable through their 'system' category override.
 ]);
 
 const TRIGGER_BELL_DENYLIST = new Set([
@@ -53,17 +53,11 @@ const TRIGGER_BELL_DENYLIST = new Set([
 const CATEGORY_BELL_ALLOWLIST = new Set([
   'new_lead',
   'inbound_sms',
+  'inbound_email',
   'voicemail_callback',
   'payment',
   'billing',
   'dispute',
-  'estimate_converted',
-  // Customer challenged the lawn measurement on a sent estimate ("does the
-  // lawn size look off?") — same class as new_lead/inbound_sms: customer-
-  // initiated and time-sensitive (the sheet promises a same-day re-check),
-  // and this notification is the ONLY handoff the flow emits (codex #3376
-  // r2 P1: without a bell path the policy suppressed it silently).
-  'estimate_measurement_review',
 ]);
 
 // Fixed list of silenced-by-default categories the owner may re-enable via
@@ -77,6 +71,10 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // notification category, add it to one of the two lists (and to
 // BELL_CATEGORY_LABELS in client PushSettingsV2.jsx if it lands here).
 const OVERRIDABLE_CATEGORIES = [
+  // Owner ruling 2026-08-28: no longer ring by default (accepted estimates
+  // still ring via their explicit bell:true site tag).
+  'estimate_converted',
+  'estimate_measurement_review',
   'alert',
   'system',
   'service',

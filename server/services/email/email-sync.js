@@ -310,6 +310,21 @@ async function upsertEmail(parsed) {
 
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
   if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
+  // A new inbound email from someone on the customer list rings the admin
+  // bell like a text does (owner ruling 2026-08-28). Vendor/spam/bulk mail
+  // (classification set, or a List-Unsubscribe header) never does.
+  // Fire-and-forget: the bell is never allowed to fail the sync.
+  if (customerId && !emailData.classification && !parsed.list_unsubscribe && (parsed.label_ids || []).includes('INBOX')) {
+    try {
+      const { triggerNotification } = require('../notification-triggers');
+      void triggerNotification('customer_email_received', {
+        fromName: parsed.from_name || parsed.from_address,
+        subject: parsed.subject,
+        emailId: inserted[0].id,
+        customerId,
+      }).catch((e) => logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`));
+    } catch (e) { logger.warn(`[email-sync] customer_email_received wiring failed: ${e.message}`); }
+  }
   const [email] = inserted;
 
   // Store list_unsubscribe for auto-unsubscribe

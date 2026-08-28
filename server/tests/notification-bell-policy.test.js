@@ -237,15 +237,11 @@ describe('codex r1 — required emissions keep ringing', () => {
     expect(site).toMatch(/bell:\s*true/);
   });
 
-  test('gate on: estimate_deposit_reconcile_needed rings through a category:system override off', async () => {
-    mockTables({
-      notification_preferences: chainMock([
-        { trigger_key: 'category:system', bell_enabled: false },
-      ]),
-    });
+  test('gate on: estimate_deposit_reconcile_needed no longer rings by default (owner ruling 2026-08-28)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({
       category: 'system', triggerKey: 'estimate_deposit_reconcile_needed',
-    })).resolves.toBe(true);
+    })).resolves.toBe(false);
   });
 
   test('gate on: extension-request path rings (bell:true) so the 24h claim logic is unaffected', async () => {
@@ -466,16 +462,18 @@ describe('bellAllowed decision order', () => {
     })).resolves.toBe(false);
   });
 
-  test('twilio_failure keeps ringing even with a category:system override off', async () => {
-    mockTables({
-      notification_preferences: chainMock([
-        { trigger_key: 'category:system', bell_enabled: false },
-      ]),
-    });
+  test('twilio_failure no longer rings by default (owner ruling 2026-08-28)', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
     await expect(bellPolicy.bellAllowed({ category: 'system', triggerKey: 'twilio_failure' }))
+      .resolves.toBe(false);
+  });
+
+  test('customer_email_received rings (allowlisted like sms_reply); retired categories are silenced', async () => {
+    mockTables({ notification_preferences: chainMock([]) });
+    await expect(bellPolicy.bellAllowed({ category: 'inbound_email', triggerKey: 'customer_email_received' }))
       .resolves.toBe(true);
-    // A plain system-category notification stays silenced.
-    await expect(bellPolicy.bellAllowed({ category: 'system' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'estimate_converted' })).resolves.toBe(false);
+    await expect(bellPolicy.bellAllowed({ category: 'estimate_measurement_review' })).resolves.toBe(false);
   });
 });
 

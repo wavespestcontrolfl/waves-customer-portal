@@ -61,6 +61,8 @@ const PRIORITY_CLASS = {
 // GET /admin/push/preferences → bellCategories; unknown keys fall back to
 // a title-cased version of the raw category).
 const BELL_CATEGORY_LABELS = {
+  estimate_converted: "Estimate conversion follow-ups",
+  estimate_measurement_review: "Estimate measurement challenges",
   alert: "Operational alerts",
   system: "System events",
   service: "Service events",

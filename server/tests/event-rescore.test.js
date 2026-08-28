@@ -83,81 +83,12 @@ describe('rescoreOnInboundMessage', () => {
       .toBeLessThan(customerHealth.scoreCustomer.mock.invocationCallOrder[0]);
   });
 
-  test('posts an admin notification (not an SMS) on a real crossing when it WINS the claim', async () => {
-    wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({
-      overall: 22, churnRisk: 'critical',
-      churnSignals: [{ signal: 'COMPETITOR_MENTIONED', value: 'Competitor mentioned', severity: 'critical' }],
-    });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(triggerNotification).toHaveBeenCalledTimes(1);
-    const [triggerKey, payload] = triggerNotification.mock.calls[0];
-    expect(triggerKey).toBe('internal_admin_alert');
-    expect(payload.title).toMatch(/Churn risk \(live\)/);
-    expect(payload.title).toMatch(/Pat Lee/);
-    expect(payload.body).toMatch(/CRITICAL/);
-    expect(payload.body).toMatch(/Competitor mentioned/);
-    expect(payload.link).toBe('/admin/customers?view=health');
-  });
-
-  test('does NOT alert (or even claim) when the customer was ALREADY critical', async () => {
-    const { claimChain } = wireDb({ priorRisk: 'critical', claimResult: 1, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 18, churnRisk: 'critical', churnSignals: [] });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(claimChain.update).not.toHaveBeenCalled(); // transition guard short-circuits before the claim
+  test('a crossing into critical no longer alerts or claims (live churn alert retired 2026-08-28)', async () => {
+    // Behavior under test is the ABSENCE of the alert: whatever the mocks
+    // return, rescoreOnInboundMessage must return the score and touch no
+    // notification.
+    triggerNotification.mockClear();
+    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' }).catch(() => null);
     expect(triggerNotification).not.toHaveBeenCalled();
-  });
-
-  test('does NOT alert when it LOSES the claim (concurrent winner)', async () => {
-    wireDb({ priorRisk: 'high', claimResult: 0, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 18, churnRisk: 'critical', churnSignals: [] });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-
-  test('no claim and no alert when the rescore is not critical', async () => {
-    const { claimChain } = wireDb({ priorRisk: 'moderate', customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 45, churnRisk: 'high', churnSignals: [] });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(claimChain.update).not.toHaveBeenCalled();
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-
-  test('releases the claim when the notification throws (so a later text retries)', async () => {
-    const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
-    triggerNotification.mockRejectedValueOnce(new Error('notif down'));
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(releaseChain.update).toHaveBeenCalledWith({ critical_alert_sent_at: null });
-  });
-
-  test('releases the claim when the notification is undelivered (no bell, no push)', async () => {
-    const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0 } });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(releaseChain.update).toHaveBeenCalledWith({ critical_alert_sent_at: null });
-  });
-
-  test('counts a push-only delivery as delivered (no release)', async () => {
-    const { releaseChain } = wireDb({ priorRisk: 'high', claimResult: 1, customer: CUSTOMER });
-    customerHealth.scoreCustomer.mockResolvedValue({ overall: 20, churnRisk: 'critical', churnSignals: [] });
-    triggerNotification.mockResolvedValueOnce({ bellWritten: false, push: { sent: 2 } });
-
-    await eventRescore.rescoreOnInboundMessage('c1', { source: 'inbound_sms' });
-
-    expect(releaseChain.update).not.toHaveBeenCalled();
   });
 });

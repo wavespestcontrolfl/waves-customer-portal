@@ -245,6 +245,19 @@ const TRIGGER_REGISTRY = {
       };
     },
   },
+  // Fired by email-sync when a NEW inbound email's sender matches a customer
+  // on file (owner ruling 2026-08-28). Vendor/spam/bulk mail never fires it.
+  customer_email_received: {
+    label: 'Email from a customer',
+    category: 'inbound_email',
+    priority: 'high',
+    group: 'Communication',
+    build: (p) => ({
+      title: `Email from ${p.fromName || 'a customer'}`,
+      body: redactSensitiveText(p.subject || '(no subject)').slice(0, 140),
+      link: p.emailId ? `/admin/email?id=${p.emailId}` : '/admin/email',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
