@@ -3878,11 +3878,13 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       const appt = await resolveAppointmentCardLane({
         svc: svcLike, invoice: invoiceForVerdict, alreadyPaid: false, visitPerformed: true,
         perApplicationBilling, annualPrepayBilling, explicitMembershipLane,
+        conn, strict: true,
       });
       const ext = await resolveExtendedLane({
         svc: svcLike, invoice: invoiceForVerdict, alreadyPaid: false, visitPerformed: true, perApplicationBilling,
         apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardLaneUnresolved: appt.apptCardLaneUnresolved,
         customerAutopayActive: autopayActive,
+        conn, strict: true,
       });
       // The per-application and extended rails charge only when the shared
       // prediction says 'auto_charge': dues / annual-prepay coverage the
@@ -3900,6 +3902,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
           svc: svcLike, invoice: invoiceForVerdict, perApplicationBilling,
           apptCardOneTimeCharge: appt.apptCardOneTimeCharge, apptCardAcceptedAmount: appt.apptCardAcceptedAmount,
           extendedLaneAnchor: ext.extendedLaneAnchor, secureSetupFee: null,
+          conn, strict: true,
         });
         // Over the cap / no accepted amount → office review, nothing charged.
         if (cap.verdict !== 'ok') autopayLaneCharges = false;

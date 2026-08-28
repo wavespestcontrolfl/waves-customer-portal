@@ -51,7 +51,7 @@ const CHARGEABLE_CARD = {
   id: 'pm-1', processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_x',
   is_default: true, autopay_enabled: true, exp_month: '12', exp_year: '2099', ach_status: null,
 };
-function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], throwOn = null }) {
+function route({ terms = [], payments = [], visits = [], invoices = [], customers = [], paymentMethods = [CHARGEABLE_CARD], apptCardRequests = [], dunningSequences = [], setupFeeClaims = [], notifications = [], pendingTerms = [], cardHolds = [], serviceRecords = [], paymentPlans = [], completionAttempts = [], estimates = [], throwOn = null }) {
   const calls = { terms: [], payments: [], visits: [], invoices: [], customers: [], cardHolds: [] };
   // the payment-pending hold query (getPaymentPendingCustomerIds) is the
   // only annual_prepay_terms query that JOINs invoices — route it to its
@@ -70,6 +70,8 @@ function route({ terms = [], payments = [], visits = [], invoices = [], customer
     if (table === 'appointment_card_requests') return chain(apptCardRequests, []);
     if (table === 'invoice_followup_sequences') return chain(dunningSequences, []);
     if (table === 'setup_fee_claims') return chain(setupFeeClaims, []);
+    // the cap verdict reads the linked estimate's frozen setup fee
+    if (table === 'estimates') return chain(estimates, []);
     if (table === 'notifications') return chain(notifications, []);
     if (table === 'estimate_card_holds') return chain(cardHolds, calls.cardHolds);
     if (table === 'service_records') return chain(serviceRecords, []);
@@ -281,6 +283,32 @@ describe('getCardExpiryExemptCustomerIds — collectible retries (sweep semantic
 });
 
 describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionBilling', () => {
+  test('a consent / hold / setup-fee provenance lookup failure inside the shared verdict exempts nobody (strict mode)', async () => {
+    // Each scenario is EXEMPT when its lookup succeeds (the bill is over the
+    // cap → office review, no charge); the same lookup throwing must flip
+    // the whole answer to "nobody" — the route swallows these failures
+    // toward review, this surface must not swallow them toward silence.
+    const overCap = (over) => [{ id: 'inv-open', status: 'sent', subtotal: '200.00', total: '200.00', discount_amount: 0, payer_id: null, scheduled_service_id: 'v1', service_record_id: null, notes: '', line_items: [], ...over }];
+    const oneTime = () => [baseVisit({ status: 'en_route', billing_mode: 'per_visit', is_recurring: false, prepaid_method: null, annual_prepay_term_id: null })];
+    const gatesMod = require('../config/feature-gates');
+    gatesMod.isEnabled.mockReturnValue(true); // appointment-card lane gate ON → consent lookup runs
+    try {
+      route({ terms: coveredAlways(['c-prepaid']), visits: oneTime(), invoices: overCap() });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+      route({ terms: coveredAlways(['c-prepaid']), visits: oneTime(), invoices: overCap(), throwOn: 'appointment_card_requests' });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    } finally { gatesMod.isEnabled.mockReturnValue(false); }
+    // extended-lane hold exclusion lookup
+    route({ terms: coveredAlways(['c-prepaid']), visits: oneTime(), invoices: overCap(), throwOn: 'estimate_card_holds' });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // setup-fee claim provenance lookup (a bill carrying a setup-fee line)
+    const feeBill = () => overCap({ subtotal: '250.00', total: '250.00', notes: 'Auto-generated from accepted estimate #7', line_items: [{ description: 'One-time setup fee', amount: 99 }] });
+    route({ terms: coveredAlways(['c-prepaid']), visits: oneTime(), invoices: feeBill() });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    route({ terms: coveredAlways(['c-prepaid']), visits: oneTime(), invoices: feeBill(), throwOn: 'setup_fee_claims' });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
   test('cap anchor precedence is completion\'s own: a $120 visit price outranks a $300 rate, so a $200 reused bill routes to review → stays exempt (#3533 held thread closed)', async () => {
     // Before the shared verdict the exemption bounded the cap by the MAX of
     // every anchor ($300 rate) and kept the warning; completion actually

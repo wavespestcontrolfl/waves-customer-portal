@@ -67,7 +67,7 @@ describe('setup-fee claim → mint → restore lifecycle (admin-dispatch)', () =
     // notes marker (Codex #2680: office edits survive markers).
     // The selection row may live on any series visit (parent or child) —
     // the allowance searches the whole series.
-    expect(verdictSource).toMatch(/planChoiceSetupFeeSelected = !!\(await db\('appointment_card_requests'\)\s*\n\s*\.whereIn\('scheduled_service_id', db\('scheduled_services'\)\.select\('id'\)/);
+    expect(verdictSource).toMatch(/planChoiceSetupFeeSelected = !!\(await conn\('appointment_card_requests'\)\s*\n\s*\.whereIn\('scheduled_service_id', conn\('scheduled_services'\)\.select\('id'\)/);
     expect(verdictSource).toMatch(/\.where\(\{ selected_plan: 'per_application' \}\)/);
     // The allowance is a per-application concept — the appointment-card
     // one-time completion lane (2026-08-01) shares the rail but must never

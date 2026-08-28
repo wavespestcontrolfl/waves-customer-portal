@@ -17,6 +17,14 @@
  * route keeps every side effect: review alerts, the account-credit apply, and
  * the charge itself — whose in-transaction guards re-assert all of this under
  * locks (stripe.js chargeInvoiceWithSavedCard, customer-credit.js).
+ *
+ * `conn` (default: the app pool) is the connection every read uses, so a
+ * caller inside a transaction sees one snapshot. `strict` (default false —
+ * the route's posture: every lookup failure fails toward office review / the
+ * pay link, never a charge) makes DB lookup failures PROPAGATE for callers
+ * that must fail the other way (the card-expiry exemption exempts nobody on
+ * a lookup failure). Unparseable line JSON and a missing converter module are
+ * not lookups and keep their conservative fallbacks in both modes.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -25,6 +33,7 @@ const { isAlwaysFreeServiceType } = require('./no-cost-visit-types');
 
 async function resolveAppointmentCardLane({
   svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, annualPrepayBilling, explicitMembershipLane,
+  conn = db, strict = false,
 }) {
   let apptCardOneTimeCharge = false;
   let apptCardAcceptedAmount = null;
@@ -40,11 +49,11 @@ async function resolveAppointmentCardLane({
     && visitPerformed && invoice?.id && !alreadyPaid && !invoice.payer_id) {
     try {
       if (require('../config/feature-gates').isEnabled('apptCardCompletionCharge')) {
-        const laneRow = await db('appointment_card_requests')
+        const laneRow = await conn('appointment_card_requests')
           .where({ scheduled_service_id: svc.id })
           .whereIn('status', ['completed', 'satisfied'])
           .first('id', 'customer_id', 'accepted_amount');
-        const holdRow = laneRow ? await db('estimate_card_holds')
+        const holdRow = laneRow ? await conn('estimate_card_holds')
           .where({ scheduled_service_id: svc.id })
           .first('id') : null;
         // The consent row must belong to the visit's CURRENT customer
@@ -66,6 +75,7 @@ async function resolveAppointmentCardLane({
         }
       }
     } catch (e) {
+      if (strict) throw e;
       // Lane state UNVERIFIABLE (Codex #3153 r10 P1): fail closed for
       // credit too — an over-cap lane invoice we couldn't detect must
       // not consume credit or flip prepaid past a never-evaluated cap.
@@ -79,6 +89,7 @@ async function resolveAppointmentCardLane({
 
 async function resolveExtendedLane({
   svc, invoice, alreadyPaid, visitPerformed, perApplicationBilling, apptCardOneTimeCharge, apptCardLaneUnresolved, customerAutopayActive,
+  conn = db, strict = false,
 }) {
   // Extended completion auto-charge lane (owner rulings 2026-08-26/27;
   // GATE_COMPLETION_AUTOPAY_CHARGE): ANY autopay customer's collectible
@@ -111,11 +122,12 @@ async function resolveExtendedLane({
   let extendedHoldExcluded = false;
   if (extendedAutopayCharge) {
     try {
-      extendedHoldExcluded = !!(await db('estimate_card_holds')
+      extendedHoldExcluded = !!(await conn('estimate_card_holds')
         .where({ scheduled_service_id: svc.id })
         .whereNotIn('status', ['released', 'cancelled', 'failed'])
         .first('id'));
     } catch (e) {
+      if (strict) throw e;
       extendedHoldExcluded = true;
       logger.warn(`[dispatch] extended-lane hold lookup failed for visit ${svc.id} — lane closed: ${e.message}`);
     }
@@ -157,6 +169,7 @@ async function resolveExtendedLane({
 // route calls it inside that block and acts on the verdict.
 async function resolveCompletionChargeCap({
   svc, invoice, perApplicationBilling, apptCardOneTimeCharge, apptCardAcceptedAmount, extendedLaneAnchor, secureSetupFee,
+  conn = db, strict = false,
 }) {
   // Above-quote guardrail (card-on-file spec §3.6, owner default = HARD
   // CAP): an auto-charge may only collect what the customer accepted —
@@ -218,13 +231,13 @@ async function resolveCompletionChargeCap({
       // link was sent for (parent or child — Codex #2980 r2), so the
       // allowance must search the whole series, not just the parent.
       const allowanceParentId = svc.recurring_parent_id || svc.id;
-      planChoiceSetupFeeSelected = !!(await db('appointment_card_requests')
-        .whereIn('scheduled_service_id', db('scheduled_services').select('id').where(function series() {
+      planChoiceSetupFeeSelected = !!(await conn('appointment_card_requests')
+        .whereIn('scheduled_service_id', conn('scheduled_services').select('id').where(function series() {
           this.where({ id: allowanceParentId }).orWhere({ recurring_parent_id: allowanceParentId });
         }))
         .where({ selected_plan: 'per_application' })
         .first('id'));
-    } catch (e) { /* fail toward review */ }
+    } catch (e) { if (strict) throw e; /* fail toward review */ }
   }
   // The shared converter constant — the disclosure, the invoice line,
   // and this cap must move together if the fee ever changes (Codex
@@ -243,7 +256,7 @@ async function resolveCompletionChargeCap({
   let wizardFrozenFeeLinked = false;
   try {
     if (svc.source_estimate_id) {
-      const srcEst = await db('estimates').where({ id: svc.source_estimate_id }).first('estimate_data');
+      const srcEst = await conn('estimates').where({ id: svc.source_estimate_id }).first('estimate_data');
       if (srcEst) {
         const srcData = typeof srcEst.estimate_data === 'string'
           ? JSON.parse(srcEst.estimate_data)
@@ -259,7 +272,7 @@ async function resolveCompletionChargeCap({
         }
       }
     }
-  } catch (e) { /* keep the shared/live cap (fail toward review) */ }
+  } catch (e) { if (strict) throw e; /* keep the shared/live cap (fail toward review) */ }
   // SINGLE-USE wizard allowance: authorized only by the durable claim
   // THIS completion consumed (secureSetupFee — nulled when the fee did
   // not ride this invoice), at exactly its amount. The durable stamp
@@ -291,7 +304,7 @@ async function resolveCompletionChargeCap({
     // ceiling at the recorded amount.
     if (!wizardFrozenFeeLinked && setupLine) {
       try {
-        const claimRecord = await db('setup_fee_claims')
+        const claimRecord = await conn('setup_fee_claims')
           .where({ invoice_id: invoice.id })
           .first('amount');
         if (claimRecord) {
@@ -303,7 +316,7 @@ async function resolveCompletionChargeCap({
             WAVEGUARD_SETUP_FEE_ALLOWANCE = recordCents / 100;
           }
         }
-      } catch (e) { /* record unreadable -> fail toward review */ }
+      } catch (e) { if (strict) { e.lookupFailure = true; throw e; } /* record unreadable -> fail toward review */ }
     }
     if (perApplicationBilling
       && (acceptMintedInvoice || planChoiceSetupFeeSelected || wizardFrozenFeeLinked)
@@ -313,7 +326,12 @@ async function resolveCompletionChargeCap({
       // widen the allowance.
       setupFeeAllowance = Math.min(lineAmt, WAVEGUARD_SETUP_FEE_ALLOWANCE);
     }
-  } catch (e) { /* unparseable lines -> no allowance (fail toward review) */ }
+  } catch (e) {
+    // strict: only the claims LOOKUP propagates — unparseable line JSON is
+    // not a lookup and keeps the no-allowance fallback in both modes
+    if (strict && e.lookupFailure) throw e;
+    /* unparseable lines -> no allowance (fail toward review) */
+  }
   const capCeiling = acceptedPerVisit != null
     ? acceptedPerVisit + setupFeeAllowance
     : null;
