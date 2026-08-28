@@ -173,8 +173,8 @@ t.uuid('pending_path_id');       // → seo_link_acquisition_paths: the replacem
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
 t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
 t.text('source_detail');
-t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
-t.timestamp('renews_at');         // = the settling purchase row's own `paid_through` (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
+t.date('paid_through');           // end of the term the last `charged` purchase bought (ET calendar day, copied from the purchase row)
+t.date('renews_at');              // = the settling purchase row's own `paid_through` (date, ET) (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
@@ -246,7 +246,7 @@ this table (a domain discovered by three feeders credits all three; "first-touch
 
 `owner_seed` · `list_import` · `competitor_gap` · `competitor_clone` · `recursive` ·
 `x` · `google_search` · `dataforseo` · `strategy_agent` · `existing_backlink` ·
-`lost_recovery` · `local_opportunity`
+`lost_recovery` · `local_opportunity` · `legacy_unknown` (backfill fallback only)
 
 `owner_seed` means **investigate immediately**, not **qualified**: it bypasses the cheap
 prefilter and the contactability gate, never the score; the row shows its reasons and an
@@ -355,10 +355,12 @@ deterministically from the legacy row with the earliest `created_at` (id as tie-
 every other row's provenance going to `seo_link_domain_sources`; `source` = that row's legacy
 value **mapped to the §3.5 enum** — `manual` → `owner_seed`,
 `strategy_agent` → `strategy_agent`, `lost_recovery` → `lost_recovery`,
-`local_opportunity_<date>` → `local_opportunity`, `deep_harvest_<date>` → `competitor_gap`,
-`signup_agent`/anything else → `existing_backlink`; the verbatim legacy value is kept in
-`source_detail` as `legacy:<value>`; the enum is a CHECK, so the mapping is exhaustive with
-that fallback) and a path
+`competitor_gap` → `competitor_gap`, `local_opportunity_<date>` → `local_opportunity`,
+`deep_harvest_<date>` → `competitor_gap`, `signup_agent` → `x` (its rows came from the X
+poller queue), and anything else → `legacy_unknown` (a neutral enum member added for this
+purpose); `existing_backlink` is reserved for rows actually imported from `seo_backlinks`.
+The verbatim legacy value is kept in `source_detail` as `legacy:<value>`; the enum is a
+CHECK, so the mapping is exhaustive with that fallback) and a path
 (`acquisition_type` mapped from `link_type`: outreach lanes → `resource_outreach`/
 `editorial_outreach`, directory/citation/social → `self_service_account`; `submission_url =
 target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
@@ -588,7 +590,7 @@ t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
 t.jsonb('terms_snapshot').notNullable();            // IMMUTABLE copy taken at reservation and re-confirmed at submitting from the checkout page: renewal_period, renewal_cost_cents, term_start (as displayed), term_end / paid_through (computed from term_start + renewal_period), auto_renew_disabled, legal terms shown — renewal scheduling reads ONLY this row, never the (mutable, supersedable) path
-t.timestamp('term_start'); t.timestamp('paid_through'); // denormalized from terms_snapshot for the renewal job; written before `submitting`, never recomputed later
+t.date('term_start'); t.date('paid_through');       // CALENDAR terms as `date` columns (the merchant states a day, not an instant) — parsed once from the checkout text into an ET calendar day via the datetime-et utilities; the renewal job compares with `etDateString(now)`, never with a UTC timestamp, so DST/midnight can't shift a renewal
 t.string('idempotency_key').notNullable().unique(); // initial: `${prospect_id}:initial:${generation}` (path-INDEPENDENT — a placement is paid for once, whatever path it was moved to); renewal: `${prospect_id}:renewal:${renewal_period_key}:${generation}` — never month-scoped
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
