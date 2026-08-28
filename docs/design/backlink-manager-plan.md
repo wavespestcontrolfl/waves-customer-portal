@@ -303,9 +303,11 @@ bridge → authority before any send).
   `backlink_id`, `first_live_at = seo_backlinks.first_seen`, `target_page` =
   `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
   it like any placement — but **D30/D90 are never inferred from age**: for an imported link
-  they are set only if `seo_backlink_events`/scan history proves the link was active at the
-  cutoff (no `lost` event before it and a scan observation on or after it); otherwise they
-  stay `null` (= unknown, excluded from learning) — a link that vanished and returned, or
+  they are set only if `seo_backlink_events`/scan history proves an **uninterrupted active
+  interval across the cutoff**: a scan observation strictly before the cutoff, a scan
+  observation on/after it, and NO `lost` (or `merged`) event anywhere between those two
+  observations — a link that vanished near D30 and returned (loss event landing after the
+  cutoff) fails this test; otherwise they stay `null` (= unknown, excluded from learning) — a link that vanished and returned, or
   predates scan coverage, must not teach the scorer that its path "survives"; the path is
   `seo_link_acquisition_paths` with `acquisition_type` mapped from the link's classified
   `link_type` (directory/citation → `self_service_free` or `self_service_account`,
@@ -497,6 +499,7 @@ t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
+t.uuid('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease: every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
 
@@ -633,8 +636,10 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   the precondition for releasing the budget and allowing a new generation, never a lookup
   that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
-- **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
-  prior state (`reserved→voided`, `reserved→submitting`, `submitting→reserved` [sweep only,
+- **Lease safety.** Every purchase transition is conditional on the **purchase row's own
+  `lease_token`** (set by the claim that took it — placement claim for an initial purchase,
+  renewal claim for a renewal — expiring with `lease_expires_at`, cleared by the terminal
+  report or the sweep) AND on the exact prior state (`reserved→voided`, `reserved→submitting`, `submitting→reserved` [sweep only,
   issuer-confirmed no card], `submitting→close_pending|ambiguous`,
   `close_pending→charged` only with `card_closed_at`, `close_pending→ambiguous`,
   `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
