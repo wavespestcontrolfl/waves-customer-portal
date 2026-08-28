@@ -403,12 +403,7 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
 
 // What a draft was written FOR. A stored draft may only be reused when the
 // review's rating + text still hash to this.
-function reviewFingerprint(row) {
-  // Rating, text, reviewer identity AND customer attribution: the account
-  // facts in the grounding derive from customer_id, so a re-attribution
-  // makes the draft stale too.
-  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}|${row.customer_id || ''}`).digest('hex');
-}
+const { reviewFingerprint } = require('./fingerprint');
 
 function groundingSnapshot(grounding) {
   // Everything the model saw, minus the review text itself (already on the row).

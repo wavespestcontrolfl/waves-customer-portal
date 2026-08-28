@@ -391,7 +391,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   useEffect(() => {
     setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null);
     setObservedDraft(review.draftReply || null);
-  }, [review.reply, review.draftReply]);
+  }, [review.reply, review.draftReply, review.reviewToken]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -400,7 +400,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: observedDraft });
+      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: observedDraft, expectedReview: review.reviewToken || null });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -2143,13 +2143,14 @@ export default function ReviewsPage() {
     await loadData();
   };
 
-  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null, expectedDraft = null } = {}) => {
+  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null, expectedDraft = null, expectedReview = null } = {}) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
       body: JSON.stringify({
         replyText,
         expectedReply,
         expectedDraft,
+        ...(expectedReview ? { expectedReview } : {}),
         ...(draftToken ? { draftToken } : {}),
         ...(groundingToken ? { groundingToken } : {}),
       }),

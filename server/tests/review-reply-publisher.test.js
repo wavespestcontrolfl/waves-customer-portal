@@ -17,6 +17,8 @@ const state = { rows: [], activity: [], failNextUpdate: false };
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/social-content-studio', () => ({ publishWithReviewLivenessLock: (...a) => mockLock(...a) }));
+const mockNotify = jest.fn(async () => ({}));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 jest.mock('../config/locations', () => ({
   WAVES_LOCATIONS: [{ id: 'sarasota', name: 'Sarasota', googleLocationResourceName: 'accounts/1/locations/2' }],
 }));
@@ -276,6 +278,37 @@ describe('publishReviewReply', () => {
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Newer draft from Agent Ops', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null, expectedDraft: 'Newer draft from Agent Ops' });
     expect(r.googlePosted).toBe(true);
+  });
+
+  test('the browser-observed REVIEW token is enforced (codex r33): a reviewer rewrite the sync recorded since page load refuses manual text', async () => {
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    const stale = reviewFingerprint({ ...state.rows[0], review_text: 'What the page showed' });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Written for the old review.', actor: { type: 'admin' }, allowOverwrite: true, expectedReview: stale }))
+      .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: state.rows[0].review_text, reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, expectedReview: reviewFingerprint(state.rows[0]) });
+    expect(r.googlePosted).toBe(true);
+  });
+
+  test('a reviewer edit recorded while the PUT was in flight persists as parked/review_edited_after_post with an action bell, never a clean posted (codex r33)', async () => {
+    mockNotify.mockClear();
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows[0].review_text = 'Rewritten complaint'; state.rows[0].star_rating = 1; return {}; });
+    const r = await publishReviewReply({
+      reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' },
+      autoFields: { auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T15:00:00Z' },
+    });
+    expect(r).toMatchObject({ googlePosted: true, editedDuringPut: true });
+    expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_published_at: '2026-08-27T15:00:00Z' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', needsAction: true });
+    // No edit → clean posted, no bell.
+    mockNotify.mockClear();
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null, review_text: 'Great', star_rating: 5 };
+    const r2 = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks again.', actor: { type: 'auto' }, autoFields: { auto_reply_status: 'posted' } });
+    expect(r2.editedDuringPut).toBe(false);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+    expect(mockNotify).not.toHaveBeenCalled();
   });
 
   test('overwriting callers fail closed when the live review cannot be read', async () => {

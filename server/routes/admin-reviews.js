@@ -308,6 +308,10 @@ router.get('/', async (req, res, next) => {
         // (review edit / re-attribution) is refused, not posted as free text.
         draftToken: isDraftReply(r.review_reply) && r.auto_reply_draft && stripDraftPrefix(r.review_reply).trim() === String(r.auto_reply_draft).trim()
           ? AutoReply.reviewFingerprint(r) : null,
+        // Identity of the review CONTENT the browser is showing; every editor
+        // submission sends it back so text written for the old review is
+        // refused after a reviewer rewrite the sync recorded meanwhile.
+        reviewToken: AutoReply.reviewFingerprint(r),
         replyUpdatedAt: isDraftReply(r.review_reply) ? null : r.reply_updated_at,
         // Auto-reply pipeline state (null = never queued; see review-reply/runner.js).
         autoReply: r.auto_reply_status ? {
@@ -368,7 +372,7 @@ router.get('/', async (req, res, next) => {
 // publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText, draftToken, groundingToken, expectedReply, expectedDraft } = req.body;
+    const { replyText, draftToken, groundingToken, expectedReply, expectedDraft, expectedReview } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
@@ -389,6 +393,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // no reply). Omitted by older clients → no browser-side check.
       expectedReply: expectedReply === undefined ? undefined : (expectedReply == null ? null : String(expectedReply)),
       expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
+      expectedReview: typeof expectedReview === 'string' && expectedReview ? expectedReview : undefined,
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

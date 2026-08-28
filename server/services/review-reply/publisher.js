@@ -22,6 +22,7 @@ const gbp = require('../google-business');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
+const { reviewFingerprint } = require('./fingerprint');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -174,7 +175,7 @@ function updatedCount(updated) {
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -231,6 +232,11 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   const { publishWithReviewLivenessLock } = require('../social-content-studio');
   let outcome;
   let googleError = null;
+  // Review content identity as seen INSIDE the claim before the PUT; the
+  // post-PUT persist compares against it (a sync can record a reviewer
+  // edit while the PUT is in flight — applyReviewEditFields defers under a
+  // live claim, so this write is the only place that can notice).
+  let prePutFingerprint = null;
   try {
     outcome = await publishWithReviewLivenessLock(reviewId, async () => {
       // Ownership recheck INSIDE the publish claim, on a fresh read: the
@@ -239,6 +245,14 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // abort here rather than overwrite what a person just posted.
       const fresh = await db('google_reviews').where({ id: reviewId }).first();
       if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+      prePutFingerprint = reviewFingerprint(fresh);
+      // The review CONTENT the browser displayed (codex r33): manually
+      // written text carries no draft token, so the editor sends the review
+      // token from the list API; a reviewer rewrite the sync recorded since
+      // the page loaded must not receive text written for the old review.
+      if (expectedReview !== undefined && String(expectedReview || '') !== prePutFingerprint) {
+        throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed since this page was loaded — reload it and read the current review first.', { status: 409 });
+      }
       if (!allowOverwrite && hasRealReply(fresh.review_reply)) {
         throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
       }
@@ -412,7 +426,15 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
 
   let persisted = false;
   let abandoned = false;
+  let editedDuringPut = false;
   try {
+    // A reviewer edit the sync recorded while the PUT was in flight: the
+    // reply is live against a review it was not written for. Record it, but
+    // as parked/review_edited_after_post (never a clean 'posted'), and ring
+    // the same action bell the sync would have.
+    const current = await db('google_reviews').where({ id: reviewId }).first();
+    editedDuringPut = !!current && !current.missing_since && reviewFingerprint(current) !== prePutFingerprint;
+    const editedFields = editedDuringPut ? { auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_claimed_until: null } : {};
     const updated = await db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
@@ -432,14 +454,25 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         review_reply: replyText,
         reply_updated_at: db.fn.now(),
         ...(autoFields || {}),
+        ...editedFields,
       });
     if (updatedCount(updated) === 0) {
       // Defensive only — unreachable while the claim defers stamping.
       throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });
     }
     persisted = true;
-    await audit({ googlePosted: true });
-    return { googlePosted: true, localOnly: false, reviewId };
+    await audit({ googlePosted: true, editedDuringPut });
+    if (editedDuringPut) {
+      const locName = (WAVES_LOCATIONS.find((l) => l.id === review.location_id) || {}).name || review.location_id;
+      const NotificationService = require('../notification-service');
+      await NotificationService.notifyAdmin('review', 'Review edited while the reply posted', `${current.star_rating}★ review on ${locName} was edited by the reviewer while our reply was being posted — check whether the reply still fits (edit or retract).`, {
+        link: `/admin/reviews?responded=all&review=${encodeURIComponent(reviewId)}`,
+        bell: true,
+        dedupeKey: `review-auto-reply:${reviewId}:review_edited_after_post`,
+        metadata: { reason: 'review_edited_after_post', reviewId, locationId: review.location_id, needsAction: true },
+      }).catch((e) => logger.warn(`[review-reply] edited-during-put bell failed for ${reviewId}: ${e.message}`));
+    }
+    return { googlePosted: true, localOnly: false, reviewId, editedDuringPut };
   } catch (err) {
     if (persisted) throw err;
     // Google ACCEPTED the reply but the local record failed (a thrown DB
