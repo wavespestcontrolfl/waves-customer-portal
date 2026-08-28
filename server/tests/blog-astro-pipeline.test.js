@@ -3730,6 +3730,19 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
+  test('variation: a generated body image must also differ from a DRAFT-authored committed image (hook r9)', async () => {
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a', raw: { content: b64(PATTERNS[1]) } } : null));
+    // hero = P0; body first try = P1 (same as the draft's a.webp) → regenerate → P2.
+    const sequence = [PATTERNS[0], PATTERNS[1], PATTERNS[2]];
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode }) => ({ dataUrl: sequence[call++], model: 'm', alt: mode === 'blog-body' ? 'b' : 'h', attempts: [] }));
+    await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n`), { action_type: 'new_supporting_blog' });
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls.map(([a]) => a.shot)).toEqual(['close-up', 'action']);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+  });
+
   test('imageDHash: identical pictures hash identically, different patterns are far apart, recompression is tolerated', async () => {
     const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
     const toBuf = (dataUrl) => Buffer.from(dataUrl.split(',')[1], 'base64');

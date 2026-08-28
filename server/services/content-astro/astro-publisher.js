@@ -1924,6 +1924,12 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
     if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
   }
+  // Draft-authored body images (verified committed above) count as siblings
+  // too — a generated image must differ from them as well.
+  for (const src of draftSrcs) {
+    const buf = await committedImageBuffer(`public${src}`);
+    if (buf) seen.push({ label: src, hash: await imageDHash(buf) });
+  }
   // body-N names are allocated past anything the draft already references
   // (a draft carrying body-2.webp must not have it overwritten by a new
   // generation that would then be linked twice).
