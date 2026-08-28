@@ -598,6 +598,12 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.applySyncReplyFields('rev-1', { review_reply: 'from feed', reply_updated_at: 'x' })).toBe(1);
     expect(state.rows[0].review_reply).toBe('from feed');
     expect(await Runner.applySyncReplyFields('rev-1', {})).toBe(0);
+    // Compare-and-set: a draft saved after the snapshot is never cleared by a stale empty-feed write.
+    state.rows[0].review_reply = '[DRAFT] saved after the sync read';
+    expect(await Runner.applySyncReplyFields('rev-1', { review_reply: null, reply_updated_at: null }, { expectedReply: 'from feed' })).toBe(0);
+    expect(state.rows[0].review_reply).toBe('[DRAFT] saved after the sync read');
+    state.rows[0].review_reply = null;
+    expect(await Runner.applySyncReplyFields('rev-1', { review_reply: 'owner', reply_updated_at: 'x' }, { expectedReply: null })).toBe(1);
   });
 
   test('a reused draft is re-verified against current replies; a failing one is redrafted', async () => {

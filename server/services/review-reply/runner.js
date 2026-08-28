@@ -724,12 +724,19 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
  * between that read and this write — a stale empty-feed snapshot must not
  * overwrite it. Returns the affected-row count.
  */
-async function applySyncReplyFields(reviewId, fields, { conn = db, now = new Date() } = {}) {
+async function applySyncReplyFields(reviewId, fields, { conn = db, now = new Date(), expectedReply = undefined } = {}) {
   if (!fields || !Object.keys(fields).length) return 0;
-  const n = await conn('google_reviews')
+  const q = conn('google_reviews')
     .where({ id: reviewId })
-    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
-    .update(fields);
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()]);
+  // Compare-and-set on the reply the snapshot saw: a "[DRAFT]" (runner or
+  // human) or a reply saved between the sync's read and this write means
+  // the judgement is stale — leave the row for the next sync.
+  if (expectedReply !== undefined) {
+    if (expectedReply == null) q.whereNull('review_reply');
+    else q.where('review_reply', expectedReply);
+  }
+  const n = await q.update(fields);
   return Array.isArray(n) ? n.length : n;
 }
 

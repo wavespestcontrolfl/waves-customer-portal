@@ -832,7 +832,7 @@ class GoogleBusinessService {
       // Conditional on the row STILL being parked for that reason (an admin
       // Skip in the meantime wins).
       await applyRequeueOnIdentity(existing.id, existing, normalized);
-      await applySyncReplyFields(existing.id, existingReplyFields);
+      await applySyncReplyFields(existing.id, existingReplyFields, { expectedReply: existing.review_reply ?? null });
       result = { id: existing.id, inserted: false };
     } else {
       try {
@@ -874,7 +874,7 @@ class GoogleBusinessService {
           // Same existing-link-first rule as the row build above.
           customer_id: winner.customer_id || customerId || null,
         });
-        await applySyncReplyFields(winner.id, winnerReplyFields);
+        await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
         result = { id: winner.id, inserted: false };
       }
     }
@@ -1074,7 +1074,7 @@ class GoogleBusinessService {
         await db('google_reviews').where({ id: existing.id }).update(upd);
         if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
           const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
-          await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }));
+          await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { expectedReply: existing.review_reply ?? null });
         }
         // Reinstatement clear, mirroring _upsertGbpReview: the main update
         // never touches missing_since; the clear is a separate conditional
