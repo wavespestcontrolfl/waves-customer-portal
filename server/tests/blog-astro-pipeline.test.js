@@ -3755,6 +3755,17 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
+  test('fail-closed: a raw <img> in the body parks — it cannot be counted or verified by the Markdown scan (hook r13)', async () => {
+    gh.getFile.mockResolvedValue(null);
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n<img src="/images/2026/08/raw.webp" alt="x">\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/raw <img> tag/);
+    // Inside a code fence it is text, not a tag.
+    const ok = await AstroPublisher._internals.validateBodyImageRefs({ body: '```html\n<img src="/x.webp">\n```\n', getFile: async () => null });
+    expect(ok.ok).toBe(true);
+  });
+
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);

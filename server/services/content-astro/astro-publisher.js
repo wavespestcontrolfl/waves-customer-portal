@@ -1925,6 +1925,16 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = 
 // as a broken image). Returns { ok, reason, distinct } — distinct = number
 // of distinct verified sources.
 async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
+  // A raw <img> is outside the writer's plain-Markdown subset: it renders a
+  // picture the Markdown scan cannot see, so it can neither count toward the
+  // minimum nor be verified — park (the syntax gate parks raw HTML upstream;
+  // this keeps the publisher fail-closed on its own).
+  const stripped = contentGuardrails.blankNonRenderedMarkdown(String(body || ''));
+  for (const tag of contentGuardrails.eachTag(stripped)) {
+    if (/^<img\b/i.test(stripped.slice(tag.start, tag.end + 1))) {
+      return { ok: false, reason: `body contains a raw <img> tag (${stripped.slice(tag.start, Math.min(tag.end + 1, tag.start + 80))}) — body images must be plain Markdown images`, distinct: 0 };
+    }
+  }
   const refs = bodyImageRefs(body);
   const hero = String(heroSrc || '');
   for (const ref of refs) {
