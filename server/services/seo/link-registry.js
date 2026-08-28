@@ -113,7 +113,9 @@ function mapLegacyOutcome(value) {
   const v = String(value == null ? '' : value).trim();
   switch (v) {
     case 'blocked_account':
-    case 'blocked_payment': return 'needs_owner';
+    case 'blocked_payment':
+    case 'blocked_phone':
+    case 'blocked_phone_verification': return 'needs_owner'; // parked for the owner (browser-form-filler vocabulary)
     case 'blocked_price_changed': return 'price_changed';
     case 'blocked_captcha': return 'captcha';
     case 'submitted':

@@ -51,12 +51,20 @@ describe('legacy mappings (plan §4 / §3.4)', () => {
     expect(R.mapLegacySource('local_opportunityx').source).toBe('legacy_unknown');
   });
   test('mapLegacyOutcome lands every legacy value inside the CHECK enum', () => {
-    const cases = { blocked_account: 'needs_owner', blocked_payment: 'needs_owner', blocked_price_changed: 'price_changed', blocked_captcha: 'captcha', submitted: 'placed', placed: 'placed', pending: 'pending', skipped: 'skipped', failed: 'failed', error: 'failed', '': 'failed', garbage: 'failed' };
+    const cases = { blocked_account: 'needs_owner', blocked_payment: 'needs_owner', blocked_phone: 'needs_owner', blocked_phone_verification: 'needs_owner', blocked_price_changed: 'price_changed', blocked_captcha: 'captcha', submitted: 'placed', placed: 'placed', pending: 'pending', skipped: 'skipped', failed: 'failed', error: 'failed', '': 'failed', garbage: 'failed' };
     for (const [legacy, v2] of Object.entries(cases)) {
       expect(R.mapLegacyOutcome(legacy)).toBe(v2);
       expect(R.ATTEMPT_OUTCOMES).toContain(v2);
     }
     expect(R.mapLegacyOutcome(undefined)).toBe('failed');
+    // every blocked_* the filler/runner can emit is an owner park, never a failure
+    const fs = require('fs'); const path = require('path');
+    const emitted = new Set();
+    for (const f of ['browser-form-filler.js', 'signup-runner.js', 'signup-classifier.js']) {
+      for (const m of fs.readFileSync(path.join(__dirname, '..', 'services/seo', f), 'utf8').matchAll(/blocked_[a-z_]+/g)) emitted.add(m[0]);
+    }
+    expect(emitted.size).toBeGreaterThanOrEqual(5);
+    for (const o of emitted) expect({ o, mapped: R.mapLegacyOutcome(o) }).not.toEqual({ o, mapped: 'failed' });
   });
   test('lane → acquisition type; non-claimable lanes → unknown/resource', () => {
     expect(R.acquisitionTypeForLinkType('editorial')).toBe('editorial_outreach');

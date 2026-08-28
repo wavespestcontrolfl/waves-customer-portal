@@ -26,7 +26,7 @@ const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 const { CITY_TO_LOCATION } = require('../../config/locations'); // canonical city/service-area → GBP locId
 const { mapLegacyOutcome } = require('./link-registry');
-const { backfillLegacyAttempts } = require('./link-registry-backfill');
+const { backfillLegacyAttempts, backfillLegacyBoard } = require('./link-registry-backfill');
 const { locationKeyOf } = require('./prospect-domain-lock');
 
 // Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
@@ -196,11 +196,17 @@ async function leaseGuardedReclassify(p, patch) {
  * no writes) and releases its leases. Returns { claimed, placed, blocked, failed, skipped }.
  */
 async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, anthropic } = {}) {
-  // Expand/contract catch-up (plan v2 §3.4): a legacy seo_signup_attempts row written
-  // by an old pod during the rolling deploy is copied forward here, never lost.
-  // Idempotent (keyed by legacy_attempt_id); a failure never blocks the run. Skipped
-  // on dryRun — a dry run writes nothing (the migration + boot catch-up cover it).
-  if (!dryRun) await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
+  // Registry catch-up before claiming (plan v2 §3.4 / §4), skipped on dryRun (a dry
+  // run writes nothing; the migration + boot catch-up cover it):
+  //  (a) board rows inserted since the last catch-up get their domain_id/path_id,
+  //      so every attempt recorded below carries its path (never a permanent NULL);
+  //  (b) a legacy seo_signup_attempts row written by an old pod during the rolling
+  //      deploy is copied forward, never lost.
+  // Both idempotent; a failure never blocks the run.
+  if (!dryRun) {
+    await backfillLegacyBoard(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] board→registry catch-up failed: ${err.message}`));
+    await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
+  }
 
   const allowlist = (allow && allow.length ? allow : String(process.env.SIGNUP_RUNNER_ALLOWLIST || '').split(','))
     .map((d) => normDomain(d)).filter(Boolean);

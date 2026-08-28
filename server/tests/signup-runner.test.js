@@ -9,7 +9,7 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
 }));
 jest.mock('../services/seo/browser-form-filler', () => ({ fillCitationForm: jest.fn() }));
 // v2 step 1: run() starts with the idempotent legacy-attempts catch-up (expand/contract).
-jest.mock('../services/seo/link-registry-backfill', () => ({ backfillLegacyAttempts: jest.fn(async () => ({ copied: 0, scanned: 0 })) }));
+jest.mock('../services/seo/link-registry-backfill', () => ({ backfillLegacyAttempts: jest.fn(async () => ({ copied: 0, scanned: 0 })), backfillLegacyBoard: jest.fn(async () => ({})) }));
 jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(async () => 'backlink-evidence/x.png') }));
 // Stub the SSRF helpers so URL validation is deterministic + offline (no real DNS).
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
@@ -143,15 +143,20 @@ describe('run — safety gates', () => {
     expect(r.note).toBe('no_allowlist');
     expect(worker.claim).not.toHaveBeenCalled();
   });
-  test('dry-run skips the legacy-attempts catch-up (no writes of any kind); a live run performs it first', async () => {
-    const { backfillLegacyAttempts } = require('../services/seo/link-registry-backfill');
-    backfillLegacyAttempts.mockClear();
+  test('dry-run skips both registry catch-ups (no writes of any kind); a live run performs board→registry, then attempts, BEFORE claiming', async () => {
+    const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
+    backfillLegacyAttempts.mockClear(); backfillLegacyBoard.mockClear();
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });
     expect(backfillLegacyAttempts).not.toHaveBeenCalled();
+    expect(backfillLegacyBoard).not.toHaveBeenCalled();
     await runner.run({ dryRun: false, allow: ['citysquares.com'] });
+    expect(backfillLegacyBoard).toHaveBeenCalledTimes(1);
     expect(backfillLegacyAttempts).toHaveBeenCalledTimes(1);
+    expect(backfillLegacyBoard.mock.invocationCallOrder[0]).toBeLessThan(backfillLegacyAttempts.mock.invocationCallOrder[0]);
     expect(backfillLegacyAttempts.mock.invocationCallOrder[0]).toBeLessThan(worker.claim.mock.invocationCallOrder.at(-1));
+    // the attempt row carries the prospect's path (linked by the catch-up above)
+    expect(runner._internals.attemptRowFor({ id: 'p', path_id: 'path-9' }, { outcome: 'blocked_phone_verification' }, null)).toMatchObject({ path_id: 'path-9', outcome: 'needs_owner' });
   });
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
