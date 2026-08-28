@@ -1032,6 +1032,40 @@ describe('revertMerge', () => {
     id: LOSER, active: false, deleted_at: '2026-07-30T04:40:00Z', phone: `merged-${LOSER.slice(0, 8)}`,
   });
 
+  it('restores the irrigation weekly delivery identity (trigger_event_id) for exactly the journaled rows (hook P1 on 47b0a3146)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.irrigation_trigger_ids = ['em1', 'em2'];
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // em2 no longer carries the winner identity → reported, not rewritten.
+        email_messages: { verifiedRows: [{ id: 'em1', trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23` }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(state.flagRestores.filter((r) => r.table === 'email_messages')).toEqual([
+      { table: 'email_messages', where: { id: 'em1' }, payload: { trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23` } },
+    ]);
+    expect(result.repointedBack['email_messages.trigger_event_id']).toBe(1);
+    expect(result.skipped).toContainEqual({ key: 'email_messages.trigger_event_id', reason: 'rows_changed_since_merge', count: 1 });
+  });
+
+  it('refuses an undo whose merge journaled the identity rewrite count-only (409, zero writes)', async () => {
+    const journal = baseJournal();
+    journal.repointed_ids.irrigation_trigger_ids = { count: 900 };
+    const { trx, state } = buildRevertTrx({ journal, winner: baseWinner(), loser: baseLoser(), tables: { leads: { stillOnWinner: ['lead-1', 'lead-2'] }, invoices: { stillOnWinner: ['inv-1'] } } });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/without row-level records/) });
+    expect(state.repointedBack).toEqual([]);
+    expect(state.journalUpdate).toBe(null);
+  });
+
   it('repoints recorded rows back, restores the loser, moves the Stripe id back, stamps undone', async () => {
     const { trx, state } = buildRevertTrx({
       journal: baseJournal(),

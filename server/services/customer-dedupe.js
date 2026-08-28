@@ -1024,6 +1024,10 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     // endpoint refuses any merge where one did.
     const repointedIds = {};
     const collisionHandlers = [];
+    // email_messages ids whose irrigation weekly trigger identity was
+    // rewritten loser→winner (row ids, or { count } over the cap — the undo
+    // refuses count-only, like any other non-restorable record).
+    let irrigationTriggerIds = [];
 
     // BEFORE the sweep: an unstamped visit renders its address via
     // COALESCE(scheduled_services.service_address_line1, customers.
@@ -1277,6 +1281,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
             .update({ trigger_event_id: `irrigation.weekly:${winnerId}:${String(r.trigger_event_id).slice(loserPrefix.length)}` });
         }
         if (rows.length) repointed['email_messages.trigger_event_id'] = rows.length;
+        irrigationTriggerIds = rows.length > REPOINT_ID_CAP ? { count: rows.length } : rows.map((r) => r.id);
       });
     } catch (e) {
       throw new Error(`executeMerge: irrigation delivery identity rewrite failed: ${e.message}`);
@@ -1703,6 +1708,11 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         // folded/merged/dropped, not plainly repointed, so the merge is not
         // auto-revertible (the revert endpoint 409s when any are listed).
         collision_handlers: collisionHandlers,
+        // email_messages rows whose irrigation weekly delivery identity
+        // (trigger_event_id) the merge rewrote to the winner — the undo
+        // rewrites exactly these back so the restored loser's customer-week
+        // record follows the returned rows (hook P1 on 47b0a3146).
+        irrigation_trigger_ids: irrigationTriggerIds,
         // The winner's ORIGINAL customer-level autopay fields for the exact
         // columns the most-restrictive block overwrote ({ before, applied }),
         // or null when the merge left the winner's autopay alone.
@@ -2345,6 +2355,13 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // only part of the loser's data. Not auto-revertible.
     if (Array.isArray(recorded.collision_handlers) && recorded.collision_handlers.length) {
       refuse(`This merge folded colliding rows (${recorded.collision_handlers.join(', ')}) that cannot be split back apart automatically — restore by hand from the journal snapshot`);
+    }
+    // Irrigation weekly delivery identities rewritten without row-level
+    // records cannot be restored exactly — refuse, never leave the winner's
+    // customer-week record on rows the undo returns to the loser.
+    const irrigationTriggerIds = recorded.irrigation_trigger_ids;
+    if (irrigationTriggerIds && !Array.isArray(irrigationTriggerIds)) {
+      refuse('irrigation weekly delivery identities were rewritten without row-level records — restore by hand from the journal');
     }
     // Link-as-property merges create the winner-owned property row AFTER the
     // merge transaction commits; if the journal never learned its id, an
@@ -3331,6 +3348,27 @@ async function revertMerge({ journalId, performedBy, performedById }) {
           updated_at: trx.fn.now(),
         });
       }
+    }
+
+    // Restore the irrigation weekly delivery identities the merge rewrote
+    // (email_messages.trigger_event_id winner→loser) for exactly the
+    // journaled rows — the plain recipient repoint above returned the rows,
+    // this returns their customer-week key; a row no longer carrying the
+    // winner identity has moved on since the merge and is reported.
+    if (Array.isArray(irrigationTriggerIds) && irrigationTriggerIds.length) {
+      const winnerPrefix = `irrigation.weekly:${winnerId}:`;
+      const rows = await trx('email_messages')
+        .whereIn('id', irrigationTriggerIds)
+        .where('trigger_event_id', 'like', `${winnerPrefix}%`)
+        .select('id', 'trigger_event_id');
+      for (const r of rows) {
+        await trx('email_messages').where({ id: r.id })
+          .update({ trigger_event_id: `irrigation.weekly:${loserId}:${String(r.trigger_event_id).slice(winnerPrefix.length)}` });
+      }
+      if (rows.length !== irrigationTriggerIds.length) {
+        skipped.push({ key: 'email_messages.trigger_event_id', reason: 'rows_changed_since_merge', count: irrigationTriggerIds.length - rows.length });
+      }
+      if (rows.length) repointedBack['email_messages.trigger_event_id'] = rows.length;
     }
 
     // The property row link-as-property created from the loser's address

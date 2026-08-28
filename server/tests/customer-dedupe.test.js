@@ -967,6 +967,8 @@ describe('executeMerge', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
     expect(state.triggerRewrites).toEqual([[{ id: 'em1' }, { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23` }]]);
     expect(result.repointed['email_messages.trigger_event_id']).toBe(1);
+    // Journaled row-precisely so the undo can rewrite exactly these back.
+    expect(JSON.parse(state.journal.repointed_ids).irrigation_trigger_ids).toEqual(['em1']);
   });
 
   it('moves the cached account_credits with the ledger and zeroes the retired row', async () => {
