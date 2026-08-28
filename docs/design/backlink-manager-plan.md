@@ -807,7 +807,7 @@ t.jsonb('merchant_binding');                        // IMMUTABLE at reservation,
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms a merchant lock is on the card) — defence in depth on top of the merchant-account-id binding, never a substitute for it; if the issuer program declares lock support but the mint returns without it, the post-mint failure path applies (§6.3): the card is closed immediately and the row goes `submitting → ambiguous` with `card_exposed=false`
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
-t.boolean('card_exposed').notNullable().defaultTo(false); // set true the instant PAN/CVV are handed to the broker;
+t.boolean('card_exposed').notNullable().defaultTo(false); // COMMITTED true (with card_exposed_at) BEFORE the worker requests PAN/CVV from the issuer — conservatively, since the fetch/hand-over and the DB write cannot be atomic: a crash anywhere after that commit (including before the card was actually used) takes the exposed/ambiguous path with the full presentment window; card_exposed=false therefore proves the card details were never even requested;
 t.timestamp('card_exposed_at');                     // written ATOMICALLY in the same UPDATE that sets card_exposed=true (CHECK (card_exposed = (card_exposed_at IS NOT NULL))); the presentment window (§6.3) is measured from THIS instant — never from submitting_at, which precedes the mint; a purchase that became `ambiguous` with card_exposed=false (post-mint precondition failure, never presented) may be reconciled_not_charged as soon as the issuer confirms the card is closed with no transaction — no presentment wait, because nothing could have been presented
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
@@ -1125,7 +1125,7 @@ together:
   which the investigator re-marks the remainder `agent_completable=true` and the bridge
   re-decides; the path's lane
   gate is on (**`GATE_LINK_AUTHORITY` for ANY `AUTO_*` stamp — the kill switch is checked at
-  claim and again immediately before every irreversible action: submit, send, mint — not
+  claim and again immediately before EVERY irreversible external action — submit, send, mint, account creation, verification-link activation, and accepting/signing legal terms — under the same locked revalidation (authority row + approval + gate), never
   only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach
   SEND claims only (`mode=send`/`mode=followup`) — `mode=draft` is exempt from the send gate
   exactly as it is from the authority clause and requires `GATE_OUTREACH_DRAFTER` instead (the
@@ -1197,7 +1197,13 @@ through a **credential broker** (fills login/verification fields via Playwright 
 an observation-free context, exactly like the payment broker; no LLM, no screenshot, no
 trace). A model-observed provider may run only non-credentialed steps (investigation,
 pre-login form discovery, filling public fields with the canonical NAP) and hands off with
-`outcome='ready_for_credentials'`; it is never resumed inside an authenticated session.
+`outcome='ready_for_credentials'`; it is never resumed inside an authenticated session. In
+EVERY discovery/fill stage — model-observed or deterministic, live or benchmark — the
+browser context runs under the §13 read-only request interception (mutating requests
+blocked and logged); mutating requests are unblocked ONLY inside the guarded `submit()`
+operation, after the slot reservation, authority/gate recheck and the durable `submitting`
+transition, and re-blocked when it returns — so a mis-click or page script during
+`completeForm` can never POST around the submission guard or the daily cap.
 
 **Payment boundary (P0 — PAN/CVV never cross into a model context).** Only the
 `deterministic_runner` may execute a `submit()` that involves payment, and even it does not
