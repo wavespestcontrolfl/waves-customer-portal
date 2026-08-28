@@ -168,6 +168,7 @@ t.timestamp('superseded_at');
 ```js
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
+t.uuid('credential_id');         // → seo_link_credentials: the account this placement acts under (explicit; never inferred from domain)
 t.uuid('pending_path_id');       // → seo_link_acquisition_paths: the replacement path a superseded placement will be repointed to once its open post-exposure purchase settles (§3.2)
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
 t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
@@ -253,7 +254,13 @@ prefilter and the contactability gate, never the score; the row shows its reason
 (`LINK_CREDENTIALS_KEY_V1`, `…_V2` …; each row carries `key_version`; rotation = add the next key,
 re-encrypt lazily on read, retire the old key when no rows reference it). Never derived from
 `JWT_SECRET` or any session/app secret — rotating those must not brick stored logins, and no
-other code path should hold this key. Rows are scoped per `domain_id`, readable only by the
+other code path should hold this key. Rows are scoped by **account identity**, not by
+domain: `account_key` = `${domain_id}:${path_id}:${location_key}` by default (one account per
+path per location — the same key as the resumable session), unique; a site that genuinely
+serves several locations/paths from ONE login is modelled explicitly with a shared row
+(`shared_account=true`, `account_key='${domain_id}:shared'`) that the placement references
+via `credential_id` — the runner never picks a credential by domain alone, so two paths or
+locations can neither select nor overwrite each other's login. Readable only by the
 runner's create/resume path, and **never** written to `seo_link_attempts.detail`, logs,
 evidence, or LLM prompts.
 The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
