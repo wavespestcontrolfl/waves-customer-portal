@@ -58,12 +58,18 @@ async function fullSync(state) {
     // COMPLETES (failed/incomplete runs also stamp last_sync_at, so that
     // cannot be the signal — codex P1). Null ⇒ this IS the first connect.
     const initialConnect = !state?.initial_sync_completed_at;
+    // Scan boundary: only mail received BEFORE the scan began is history.
+    // A message arriving during a long first scan is genuinely new and takes
+    // the normal path (age guard decides), so its later incremental replay
+    // is not silenced by a pre-claim (codex P1).
+    const scanStartedAt = new Date();
 
     let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
-        const inserted = await upsertEmail(parsed, { backfill: initialConnect });
+        const receivedTs = parsed.received_at ? new Date(parsed.received_at).getTime() : 0;
+        const inserted = await upsertEmail(parsed, { backfill: initialConnect && receivedTs < scanStartedAt.getTime() });
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
