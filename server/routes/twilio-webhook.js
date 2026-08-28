@@ -253,10 +253,11 @@ router.post('/sms', async (req, res) => {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
     // A tapback on a question we asked ("Reacted 👍 to \"Does 9am work?\"") is
-    // the ANSWER, not a closer — same awaiting-answer rule as a standalone 👍
-    // (codex P1). Such a reaction falls through as a normal inbound: bell,
-    // push, owner forward, unread; only the AI reply paths still skip it.
-    const quietReaction = smsReaction && !(await lastOutboundAskedQuestion(From, To));
+    // the ANSWER, not a closer. The tapback QUOTES its target, so the target
+    // itself is inspected (not merely our latest outbound — hook P1). Loud
+    // reactions take a dedicated path below: persisted unread + bell/push,
+    // never the business automations (reschedule, lead intake, estimator).
+    const quietReaction = smsReaction && !reactionTargetAsksQuestion(Body);
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
@@ -625,13 +626,13 @@ router.post('/sms', async (req, res) => {
         : `<Response><Message>We received your request to receive texts from Waves Pest Control. Our office will confirm your subscription shortly.</Message></Response>`);
     }
 
-    if (quietReaction) {
+    if (smsReaction) {
       await db('sms_log').insert({
         customer_id: customer?.id || null,
         direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received',
         message_type: 'sms_reaction',
-        is_read: true, // read on arrival — mirrors the unified messages row (hook P1)
+        is_read: quietReaction, // closers read on arrival — mirrors the unified messages row
         metadata: JSON.stringify({
           locationId: numberConfig.locationId,
           source: numberConfig.type,
@@ -641,6 +642,21 @@ router.post('/sms', async (req, res) => {
       }).catch(() => {});
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
+      if (!quietReaction && customer && (numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking')) {
+        // Loud reaction = an answer to a question we asked. Ring the same
+        // thread bell a text would, then stop — no reschedule/lead/estimator
+        // automation ever sees a tapback (hook P1).
+        try {
+          const { triggerNotification } = require('../services/notification-triggers');
+          await triggerNotification('sms_reply', {
+            fromName: `${customer.first_name} ${customer.last_name}`,
+            fromPhone: From,
+            message: Body,
+            threadId: customer.id,
+            twilioSid: MessageSid,
+          });
+        } catch (e) { logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`); }
+      }
       return res.type('text/xml').send('<Response></Response>');
     }
 
@@ -990,7 +1006,7 @@ router.post('/sms', async (req, res) => {
     // for this message — the legacy owner-SMS forward must not re-alert
     // (codex #3232 r4).
     let knownInboundNotified = rescheduleFlagged;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !quietReaction && !courtesyOnly && !rescheduleFlagged) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
         // Re-check right before writing the bell: if the thread was opened
@@ -1063,7 +1079,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !quietReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
@@ -1832,6 +1848,17 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;
   }
+}
+
+/**
+ * Does the OUTBOUND a tapback quotes ask a question / give a reply directive?
+ * The quoted target is authoritative (a later non-question outbound must not
+ * mask it). Unquoted targets ("an image", "a photo") ask nothing.
+ */
+function reactionTargetAsksQuestion(body) {
+  const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
+  if (!m) return false;
+  return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(m[1]);
 }
 
 function shouldReserveCorrectionJob(body, smsReaction) {
