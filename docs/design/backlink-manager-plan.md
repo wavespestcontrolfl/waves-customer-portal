@@ -195,8 +195,13 @@ alone, nor send on an outreach approval alone.
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send
-t.string('outcome').notNullable();    // placed | drafted | failed | skipped | needs_owner | captcha | blocked
-t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false);
+t.string('outcome').notNullable();    // CHECK (outcome IN (
+                                      //   'slot_reserved','submitting','submit_ambiguous',            -- submission lifecycle (§13)
+                                      //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
+                                      //   'needs_owner','human_step_done','ready_for_payment',
+                                      //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
+                                      //   'payment_ambiguous','mint_not_started','sandbox_replay' )) — the ONE complete enum; every state named anywhere in this plan is here
+t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
