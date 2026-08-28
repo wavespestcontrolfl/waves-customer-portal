@@ -1804,6 +1804,9 @@ async function nearDuplicateOf(buffer, siblings) {
   return { label: null, hash };
 }
 const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
+// Upper bound on body-N names scanned per post before parking (a directory
+// full of files this run can neither reuse nor overwrite is a human problem).
+const BODY_IMAGE_NAME_SCAN_MAX = 50;
 const BODY_IMAGE_SKIP_HEADING_RE = /\b(?:faq|faqs|frequently asked|questions|sources|references|summary|bottom line|key takeaways|next steps)\b/i;
 
 function bodyImagesEnabled() {
@@ -2209,40 +2212,57 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const placements = [];
   const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
   const heroSubject = String(frontmatter?.primary_keyword || frontmatter?.title || '').trim();
-  // body-N names are allocated past anything the draft already references
-  // (a draft carrying body-2.webp must not have it overwritten by a new
-  // generation that would then be linked twice).
+  // body-N names: a name the draft already references is skipped (a draft
+  // carrying body-2.webp must not have it overwritten by a new generation
+  // that would then be linked twice); a name already COMMITTED in the repo
+  // is either REUSED (the live body still describes that picture and it is
+  // not a near-duplicate) or skipped — a committed path is never overwritten
+  // by a generation, so the atomic commit only ever ADDS asset paths (its
+  // lock can then require each one to still be absent on the fresh branch).
   let n = 0;
-  const nextSrc = () => {
-    do { n += 1; } while (draftSrcs.has(`${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`));
-    return { src: `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`, repoPath: `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp` };
-  };
   for (let k = 0; k < slots.length; k++) {
-    const { src, repoPath } = nextSrc();
     const slot = slots[k];
-
-    // Reuse a file already committed on main when the live body still
-    // describes it; otherwise (re)generate — never reuse a picture blind.
-    if (existingFile) {
-      const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
-      // A reused alt is customer-facing copy too: it must clear the same
-      // guardrails as a generated alt (no fallback → regenerate) and it joins
-      // the compliance second pass below.
-      const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
-      const committed = vettedAlt ? await committedImageBuffer(repoPath) : null;
-      if (committed) {
-        // A reused picture obeys the same rule as a generated one: if it
-        // duplicates the (possibly new) hero or a sibling, regenerate.
-        const dup = await nearDuplicateOf(committed, seen);
-        if (!dup.label) {
-          seen.push({ label: `body-${n}`, hash: dup.hash });
-          images.push({ src, alt: vettedAlt, reused: true });
-          newAlts.push(vettedAlt);
-          placements.push({ insertAt: slot.insertAt, src, alt: vettedAlt });
-          continue;
-        }
-        logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — regenerating instead of reusing`);
+    let src;
+    let repoPath;
+    let reuse = null;
+    for (;;) {
+      n += 1;
+      if (n > BODY_IMAGE_NAME_SCAN_MAX) {
+        const err = new Error(`autonomous blog body images: no free body-N name under ${slug} within ${BODY_IMAGE_NAME_SCAN_MAX} — the post's image directory is full of files this run cannot reuse`);
+        err.code = 'BLOG_BODY_IMAGES_FAILED';
+        throw err;
       }
+      src = `${ASTRO_HERO_PUBLIC_BASE}/${slug}/body-${n}.webp`;
+      repoPath = `${ASTRO_HERO_DIR}/${slug}/body-${n}.webp`;
+      if (draftSrcs.has(src)) continue;
+      const onMain = await gh.getFile(repoPath);
+      if (!onMain) break; // free name → generate here
+      // Reuse a file already committed on main when the live body still
+      // describes it — never reuse a picture blind.
+      if (existingFile) {
+        const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
+        // A reused alt is customer-facing copy too: it must clear the same
+        // guardrails as a generated alt (no fallback → regenerate) and it
+        // joins the compliance second pass below.
+        const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
+        const committed = vettedAlt ? await committedImageBuffer(repoPath, async () => onMain) : null;
+        if (committed) {
+          // A reused picture obeys the same rule as a generated one: if it
+          // duplicates the (possibly new) hero or a sibling, a NEW picture is
+          // generated under the next free name instead.
+          const dup = await nearDuplicateOf(committed, seen);
+          if (!dup.label) { reuse = { alt: vettedAlt, hash: dup.hash }; break; }
+          logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — generating a new picture under the next name instead of reusing`);
+        }
+      }
+      // Occupied by a picture this run cannot reuse → next name.
+    }
+    if (reuse) {
+      seen.push({ label: `body-${n}`, hash: reuse.hash });
+      images.push({ src, alt: reuse.alt, reused: true });
+      newAlts.push(reuse.alt);
+      placements.push({ insertAt: slot.insertAt, src, alt: reuse.alt });
+      continue;
     }
 
     let gen;
@@ -2891,15 +2911,24 @@ async function publishRefresh(draft, brief = {}) {
   // diffed against the older read (then auto-merged). Re-read the target on
   // the fresh branch and require the SHA the draft was diffed against; a
   // mismatch is transient — the run retries against the new live content.
+  // The lock covers EVERY path the commit writes: the post must still carry
+  // the SHA it was diffed against, and each generated asset path (allocated
+  // as ABSENT from main — resolveBodyImages never overwrites a committed
+  // picture) must still be absent, or a concurrent write would be lost.
   if (refreshImages.files.length) {
+    const conflicts = [];
     const onBranch = await gh.getFile(filePath, branch);
-    if (!onBranch || onBranch.sha !== existing.sha) {
+    if (!onBranch || onBranch.sha !== existing.sha) conflicts.push(`${filePath} (expected ${existing.sha}, found ${onBranch?.sha || 'missing'})`);
+    for (const f of refreshImages.files) {
+      if (await gh.getFile(f.path, branch)) conflicts.push(`${f.path} (appeared since it was allocated)`);
+    }
+    if (conflicts.length) {
       // No PR references the branch yet — drop it, or every collision
       // (the runner retries with a fresh shortId) leaves an orphan ref.
       try { await gh.deleteRef(branch); } catch (cleanupErr) {
         logger.warn(`[astro-publisher] could not delete refresh branch ${branch} after a lock mismatch: ${cleanupErr.message}`);
       }
-      throw new Error(`refresh target ${filePath} changed since it was read (expected ${existing.sha}, found ${onBranch?.sha || 'missing'} on ${branch}) — retry against the live content`);
+      throw new Error(`refresh target changed since it was read on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
     }
   }
   // New image bytes ride the SAME commit as the post (atomic, like the

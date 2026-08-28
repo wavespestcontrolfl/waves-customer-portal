@@ -3659,7 +3659,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
     expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
     const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
-    expect(files).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    // The duplicate committed body-1 is never overwritten — the replacement lands on the next free names (hook P0).
+    expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    expect(files).toEqual(expect.arrayContaining(['public/images/blog/pest-control/drywood-frass-venice/body-2.webp', 'public/images/blog/pest-control/drywood-frass-venice/body-3.webp']));
     expect(fmModule.parse(gh.commitFiles.mock.calls[0][0].files.at(-1).content).content).not.toContain('Live alt for pellets');
   });
 
@@ -3674,9 +3676,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
 
     expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    // body-1 stays committed under its old heading; the new pictures take the next free names (hook P0: never overwrite).
     expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
-      'public/images/blog/pest-control/drywood-frass-venice/body-1.webp',
       'public/images/blog/pest-control/drywood-frass-venice/body-2.webp',
+      'public/images/blog/pest-control/drywood-frass-venice/body-3.webp',
       'src/content/blog/pest-control/drywood-frass-venice.mdx',
     ]);
     expect(fmModule.parse(gh.commitFiles.mock.calls[0][0].files[2].content).content).not.toContain('Live alt');
@@ -3993,6 +3996,54 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
     expect(gh.putFile).not.toHaveBeenCalled();
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/shrub-diseases-sarasota-fl.md', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('refresh lane: the lock also covers generated asset paths — a body-N.webp that appeared on the fresh branch throws transient + deletes the branch (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // body-1 is free on main at allocation time but has appeared on the fresh branch by commit time.
+      if (ref && path === 'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp') return { content: '', sha: 'raced' };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/body-1\.webp \(appeared since it was allocated\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('resolveBodyImages: a committed body-N the run cannot reuse is never overwritten — the next free name is allocated (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      // An orphan body-1.webp sits on main; the live body does not reference it → not reusable, never overwritten.
+      if (path === 'public/images/blog/shrub-diseases-sarasota-fl/body-1.webp') return { content: '', sha: 'orphan', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    gh.commitFiles.mockResolvedValue({ commit: { sha: 'multi' } });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    const res = await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url });
+    expect(res.status).toBe('pr_open');
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
+      'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
+      'public/images/blog/shrub-diseases-sarasota-fl/body-3.webp',
+      'src/content/blog/shrub-diseases-sarasota-fl.md',
+    ]);
   });
 
   test('committedImageBuffer: a 404 (null) is a missing asset; an operational read error propagates so the runner retries instead of parking (hook P1)', async () => {
