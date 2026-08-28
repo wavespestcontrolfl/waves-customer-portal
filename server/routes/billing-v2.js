@@ -9,7 +9,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
-const { isBankMethodType, isExpiredCardMethod, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
+const { isBankMethodType, isExpiredCardMethod, isPaused, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
 const { isEnabled } = require('../config/feature-gates');
 
@@ -804,6 +804,7 @@ router.delete('/cards/:id', async (req, res, next) => {
     // client timeout and is the price of a guard that cannot be raced.
     let outcome = null; // { status, body } when the request ends early
     let removedCard = null;
+    let autopayDisabled = false;
     await db.transaction(async (trx) => {
       const customer = await trx('customers')
         .where({ id: req.customerId })
@@ -831,7 +832,9 @@ router.delete('/cards/:id', async (req, res, next) => {
           return;
         }
         if (selectedIds.includes(String(card.id))) {
-          const paused = !!customer?.autopay_paused_until;
+          // Same ET-aware predicate the display and collection use — a
+          // stale past autopay_paused_until is NOT paused (GH codex r1 P2).
+          const paused = isPaused(customer);
           outcome = {
             status: 409,
             body: {
@@ -846,21 +849,30 @@ router.delete('/cards/:id', async (req, res, next) => {
         }
       }
 
+      const wasEnabled = !!customer?.autopay_enabled;
       await StripeService.removeCard(req.customerId, req.params.id, { cascadeAutopay: !removalGuard, db: trx });
       removedCard = card;
+      // Did Auto Pay actually go off with this removal? Only the legacy
+      // cascade (gate off) can do that, and it swallows its own failures —
+      // so the answer comes from a re-read of the customer row under the
+      // lock, never from the removed row's stale flag (GH codex r1 P1).
+      if (wasEnabled) {
+        const after = await trx('customers').where({ id: req.customerId }).first('autopay_enabled');
+        autopayDisabled = !after?.autopay_enabled;
+      }
     });
 
     if (outcome) return res.status(outcome.status).json(outcome.body);
 
     // Lifecycle notice (gated inside the sender). The row is gone — pass
     // the snapshot. Under the guard a removed method was never in charge,
-    // so no autopay note; the legacy cascade case reports honestly. The
-    // sender's idempotency key is the method row id, so the detached
+    // so no autopay note; the legacy cascade case reports what committed.
+    // The sender's idempotency key is the method row id, so the detached
     // webhook that follows this detach cannot send a second notice.
     PaymentLifecycleEmail.sendPaymentMethodRemoved({
       customerId: req.customerId,
       method: removedCard,
-      autopayDisabled: !removalGuard && !!removedCard.autopay_enabled,
+      autopayDisabled,
       removedAt: new Date(),
     }).catch((emailErr) => {
       logger.warn(`[billing-v2] payment method removed email failed for customer ${req.customerId}: ${emailErr.message}`);

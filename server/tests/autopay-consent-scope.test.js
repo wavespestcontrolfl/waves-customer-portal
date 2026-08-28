@@ -8,6 +8,9 @@
 // BEFORE any flag moves.
 
 jest.mock('stripe', () => jest.fn(() => ({})));
+// The router's per-customer write limiter (6/min) is shared across every
+// test in this file; it is not under test here.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
@@ -117,6 +120,36 @@ describe('PUT /billing/autopay — selected method re-verified under lock (pre-p
       expect((await res.json()).code).toBe('payment_method_removed');
       expect(state.customers[0].autopay_enabled).toBe(false);
       expect(state.customers[0].autopay_payment_method_id).toBe(null);
+    }));
+});
+
+describe('PUT /billing/autopay — Auto Pay-off notice sent once (GH codex r1 P2)', () => {
+  const router = () => require('../routes/customer-autopay');
+  const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+  const disable = (baseUrl) => fetch(`${baseUrl}/billing/autopay`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autopay_enabled: false }),
+  });
+
+  test('the request that flips enabled→disabled under the lock sends the notice', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-old' }));
+    }));
+
+  test('an overlapping disable that finds the flag already off under the lock does NOT send a second notice', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      db.transaction = async (fn) => {
+        // The first disable committed between this request's pre-read and its lock.
+        state.customers[0].autopay_enabled = false;
+        return fn((table) => builderFor(table));
+      };
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).not.toHaveBeenCalled();
     }));
 });
 

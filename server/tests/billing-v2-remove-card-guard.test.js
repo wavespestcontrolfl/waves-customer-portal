@@ -153,6 +153,16 @@ describe('DELETE /billing/cards/:id — removal guard', () => {
       expect(body.autopay.paused).toBe(true);
     }));
 
+  test('a stale PAST autopay_paused_until is not paused (isPaused, ET-aware) → plain in-use copy', () =>
+    withServer(async (baseUrl) => {
+      state.customers[0].autopay_paused_until = '2000-01-01';
+      const res = await del(baseUrl, 'pm-live');
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.error).not.toMatch(/paused/i);
+      expect(body.autopay.paused).toBe(false);
+    }));
+
   test('a non-autopay row → detached with cascadeAutopay:false and a removed notice, no Auto Pay mutation', () =>
     withServer(async (baseUrl) => {
       const res = await del(baseUrl, 'pm-spare');
@@ -220,14 +230,31 @@ describe('DELETE /billing/cards/:id — removal guard', () => {
 });
 
 describe('DELETE /billing/cards/:id — gate OFF (legacy)', () => {
-  test('removes the in-charge card unconditionally with the legacy cascade, and reports autopayDisabled honestly', () =>
+  test('removes the in-charge card unconditionally with the legacy cascade; autopayDisabled reflects what the cascade COMMITTED', () =>
     withServer(async (baseUrl) => {
       mockGateOn = false;
+      // The cascade actually flipped the customer row.
+      StripeService.removeCard.mockImplementation(async () => {
+        state.customers[0].autopay_enabled = false;
+        state.customers[0].autopay_payment_method_id = null;
+        return { success: true };
+      });
       const res = await del(baseUrl, 'pm-live');
       expect(res.status).toBe(200);
       expect(StripeService.removeCard).toHaveBeenCalledWith('cust-1', 'pm-live', expect.objectContaining({ cascadeAutopay: true }));
       expect(PaymentLifecycleEmail.sendPaymentMethodRemoved).toHaveBeenCalledWith(expect.objectContaining({
         autopayDisabled: true,
+      }));
+    }));
+
+  test('cascade swallowed a failure (customer still enabled) → the notice must NOT claim Auto Pay went off', () =>
+    withServer(async (baseUrl) => {
+      mockGateOn = false;
+      StripeService.removeCard.mockImplementation(async () => ({ success: true })); // row gone, customer untouched
+      const res = await del(baseUrl, 'pm-live');
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendPaymentMethodRemoved).toHaveBeenCalledWith(expect.objectContaining({
+        autopayDisabled: false,
       }));
     }));
 });
