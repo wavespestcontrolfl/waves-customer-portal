@@ -1112,8 +1112,7 @@ land with the authority step (§14 step 4), in one PR, with the route/worker tes
 together:
 - **Claim predicate is authority-aware, atomic and UNCONDITIONAL.** Today `claim()` filters
   only on prospect status/type. From step 4 it always joins the registry — no gate turns the
-  old predicate back on; `GATE_LINK_AUTHORITY` only controls whether the policy may *grant*
-  an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement status matches the
+  old predicate back on; `GATE_LINK_AUTHORITY` is the GLOBAL automation kill switch — required for EVERY automated claim and every irreversible automated action whatever the stamped level (`AUTO_*` or owner-approved `OWNER_*` alike; only the human settlement form and owner-side UI actions are outside it) — and leases a row only when ALL hold inside the same locked select: placement status matches the
   CLAIM MODE — `prospect` for initial acquisition / `mode=draft` / the initial `mode=send`;
   `contacted`/`negotiating` for `mode=payment` and `mode=followup`; `placed`/`live`/`indexed`
   for `mode=renewal` (each mode's extra predicate is defined where the mode is) — the
@@ -1137,7 +1136,7 @@ together:
   (a `human` attempt with `outcome='human_step_done'` + the resulting session/state), after
   which the investigator re-marks the remainder `agent_completable=true` and the bridge
   re-decides; the path's lane
-  gate is on (**`GATE_LINK_AUTHORITY` for ANY `AUTO_*` stamp — the kill switch is checked at
+  gate is on (**`GATE_LINK_AUTHORITY` for EVERY automated claim, `AUTO_*` and owner-approved alike — the kill switch is checked at
   claim and again immediately before EVERY irreversible external action — submit, send, mint, account creation, verification-link activation, and accepting/signing legal terms — under the same locked revalidation (authority row + approval + gate), never
   only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach
   SEND claims only (`mode=send`/`mode=followup`) — `mode=draft` is exempt from the send gate
@@ -1152,8 +1151,7 @@ together:
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
   (an unleased `renewal` reservation is claimable by the runner, §6.3 — and the claim's re-run of
   the §6.3 decision computes `month_spend_cents` EXCLUDING the reservation being claimed, exactly
-  as the pre-mint check does, so a renewal that fills the remaining budget is not double-counted); and the provider requesting
-  the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
+  as the pre-mint check does, so a renewal that fills the remaining budget is not double-counted); and the provider identity — DERIVED SERVER-SIDE from the authenticated worker credential, never read from a query/body value (§12: one distinct service token per provider, `LINK_WORKER_TOKEN_<PROVIDER>`, resolved by `hermes-auth.js` to a fixed `{ provider, capabilities }` record; the legacy shared `HERMES_SERVICE_TOKEN` maps to the `hermes` provider with NO payment/credential capability) — carries the capability the step needs (payment and credential steps → the `deterministic_runner` identity only). A caller-supplied `provider` field is ignored (logged as a mismatch if it disagrees with the token). A row
   the policy has not authorized cannot be leased by any caller.
 - **Draft leases are separate from send authority (no claim-before-draft deadlock).** The
   drafter (`backlink-outreach-drafter.js`) claims with `?type=outreach&mode=draft`: a draft
@@ -1410,19 +1408,19 @@ Link Building board and outreach approvals remain as shipped.
 ## 12. Gates, env, kill switches
 
 Existing: `GATE_SEO_INTELLIGENCE` (all DataForSEO spend), `GATE_BACKLINK_AGENT`,
-`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report), `GATE_SIGNUP_RUNNER` +
+`GATE_HERMES_WORKER` + `HERMES_SERVICE_TOKEN` (claim/report — from step 1 one of several per-provider tokens `LINK_WORKER_TOKEN_<PROVIDER>`; each resolves server-side to a fixed provider identity + capability set, and only the `deterministic_runner` token carries payment/credential capability), `GATE_SIGNUP_RUNNER` +
 `SIGNUP_RUNNER_ALLOWLIST`, `GATE_OUTREACH_DRAFTER`, `GATE_LINK_OUTREACH` +
 `LINK_OUTREACH_DAILY_CAP`, `HERMES_SIGNUP_EMAIL`.
 
 New, all **default OFF in prod**: `GATE_LINK_INVESTIGATOR` (investigator job),
 `GATE_LINK_AUTHORITY` (the policy engine may grant any `AUTO_*`, AND every automated claim
-and every irreversible step re-checks it; **off ⇒ the claim route grants no automated lease
-at all and in-flight `AUTO_*` work stops before its next irreversible action** — the gate
+and every irreversible step re-checks it regardless of the stamped level; **off ⇒ the claim route grants no automated lease
+at all, owner-approved rows included and in-flight `AUTO_*` work stops before its next irreversible action** — the gate
 changes NO lifecycle status: pending `AUTO_*` placements simply stay `prospect` and are
 refused by the claim predicate while it is off (the Agent tab shows them as "held by
 GATE_LINK_AUTHORITY"), so re-enabling the gate releases them with no restoration step and
 nothing is ever stranded; verified and terminal statuses are Judge-owned history and are
-never touched by a gate; only owner-approved rows can be leased while it is off), `GATE_LINK_AUTO_PAID`
+never touched by a gate; NO automated lease of any authority level — owner-approved included — is granted while it is off, and in-flight owner-approved work also stops before its next irreversible action; only human actions (the settlement form, owner UI clicks) continue), `GATE_LINK_AUTO_PAID`
 (separately arms `AUTO_PAID_WITHIN_POLICY` — never required for owner-approved payments),
 `GATE_LINK_PAYMENTS` (the payment-lane kill switch: off ⇒ no purchase of any authority is
 minted or submitted; owner-approved rows wait), `GATE_LINK_RECURSIVE_DISCOVERY`. From step 4
