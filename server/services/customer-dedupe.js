@@ -645,6 +645,44 @@ async function repointRowwiseDropCollisions(trx, table, column, winnerId, loserI
   return `moved ${moved}, dropped ${dropped} duplicate row(s) (winner already has them)`;
 }
 
+// irrigation_week_plans: UNIQUE(customer_id, week_ending). The row that
+// matters is the DELIVERED one (sent_at) — it is the decision the customer
+// received and the report renders, and the Monday sweep's first dedupe key
+// (hasSentWeekPlan). Keeping the winner's row blindly could delete the
+// loser's sent snapshot in favour of an unsent one: the report then hides
+// the plan the customer got and the sweep resends a possibly different
+// plan (codex #3565 gh-r15). Rule: a sent row beats an unsent row; both
+// sent or both unsent → the winner's stays.
+async function repointWeekPlansKeepSent(trx, table, column, winnerId, loserId) {
+  const rows = await trx(table).where(column, loserId).select('id', 'week_ending', 'sent_at');
+  let moved = 0;
+  let replaced = 0;
+  let dropped = 0;
+  for (const row of rows) {
+    try {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+      });
+      moved += 1;
+      continue;
+    } catch (e) {
+      if (!(e && e.code === '23505')) throw e;
+    }
+    const winnerRow = await trx(table).where({ [column]: winnerId, week_ending: row.week_ending }).first('id', 'sent_at');
+    if (winnerRow && !winnerRow.sent_at && row.sent_at) {
+      await trx.transaction(async (sp) => {
+        await sp(table).where({ id: winnerRow.id }).del();
+        await sp(table).where({ id: row.id }).update({ [column]: winnerId });
+      });
+      replaced += 1;
+    } else {
+      await trx(table).where({ id: row.id }).del();
+      dropped += 1;
+    }
+  }
+  return `moved ${moved}, replaced ${replaced} unsent winner row(s) with the sent snapshot, dropped ${dropped} duplicate row(s)`;
+}
+
 // collections_flags: at most one ACTIVE row per (customer, flag) — both
 // duplicate profiles carrying the same active hold is the same instruction,
 // not divergent data. The winner's copy stays live; the loser's colliding
@@ -695,11 +733,10 @@ const UNIQUE_COLLISION_HANDLERS = {
   // (codex #3390: absent here, a shared alert aborted the whole merge).
   customer_alerts: repointRowwiseDropCollisions,
   // UNIQUE(customer_id, week_ending): both duplicate profiles holding a
-  // Monday watering-plan snapshot for the same week — the winner's sent
-  // snapshot stays authoritative (it is what their report renders); the
-  // loser's colliding copy drops instead of aborting the merge (codex
-  // #3565 gh-r14).
-  irrigation_week_plans: repointRowwiseDropCollisions,
+  // Monday watering-plan snapshot for the same week — the DELIVERED
+  // snapshot survives (a sent row beats an unsent one, ties keep the
+  // winner's); never abort the merge (codex #3565 gh-r14/r15).
+  irrigation_week_plans: repointWeekPlansKeepSent,
   collections_flags: repointFlagsReleaseCollisions,
 };
 
@@ -4060,6 +4097,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
+    repointWeekPlansKeepSent,
   repointFlagsReleaseCollisions,
     mergeConversationRows,
     UNIQUE_COLLISION_HANDLERS,

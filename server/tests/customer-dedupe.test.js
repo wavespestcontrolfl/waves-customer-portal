@@ -833,9 +833,83 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
-  it('registers irrigation_week_plans with the rowwise drop-collisions handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
-    const { UNIQUE_COLLISION_HANDLERS, repointRowwiseDropCollisions } = dedupe._test;
-    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointRowwiseDropCollisions);
+  it('registers irrigation_week_plans with the keep-sent handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointWeekPlansKeepSent } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointWeekPlansKeepSent);
+  });
+
+  describe('repointWeekPlansKeepSent (codex #3565 gh-r15: the delivered snapshot survives)', () => {
+    // Minimal in-memory irrigation_week_plans with the (customer_id,
+    // week_ending) unique enforced on update, so the handler's collision
+    // branches run against real row state.
+    const fakeTrx = (seed) => {
+      const rows = seed.map((r) => ({ ...r }));
+      const matches = (row, where) => Object.entries(where).every(([k, v]) => row[k] === v);
+      const unique = (id, customerId) => {
+        const me = rows.find((r) => r.id === id);
+        if (rows.some((r) => r.id !== id && r.customer_id === customerId && r.week_ending === me.week_ending)) {
+          const e = new Error('duplicate key'); e.code = '23505'; throw e;
+        }
+      };
+      const qb = (table) => {
+        expect(table).toBe('irrigation_week_plans');
+        let where = {};
+        const api = {
+          where(a, b) { where = typeof a === 'object' ? { ...where, ...a } : { ...where, [a]: b }; return api; },
+          select() { return Promise.resolve(rows.filter((r) => matches(r, where)).map((r) => ({ ...r }))); },
+          first() { const r = rows.find((x) => matches(x, where)); return Promise.resolve(r ? { ...r } : undefined); },
+          update(patch) {
+            const hit = rows.filter((r) => matches(r, where));
+            for (const r of hit) { if (patch.customer_id) unique(r.id, patch.customer_id); Object.assign(r, patch); }
+            return Promise.resolve(hit.length);
+          },
+          del() { const before = rows.length; for (let i = rows.length - 1; i >= 0; i -= 1) if (matches(rows[i], where)) rows.splice(i, 1); return Promise.resolve(before - rows.length); },
+        };
+        return api;
+      };
+      const trx = (table) => qb(table);
+      trx.transaction = async (fn) => fn(trx);
+      trx.rows = rows;
+      return trx;
+    };
+    const { repointWeekPlansKeepSent } = dedupe._test;
+
+    it('moves a non-colliding week and drops the loser copy when the winner already SENT that week', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:00:00Z' },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
+        { id: 'l2', customer_id: LOSER, week_ending: '2026-08-16', sent_at: '2026-08-17T10:00:00Z' },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/moved 1, replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => [r.id, r.customer_id]).sort()).toEqual([['l2', WINNER], ['w1', WINNER]]);
+    });
+
+    it('replaces the winner UNSENT row with the loser SENT snapshot (the delivered decision survives)', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 1/);
+      expect(trx.rows).toEqual([{ id: 'l1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: '2026-08-24T10:01:00Z' }]);
+    });
+
+    it('both unsent → the winner row stays, the loser copy drops', async () => {
+      const trx = fakeTrx([
+        { id: 'w1', customer_id: WINNER, week_ending: '2026-08-23', sent_at: null },
+        { id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null },
+      ]);
+      const out = await repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER);
+      expect(out).toMatch(/replaced 0 .* dropped 1/);
+      expect(trx.rows.map((r) => r.id)).toEqual(['w1']);
+    });
+
+    it('rethrows a non-unique failure', async () => {
+      const trx = fakeTrx([{ id: 'l1', customer_id: LOSER, week_ending: '2026-08-23', sent_at: null }]);
+      trx.transaction = async () => { throw new Error('connection reset'); };
+      await expect(repointWeekPlansKeepSent(trx, 'irrigation_week_plans', 'customer_id', WINNER, LOSER)).rejects.toThrow('connection reset');
+    });
   });
 
   it('moves non-colliding CRM tags and drops duplicate tags instead of aborting', async () => {
