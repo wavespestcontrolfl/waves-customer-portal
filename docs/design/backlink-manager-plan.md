@@ -403,6 +403,7 @@ auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; fre
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
+auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; DB-backed count of seo_link_attempts action IN (submit, create_account) for the ET day, checked inside the locked claim and again immediately before each submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
 owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
@@ -539,8 +540,11 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   was paid for in March can never be paid for again as `initial` in April; only an explicit
   `renewal` for a *new* period can be reserved, and `claim()` never leases a placement with an
   open (`reserved`/`submitting`/`ambiguous`) purchase of any kind. Otherwise `generation` =
-  1 + the highest ended generation (`voided` / `reconciled_not_charged`) for that key → if `month_spend_cents + amount_cents ≤
-  monthly_paid_budget_cents` insert the `reserved` row (the unique `idempotency_key` makes a
+  1 + the highest ended generation (`voided` / `reconciled_not_charged`) for that key → if `budget_cents = budgetFor(authority)` (`monthly_paid_budget_cents` for
+  `AUTO_PAID_WITHIN_POLICY`, `owner_monthly_budget_cents` for `OWNER_*`) is null ⇒ no
+  software cap (the approval's `max_payable_cents` and the issuer program limit still bound
+  it), else require `month_spend_cents(authority class) + amount_cents ≤ budget_cents`; then
+  insert the `reserved` row (the unique `idempotency_key` makes a
   concurrent duplicate a no-op) → commit. All money is integer cents. So a pre-submission failure (voided) can be retried
   in the same month as a new generation, while anything that may have reached the merchant
   never can. Only a committed
@@ -764,6 +768,12 @@ together:
   `AUTO_OUTREACH` on that draft; only a `mode=send` lease — which requires the stamped
   `AUTO_OUTREACH` (or an approval) — may call the sender. Drafting therefore never needs
   authority, and authority is never granted without a lint-clean draft to grant it for.
+- **`pending` submissions are kept.** The shipped report path for a moderated directory
+  (`outcome='placed'` with `pending:true` and no `live_url` — `link-prospect-worker.js`) is
+  retained unchanged: the placement moves to `placed` without a `live_url`, the daily
+  verifier's domain reconcile (`reconcileByDomain`) discovers the URL on approval, and the
+  row is excluded from re-claim while `placed`. `live_url` is required only for a
+  non-pending `placed` report, exactly as today.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
   gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `price_changed`,
   `captcha`); `needs_owner` atomically maps the placement to `status='awaiting_owner'`
@@ -955,7 +965,12 @@ unset its gate; budget kill = the issuer program's limit.
   The June drafts are released only through this path.
 - **PII / secrets** — credentials encrypted, never in attempts/evidence/logs/prompts;
   Twilio/Gmail errors logged by code only; identity packet = canonical NAP only.
-- **Footprint** — daily caps on sends and submissions; one conversation per inbox
+- **Footprint** — daily caps on sends (§6.4, inside the sender lock) and on submissions
+  (`auto_submission_daily_cap`: a DB-backed per-ET-day count over `seo_link_attempts`,
+  enforced in the locked claim and re-checked immediately before every submit, so repeated
+  manual runs or several providers can never add disjoint batches past the cap — the
+  runner's `batchSize`/`runExclusive` only serialize one invocation and are not the limit);
+  one conversation per inbox
   (`claimProspectDomain`); signup lanes coexist per location by design; no templated blasts.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
   `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
