@@ -54,12 +54,18 @@ function wireDayCapCounts(rows = []) {
     where: jest.fn().mockReturnThis(),
     whereNotIn: jest.fn().mockReturnThis(),
     whereBetween: jest.fn().mockReturnThis(),
+    // Effective-date count (SELF_BOOKING_EFFECTIVE_DATE_SQL) rides in via
+    // whereRaw / db.raw select / groupByRaw — passthroughs; no linked live
+    // rows here, so the copy dates stand.
+    whereRaw: jest.fn().mockReturnThis(),
     select: jest.fn().mockReturnThis(),
     count: jest.fn().mockReturnThis(),
     groupBy: jest.fn().mockReturnThis(),
+    groupByRaw: jest.fn().mockReturnThis(),
     then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
   };
   db.mockReturnValue(builder);
+  db.raw = jest.fn((sql) => sql);
   return builder;
 }
 

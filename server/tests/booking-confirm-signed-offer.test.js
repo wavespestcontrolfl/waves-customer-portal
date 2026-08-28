@@ -317,6 +317,8 @@ describe('createSelfBooking — source_estimate_id OWNERSHIP gate (booking-audit
       const b = {
         where: () => b,
         whereNot: () => b,
+        // Effective-date day-cap predicate (SELF_BOOKING_EFFECTIVE_DATE_SQL)
+        whereRaw: () => b,
         modify(fn) { fn(b); return b; },
         count: () => { counting = true; return b; },
         // replay lookup → none; global day-cap count → 0 (under cap)
