@@ -3628,11 +3628,19 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
   const autopayWalkMethodIds = async (customerLike) => {
     const key = String(customerLike.id);
     if (!autopayWalkMemo.has(key)) {
-      const { getChargeableAutopayMethod } = require('./autopay-eligibility');
+      const { listChargeableAutopayMethods } = require('./autopay-eligibility');
+      // (a) the expiring card the warning exists to replace; (b) EVERY
+      // method eligible today in walk order — the charge lands on some
+      // date inside the horizon and eligibility only shrinks with time
+      // (cards expire), so whatever charge() selects then is one of
+      // today's eligible fallbacks (GitHub P1: a pointer valid today but
+      // expiring mid-window hands the charge to the next default).
       autopayWalkMemo.set(key, Promise.all([
-        getChargeableAutopayMethod(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
-        getChargeableAutopayMethod(customerLike, conn, { rethrow: true, now: walkNow }),
-      ]).then((methods) => [...new Set(methods.filter((m) => m?.id != null).map((m) => String(m.id)))]));
+        listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
+        listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow }),
+      ]).then(([expiringFirst, eligibleToday]) => [...new Set(
+        [...expiringFirst.slice(0, 1), ...eligibleToday].filter((m) => m?.id != null).map((m) => String(m.id)),
+      )]));
     }
     return autopayWalkMemo.get(key);
   };
@@ -3934,7 +3942,7 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // final total is unknown here → its consumption is unbounded.
       let creditEntry = null;
       if (creditGateOn) {
-        creditEntry = { pendingMint: !reused, eligible: false, remainingDue: null };
+        creditEntry = { pendingMint: !reused, eligible: false, remainingDue: null, invoiceId: reused ? String(reused.id) : null };
         if (reused && !reused.stripe_payment_intent_id) {
           const activePlan = await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id');
           if (!activePlan) {
@@ -4130,23 +4138,44 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
     // applyAccountCreditToInvoice runs ahead of chargeInvoiceWithSavedCard
     // and the hold charge, which then finds the invoice prepaid →
     // invoice_not_collectible). A FULLY covered invoice never touches a
-    // card, so it is not a charge vector. Credit is NOT reserved and the
-    // window's visits do not complete in any guaranteed order (hook P1),
-    // so coverage is judged per CUSTOMER against the SUM: every
-    // credit-eligible invoice in the window is covered only when the
-    // balance settles ALL of them — then no completion order can leave one
-    // short. Any pending mint in the window (final total unknown → its
-    // credit consumption unbounded) disables coverage for the customer;
-    // a credit-ineligible invoice (attached PaymentIntent, active payment
-    // plan, appointment lane off the one-time lane) consumes nothing and
-    // stays a charge. Partial coverage leaves residuals the card collects
-    // → every charge stays. A missing balance row reads as 0.
+    // card, so it is not a charge vector. Credit is NOT reserved: the
+    // window's visits complete in no guaranteed order (hook P1), and other
+    // payment-ask seams draw the SAME balance down against unrelated open
+    // invoices first (autoApplyAccountCreditIfEnabled — dunning touches,
+    // sends, project reports; GitHub P1). So coverage is judged per
+    // CUSTOMER against the SUM of every competing credit-eligible
+    // obligation: the window's collectible invoices ∪ ALL the customer's
+    // open self-pay invoices the apply would accept (collectible status,
+    // no payer, no attached PaymentIntent, no active payment plan) — the
+    // window's charges are covered only when the balance settles all of
+    // them, so no order of consumption can leave one short. Any pending
+    // mint in the window (final total unknown → its consumption
+    // unbounded) disables coverage for the customer; a credit-ineligible
+    // window invoice consumes nothing and stays a charge. Partial coverage
+    // leaves residuals the card collects → every charge stays. A missing
+    // balance row reads as 0.
     const { getBalance } = require('./customer-credit');
+    const { INVOICE_UNCOLLECTIBLE_STATUSES } = require('./invoice-helpers');
+    const remainingDueOf = (inv) => Math.max(0, Math.round((Number(inv.total || 0) - Math.max(0, Number(inv.credit_applied) || 0)) * 100) / 100);
     const creditCoveredCustomers = new Set();
     for (const [customerId, exposure] of creditExposureByCustomer) {
       if (!deferredCharges.some((d) => d.customerId === customerId && d.creditEntry?.eligible)) continue;
       if (exposure.some((e) => e.pendingMint)) continue;
-      const sumDue = exposure.reduce((sum, e) => sum + (e.eligible ? e.remainingDue : 0), 0);
+      const dueByInvoice = new Map();
+      for (const e of exposure) if (e.eligible && e.invoiceId) dueByInvoice.set(e.invoiceId, e.remainingDue);
+      const competing = await conn('invoices')
+        .where({ customer_id: customerId })
+        .whereNull('payer_id')
+        .whereNull('stripe_payment_intent_id')
+        .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
+        .whereNotExists(function activePlan() {
+          this.from('payment_plans').whereRaw('payment_plans.invoice_id = invoices.id').where('payment_plans.status', 'active').select('payment_plans.id');
+        })
+        .select('id', 'total', 'credit_applied');
+      for (const inv of competing || []) {
+        if (inv?.id != null && !dueByInvoice.has(String(inv.id))) dueByInvoice.set(String(inv.id), remainingDueOf(inv));
+      }
+      const sumDue = [...dueByInvoice.values()].reduce((sum, due) => sum + due, 0);
       const balance = Number(await getBalance(customerId, conn));
       if (Number.isFinite(balance) && Math.round(balance * 100) >= Math.round(sumDue * 100)) creditCoveredCustomers.add(customerId);
     }

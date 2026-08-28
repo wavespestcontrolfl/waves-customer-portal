@@ -53,8 +53,22 @@ function isChargeableAutopayMethod(method, now = new Date(), { ignoreCardExpiry 
       && BLOCKED_PM_ACH_STATUSES.includes(method.ach_status));
 }
 
-async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now = new Date(), ignoreCardExpiry = false } = {}) {
+async function getChargeableAutopayMethod(customer, knex, options = {}) {
   if (!customer?.id) return false;
+  const methods = await listChargeableAutopayMethods(customer, knex, options);
+  return methods.length ? methods[0] : null;
+}
+
+// EVERY method the charge walk could select, in walk order (the pointer
+// first when eligible, then the eligible defaults newest-first). The first
+// entry is exactly getChargeableAutopayMethod's answer; the rest are the
+// deterministic fallbacks charge() moves to as earlier entries stop being
+// eligible (a card expiring later in a projection window) — callers that
+// must fail toward warning about every card a future charge could reach
+// (the card-expiry exemption) retain all of them. Same error contract as
+// the single-method walk: [] by default, throws under rethrow.
+async function listChargeableAutopayMethods(customer, knex, { rethrow = false, now = new Date(), ignoreCardExpiry = false } = {}) {
+  if (!customer?.id) return [];
 
   try {
     // Legacy data (or a pre-fix race) can hold SEVERAL default+enabled rows,
@@ -102,6 +116,7 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
     const achBlockedForCustomer = !!(achStatus && achStatus !== 'active');
     const eligible = (m) => isChargeableAutopayMethod(m, now, { ignoreCardExpiry })
       && !(achBlockedForCustomer && isBankMethodType(m.method_type));
+    const ordered = [];
     // Pointer first — charge() honors it before the default fallback; an
     // ineligible pointer falls through to the walk, same as charge()'s
     // "falling back to default lookup" branch.
@@ -120,10 +135,13 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
         // with isChargeableAutopayMethod, which requires is_default (hook
         // P1: a raw non-default pointer row would pass here and then fail
         // the recheck, reading as not-on-autopay).
-        return { ...pointerRow, is_default: true };
+        ordered.push({ ...pointerRow, is_default: true });
       }
     }
-    return (candidates || []).find(eligible) || null;
+    for (const m of candidates || []) {
+      if (eligible(m) && !ordered.some((o) => String(o.id) === String(m.id))) ordered.push(m);
+    }
+    return ordered;
   } catch (err) {
     // Swallowed by default (a broken read means "no chargeable method" for
     // display/scheduling call sites). Callers whose SAFE direction is
@@ -132,7 +150,7 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
     // error here reads as confirmed unenrollment and activates reminders
     // for an enrolled customer (Codex #3493 r16).
     if (rethrow) throw err;
-    return null;
+    return [];
   }
 }
 
@@ -258,6 +276,7 @@ function isBankMethodType(methodType) {
 module.exports = {
   customerOnAutopay,
   getChargeableAutopayMethod,
+  listChargeableAutopayMethods,
   isChargeableAutopayMethod,
   isBankMethodType,
   isExpiredCardMethod,

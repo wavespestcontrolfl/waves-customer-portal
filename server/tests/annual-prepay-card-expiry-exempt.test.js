@@ -27,7 +27,7 @@ const TOMORROW = addDays(TODAY, 1);
 function chain(rowsFor, calls) {
   const q = {};
   const own = []; // this query's calls only — coverage is asked per date
-  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereExists', 'from', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
+  ['whereIn', 'where', 'whereNull', 'whereNotNull', 'whereNot', 'whereNotIn', 'whereExists', 'whereNotExists', 'from', 'leftJoin', 'join', 'whereRaw', 'orderBy', 'orWhere', 'orWhereNull', 'orWhereNotNull', 'orWhereIn', 'orWhereRaw', 'andWhere', 'andWhereNot', 'modify']
     .forEach((m) => { q[m] = jest.fn((...a) => { own.push([m, ...a]); calls.push([m, ...a]); if (typeof a[0] === 'function') a[0].call(q, q); return q; }); });
   const resolve = async () => (typeof rowsFor === 'function' ? rowsFor(own) : rowsFor);
   // Thenable builder (not a bare promise): completion's cap block chains
@@ -873,6 +873,24 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
     expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-expired']));
   });
 
+  test('a pointer valid TODAY but expiring inside the window hands the charge to the next default — every eligible fallback is a vector (GitHub P1)', async () => {
+    const [ty, tm] = TODAY.split('-');
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_payment_method_id: 'pm-ptr' })],
+      paymentMethods: [
+        { ...CHARGEABLE_CARD, id: 'pm-ptr', exp_month: String(Number(tm)), exp_year: ty }, // valid through this month only
+        { ...CHARGEABLE_CARD, id: 'pm-b' },
+        { ...CHARGEABLE_CARD, id: 'pm-c' },
+        { ...CHARGEABLE_CARD, id: 'pm-dead', exp_month: '1', exp_year: '2020' }, // never selectable
+        { ...CHARGEABLE_CARD, id: 'pm-off', autopay_enabled: false },            // never selectable
+      ],
+    });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-ptr', 'pm-b', 'pm-c']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-dead')).toBe(true);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-off')).toBe(true);
+  });
+
   test("an already-expired pointer/default AND the card charge() falls back to today are BOTH vectors (hook P1)", async () => {
     route({
       terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})],
@@ -1050,6 +1068,24 @@ describe('getCardExpiryExemptions — account credit that fully settles the invo
     route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices({ v1: 'v-other' }), customers: withCredit('120.00') });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
     route({ terms: coveredAlways(['c-prepaid']), visits: twoVisits(), invoices: perVisitInvoices({ v1: 'v-other' }), customers: withCredit('240.00') });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('credit is drawn down by OTHER open invoices too (dunning / send seams) → the sum spans every open credit-eligible invoice (GitHub P1)', async () => {
+    // window: v1 reuses inv-1 (120); an unrelated open invoice of 200 sits
+    // outside the window → 240 does not settle both, 320 does
+    const withOldInvoice = () => [
+      { id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00', total: '120.00', credit_applied: 0 },
+      { id: 'inv-old', scheduled_service_id: 'v-old', status: 'overdue', subtotal: '200.00', total: '200.00', credit_applied: 0 },
+    ];
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: withOldInvoice(), customers: withCredit('240.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // the competing-obligation query mirrors the apply's own admission
+    expect(calls.invoices).toEqual(expect.arrayContaining([
+      ['where', { customer_id: 'c-prepaid' }], ['whereNull', 'payer_id'], ['whereNull', 'stripe_payment_intent_id'],
+      ['whereNotIn', 'status', require('../services/invoice-helpers').INVOICE_UNCOLLECTIBLE_STATUSES],
+    ]));
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: withOldInvoice(), customers: withCredit('320.00') });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
   });
 

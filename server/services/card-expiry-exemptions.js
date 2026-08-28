@@ -45,15 +45,14 @@ function isCardExpiryExemptMethod(exemptions, customerId, paymentMethodId) {
   return !charged.has(String(paymentMethodId));
 }
 
-const BANK_METHOD_TYPES = new Set(['ach', 'us_bank_account', 'bank', 'bank_account']);
-
 // A charged method that gives the operator nothing to act on: a bank row
-// (no card expiry), or a card whose well-formed expiry is strictly LATER
-// than the (year, month) the caller's warning window ends on. Malformed or
-// missing expiry → actionable (fail toward the alert staying open).
+// (no card expiry — the shared classifier, autopay-eligibility.isBankMethodType),
+// or a card whose well-formed expiry is strictly LATER than the (year, month)
+// the caller's warning window ends on. Malformed or missing expiry →
+// actionable (fail toward the alert staying open).
 function chargedMethodBeyondWindow(row, year, month) {
   if (!row) return false;
-  if (BANK_METHOD_TYPES.has(String(row.method_type || '').toLowerCase())) return true;
+  if (require('./autopay-eligibility').isBankMethodType(row.method_type)) return true;
   const expMonth = Number(row.exp_month);
   const rawYear = Number(row.exp_year);
   const expYear = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;

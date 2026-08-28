@@ -1,5 +1,6 @@
 // Pure per-method exemption verdicts shared by the three card-expiry
 // warning surfaces (services/card-expiry-exemptions.js).
+jest.mock('../models/db', () => jest.fn());
 const {
   emptyCardExpiryExemptions, isCardExpiryExemptMethod, cardExpiryAlertResolvableCustomerIds,
 } = require('../services/card-expiry-exemptions');
