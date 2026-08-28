@@ -273,17 +273,23 @@ t.timestamps(true, true);
 The deterministic runner writes here (`signup-runner.js` `recordAttempt`; `signup-evidence.js`
 only stores the screenshot it references). Its current ledger (`seo_signup_attempts`,
 migration `20260622000010`) is **backfilled idempotently in step 1**, and the cutover is
-ATOMIC in that same PR: the migration backfills first (migrations run pre-deploy, so no
-attempt is written to the legacy table after the backfill), and the same deploy moves
-`recordAttempt` and every reader of `seo_signup_attempts` to `seo_link_attempts` — there is
-no dual-write window and no period in which the legacy table has a live writer. Mapping — `blocked_account` →
+expand/contract in that same PR: `seo_link_attempts` carries `legacy_attempt_id` (uuid,
+partial UNIQUE where not null) and the backfill is ONE pure, re-runnable function
+(`INSERT … ON CONFLICT (legacy_attempt_id) DO NOTHING`, keyed by the legacy row id) that
+runs (a) in the migration, pre-deploy, and (b) as a catch-up at the start of every
+`signup-runner` `run()` and once at boot — so a legacy row written by an OLD pod during the
+rolling deploy (after the migration, before the new writer is live) is picked up by the next
+catch-up, never lost. The same deploy moves `recordAttempt` and every reader of
+`seo_signup_attempts` to `seo_link_attempts`; there is no dual-write. (Today the runner is
+gated OFF in prod with 0 legacy attempts, so the race is theoretical — the catch-up makes the
+cutover correct regardless.) Mapping — `blocked_account` →
 `needs_owner`, `blocked_payment` → `needs_owner`, `blocked_price_changed` → `price_changed`,
 `blocked_captcha` → `captcha`, `submitted` → `placed`, `failed`/`error` → `failed`, anything
 else → `failed` — with the verbatim legacy outcome kept in `detail.legacy_outcome` and
 `provider='deterministic_runner'`, so historical attempts and costs appear in the Outcomes/
 provider reports and the CHECK enum holds. `seo_signup_attempts` is then left in place with
-no writer, as read-only history, and dropped by a later cleanup migration once step 5's
-provider work no longer needs to compare against it.
+no writer, as read-only history; the catch-up and the legacy table are removed together by a
+later cleanup migration once step 5's provider work no longer needs to compare against it.
 
 ### 3.4b `seo_link_domain_sources` — every touch, normalized
 
