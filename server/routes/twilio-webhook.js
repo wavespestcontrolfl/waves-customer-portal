@@ -821,6 +821,11 @@ router.post('/sms', async (req, res) => {
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
 
+    // The unified row was written above; if the thread was opened in the
+    // meantime that row is already read and this legacy row must agree, or
+    // it would sit unread forever (no later mirror can find it — hook P1).
+    const unifiedAlreadyRead = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+      .then((r) => r?.is_read === true).catch(() => false);
     const [smsLogEntry] = await db('sms_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound', from_phone: From, to_phone: To,
@@ -828,7 +833,7 @@ router.post('/sms', async (req, res) => {
       message_type: messageType,
       // Courtesy closers are read on arrival in the legacy log too, so the
       // sms_log-backed unread counts agree with the unified messages row.
-      ...(courtesyOnly ? { is_read: true } : {}),
+      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
       metadata: JSON.stringify({
         locationId: numberConfig.locationId,
         source: numberConfig.type,

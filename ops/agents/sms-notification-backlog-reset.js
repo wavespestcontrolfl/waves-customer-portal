@@ -56,7 +56,7 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
       SELECT (l.message_body ~* $1) AS asks FROM sms_log l
       WHERE i.id IS NOT NULL AND l.direction='outbound' AND l.to_phone = i.from_phone AND l.from_phone = i.to_phone
         AND l.status IN ('queued','sent','delivered')
-        AND l.message_type <> 'internal_alert' AND l.created_at < m.created_at AND l.created_at > m.created_at - interval '24 hours'
+        AND (l.message_type <> 'internal_alert' OR l.message_type IS NULL) AND l.created_at < m.created_at AND l.created_at > m.created_at - interval '24 hours'
       ORDER BY l.created_at DESC LIMIT 1) o ON true
     WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)`, [ASKS]);
   const closers = unread.rows.filter((r) => isSmsReaction(r.body) || (!r.has_media && isCourtesyOnly(r.body, { awaitingAnswer: r.awaiting !== false }))).map((r) => r.id);
