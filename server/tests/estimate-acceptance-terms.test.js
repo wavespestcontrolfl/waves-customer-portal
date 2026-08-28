@@ -165,6 +165,27 @@ describe('accepted-onboarding email recipient — linked customer without a usab
     expect(sendTemplate.mock.calls[0][0].to).toBe('pat@example.com');
     expect(sendTemplate.mock.calls[0][0].recipientId).toBe('cust-1');
   });
+
+  test('outcomes: no address anywhere → no_address; a thrown send → failed (never null)', async () => {
+    jest.resetModules();
+    const sendTemplate = jest.fn(async () => { throw new Error('SendGrid 503'); });
+    jest.doMock('../services/email-template-library', () => ({ sendTemplate, redactEmailAddresses: (s) => s }));
+    let contactEmail = '';
+    jest.doMock('../models/db', () => (table) => {
+      const b = {};
+      b.where = () => b; b.whereNull = () => b; b.orderBy = () => b; b.update = async () => 1;
+      b.first = async () => {
+        if (table === 'customers') return undefined;
+        if (table === 'estimates') return { token: 't', customer_name: 'Pat', customer_email: contactEmail };
+        return undefined;
+      };
+      return b;
+    });
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    expect(await sendEstimateAcceptedOnboarding({ customerId: null, estimateId: 'e', serviceLabel: 'x' })).toEqual({ sent: false, outcome: 'no_address' });
+    contactEmail = 'pat@example.com';
+    expect(await sendEstimateAcceptedOnboarding({ customerId: null, estimateId: 'e', serviceLabel: 'x' })).toMatchObject({ sent: false, outcome: 'failed' });
+  });
 });
 
 describe('accepted-onboarding email acceptance_note', () => {

@@ -92,7 +92,7 @@ test('a sent-ish row → fulfilment stamped, never emailed twice', async () => {
 });
 
 test('no usable email: escalated to the office ONCE after 7 days, not before', async () => {
-  sendEstimateAcceptedOnboarding.mockResolvedValue(null);
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: false, outcome: 'no_address' });
   // 2 hours old: no escalation yet.
   let result = await runAcceptanceCopySweep();
   expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
@@ -110,8 +110,25 @@ test('no usable email: escalated to the office ONCE after 7 days, not before', a
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
 });
 
+test('a suppression-blocked send is undeliverable too → escalated after 7 days', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: false, blocked: true, reason: 'Email suppressed' });
+  acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 8 * 86400000).toISOString() }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 1 });
+  expect(notifyAdmin.mock.calls[0][2]).toContain('suppressed');
+});
+
+test('a transient failure is retried, never escalated as "no email"', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: false, outcome: 'failed', reason: 'SendGrid 503' });
+  acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 30 * 86400000).toISOString() }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
+  expect(notifyAdmin).not.toHaveBeenCalled();
+  expect(acceptanceUpdate).not.toHaveBeenCalled();
+});
+
 test('a policy-suppressed alert is NOT stamped — retried next sweep', async () => {
-  sendEstimateAcceptedOnboarding.mockResolvedValue(null);
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: false, outcome: 'no_address' });
   notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'bell_policy' });
   acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 8 * 86400000).toISOString() }];
   const result = await runAcceptanceCopySweep();

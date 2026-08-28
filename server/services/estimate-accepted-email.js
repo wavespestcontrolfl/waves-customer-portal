@@ -86,6 +86,11 @@ function acceptedOnboardingKey(estimateId, acceptanceId) {
     : `estimate.accepted_onboarding:${estimateId}`;
 }
 
+// Returns the sendTemplate result on a send ({sent:true} / {sent:false,
+// blocked:true} for a suppression), {sent:false, outcome:'no_address'} when
+// no usable email exists, {sent:false, outcome:'failed'} on a transient
+// failure, or null when called without an estimate. Callers that fire-and-
+// forget ignore it; the catch-up sweep keys its retry / escalate decision on it.
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey } = {}) {
   try {
     if (!estimateId) return null;
@@ -102,7 +107,8 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
     if (estimateContact) email = clean(estimateContact.customer_email);
     if (!email || !email.includes('@')) {
       logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
-      return null;
+      // Distinct from a failure: nothing to retry until an address exists.
+      return { sent: false, outcome: 'no_address' };
     }
     const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
     const acceptanceNote = await acceptanceNoteFor(estimateId, acceptanceId);
@@ -141,7 +147,8 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       ? `SendGrid ${err.status}`
       : EmailTemplateLibrary.redactEmailAddresses(err.message);
     logger.error(`[estimate-accepted-email] failed for estimate ${estimateId}: ${reason}`);
-    return null;
+    // Transient (DB / template / provider) — the catch-up sweep retries.
+    return { sent: false, outcome: 'failed', reason };
   }
 }
 

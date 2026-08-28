@@ -414,15 +414,19 @@ async function runAcceptanceCopySweep() {
         idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
       });
       if (result?.sent) { sent += 1; continue; }
-      // null = no usable email anywhere (sender skipped). Not a mail problem
-      // to retry — surface it once so a person can deliver the copy.
+      // Outcomes (GH Codex r3 P1): no usable address anywhere, or a
+      // suppression block (bounced/unsubscribed — the provider will not
+      // deliver) are NOT mail problems a retry can fix → surface once so a
+      // person delivers the copy. A transient failure ({outcome:'failed'})
+      // is left for tomorrow's retry and never escalated as "no email".
+      const undeliverable = result?.outcome === 'no_address' || result?.blocked === true;
       const ageDays = (now - new Date(row.accepted_at).getTime()) / 86400000;
-      if (result === null && !row.copy_escalated_at && ageDays >= ACCEPTANCE_COPY_ESCALATE_DAYS) {
+      if (undeliverable && !row.copy_escalated_at && ageDays >= ACCEPTANCE_COPY_ESCALATE_DAYS) {
         const NotificationService = require('./notification-service');
         const notification = await NotificationService.notifyAdmin(
           'estimate',
           `Acceptance copy not deliverable: ${estimate.customer_name || 'customer'}`,
-          `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)} with no usable email on the customer or the estimate. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`,
+          `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)}; ${result?.blocked ? 'their email is suppressed (bounced/unsubscribed)' : 'no usable email on the customer or the estimate'}. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`,
         );
         // Stamp ONLY when a row was persisted (GH Codex r3 P1): the admin bell
         // policy can silence the 'estimate' category (owner-overridable via
