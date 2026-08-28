@@ -251,7 +251,19 @@ const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:
 // before the abbreviation matchers. "Columbia SC pest control" still is.
 const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bifen|bifenthrin|suspend|fipro|tengard|cyzmic|onslaught|dominion|premise|altriset|transport|alpine|phantom|demand|talstar|tempo|celsius|advion|blindside|headway|prodiamine|dimension|arena|acelepryn|merit|safari|xylecore|specticle|certainty|manuscript|tribute|sedgehammer|quali-pro|lesco|adjourn|floramite|roundup\s+quikpro|quikpro|essentria|mavrik|avid|orthene|sevin|spinosad|conserve|eagle|heritage|banner\s+maxx|prostar|fame|pillar|velocity|monument|katana|revolver|negate|drive\s+xlr8|tenacity|speedzone|trimec|q4|barricade|pendulum|gallery|snapshot|ronstar|regalkade)\s+(?:sc|cs|wp|wsb|ec|wg|wdg|sg|me|ew|ulv|xt|zc|g|p|pro|total|ls|sl|sc\/ls|xlr8|maxx)\b|\b[a-z][a-z-]*\s+(?:sc|cs|wp|wdg|wg|ec|ls|sl)\s+(?:for|mosquito|mosquitoes|mite|mites|weed|weeds|insect|insects|termite|termites|lawn|turf|control|application|applications|rate|rates|label|mix|mixing|per|oz|ounces|gallon|gallons|spray|treatment|termiticide|insecticide|fungicide|herbicide|miticide)\b/gi;
 // Nationwide domestic targeting is not footprint-anchored either.
-const NATIONWIDE_RE = /\b(?:united states|u\.s\.a?\.?|usa|nationwide|across the (?:country|nation|us|usa)|all 50 states|every state)(?![a-z])/i;
+// Bare "US" / "America" only in unambiguous nationwide forms ("in the US",
+// "across America", "US pest control") — "let us help" / "American
+// cockroach" are not geography.
+const NATIONWIDE_RE = new RegExp(
+  `\\b(?:united states|u\\.s\\.a?\\.?|usa|nationwide|america|all 50 states|every state)(?![a-z])`
+  + `|\\b(?:in|across|throughout|around|serving|anywhere in)\\s+(?:the\\s+)?(?:us|u\\.s\\.|states)(?![a-z])`
+  + `|\\bus\\s+(?:${SERVICE_INTENT})\\b`,
+  'i'
+);
+// Chemical symbols and agronomic / measurement abbreviations that collide
+// with postal codes (Ca, Mg, K, GA = gibberellic acid, CT values, …) — scrubbed
+// before the abbreviation matchers when they carry that context.
+const SCIENCE_EXEMPT_RE = /\b(?:(?:low|high|soil|leaf|tissue|available|excess|deficient|deficiency|deficiencies|adequate|optimal|foliar|calcium|magnesium|potassium|nitrogen|phosphorus|sulfur|iron|ppm|mg\/l|percent|%)\s+(?:ca|mg|k|n|p|s|fe|mn|zn|cu|b|mo|al|na|cl|co|ni)|(?:ca|mg|k|n|p|fe|mn|zn|cu|na|al|co|ni)\s+(?:levels?|deficienc(?:y|ies)|ratios?|content|uptake|availability|toxicity|sufficiency|in\s+(?:soil|soils|turf|lawns?|grass|leaves|plants?|tissue))|ga(?:3)?\s+(?:applications?|treatments?|sprays?|levels?|rates?|concentrations?|sensitivity)|ct\s+(?:values?|scans?|products?|calculations?|concentration))\b/gi;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
@@ -270,7 +282,8 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // "<Name> pest control" / "pest control <Name>" — the place-first and
 // service-first search forms. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
 // activity") are excluded: both read as ordinary words before a service.
-const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile' && n !== 'Sunrise');
+// (Reading too: "Reading pest control labels" is a gerund, not Reading, PA.)
+const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading'].includes(n));
 const CONTEXT_PLACE_RE = new RegExp(
   `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
   + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
@@ -429,7 +442,7 @@ function classifyGeoScope(text) {
   // compounds ("San Jose scale", "Portland cement") and formulations are not
   // markets — scrubbed for BOTH the served-city and the out-of-area scans
   // ("Texas Mountain Laurel" is a plant, not Laurel, FL).
-  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(SCIENCE_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
   const footprint = [
     ...findAll(cityRe(footprintCities()), tg.replace(FOOTPRINT_VERNACULAR_RE, ' ')),
     ...findAll(footprintContextRe(), tg),

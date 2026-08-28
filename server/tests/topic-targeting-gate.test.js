@@ -900,3 +900,28 @@ describe('PR codex r18 (fa945c056)', () => {
     expect(gate.classifyGeoScope('pest control in laurel fl').scope).toBe('footprint');
   });
 });
+
+describe('PR codex r19 (9a7979af4)', () => {
+  test('bare US / America nationwide forms are out of footprint; "let us help" and "American cockroach" are not', () => {
+    for (const t of ['US pest control guide', 'pest control in the US', 'pest control across America', 'termite treatment throughout America', 'best exterminators in the states']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['let us help with ants', 'american cockroach control in sarasota', 'contact us about termites']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+  test('"Reading …" before a service is a gerund; Reading with geo context is still a place', () => {
+    for (const t of ['Reading pest control labels', 'Reading pest control service reports', 'Reading termite inspection reports']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    expect(gate.classifyGeoScope('pest control in Reading').scope).toBe('out_of_area');
+    expect(gate.classifyGeoScope('Reading, PA exterminator').scope).toBe('out_of_area');
+  });
+  test('chemical / agronomic / measurement abbreviations are not postal codes', () => {
+    for (const t of ['Low Ca in St. Augustine lawns', 'GA applications for turf growth', 'CT values for termite fumigation', 'soil Mg deficiency in bahia grass', 'K levels in florida lawns']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    expect(gate.classifyGeoScope('pest control fresno, ca').out_of_area).toContain('CA');
+    expect(gate.classifyGeoScope('atlanta ga pest control').out_of_area).toContain('GA');
+  });
+});
