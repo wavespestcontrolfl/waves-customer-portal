@@ -46,7 +46,7 @@ async function fullSync(state) {
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
-        const inserted = await upsertEmail(parsed);
+        const inserted = await upsertEmail(parsed, { backfill: true }); // first-connect history: never notifies
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
@@ -188,7 +188,7 @@ async function incrementalSync(state) {
   }
 }
 
-async function upsertEmail(parsed) {
+async function upsertEmail(parsed, { backfill = false } = {}) {
   const existing = await db('emails').where('gmail_id', parsed.gmail_id).first();
 
   // Match sender to customer
@@ -322,6 +322,7 @@ async function upsertEmail(parsed) {
     authenticationResults: parsed.authentication_results,
     fromAddress: parsed.from_address,
     receivedAt: parsed.received_at,
+    backfill,
   })) {
     try {
       const { triggerNotification } = require('../notification-triggers');
@@ -405,7 +406,11 @@ async function upsertEmail(parsed) {
  * and anything not in INBOX never ring.
  */
 const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress, receivedAt, now = Date.now() } = {}) {
+function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress, receivedAt, backfill = false, now = Date.now() } = {}) {
+  // A fullSync (first Gmail connect / empty table) is history, whatever its
+  // timestamps say — it never notifies (hook P1). The 24h guard below is the
+  // second line for incremental syncs that replay old messages.
+  if (backfill) return false;
   if (!customerId || classification || listUnsubscribe) return false;
   if (!(labelIds || []).includes('INBOX')) return false;
   // Only NEW arrivals ring: a full mailbox backfill (first connect, empty

@@ -652,5 +652,7 @@ describe('customer_email_received eligibility (email-sync) — sender must authe
     const ok = 'dkim=pass header.d=customer-domain.com';
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString() })).toBe(false);
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: null })).toBe(false);
+    // First-connect fullSync: even a fresh timestamp never rings.
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, backfill: true })).toBe(false);
   });
 });

@@ -663,6 +663,11 @@ function pushTagFor(triggerKey, payload = {}) {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
   }
+  if (triggerKey === 'customer_email_received') {
+    // Per-email tag: same-tag pushes replace each other without renotifying,
+    // so two customer emails must not collapse into one banner (hook P1).
+    return `waves-customer_email_received-${payload.emailId || crypto.randomUUID()}`;
+  }
   if (triggerKey === 'customer_voicemail_callback') {
     // Per-call tag: the service worker replaces same-tag pushes with
     // renotify:false, so a static tag would let a second caller's alert

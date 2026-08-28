@@ -37,10 +37,12 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'customer_email_received',
   'payment_failed',
   'bill_payment_error',
-  // Owner ruling 2026-08-28: the bell is for what Adam ACTS on today.
-  // Removed from the ring list: twilio_failure (infra — still pushes) and
-  // estimate_deposit_reconcile_needed (deposit ledger mismatch). Both stay
-  // reachable through their 'system' category override.
+  // Owner ruling 2026-08-28: the bell is for what Adam ACTS on today, and
+  // push follows the bell (one routing decision per event). Removed from the
+  // ring list — silent on BOTH surfaces by default: twilio_failure (infra;
+  // the canaries' direct internal_alert SMS to the owner is unaffected) and
+  // estimate_deposit_reconcile_needed (deposit ledger mismatch). Both are
+  // re-enabled together through the 'system' category override.
 ]);
 
 const TRIGGER_BELL_DENYLIST = new Set([
