@@ -1654,8 +1654,27 @@ const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g;
 // code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
 // still address the original text. Shared stripper, so "rendered" here means
 // exactly what the table scanner and CTA extraction mean by it.
+// Same-length blanking that keeps newlines (line indices stay aligned).
+function blankKeepNewlines(match) {
+  return match.replace(/[^\n]/g, ' ');
+}
+
+// Markdown image syntax inside a JSX/HTML tag (an attribute string) or an
+// MDX expression is data, not a rendered image — mask tags (multi-line
+// components included) and balanced {…} expressions after the shared
+// stripper has removed code and comments.
+function blankJsxAndExpressions(text) {
+  let out = String(text || '').replace(/<[A-Za-z!/][^>]*>/g, blankKeepNewlines);
+  for (let pass = 0; pass < 4; pass++) {
+    const next = out.replace(/\{[^{}]*\}/g, blankKeepNewlines);
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
 function renderedBodyLines(body) {
-  return contentGuardrails.blankNonRenderedMarkdown(String(body || '')).split('\n');
+  return blankJsxAndExpressions(contentGuardrails.blankNonRenderedMarkdown(String(body || ''))).split('\n');
 }
 
 function bodyImageRefs(body) {

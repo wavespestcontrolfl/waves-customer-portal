@@ -3613,6 +3613,21 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(files).not.toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
   });
 
+  test('bodyImageRefs: image syntax inside JSX/HTML attributes or MDX expressions is data, not an image (hook r7)', () => {
+    const body = [
+      '<Card note="![x](/images/2026/08/a.webp)" />',
+      '<ComparisonTable',
+      '  rows={[["![y](/images/2026/08/b.webp)", "z"]]}',
+      '/>',
+      '{"![z](/images/2026/08/c.webp)"}',
+      '<span title="![w](/images/2026/08/d.webp)">t</span>',
+      '',
+      '![real](/images/2026/08/e.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/e.webp']);
+    expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(7);
+  });
+
   test('bodyImageRefs: comments, JSX comments, code spans and escaped syntax are not images; an escaped backslash before ! still renders (GH r1)', () => {
     const body = [
       '![real](/images/2026/08/a.webp)',
