@@ -441,10 +441,83 @@ describe('voice quiet window (9:00–17:59 ET, Mon–Fri, via datetime-et)', () 
 });
 
 describe('voice pilot caps (purpose late_payment)', () => {
-  test('two eligible invoices → pilot_requires_single_invoice', async () => {
-    armAllowedBaseline({ invoices: [invoiceRow(), invoiceRow({ id: 'inv-2', invoice_number: 'WPC-2026-1101' })] });
+  // ACCOUNT-LEVEL (owner ruling 2026-08-28): several open invoices are ONE
+  // balance, and the clock is the OLDEST-due invoice — a fresh 4-day invoice
+  // never softens a 30-day one, and the whole set rides eligibleInvoiceIds.
+  test('two eligible invoices are collected as one balance; the anchor is the oldest due', async () => {
+    armAllowedBaseline({ invoices: [
+      invoiceRow({ id: 'inv-new', invoice_number: 'WPC-2026-1101', due_date: '2026-08-08', created_at: '2026-08-01T12:00:00.000Z', total: '44.55' }),
+      invoiceRow(), // due 2026-07-22 ⇒ 21 days on WED_11AM (2026-08-12)
+    ] });
     const result = await evalVoice();
-    expect(result.denialReasons).toContain('pilot_requires_single_invoice');
+    expect(result.denialReasons).not.toContain('pilot_requires_single_invoice');
+    expect(result.denialReasons).not.toContain('pilot_not_overdue_long_enough');
+    expect(result.eligibleInvoiceIds.sort()).toEqual(['inv-1', 'inv-new']);
+    expect(result.eligibleBalanceCents).toBe(12800 + 4455);
+    expect(result.eligibleInvoiceCents).toEqual({ 'inv-1': 12800, 'inv-new': 4455 }); // per-invoice remainder for the pre-dial drift check
+    expect(result.eligibleAccountTier).toBe(14); // the anchor's tier = the register origination holds the approval to
+    expect(result.eligibleAnchorDueDate).toBe('2026-07-22');
+  });
+
+  test('an INCOMPLETE account read (a dropped unprovable row, or the candidate bound) denies the call — a partial total is never "the total"', async () => {
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => { opts.onResolveFailure(); return [invoiceRow()]; });
+    expect((await evalVoice()).denialReasons).toContain('balance_read_incomplete');
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => { opts.onTruncation(); return [invoiceRow()]; });
+    expect((await evalVoice()).denialReasons).toContain('balance_read_incomplete');
+    armAllowedBaseline();
+    expect((await evalVoice()).denialReasons).not.toContain('balance_read_incomplete');
+  });
+
+  test('a legacy unpaid row dropped on a payer-resolve failure marks the read INCOMPLETE too', async () => {
+    const { rowIsSelfPayDue } = require('../services/open-balance');
+    armAllowedBaseline();
+    const prev = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'invoices'
+      ? chain({ result: [invoiceRow({ id: 'inv-legacy', status: 'unpaid', due_date: '2026-06-01' })] })
+      : prev(table)));
+    rowIsSelfPayDue.mockImplementationOnce(async (cid, row, opts) => { opts.onResolveFailure(new Error('payer lookup down')); return false; });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('balance_read_incomplete');
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']); // the survivor alone is NOT "the total"
+  });
+
+  test('a dunning-stop check error on one invoice marks the read INCOMPLETE (the survivors are not "the total")', async () => {
+    const { isDunningStopped } = require('../services/invoice-followups');
+    armAllowedBaseline({ invoices: [invoiceRow(), invoiceRow({ id: 'inv-2', due_date: '2026-08-01' })] });
+    isDunningStopped.mockImplementationOnce(async () => false).mockImplementationOnce(async () => { throw new Error('followups down'); });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('balance_read_incomplete');
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
+  });
+
+  test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {
+    armAllowedBaseline({ invoices: [invoiceRow({ due_date: '2026-08-08' })] });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('pilot_not_overdue_long_enough');
+  });
+
+  test('payment_plan_active blocks every channel (A2 mirrors its PAYMENT_PLAN state here)', async () => {
+    expect(ContactPolicy.FLAG_BLOCKED_CHANNELS.payment_plan_active).toEqual(['sms', 'email', 'voice', 'manual_call']);
+    armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
+    expect((await evalVoice()).denialReasons).toContain('flag_payment_plan_active');
+    armAllowedBaseline({ flags: [{ flag: 'payment_plan_active', customer_id: 'cust-1', released_at: null }] });
+    const sms = await ContactPolicy.evaluate('cust-1', { channel: 'sms', purpose: 'balance_reminder', now: WED_11AM_EDT });
+    expect(sms.denialReasons).toContain('flag_payment_plan_active');
+  });
+
+  test('a customer who prefers Spanish is never given the English automated call', async () => {
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'es' }) });
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'es-US' }) });
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'Español' }) }); // legacy free-form value
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'en' }) });
+    expect((await evalVoice()).denialReasons).not.toContain('customer_prefers_spanish');
+    armAllowedBaseline();
+    expect((await evalVoice()).denialReasons).not.toContain('customer_prefers_spanish');
   });
 
   // Owner ruling 2026-08-28: NO balance band — any amount is callable.
@@ -952,6 +1025,8 @@ describe('microdeposit-pending pilot denial', () => {
 
     armAllowedBaseline({ invoices: [PI_INVOICE()] });
     StripeService.isInvoiceAwaitingMicrodepositVerification.mockRejectedValueOnce(new Error('stripe down'));
+    // The helper fails OPEN for the SMS rails; this policy asks it to throw so an unknown state DENIES (gh r6).
+    expect(StripeService.isInvoiceAwaitingMicrodepositVerification).toHaveBeenLastCalledWith(expect.anything(), { throwOnError: true });
     expect((await evalVoice()).denialReasons).toContain('pilot_awaiting_microdeposit_verification');
 
     armAllowedBaseline(); // PI null

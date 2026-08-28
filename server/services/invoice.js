@@ -5634,5 +5634,8 @@ module.exports._invoiceHasNonBaseCharges = invoiceHasNonBaseCharges;
 module.exports._invoiceHasDepositCreditLine = invoiceHasDepositCreditLine;
 module.exports._parseInvoiceLineItems = parseInvoiceLineItems;
 module.exports.CANCELLED_SERVICE_VOIDABLE_STATUSES = CANCELLED_SERVICE_VOIDABLE_STATUSES;
+// The statuses sendViaSMS/claimInvoiceForSend will claim — the ONE
+// sendability authority (the collections pay-link anchor reads it).
+module.exports.SEND_CLAIMABLE_STATUSES = SEND_CLAIMABLE_STATUSES;
 module.exports._s3KeyFromStoredUrl = s3KeyFromStoredUrl;
 module.exports._withFreshServicePhotoUrls = withFreshServicePhotoUrls;
