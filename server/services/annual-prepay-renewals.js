@@ -3624,23 +3624,35 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
   // noise, never a missed charge). Lookup failures propagate to the outer
   // catch (exempt nobody). One pair of walks per customer.
   const walkNow = new Date();
+  const horizonNoon = parseETDateTime(`${dateOnly(horizon)}T12:00`);
   const autopayWalkMemo = new Map();
   const autopayWalkMethodIds = async (customerLike) => {
     const key = String(customerLike.id);
     if (!autopayWalkMemo.has(key)) {
-      const { listChargeableAutopayMethods } = require('./autopay-eligibility');
-      // (a) the expiring card the warning exists to replace; (b) EVERY
-      // method eligible today in walk order — the charge lands on some
-      // date inside the horizon and eligibility only shrinks with time
-      // (cards expire), so whatever charge() selects then is one of
-      // today's eligible fallbacks (GitHub P1: a pointer valid today but
-      // expiring mid-window hands the charge to the next default).
+      const { listChargeableAutopayMethods, isExpiredCardMethod, isBankMethodType } = require('./autopay-eligibility');
+      // (a) the expiring card the warning exists to replace; (b) today's
+      // eligible methods in walk order, AS FAR AS the horizon can make
+      // each predecessor fall through: the charge lands on some date
+      // inside the horizon and eligibility only shrinks with time (cards
+      // expire), so charge() moves past a method only once it has
+      // expired — a method still valid AT the horizon (or a bank row) is
+      // selected on every date in the window and nothing behind it can be
+      // (GitHub P1 + r2 P2: a pointer valid today but expiring mid-window
+      // hands the charge to the next default; a pointer valid through the
+      // horizon never does).
       autopayWalkMemo.set(key, Promise.all([
         listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
         listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow }),
-      ]).then(([expiringFirst, eligibleToday]) => [...new Set(
-        [...expiringFirst.slice(0, 1), ...eligibleToday].filter((m) => m?.id != null).map((m) => String(m.id)),
-      )]));
+      ]).then(([expiringFirst, eligibleToday]) => {
+        const reachable = [];
+        for (const m of eligibleToday) {
+          reachable.push(m);
+          if (isBankMethodType(m.method_type) || !isExpiredCardMethod(m, horizonNoon)) break;
+        }
+        return [...new Set(
+          [...expiringFirst.slice(0, 1), ...reachable].filter((m) => m?.id != null).map((m) => String(m.id)),
+        )];
+      }));
     }
     return autopayWalkMemo.get(key);
   };
@@ -3655,7 +3667,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
   // scans hold cards (saved enableAutopay:false), so the Auto Pay card's
   // warning must stay as the customer's only notice (hook P1): record it
   // as unresolved. Malformed expiry reads as expired (isExpiredCardMethod).
-  const horizonNoon = parseETDateTime(`${dateOnly(horizon)}T12:00`);
   try {
     // Paid coverage must span the whole window [today, horizon], but it may
     // be SPLIT across adjacent terms (createTermForAnnualPrepay writes a

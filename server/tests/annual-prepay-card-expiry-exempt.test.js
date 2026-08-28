@@ -886,9 +886,34 @@ describe('getCardExpiryExemptions — per-method charge vectors', () => {
       ],
     });
     const ex = await getCardExpiryExemptions(HORIZON);
-    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-ptr', 'pm-b', 'pm-c']));
+    // pm-b is valid through the horizon, so charge() can never reach pm-c inside it (r2 P2)
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-ptr', 'pm-b']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-c')).toBe(true);
     expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-dead')).toBe(true);
     expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-off')).toBe(true);
+  });
+
+  test('a pointer valid THROUGH the horizon (or a healthy bank pointer) is the only vector — a legacy fallback expiring this week is never reached (GitHub r2 P2)', async () => {
+    const [ty, tm] = TODAY.split('-');
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_payment_method_id: 'pm-ptr' })],
+      paymentMethods: [
+        { ...CHARGEABLE_CARD, id: 'pm-ptr' },                                          // 2099
+        { ...CHARGEABLE_CARD, id: 'pm-legacy', exp_month: String(Number(tm)), exp_year: ty }, // expiring now
+      ],
+    });
+    let ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-ptr']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-legacy')).toBe(true);
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ customer_autopay_payment_method_id: 'pm-bank' })],
+      paymentMethods: [
+        { ...CHARGEABLE_CARD, id: 'pm-bank', method_type: 'us_bank_account', exp_month: null, exp_year: null },
+        { ...CHARGEABLE_CARD, id: 'pm-legacy', exp_month: String(Number(tm)), exp_year: ty },
+      ],
+    });
+    ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-bank']));
   });
 
   test("an already-expired pointer/default AND the card charge() falls back to today are BOTH vectors (hook P1)", async () => {
