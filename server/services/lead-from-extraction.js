@@ -336,7 +336,12 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
       'Quote promised on call — send it',
       [
         `${who}: the voice agent could not give a number and promised a written estimate (${service || 'service discussed on the call'}).`,
-        'Existing customer — no lead is tracking this promise; this card is the obligation. Send it before end of day.',
+        opts.spokenExpectation === 'about_15_minutes'
+          ? '⚠ The caller was told it usually goes out in about 15 minutes — send it NOW.'
+          : (opts.spokenExpectation === 'when_office_opens'
+            ? 'The caller was told it goes out when the office opens — send it first thing.'
+            : 'The caller was told it will be sent as soon as possible.'),
+        'Existing customer — no lead is tracking this promise; this card is the obligation.',
         // The details collected ON THIS CALL are the fulfilment details (hook
         // P1): the account's email/address may be stale or a different
         // property. Nothing here mutates the customer — staff decide.
@@ -364,6 +369,8 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
           property_count: 1,
           source: 'voice_agent',
           kind: 'estimate_request',
+          spoken_expectation: opts.spokenExpectation || 'as_soon_as_possible',
+          urgent: opts.spokenExpectation === 'about_15_minutes',
           requested_service: service,
           // fulfilment details as captured (never applied to the customer here)
           first_name: extracted.first_name || null,
@@ -730,7 +737,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
 
     // Urgency: upgrade-only (mirror voicemail path) — hot promotes to urgent,
     // otherwise only fill if still empty so a cold follow-up never downgrades.
-    if (extracted.lead_quality === 'hot') leadUpdates.urgency = 'urgent';
+    if (extracted.lead_quality === 'hot' || extracted.quote_promised_expectation === 'about_15_minutes') leadUpdates.urgency = 'urgent';
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
     if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
@@ -759,6 +766,9 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     // and a later capture that does not mention it must not erase it.
     if (extracted.quote_requested === true) merged.quote_requested = true;
     if (extracted.quote_promised === true) merged.quote_promised = true;
+    // What the caller was TOLD about turnaround travels with the lead
+    // (hook P1); a 15-minute expectation makes the lead urgent for staff.
+    if (extracted.quote_promised_expectation) merged.quote_promised_expectation = extracted.quote_promised_expectation;
     const contactPreference = contactPreferenceFields(extracted);
     if (contactPreference) {
       if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;

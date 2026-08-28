@@ -860,9 +860,18 @@ async function executeTool(name, input = {}, ctx = {}) {
       const estimateMissing = estimateRequested
         ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
         : [];
+      // The spoken turnaround is decided HERE, from the office clock, and
+      // travels with the artifact (hook P1): open ⇒ "usually about 15
+      // minutes" (urgent for staff); closed ⇒ "when the office opens";
+      // unknown ⇒ "as soon as possible". The model only ever repeats it.
+      const officeOpen = typeof ctx.officeOpenNow === 'function' ? ctx.officeOpenNow() : null;
+      const spokenExpectation = officeOpen === true
+        ? 'about_15_minutes'
+        : (officeOpen === false ? 'when_office_opens' : 'as_soon_as_possible');
       if (estimateRequested) {
         extracted.quote_requested = true;
         extracted.quote_promised = estimateMissing.length === 0;
+        if (extracted.quote_promised) extracted.quote_promised_expectation = spokenExpectation;
       }
       // ⭐ AN EXPLICIT VERBAL OPT-OUT IS HONOURED, NOT JUST FILED.
       //
@@ -1349,16 +1358,20 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null, spokenExpectation })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
           estimateQueued = false;
         }
       }
+      const expectationCopy = {
+        about_15_minutes: 'The office is open: tell the caller the written estimate usually goes out in about 15 minutes.',
+        when_office_opens: 'The office is closed: tell the caller the written estimate goes out when the office opens — do not name a time.',
+        as_soon_as_possible: 'Office hours are unknown right now: tell the caller the written estimate will be sent as soon as possible — do not name a time.',
+      }[spokenExpectation];
       const estimateNote = estimateQueued === true
-        ? ' The estimate request IS on the office queue: you may tell the caller a written estimate will be '
-          + 'sent — set WHEN from the latest CLOCK DATA, never a time you cannot know.'
+        ? ` The estimate request IS on the office queue. ${expectationCopy}`
         : (estimateQueued === false
           ? (estimateMissing.length
             ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `

@@ -908,6 +908,19 @@ class RelayConversation {
       // Estimate fields accumulate ACROSS captures on this call (hook P1): a
       // retry that supplies only the missing email must not lose the name
       // and address given on the first capture.
+      // Is the office open RIGHT NOW (ET)? true / false / null (unknown). The
+      // estimate-promise wording is decided from this in code (hook P1) and
+      // recorded on the artifact — never left to the model's reading of the
+      // clock block.
+      officeOpenNow: () => {
+        const h = convo._officeHours;
+        if (!h || !Number.isFinite(h.startMin) || !Number.isFinite(h.endMin)) return null;
+        if (h.closedToday === true) return false;
+        const { etParts } = require('../../utils/datetime-et');
+        const et = etParts(convo._now());
+        const m = Number(et.hour) * 60 + Number(et.minute);
+        return m >= h.startMin && m < h.endMin;
+      },
       getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
       noteEstimateFields: (fields = {}) => {
         const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));

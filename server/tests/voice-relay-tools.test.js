@@ -313,9 +313,10 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     test('existing customer + card persisted ⇒ promise authorized, WHEN from CLOCK DATA', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
-      const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito', first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est' });
-      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.objectContaining({ callSid: 'CA-est' }));
+      const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito', first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est', officeOpenNow: () => true });
+      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.objectContaining({ callSid: 'CA-est', spokenExpectation: 'about_15_minutes' }));
       expect(out).toMatch(/estimate request IS on the office queue/);
+      expect(out).toMatch(/usually goes out in about 15 minutes/);
       expect(out).toMatch(/no new lead was created/i);
       expect(out).not.toMatch(/do not say a new request/); // no self-contradiction when queued
       expect(out).toMatch(/Do not say an appointment was created/);
@@ -394,6 +395,20 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       // every field from the FIRST capture survives the retry, including the service context
       expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr', requested_service: 'mosquito', pain_points: 'bites on the lanai' }), expect.anything());
       expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: false }));
+    });
+
+    test('the spoken turnaround is decided from the office clock in code and travels with the artifact', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-7', created: true });
+      const full = { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' };
+      const closed = await executeTool('capture_lead', full, { from: '+19415551234', callSid: 'CA-c', officeOpenNow: () => false });
+      expect(closed).toMatch(/office is closed: tell the caller the written estimate goes out when the office opens — do not name a time/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: true, quote_promised_expectation: 'when_office_opens' }), expect.anything());
+      const unknown = await executeTool('capture_lead', full, { from: '+19415551234', callSid: 'CA-u' });
+      expect(unknown).toMatch(/as soon as possible — do not name a time/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised_expectation: 'as_soon_as_possible' }), expect.anything());
+      const open = await executeTool('capture_lead', full, { from: '+19415551234', callSid: 'CA-o', officeOpenNow: () => true });
+      expect(open).toMatch(/about 15 minutes/);
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised_expectation: 'about_15_minutes' }), expect.anything());
     });
 
     test('a complete capture does not hold the call open', async () => {
