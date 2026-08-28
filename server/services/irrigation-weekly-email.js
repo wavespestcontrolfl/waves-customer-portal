@@ -1003,7 +1003,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
-    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0 },
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0 },
   };
   const weekPlanEnabled = isEnabled('irrigationWeekPlan');
   const planAsOf = now;
@@ -1109,7 +1109,20 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
           snapshotArgs.reconciled = true;
         } else if (prior.state !== 'pending') {
-          snapshotArgs.decisionHash = await persistWeekPlan(snapshotArgs);
+          const claim = await persistWeekPlan(snapshotArgs);
+          snapshotArgs.claimToken = claim.claimToken;
+          if (!claim.claimed) {
+            // Another worker holds the customer-week (overlapping sweeps) or
+            // the row is already sent — that worker's decision is the one
+            // sent AND stored; this one must not send a second plan.
+            summary.plan.claimed_elsewhere += 1;
+            continue;
+          }
+          snapshotArgs.decisionHash = claim.hash;
+        } else {
+          // In flight elsewhere: touch nothing, send nothing.
+          summary.plan.claimed_elsewhere += 1;
+          continue;
         }
       } else if (decision.weekPlanUnavailable) {
         summary.plan.unavailable += 1;
@@ -1148,8 +1161,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           // the accepted-then-superseded race reported as
           // sent+deduped+providerAttempted). Pre-send write may have failed
           // transiently — one more try, then stamp by this decision's hash.
-          const hash = snapshotArgs.decisionHash || await persistWeekPlan(snapshotArgs);
-          await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
+          const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
+          if (hash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
         } else if (result.deduped) {
           // Deduped without a provider attempt: the durable record decides,
           // and only the row it names is stamped.

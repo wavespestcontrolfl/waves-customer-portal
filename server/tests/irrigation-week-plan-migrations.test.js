@@ -19,7 +19,7 @@ describe('irrigation_week_plans table', () => {
     const knex = { schema: { hasTable: jest.fn().mockResolvedValue(false), createTable: jest.fn(async (_n, cb) => cb(builder)) }, raw: (s) => s, fn: { now: () => 'now()' } };
     await table.up(knex);
     expect(knex.schema.createTable).toHaveBeenCalledWith('irrigation_week_plans', expect.any(Function));
-    expect(cols).toEqual(expect.arrayContaining(['customer_id', 'week_ending', 'plan_as_of', 'weather_inputs', 'restriction_policy', 'week_plan', 'sent_at', 'decision_hash']));
+    expect(cols).toEqual(expect.arrayContaining(['customer_id', 'week_ending', 'plan_as_of', 'weather_inputs', 'restriction_policy', 'week_plan', 'sent_at', 'decision_hash', 'claim_token', 'claimed_at']));
     expect(builder.unique).toHaveBeenCalledWith(['customer_id', 'week_ending']);
     knex.schema.hasTable.mockResolvedValue(true);
     knex.schema.createTable.mockClear();

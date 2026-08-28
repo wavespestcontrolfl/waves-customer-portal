@@ -227,34 +227,42 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect((await loadCurrentWeekPlan('c1', { now: NOW })).plan.action).toBe('run'); // unpinned = live
   });
 
-  test('persist replaces only an UNSENT row and returns the decision hash; mark-sent binds to that hash; discard deletes only unsent', async () => {
+  test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {
     const calls = {};
+    let returned = [{ decision_hash: 'x' }];
     db.mockImplementation(() => ({
       insert(r) { calls.insert = r; return this; },
       onConflict(cols) { calls.conflict = cols; return this; },
       merge(r) { calls.merged = r; return this; },
-      ignore: async () => { calls.ignored = true; },
-      whereNull(c) { calls.whereNull = c; return this; },
-      then(resolve) { return Promise.resolve(1).then(resolve); },
+      whereRaw(sql, b) { calls.whereRaw = sql; calls.bindings = b; return this; },
+      returning: async () => returned,
       where(w) { calls.where = w; return this; },
+      whereNull(c) { calls.whereNull = c; return this; },
       update: async (patch) => { calls.update = patch; return 1; },
       del: async () => { calls.deleted = true; return 1; },
     }));
     const plan = { action: 'hold', reasons: [] };
-    const hash = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 } });
-    // Hash covers plan + the inputs that change rendered copy (runMinutes).
-    expect(hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, runMinutes: 20 })).digest('hex'));
-    expect(_private.decisionHash(plan, { runMinutes: 25 })).not.toBe(hash);
+    const claim = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-1' });
+    expect(claim.claimed).toBe(true);
+    expect(claim.hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, runMinutes: 20 })).digest('hex'));
+    expect(_private.decisionHash(plan, { runMinutes: 25 })).not.toBe(claim.hash);
     expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
-    expect(calls.merged.decision_hash).toBe(hash);
-    expect(calls.whereNull).toBe('irrigation_week_plans.sent_at'); // a SENT row is never replaced
-    expect(calls.ignored).toBeUndefined();
+    expect(calls.merged.decision_hash).toBe(claim.hash);
+    expect(calls.merged.claim_token).toBe('tok-1');
+    expect(calls.whereRaw).toMatch(/sent_at IS NULL/);
+    expect(calls.whereRaw).toMatch(/claim_token = \?/);
+    expect(calls.whereRaw).toMatch(/claimed_at < now\(\) - interval '15 minutes'/);
+    expect(calls.bindings).toEqual(['tok-1']);
     expect(calls.insert.sent_at).toBeNull();
-    expect(JSON.parse(calls.insert.weather_inputs)).toEqual({ runMinutes: 20 });
+    // Another worker's live lease → nothing returned → not claimed, no hash.
+    returned = [];
+    const lost = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-2' });
+    expect(lost.claimed).toBe(false);
+    expect(lost.hash).toBeNull();
     // mark-sent: keyed on the hash, unsent rows only; no hash → no-op.
     expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
-    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: hash })).toBe(true);
-    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: hash });
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash });
     expect(calls.whereNull).toBe('sent_at');
     expect(calls.update.sent_at).toBeInstanceOf(Date);
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });

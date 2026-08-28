@@ -59,7 +59,8 @@ describe('jurisdiction', () => {
   });
 
   test('resolveRestrictionCounty: turf-profile county first, then whole-county service cities, else null', () => {
-    expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Bradenton' })).toBe('Sarasota');
+    expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Sarasota' })).toBe('Sarasota'); // normalized
+    expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Bradenton' })).toBe('Manatee'); // conflicting current city wins
     expect(resolveRestrictionCounty({ city: 'Lakewood Ranch' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties
@@ -68,6 +69,9 @@ describe('jurisdiction', () => {
     // city → the profile's county is dropped; the current city decides.
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Port Charlotte' })).toBe('Charlotte');
     expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Bradenton' })).toBe('Manatee');
-    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Port Charlotte' })).toBe('Manatee'); // no profile city context → keep
+    // No profile city context but the current city maps to a DIFFERENT county → the current city wins.
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Port Charlotte' })).toBe('Charlotte');
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Bradenton' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Englewood' })).toBe('Manatee'); // unmapped city → profile county kept
   });
 });

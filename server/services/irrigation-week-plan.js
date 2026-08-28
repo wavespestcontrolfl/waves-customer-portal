@@ -270,10 +270,10 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
 /**
  * Snapshot lifecycle — exactness contract: the row the report renders is the
  * decision the SENT email was built from.
- *   persistWeekPlan()       before the send: insert, or REPLACE an existing
- *                           UNSENT row (a died/failed earlier attempt) with
- *                           this decision; a SENT row is never touched.
- *                           Returns the decision hash.
+ *   persistWeekPlan()       before the send: ATOMIC CLAIM — insert, or
+ *                           replace an existing UNSENT row only when no
+ *                           other worker holds a live lease on it; a SENT
+ *                           row is never touched. Only the claimant sends.
  *   markWeekPlanSent()      after the provider accepts: stamp sent_at on the
  *                           row whose decision_hash matches — a stale row
  *                           from another decision can never be stamped.
@@ -302,9 +302,19 @@ function decisionHash(plan, decisionInputs = {}) {
     .digest('hex');
 }
 
-async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan } = {}) {
-  if (!customerId || !weekEnding || !plan) return null;
+const CLAIM_LEASE_MINUTES = 15;
+
+/**
+ * Pre-send write AND send claim, in one statement: insert the row, or
+ * replace an existing UNSENT row only when nobody holds a live lease on it
+ * (or we hold it — the post-send retry). RETURNING tells us whether we own
+ * the row: { claimed: true, hash } → this worker sends; { claimed: false }
+ * → another worker (or a sent row) owns the customer-week — do not send.
+ */
+async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan, claimToken = null } = {}) {
+  if (!customerId || !weekEnding || !plan) return { claimed: false, hash: null };
   const hash = decisionHash(plan, decisionInputs);
+  const token = claimToken || crypto.randomBytes(16).toString('hex');
   try {
     const row = {
       customer_id: customerId,
@@ -315,17 +325,28 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
       week_plan: JSON.stringify(plan),
       decision_hash: hash,
       sent_at: null,
+      claim_token: token,
+      claimed_at: db.fn.now(),
       updated_at: db.fn.now(),
     };
-    await db('irrigation_week_plans')
+    const returned = await db('irrigation_week_plans')
       .insert({ ...row, created_at: db.fn.now() })
       .onConflict(['customer_id', 'week_ending'])
       .merge(row)
-      .whereNull('irrigation_week_plans.sent_at');
-    return hash;
+      .whereRaw(
+        `irrigation_week_plans.sent_at IS NULL AND (
+           irrigation_week_plans.claim_token = ?
+           OR irrigation_week_plans.claimed_at IS NULL
+           OR irrigation_week_plans.claimed_at < now() - interval '${CLAIM_LEASE_MINUTES} minutes'
+         )`,
+        [token],
+      )
+      .returning(['decision_hash']);
+    const claimed = Array.isArray(returned) && returned.length > 0;
+    return { claimed, hash: claimed ? hash : null, claimToken: token };
   } catch (err) {
-    logger.warn(`[irrigation-week-plan] snapshot failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return null;
+    logger.warn(`[irrigation-week-plan] snapshot claim failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return { claimed: false, hash: null, claimToken: token };
   }
 }
 

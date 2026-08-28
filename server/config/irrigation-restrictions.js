@@ -61,10 +61,15 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // decides — never the old property's order.
   const pCity = String(profileCity || '').trim().toLowerCase();
   const cCity = String(city || '').trim().toLowerCase();
+  const cityCounty = CITY_COUNTY[cCity] || null;
+  const norm = (v) => { const t = String(v || '').trim().replace(/\s+county$/i, ''); return t ? t.charAt(0).toUpperCase() + t.slice(1).toLowerCase() : ''; };
+  const profileCounty = norm(county);
   const profileDiverges = !!pCity && !!cCity && pCity !== cCity;
-  const c = profileDiverges ? '' : String(county || '').trim().replace(/\s+county$/i, '');
-  if (c) return c.charAt(0).toUpperCase() + c.slice(1).toLowerCase();
-  return CITY_COUNTY[cCity] || null;
+  // A profile with NO city context can still be stale: when the customer's
+  // current city maps to a different county, the current city wins.
+  const countyConflicts = !!profileCounty && !!cityCounty && profileCounty !== cityCounty;
+  if (profileCounty && !profileDiverges && !countyConflicts) return profileCounty;
+  return cityCounty;
 }
 
 function coversCounty(policy, county) {

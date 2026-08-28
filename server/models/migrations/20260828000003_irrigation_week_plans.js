@@ -17,6 +17,11 @@ exports.up = async function up(knex) {
     // sha1 of the plan JSON: mark-sent binds to the decision that was
     // actually emailed, never to a stale unsent row from an earlier attempt.
     t.string('decision_hash', 40).notNullable();
+    // Send lease: the worker that claims the customer-week row (token +
+    // time) is the only one that sends; a stale lease (>15 min, no sent_at)
+    // can be re-claimed by a retry.
+    t.string('claim_token', 64);
+    t.timestamp('claimed_at', { useTz: true });
     // Set once the provider accepts the email built from this plan. A row
     // left null is a decision that was never delivered (send failed or was
     // suppressed) and is discarded by the sweep; the report renders only
