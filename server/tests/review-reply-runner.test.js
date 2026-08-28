@@ -388,6 +388,7 @@ describe('processDueAutoReplies — state machine', () => {
     expect(stats.parked).toBe(1);
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_draft: GOOD_DRAFT.text });
     expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'persist_failed', needsAction: true });
+    expect(mockNotify.mock.calls.at(-1)[3].link).toBe('/admin/reviews?responded=all&review=rev-1');
     // Parked rows are not re-claimed.
     await Runner.processDueAutoReplies();
     expect(mockPublish).toHaveBeenCalledTimes(1);
@@ -680,6 +681,22 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'google_uncertain', needsAction: true });
     await Runner.processDueAutoReplies();
     expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
+  test('postedEditFields: a reviewer edit on a POSTED row parks it for a person', () => {
+    const posted = row({ auto_reply_status: 'posted' });
+    expect(Runner.postedEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
+    expect(Runner.postedEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    expect(Runner.postedEditFields(row({ auto_reply_status: 'skipped' }), { star_rating: 1, review_text: 'x', reviewer_name: 'Dana W.' })).toEqual({});
+  });
+
+  test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {
+    const skipped = row({ id: 'm', auto_reply_status: 'skipped', auto_reply_reason: 'missing', missing_since: '2026-08-20T00:00:00Z' });
+    expect(Runner.requeueFieldsOnIdentity(skipped, { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null })).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'reinstated' });
+    expect(Runner.requeueFieldsOnIdentity({ ...skipped, auto_reply_reason: 'admin_skip' }, { gbp_review_name: 'x', owner_reply: null })).toEqual({});
+    state.rows = [{ ...skipped }];
+    expect(await Runner.applyRequeueOnIdentity('m', skipped, { gbp_review_name: 'x', owner_reply: null })).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

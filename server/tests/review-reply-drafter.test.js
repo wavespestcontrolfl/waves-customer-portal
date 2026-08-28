@@ -215,6 +215,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, thanks for choosing the number one team for the ants Marcus handled.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus and a top pest control team got the ants out.'))).toBe('banned_phrase');
   });
+  test('charge-waiver incentive forms are banned; respect / visit-condition claims need the reviewer\'s words', () => {
+    expect(verify(good("Hi Dana, Marcus got the ants out and we'd like to waive the charge on your next service."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants out at no cost to you.'))).toBe('banned_phrase');
+    const g = grounding({ text: '', mentionedTechNames: [], topics: [], account: null });
+    expect(verify(good("Hello there, we're glad we respected your home and left everything exactly as we found it. Thanks for the rating."), g)).toBe('unlisted_experience_claim');
+  });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana, glad the ants are gone before your HOA walk-through. Marcus says thanks.'))).toBeNull();

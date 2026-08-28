@@ -270,7 +270,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       if (e.code === CODES.GOOGLE_UNCERTAIN) {
         // The lock helper released the claim on throw; take the row out of
         // the automatic lane ourselves (best effort) so no retry re-PUTs.
+        // Compare-and-set against the state THIS attempt owned: a sync that
+        // already recorded the late reply (skipped/already_replied) or a
+        // human publish that finished meanwhile must not be clobbered.
         await db('google_reviews').where({ id: reviewId })
+          .whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
+          .where(function ownSlot() {
+            this.whereNull('review_reply');
+            if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
+            if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
+            this.orWhere('review_reply', asDraft(replyText));
+          })
           .update({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000), auto_reply_claimed_until: null })
           .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
         logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, parked for reconciliation`);

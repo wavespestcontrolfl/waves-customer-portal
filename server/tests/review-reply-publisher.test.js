@@ -43,6 +43,7 @@ jest.mock('../models/db', () => {
         return api;
       },
       modify(fn) { fn(api); return api; },
+      whereNotIn(col, vals) { filters.push((r) => !vals.includes(r[col])); return api; },
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
@@ -65,6 +66,8 @@ const { publishReviewReply, retractReviewReply, CODES } = require('../services/r
 function liveLock() {
   return { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
 }
+
+afterEach(() => { jest.useRealTimers(); });
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -212,7 +215,6 @@ describe('publishReviewReply', () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
     jest.isolateModules(() => {});
     mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
-    const started = Date.now();
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
@@ -222,7 +224,24 @@ describe('publishReviewReply', () => {
     // A timed-out PUT may have landed: parked for reconciliation, never retried blindly.
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
-    expect(Date.now() - started).toBeLessThan(31000 + 5000);
+  });
+
+  test('the uncertain-timeout park is a compare-and-set: a sync that already recorded the late reply is not clobbered', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    // The PUT hangs; while it hangs the hourly sync lands the late reply.
+    mockGbp.replyToReview.mockImplementationOnce(() => {
+      state.rows[0].review_reply = 'x y z';
+      state.rows[0].auto_reply_status = 'skipped';
+      state.rows[0].auto_reply_reason = 'already_replied';
+      return new Promise(() => {});
+    });
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied', review_reply: 'x y z' });
   });
 
   test('a live GET that never completes → GOOGLE_FAILED (retryable), no PUT attempted', async () => {

@@ -827,12 +827,28 @@ class GoogleBusinessService {
     if (existing) {
       // A Places-first row that parked waiting for its GBP identity re-enters
       // the auto-reply queue once this authoritative sync attaches the name.
-      const { applyRequeueOnIdentity } = require('./review-reply/runner');
+      const { applyRequeueOnIdentity, postedEditFields } = require('./review-reply/runner');
       await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
       // Conditional on the row STILL being parked for that reason (an admin
       // Skip in the meantime wins).
       await applyRequeueOnIdentity(existing.id, existing, normalized);
       await applySyncReplyFields(existing.id, existingReplyFields, { expectedReply: existing.review_reply ?? null });
+      // A reviewer edit on a review that carries a POSTED automatic reply:
+      // the reply may no longer fit (5★ praise → 1★ complaint) — park it for
+      // a person, conditional on the row still being 'posted'.
+      const edited = postedEditFields(existing, normalized);
+      if (Object.keys(edited).length) {
+        const n = await db('google_reviews').where({ id: existing.id, auto_reply_status: 'posted' }).update(edited);
+        if ((Array.isArray(n) ? n.length : n) > 0) {
+          const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
+          await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
+            link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
+            bell: true,
+            dedupeKey: `review-auto-reply:${existing.id}:review_edited_after_post`,
+            metadata: { reason: 'review_edited_after_post', reviewId: existing.id, locationId: normalized.location_id, needsAction: true },
+          }).catch((e) => logger.warn(`[gbp] edited-after-post bell failed: ${e.message}`));
+        }
+      }
       result = { id: existing.id, inserted: false };
     } else {
       try {

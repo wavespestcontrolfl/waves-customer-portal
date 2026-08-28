@@ -257,7 +257,9 @@ async function parkPersistFailed(row, draft, err) {
     ...(draft?.text ? { auto_reply_draft: draft.text, auto_reply_version: draft.version || null, auto_reply_mode: draft.mode || null } : {}),
     auto_reply_claimed_until: null,
   }).catch((e2) => logger.error(`[review-auto-reply] persist_failed bookkeeping also failed for ${row.id}: ${e2.message}`));
-  await bell(row, { title: 'Review reply needs reconciling', body: `${summarize(row)} — the reply is LIVE on Google but was not recorded here. Open Reviews and confirm it.`, reason: 'persist_failed', action: true });
+  // The next sync will record the live reply and the row leaves the default
+  // needs-reply view — link a view that keeps replied rows.
+  await bell(row, { title: 'Review reply needs reconciling', body: `${summarize(row)} — the reply is LIVE on Google but was not recorded here. Open Reviews and confirm it.`, reason: 'persist_failed', action: true, link: `/admin/reviews?responded=all&review=${encodeURIComponent(row.id)}` });
 }
 
 function summarize(row) {
@@ -512,7 +514,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       // The PUT timed out: it may have landed. Publisher already parked the
       // row; keep the draft for the reconciler and ring an action bell.
       await db('google_reviews').where({ id: merged.id }).update({ auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode }).catch(() => {});
-      await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — Google did not answer in time; the reply MAY be live. Check the review after the next sync.`, reason: 'google_uncertain', action: true });
+      await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — Google did not answer in time; the reply MAY be live. Check the review after the next sync.`, reason: 'google_uncertain', action: true, link: `/admin/reviews?responded=all&review=${encodeURIComponent(merged.id)}` });
       return { outcome: 'parked', reason: 'google_uncertain' };
     }
     if (code === CODES.STALE && err.message.includes(HUMAN_DRAFT)) {
@@ -700,6 +702,19 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * makes the holder's in-lock guard fail).
  */
 /**
+ * A POSTED automatic reply whose review the reviewer has since edited
+ * (rating / text / name — the sync just overwrote them) is no longer known
+ * to fit: route it to a person. Returns {} when nothing changed.
+ */
+function postedEditFields(existing, normalized) {
+  if (!existing || existing.auto_reply_status !== STATUS.POSTED) return {};
+  const before = reviewFingerprint(existing);
+  const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name });
+  if (before === after) return {};
+  return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
+}
+
+/**
  * Conditional write for requeueFieldsOnIdentity: only when the row is STILL
  * parked for the same reason the snapshot saw (an admin Skip in between
  * must win). Returns the affected-row count.
@@ -708,7 +723,7 @@ async function applyRequeueOnIdentity(reviewId, existing, normalized, { conn = d
   const fields = requeueFieldsOnIdentity(existing, normalized);
   if (!Object.keys(fields).length) return 0;
   const n = await conn('google_reviews')
-    .where({ id: reviewId, auto_reply_status: STATUS.PARKED, auto_reply_reason: existing.auto_reply_reason })
+    .where({ id: reviewId, auto_reply_status: existing.auto_reply_status, auto_reply_reason: existing.auto_reply_reason })
     .update(fields);
   return Array.isArray(n) ? n.length : n;
 }
@@ -778,8 +793,14 @@ async function applySyncReplyFields(reviewId, fields, { conn = db, now = new Dat
  * the moment the authoritative sync attaches its GBP identity.
  */
 function requeueFieldsOnIdentity(existing, normalized) {
-  if (!existing || existing.auto_reply_status !== STATUS.PARKED) return {};
+  if (!existing) return {};
   if (hasRealReply(normalized?.owner_reply) || existing.dismissed) return {};
+  // A queued review the sync stamped missing (skipped/missing) that Google
+  // has now reinstated — this authoritative sync proves it is live again.
+  if (existing.auto_reply_status === STATUS.SKIPPED && ['missing', 'review_missing'].includes(existing.auto_reply_reason) && existing.missing_since) {
+    return { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'reinstated', auto_reply_due_at: new Date().toISOString(), auto_reply_attempts: 0 };
+  }
+  if (existing.auto_reply_status !== STATUS.PARKED) return {};
   // Called only from the AUTHORITATIVE GBP sync, so the location's
   // credentials demonstrably work: a row parked on gbp_not_configured revives.
   if (existing.auto_reply_reason === 'gbp_not_configured') {
@@ -846,6 +867,7 @@ module.exports = {
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
   applyRequeueOnIdentity,
+  postedEditFields,
   syncReplyFields,
   applySyncReplyFields,
   reviewFingerprint,
