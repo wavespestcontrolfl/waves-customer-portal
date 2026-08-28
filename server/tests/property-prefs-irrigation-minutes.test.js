@@ -18,7 +18,7 @@ const propertyRouter = require('../routes/property');
 const { hasRecurringLawnEvidence } = require('../services/irrigation-weekly-email');
 
 const {
-  propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, hasIrrigationValue, IRRIGATION_INPUT_FIELDS,
+  propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, IRRIGATION_INPUT_FIELDS,
 } = propertyRouter._private;
 
 describe('property preferences — irrigation minutes per zone', () => {
@@ -76,25 +76,21 @@ describe('property preferences — irrigation minutes per zone', () => {
 // report / weekly email keep suppressing a derived figure behind the old
 // false default.
 describe('property preferences — irrigation on by default', () => {
-  test('a value in any irrigation input column counts as an irrigation write', () => {
+  test('every irrigation input column is an irrigation write (a clear included)', () => {
     expect(IRRIGATION_INPUT_FIELDS).toEqual(expect.arrayContaining([
-      'irrigation_run_minutes', 'irrigation_inches_per_week', 'watering_days', 'irrigation_system_type', 'irrigation_zones',
+      'irrigation_run_minutes', 'irrigation_inches_per_week', 'watering_days', 'irrigation_system_type',
+      'irrigation_zones', 'irrigation_controller_location', 'irrigation_schedule_notes', 'rain_sensor', 'irrigation_issues',
     ]));
-    expect(hasIrrigationValue('irrigation_run_minutes', 20)).toBe(true);
-    expect(hasIrrigationValue('watering_days', ['Mon'])).toBe(true);
-    expect(hasIrrigationValue('rain_sensor', true)).toBe(true);
-    expect(hasIrrigationValue('irrigation_controller_location', 'garage')).toBe(true);
-    // Clears / blanks are not evidence of a system.
-    expect(hasIrrigationValue('irrigation_run_minutes', null)).toBe(false);
-    expect(hasIrrigationValue('watering_days', [])).toBe(false);
-    expect(hasIrrigationValue('irrigation_zones', 0)).toBe(false);
-    expect(hasIrrigationValue('irrigation_controller_location', '   ')).toBe(false);
-    expect(hasIrrigationValue('rain_sensor', false)).toBe(false);
+    // Never a customer-writable flag.
+    expect(IRRIGATION_INPUT_FIELDS).not.toContain('irrigation_system');
   });
 
   test('route stamps irrigation_system=true on irrigation writes, GET defaults ON and reports hasLawnCare', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
-    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => hasIrrigationValue\(f, updates\[f\]\)\)[\s\S]{0,40}\{ irrigation_system: true \}/);
+    // Key PRESENCE, not a non-empty value: clearing notes / zones→0 /
+    // unchecking the rain sensor on a legacy false row is still the
+    // customer's first edit under Irrigation (pre-push codex P1).
+    expect(src).toMatch(/IRRIGATION_INPUT_FIELDS\.some\(\(f\) => f in updates\)[\s\S]{0,40}\{ irrigation_system: true \}/);
     expect(src).toMatch(/\.update\(\{ \.\.\.updates, \.\.\.stampIrrigationOn, updated_at/);
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)

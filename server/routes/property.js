@@ -192,19 +192,12 @@ async function customerQualifiesForLawnInches(customer = {}) {
   }
 }
 
-// Irrigation is ON by default (owner ruling 2026-08-27: no toggle). Any
-// irrigation entry the customer makes describes a system that exists, so a
-// write to one of these columns stamps irrigation_system = true — the report
-// and weekly email still read the column and would otherwise suppress a
-// derived figure behind a false the old toggle left in the row.
-function hasIrrigationValue(field, value) {
-  if (value == null) return false;
-  if (Array.isArray(value)) return value.length > 0;
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'number') return Number.isFinite(value) && value > 0;
-  return String(value).trim() !== '';
-}
-
+// Irrigation is ON by default (owner ruling 2026-08-27: no toggle). The
+// portal presents the section as on, so ANY edit under it — including a
+// clear — is the customer working a system that exists; the write stamps
+// irrigation_system = true. The report and weekly email still read the
+// column and would otherwise keep suppressing a derived figure behind a
+// false the old toggle left in the row (the migration rewrites no rows).
 const IRRIGATION_INPUT_FIELDS = [
   'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
   'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
@@ -294,7 +287,7 @@ router.put('/preferences', async (req, res, next) => {
     }
     // Stamped on the row, not on `updates`: the account-updated email lists
     // what the customer changed, and the stamp is not a customer edit.
-    const stampIrrigationOn = IRRIGATION_INPUT_FIELDS.some((f) => hasIrrigationValue(f, updates[f]))
+    const stampIrrigationOn = IRRIGATION_INPUT_FIELDS.some((f) => f in updates)
       ? { irrigation_system: true }
       : {};
 
@@ -518,6 +511,5 @@ module.exports._private = {
   prefsSchema,
   customerHasLawnCare,
   customerQualifiesForLawnInches,
-  hasIrrigationValue,
   IRRIGATION_INPUT_FIELDS,
 };
