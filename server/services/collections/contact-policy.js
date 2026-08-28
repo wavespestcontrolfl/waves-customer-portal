@@ -589,6 +589,9 @@ module.exports = {
   loadEligibleInvoices,
   isWithinCallWindow,
   isSupervisedApprover,
+  // The anchor's delivered-touch count — exported so the live call
+  // revalidates a refreshed anchor against the SAME floor (gh r4).
+  deliveredDunningTouches,
   // Exported for tests / PR B reuse.
   PILOT_MIN_DAYS_OVERDUE,
   PILOT_MAX_DAYS_OVERDUE,

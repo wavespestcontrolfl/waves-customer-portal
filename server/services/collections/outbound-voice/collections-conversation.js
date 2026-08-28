@@ -779,16 +779,19 @@ class CollectionsConversation {
   // and pay-link scope, in one place (disclosure, send time, credit-cover
   // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
   // is updated — the caller discloses/sends nothing on a partial account.
-  // `callable` = the refreshed account clock is still inside the policy's
-  // pilot window (gh r3 + hook r4): the overdue anchor paid mid-call can
-  // leave only not-yet-callable invoices (never dunned), and an older
-  // invoice joining can push the account past the 60-day ceiling (the
-  // office's, not this call's). `accountDays` lets the caller say which.
+  // `callable` = the refreshed account still clears the policy's
+  // account-shaped checks (gh r3/r4 + hook r4): the anchor inside the
+  // 14–60 day pilot window AND with the delivered-touch floor (an older
+  // invoice sent mid-call can become the anchor with zero dunning history).
+  // `notCallable` names why, so the caller says the right thing.
   async _refreshBalance() {
-    const { loadEligibleInvoices, PILOT_MIN_DAYS_OVERDUE, PILOT_MAX_DAYS_OVERDUE } = require('../contact-policy');
+    const {
+      loadEligibleInvoices, deliveredDunningTouches,
+      PILOT_MIN_DAYS_OVERDUE, PILOT_MAX_DAYS_OVERDUE, PILOT_MIN_DUNNING_TOUCHES,
+    } = require('../contact-policy');
     let incomplete = null;
     const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
-    if (incomplete) return { incomplete, fresh, callable: false, accountDays: null };
+    if (incomplete) return { incomplete, fresh, callable: false, notCallable: 'incomplete' };
     this._ctx.balance = {
       total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
       count: fresh.length,
@@ -796,21 +799,26 @@ class CollectionsConversation {
     };
     this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
     Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
-    const accountDays = fresh.length ? accountDaysOverdue(this._now(), fresh) : null;
-    const callable = fresh.length > 0 && accountDays >= PILOT_MIN_DAYS_OVERDUE && accountDays <= PILOT_MAX_DAYS_OVERDUE;
-    return { incomplete: null, fresh, callable, accountDays };
+    let notCallable = null;
+    if (fresh.length) {
+      const accountDays = accountDaysOverdue(this._now(), fresh);
+      if (accountDays < PILOT_MIN_DAYS_OVERDUE) notCallable = 'under_floor';
+      else if (accountDays > PILOT_MAX_DAYS_OVERDUE) notCallable = 'over_ceiling';
+      else if ((await deliveredDunningTouches(anchorInvoiceOf(fresh))) < PILOT_MIN_DUNNING_TOUCHES) notCallable = 'no_dunning_history';
+    }
+    return { incomplete: null, fresh, callable: fresh.length > 0 && !notCallable, notCallable };
   }
 
-  // Copy for a refreshed set the policy would no longer call: under the
-  // floor = the past-due part cleared; over the ceiling = the office's.
-  _notCallableCopy(accountDays, { atSend = false } = {}) {
-    const { PILOT_MAX_DAYS_OVERDUE } = require('../contact-policy');
-    if (accountDays > PILOT_MAX_DAYS_OVERDUE) {
-      return `${atSend ? 'Do not send the link: ' : ''}This account now needs the office's attention rather than this call. Do NOT state any figure, do NOT ask for payment or offer a link; say the office will follow up, and end politely.`;
+  // Copy for a refreshed set the policy would no longer call. Under the
+  // floor = the invoice this call was about cleared (what remains may still
+  // be a few days past due — never call it current); anything else = the
+  // office's, not this call's.
+  _notCallableCopy(notCallable, { atSend = false } = {}) {
+    const lead = atSend ? 'Do not send the link: ' : '';
+    if (notCallable === 'under_floor') {
+      return `${lead}The past-due balance this call was about has been taken care of since we dialed. Thank the customer; do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say the account is current or settled — if they ask, say the office will follow up on anything remaining. End politely.`;
     }
-    return atSend
-      ? 'Do not send the link: the past-due balance has been taken care of since we dialed and nothing else is past due yet. Tell the customer there is nothing overdue today and end politely.'
-      : 'The past-due balance this call was about has been taken care of since we dialed, and nothing else on the account is past due. Thank the customer, say there is nothing overdue today, do NOT state any figure, do NOT ask for payment or offer a link, and end politely.';
+    return `${lead}This account is not one this call may collect on — it needs the office's attention. Do NOT state any figure, do NOT ask for payment or offer a link; say the office will follow up, and end politely.`;
   }
 
   _ensureSystemBlocks() {
@@ -1136,16 +1144,16 @@ class CollectionsConversation {
     try {
       // A read that DROPPED an unprovable row or hit the bound understates
       // the account (gh r1): never present the survivors as "the total".
-      const { incomplete, fresh, callable, accountDays } = await this._refreshBalance();
+      const { incomplete, fresh, callable, notCallable } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
         return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
       }
       if (fresh.length && !callable) {
-        // The refreshed account is outside the pilot window the policy
+        // The refreshed account no longer clears the policy this call was
         // dialed on — never dunned here, no figure spoken.
         this.state = 'RESOLUTION';
-        return this._notCallableCopy(accountDays);
+        return this._notCallableCopy(notCallable);
       }
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
@@ -1509,12 +1517,12 @@ class CollectionsConversation {
     // claimed by a live PaymentIntent since disclosure must be neither
     // promised nor recorded as contacted. Fail closed on an unreadable set.
     try {
-      const { incomplete, fresh, callable, accountDays } = await this._refreshBalance();
+      const { incomplete, fresh, callable, notCallable } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] send-time balance read incomplete callSid=${this.callSid}: ${incomplete} — not sending`);
         return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
       }
-      if (fresh.length && !callable) return this._notCallableCopy(accountDays, { atSend: true });
+      if (fresh.length && !callable) return this._notCallableCopy(notCallable, { atSend: true });
     } catch (err) {
       logger.error(`[collections-voice] send-time balance read failed callSid=${this.callSid}: ${err.message}`);
       return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
@@ -1618,7 +1626,7 @@ class CollectionsConversation {
           return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
         }
         if (!refreshed.callable) {
-          return `No text was needed: account credit covered that invoice in full. ${this._notCallableCopy(refreshed.accountDays)}`;
+          return `No text was needed: account credit covered that invoice in full. ${this._notCallableCopy(refreshed.notCallable)}`;
         }
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;

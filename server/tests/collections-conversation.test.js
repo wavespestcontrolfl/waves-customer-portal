@@ -54,6 +54,8 @@ jest.mock('../services/collections/contact-policy', () => ({
   isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
   PILOT_MIN_DAYS_OVERDUE: 14,
   PILOT_MAX_DAYS_OVERDUE: 60,
+  PILOT_MIN_DUNNING_TOUCHES: 2,
+  deliveredDunningTouches: jest.fn(async () => 2),
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -1380,9 +1382,9 @@ describe('account-level disclosure + registers', () => {
     await convo._contextReady;
     convo.verified = true;
     const out = await convo._toolGetBalance();
-    expect(out).toMatch(/nothing overdue today/);
-    expect(out).toMatch(/do NOT state any figure, do NOT ask for payment or offer a link/);
-    expect(out).not.toMatch(/105\.30/);
+    expect(out).toMatch(/taken care of since we dialed/);
+    expect(out).toMatch(/do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say the account is current or settled/); // 7 days overdue is still overdue
+    expect(out).not.toMatch(/105\.30|nothing overdue/);
     expect(convo.disclosed).toBe(false);
     // Send time: disclosed on the full set, then the anchor cleared.
     loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
@@ -1393,7 +1395,7 @@ describe('account-level disclosure + registers', () => {
     await c2._toolGetBalance();
     c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
     InvoiceService.sendViaSMS.mockClear();
-    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: the past-due balance has been taken care of/);
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: The past-due balance this call was about has been taken care of/);
     expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
     // Over the 60-day ceiling (an older invoice joined after dialing) is the office's, not this call's.
     const ancient = { id: 'inv-ancient', title: 'Termite', status: 'overdue', due_date: '2026-05-01', total: '300.00', credit_applied: 0 }; // 103d
@@ -1403,9 +1405,23 @@ describe('account-level disclosure + registers', () => {
     await c3._contextReady;
     c3.verified = true;
     const over = await c3._toolGetBalance();
-    expect(over).toMatch(/needs the office's attention rather than this call/);
+    expect(over).toMatch(/not one this call may collect on — it needs the office's attention/);
     expect(over).not.toMatch(/300\.00|nothing overdue/);
     expect(c3.disclosed).toBe(false);
+    // An older invoice SENT mid-call becomes the anchor with no dunning history — the policy's touch floor holds here too.
+    const { deliveredDunningTouches } = require('../services/collections/contact-policy');
+    const freshOld = { id: 'inv-fresh', title: 'Termite', status: 'sent', due_date: '2026-06-25', total: '80.00', credit_applied: 0 }; // 48d, just delivered
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([freshOld, old]);
+    deliveredDunningTouches.mockResolvedValueOnce(0); // the refreshed anchor has zero delivered touches (init never consults the floor — origination did)
+    setDb();
+    const { convo: c4 } = makeConvo();
+    await c4._contextReady;
+    c4.verified = true;
+    const untouched = await c4._toolGetBalance();
+    expect(deliveredDunningTouches).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'inv-fresh' }));
+    expect(untouched).toMatch(/needs the office's attention/);
+    expect(untouched).not.toMatch(/80\.00/);
+    expect(c4.disclosed).toBe(false);
   });
 
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
