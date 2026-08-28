@@ -41,8 +41,9 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
   console.log(`${execute ? 'EXECUTE' : 'DRY RUN'} tag=${tag}${staleDays ? ` stale-days=${staleDays}` : ''}`);
 
   // Pass 1 — classify unread inbound bodies in Node (the detectors are JS).
-  const unread = await c.query(`SELECT id, body FROM messages WHERE channel='sms' AND direction='inbound' AND (is_read IS NOT TRUE)`);
-  const closers = unread.rows.filter((r) => isSmsReaction(r.body) || isCourtesyOnly(r.body)).map((r) => r.id);
+  // Attachments are content: a photo captioned "Thanks" is never a closer.
+  const unread = await c.query(`SELECT id, body, (media IS NOT NULL AND media::text NOT IN ('[]','null','')) AS has_media FROM messages WHERE channel='sms' AND direction='inbound' AND (is_read IS NOT TRUE)`);
+  const closers = unread.rows.filter((r) => isSmsReaction(r.body) || (!r.has_media && isCourtesyOnly(r.body))).map((r) => r.id);
   console.log(`unread inbound sms messages: ${unread.rows.length}; reaction/courtesy closers: ${closers.length}`);
 
   // Pass 3 (optional) — stale rows.

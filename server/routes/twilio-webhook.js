@@ -183,11 +183,6 @@ router.post('/sms', async (req, res) => {
     // ("I won't be home") carry no scheduling keyword — the AI auto-reply
     // gates must stand down for these too.
     const rescheduleAsk = Body ? hasRescheduleOrAwayIntent(Body) : false;
-    // Pure courtesy closer ("Thanks!", "Ok great", "👍"): lands in the thread
-    // already read, no bell/push/owner forward, no AI auto-reply. The shadow
-    // drafter still sees it (knowing when NOT to reply is a judged class).
-    // isCourtesyOnly is fail-safe: any question/scheduling/mixed content → false.
-    const courtesyOnly = !smsReaction && isCourtesyOnly(Body);
 
     // ── Idempotency claim (must run before spam-block + all side-effects) ──
     // Twilio can redeliver the same MessageSid (edge retry, a slow handler
@@ -243,6 +238,13 @@ router.post('/sms', async (req, res) => {
     }
 
     const inboundMedia = await uploadTwilioMedia(req.body);
+    // Pure courtesy closer ("Thanks!", "Ok great", "👍"): lands in the thread
+    // already read, no bell/push/owner forward, no AI auto-reply. The shadow
+    // drafter still sees it (knowing when NOT to reply is a judged class).
+    // isCourtesyOnly is fail-safe: any question/scheduling/mixed content → false.
+    // An attachment is content — a photo captioned "Thanks" stays loud.
+    // (Computed after the media upload: needs inboundMedia — hook P0.)
+    const courtesyOnly = !smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body);
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
