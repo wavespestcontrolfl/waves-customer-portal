@@ -576,14 +576,16 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
       // Same retry ceiling as the handled paths: park + action bell after it.
       const attempts = (row.auto_reply_attempts || 0) + 1;
       const exhausted = attempts >= MAX_ATTEMPTS;
-      await releaseClaim(row, {
+      const owned = await releaseClaim(row, {
         auto_reply_status: exhausted ? STATUS.PARKED : STATUS.FAILED,
         auto_reply_reason: 'runner_error',
         auto_reply_attempts: attempts,
         ...(exhausted ? {} : { auto_reply_due_at: new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString() }),
         auto_reply_error: String(err.message || err).slice(0, 1000),
-      }).catch(() => {});
-      if (exhausted) {
+      }).catch(() => false);
+      // A skip/dismiss that cleared the claim meanwhile owns the outcome —
+      // no "needs you" bell over a deliberate cancellation.
+      if (exhausted && owned) {
         await bell(row, { title: 'Review reply needs you', body: `${summarize(row)} — the auto-reply runner failed ${attempts} times (${String(err.message || err).slice(0, 120)}). Reply by hand.`, reason: 'runner_error', action: true });
       }
     }
@@ -655,7 +657,14 @@ async function postNow(reviewId, actor) {
       throw err;
     }
   }
-  return processClaimedRow(row, { intent: 'post_now', actor: actor || { type: 'admin' } });
+  try {
+    return await processClaimedRow(row, { intent: 'post_now', actor: actor || { type: 'admin' } });
+  } catch (err) {
+    // Errors before processClaimedRow's own publish try/catch (grounding
+    // read, GBP config check…) must not strand the claim for its TTL.
+    await releaseClaim(row, { auto_reply_error: String(err.message || err).slice(0, 1000) }).catch(() => {});
+    throw err;
+  }
 }
 
 /**

@@ -650,6 +650,25 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
   });
 
+  test('an exhausted runner error after an admin cancelled the claim sends no bell', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockGbp.isLocationConfigured.mockImplementationOnce(async () => { state.rows[0].auto_reply_claimed_until = null; state.rows[0].auto_reply_status = 'skipped'; throw new Error('boom'); });
+    state.rows = [row({ auto_reply_attempts: Runner.MAX_ATTEMPTS - 1 })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.errors).toBe(1);
+    expect(state.rows[0].auto_reply_status).toBe('skipped');
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('postNow releases its claim when an error happens before the publish stage', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockGbp.isLocationConfigured.mockRejectedValueOnce(new Error('token store down'));
+    state.rows = [row({ auto_reply_due_at: '2099-01-01T00:00:00Z' })];
+    await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toThrow('token store down');
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
+    expect(state.rows[0].auto_reply_status).toBe('queued');
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
