@@ -743,3 +743,20 @@ describe('PR codex r11 (1c55e2875)', () => {
     expect(r.findings.map((f) => f.code)).toEqual([gate.CODES.GEO_STATEWIDE, gate.CODES.CANNIBALIZES_EXISTING]);
   });
 });
+
+describe('withTopicMergeLock (hook, PR codex r11 push)', () => {
+  const fakeDb = (locked) => ({ transaction: jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked }] }) })) });
+  test('runs fn inside a transaction holding the advisory lock and returns its result', async () => {
+    const db = fakeDb(true);
+    const fn = jest.fn().mockResolvedValue('merged');
+    await expect(gate.withTopicMergeLock(db, fn)).resolves.toBe('merged');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+  test('a busy lock throws TOPIC_MERGE_LOCK_BUSY without running fn', async () => {
+    const db = fakeDb(false);
+    const fn = jest.fn();
+    await expect(gate.withTopicMergeLock(db, fn)).rejects.toMatchObject({ code: 'TOPIC_MERGE_LOCK_BUSY' });
+    expect(fn).not.toHaveBeenCalled();
+  });
+});

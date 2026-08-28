@@ -50,6 +50,13 @@ jest.mock('../services/content/hero-alt-vision', () => ({
 
 const db = require('../models/db');
 const factCheckGate = require('../services/content/fact-check-gate');
+// Topic-gated merges run recheck → merge inside db.transaction under a
+// Postgres advisory lock (topic-targeting-gate.withTopicMergeLock); the bare
+// jest.fn() db needs a transaction that grants the lock by default.
+function grantTopicMergeLock(locked = true) {
+  db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked }] }) }));
+}
+beforeEach(() => grantTopicMergeLock(true));
 const gh = require('../services/content-astro/github-client');
 const authorService = require('../services/content-astro/author-service');
 const { validateBlogFrontmatter } = require('../services/content-astro/schema-validator');
@@ -3124,6 +3131,17 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
     expect(stamp).toBeDefined();
     expect(stamp.astro_publish_error).toMatch(/TOPIC_GEO_OUT_OF_AREA/);
     expect(stamp).not.toHaveProperty('astro_pr_number');
+  });
+
+  test('a busy topic-merge lock defers the merge (TOPIC_MERGE_LOCK_BUSY), nothing merged', async () => {
+    const queries = [chain({ first: jest.fn().mockResolvedValue(prOpenPost()) })];
+    db.mockImplementation(() => queries.shift() || chain());
+    cleanReview();
+    mockBranchFile('Ant Trails in Bradenton');
+    grantTopicMergeLock(false);
+    await expect(AstroPublisher.mergeAstro('post-gate-1')).rejects.toMatchObject({ code: 'TOPIC_MERGE_LOCK_BUSY' });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 
   test('a clear recheck merges; a refresh of a live post skips the recheck', async () => {

@@ -2331,9 +2331,8 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       if (hold.pending) throw new Error(`PR #${pr.number} cannot merge: ${hold.reason}`);
     }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
-    if (!isUnpublish) await assertTopicTargetingStillClear(post, pr);
 
-    const result = await gh.mergePr(post.astro_pr_number, {
+    const doMerge = () => gh.mergePr(post.astro_pr_number, {
       method: 'squash',
       title: isUnpublish ? `Unpublish: ${post.title}`.slice(0, 72) : `Blog: ${post.title}`.slice(0, 72),
       // Pin the merge to the exact head the hub-only/Codex gates just vetted —
@@ -2342,6 +2341,15 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       // manual/scheduler path did not).
       sha: pr.head?.sha,
     });
+    // Publish PRs: the ownership recheck and the merge run under one
+    // advisory lock so two PRs claiming the same entity cannot both pass
+    // against the same old corpus and both merge.
+    const result = isUnpublish
+      ? await doMerge()
+      : await require('../content/topic-targeting-gate').withTopicMergeLock(db, async () => {
+        await assertTopicTargetingStillClear(post, pr);
+        return doMerge();
+      });
 
     await applyMergeEffect(postId, post, new Date(), isUnpublish, result?.sha);
     if (!isUnpublish) queueInternalLinkPlanning(post);

@@ -508,6 +508,26 @@ async function loadLiveIndex() {
   return indexCorpus(corpus);
 }
 
+// Topic-gated merges are serialized: the live-corpus ownership recheck and
+// the merge itself are two operations, so two PRs claiming the same entity
+// could both read the old corpus, both pass, and both merge. fn runs inside a
+// transaction that holds a Postgres advisory lock for its duration (released
+// with the transaction, even on throw). A busy lock throws
+// TOPIC_MERGE_LOCK_BUSY — callers defer to their next tick.
+const TOPIC_MERGE_LOCK_KEY = 20260827; // owner rulings date; one lock for every topic-gated merge
+async function withTopicMergeLock(db, fn) {
+  return db.transaction(async (trx) => {
+    const res = await trx.raw('SELECT pg_try_advisory_xact_lock(?) AS locked', [TOPIC_MERGE_LOCK_KEY]);
+    const locked = Array.isArray(res?.rows) ? res.rows[0]?.locked : res?.[0]?.locked;
+    if (locked !== true) {
+      const err = new Error('another topic-gated merge is in progress — retry next tick');
+      err.code = 'TOPIC_MERGE_LOCK_BUSY';
+      throw err;
+    }
+    return fn(trx);
+  });
+}
+
 // A row already on the hub, or a legacy pre-Astro row the admin routes still
 // carry as status='published' (no astro_status / astro_live_url), is an
 // existing post: re-publishing it is a refresh, never a new sibling.
@@ -852,6 +872,8 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
 
 module.exports = {
   evaluate,
+  withTopicMergeLock,
+  TOPIC_MERGE_LOCK_KEY,
   evaluateDraftFraming,
   evaluateDraftTargeting,
   evaluateBlogPostRow,

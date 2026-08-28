@@ -47,6 +47,8 @@ jest.mock('../services/content-astro/astro-publisher', () => ({
 jest.mock('../services/content/topic-targeting-gate', () => ({
   loadLiveIndex: jest.fn().mockResolvedValue({ posts: [] }),
   evaluateDraftTargeting: jest.fn(() => ({ ok: true, findings: [] })),
+  // REAL lock helper: the tests drive it through the db.transaction stub.
+  withTopicMergeLock: jest.requireActual('../services/content/topic-targeting-gate').withTopicMergeLock,
 }));
 jest.mock('../services/seo/indexnow-submit', () => ({
   submit: jest.fn(),
@@ -215,6 +217,9 @@ function runUpdates(updates) {
 }
 
 beforeEach(() => {
+  // Topic-gated merges run recheck → merge inside db.transaction under an
+  // advisory lock; the bare jest.fn() db grants it by default.
+  db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked: true }] }) }));
   // Default: the PR head's blog file is readable and the topic recheck is
   // clean (the recheck fails closed on an unreadable file).
   gh.getFile.mockResolvedValue({ content: '---\ntitle: Test Post\nslug: /pest-control/test-post/\nprimary_keyword: test keyword\n---\n\nBody.\n' });
@@ -704,6 +709,23 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', expect.any(String));
     expect(topicGate.loadLiveIndex).toHaveBeenCalled();
     expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Test Post');
+  });
+
+  test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn().mockResolvedValue({ rows: [{ locked: false }] }) }));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(topicGate.evaluateDraftTargeting).not.toHaveBeenCalled();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: 'topic_merge_lock_busy' });
   });
 
   test('an unreadable head file fails the recheck closed (deferred, not merged)', async () => {

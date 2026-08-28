@@ -1008,34 +1008,51 @@ async function maybeAutoMerge(run, pr) {
   //     blog file against a fresh live corpus — the same assertion mergeAstro
   //     makes — before the direct merge below. Fails closed (unreadable file /
   //     corpus outage defers to the next tick).
-  if (run.action_type === 'new_supporting_blog') {
-    const topic = await recheckTopicTargeting(run, pr, gh);
-    if (!topic.ok) {
-      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
-      return { pending: true, reason: `topic_targeting_blocked: ${topic.reason}` };
-    }
-    // 3.8 The recheck above was more async work (GitHub + corpus reads): an
-    //     operator dismiss/requeue landing during it must still block the
-    //     merge — repeat the queue re-check immediately before gh.mergePr.
-    if (!(await queueRowStillParked(run))) {
-      logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
-      return { pending: true, reason: 'queue_row_moved_during_gating' };
-    }
-  }
-
   // 4. The merge itself is pinned to the head commit the gates above were
   //    checked against: GitHub rejects with 409 if the branch received
   //    another push while the merge call was in flight, so an unbuilt/
   //    unreviewed commit can never ride through the gate. The fresh head
   //    re-runs the full gate next tick.
+  const doMerge = () => gh.mergePr(pr.number, {
+    method: 'squash',
+    title: String(pr.title || '').slice(0, 72),
+    sha: pr.head?.sha,
+  });
   let mergeRes;
   try {
-    mergeRes = await gh.mergePr(pr.number, {
-      method: 'squash',
-      title: String(pr.title || '').slice(0, 72),
-      sha: pr.head?.sha,
-    });
+    if (run.action_type === 'new_supporting_blog') {
+      // The recheck and the merge run under the shared topic-merge advisory
+      // lock (same as mergeAstro), so two PRs claiming one entity cannot
+      // both pass against the same old corpus and both merge. A withheld
+      // result is returned through the lock via `withheld`.
+      let withheld = null;
+      const { withTopicMergeLock } = require('./topic-targeting-gate');
+      mergeRes = await withTopicMergeLock(db, async () => {
+        const topic = await recheckTopicTargeting(run, pr, gh);
+        if (!topic.ok) {
+          logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
+          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}` };
+          return null;
+        }
+        // 3.8 The recheck above was more async work (GitHub + corpus reads):
+        //     an operator dismiss/requeue landing during it must still block
+        //     the merge — repeat the queue re-check immediately before merging.
+        if (!(await queueRowStillParked(run))) {
+          logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: opportunity_queue row moved during the topic-targeting recheck (operator action)`);
+          withheld = { pending: true, reason: 'queue_row_moved_during_gating' };
+          return null;
+        }
+        return doMerge();
+      });
+      if (withheld) return withheld;
+    } else {
+      mergeRes = await doMerge();
+    }
   } catch (err) {
+    if (err?.code === 'TOPIC_MERGE_LOCK_BUSY') {
+      logger.info(`[autonomous-pr-poller] auto-merge deferred for run ${run.id}: ${err.message}`);
+      return { pending: true, reason: 'topic_merge_lock_busy' };
+    }
     if (err?.status === 409) {
       logger.info(`[autonomous-pr-poller] auto-merge aborted for run ${run.id}: PR #${pr.number} head moved after gating (409)`);
       return { pending: true, reason: 'head_moved_during_merge' };
