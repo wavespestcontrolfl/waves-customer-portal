@@ -138,7 +138,7 @@ t.string('link_type').notNullable();              // board lane the placement wi
 t.numeric('confidence', 3, 2);                    // 0–1
 t.integer('revision').notNullable().defaultTo(1);  // display/global counter: +1 whenever ANY in-place authority- or approval-relevant field changes (acquisition_type / submission_url changes supersede the row instead — see above)
 t.integer('revision_payment').notNullable().defaultTo(1);        // +1 only on payment inputs: estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding
-t.integer('revision_communication').notNullable().defaultTo(1);  // +1 only on communication inputs: link_type, expected_rel (recipient/draft live on the approval hash)
+t.integer('revision_communication').notNullable().defaultTo(1);  // +1 only on communication inputs: link_type, expected_rel, legal_attestation (recipient/draft live on the approval hash)
 t.integer('revision_execution').notNullable().defaultTo(1);      // +1 only on execution inputs: account_required, email_verification, agent_completable, legal_attestation
 // Approvals and authority rows bind to THEIR dimension's revision (§3.3b/§3.6b); a price change bumps revision_payment
 // only, so a satisfied communication approval is untouched. Purely descriptive fields (confidence, investigation, last_investigated_at, authority_last_decided) do not bump it. Approvals bind to it (§3.6b) and the authority job re-decides on every bump.
@@ -320,7 +320,7 @@ what was approved; execution is bound to it and it dies if anything it froze cha
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.integer('path_revision').notNullable();     // the path's revision_<dimension of this approval's action> at approval time (§3.2) — never the global counter
-t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding}; communication = {link_type, expected_rel, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence}. A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
+t.text('decision_inputs_hash').notNullable(); // hash of THIS approval's dimension inputs only (same sets as the authority rows): payment = {estimated_cost_cents, renewal_cost_cents, renewal_period, payment_required, legal_attestation, merchant_binding}; communication = {link_type, expected_rel, legal_attestation, recipient, subject/body hash}; execution = {account_required, email_verification, agent_completable, legal_attestation, submission_url}; plus, for every dimension, the shared quality floors {spam_score, score, confidence}. A mismatch at claim time invalidates the approval; a change outside the dimension's set never does
 t.boolean('money_action').notNullable();      // = (dimension = 'payment'); CHECK (money_action = (dimension = 'payment')) — same-row, so the money CHECKs below can see it; execution and communication approvals never carry payment terms
 t.string('decision').notNullable();           // CHECK (decision IN ('approved','rejected','watch'))
 t.string('authority').notNullable();          // the OWNER_* / OWNER_OVERRIDE level being granted
@@ -336,7 +336,9 @@ t.timestamp('consumed_at');                   // set when the leased execution r
 ```
 `seo_link_acquisition_paths` gains `revision` (integer; bump rule in §3.2). The claim predicate
 accepts an `OWNER_*`/`OWNER_OVERRIDE` row only with an approval that is `approved`, not
-invalidated, not consumed, whose `path_id` is the placement's current, non-superseded path,
+invalidated, **unconsumed for the dimension instance that owns the current action** (a
+consumed approval on a prior, satisfied dimension instance is a durable prerequisite, §3.3b),
+whose `path_id` is the placement's current, non-superseded path,
 whose `path_revision` equals that path's current `revision_<dimension>` (per-dimension —
 a price change bumps `revision_payment` only) AND whose
 `decision_inputs_hash` equals the hash of the current inputs (an owner approved *these*
@@ -561,7 +563,6 @@ if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shi
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
-if path.payment_required and not valid(path.merchant_binding)  → payment = OWNER_MANUAL_PAYMENT   # no resolvable recipient identity: the automated purchase flow is closed for this path (no reservation, no card); the owner pays outside the system and records a `human` attempt — communication/execution dimensions proceed normally
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
 #     is the owner's explicit "Acquire anyway" click, which does NOT stamp an authority: it
@@ -579,30 +580,42 @@ if domain.spam_score > policy.max_spam_score
 #    INDEPENDENTLY and the result is the SET {execution|communication, payment?}; no branch
 #    returns early for the whole placement — an OWNER_* verdict in one dimension never
 #    suppresses the payment decision for a paid path.
-# 2a. EXECUTION dimension (non-outreach types) — first matching rule wins for THIS dimension only
-if not path.agent_completable → execution = OWNER_HUMAN_STEP      # the investigator judged a human must act; never AUTO_*
-elif path.legal_attestation and policy.legal_attestation_requires_owner → execution = OWNER_LEGAL
-elif path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → execution = OWNER_MEMBERSHIP
 # Policy thresholds are compared ONLY when explicitly configured: `configured(x)` = x is a
 # finite number (not null/undefined/NaN). JS compares `5 >= null` as true, so a null
 # threshold must never reach a comparison — an unconfigured AUTO capability is simply absent.
-# 2b. PAYMENT dimension — evaluated for EVERY paid path regardless of 2a/2c
+# Each dimension below is a CLOSED branch: first matching rule assigns that dimension and
+# nothing later in the same dimension can overwrite it; dimensions never assign each other.
+OUTREACH_TYPES = (resource_outreach, editorial_outreach, partnership, content_submission)
+
+# 2a. EXECUTION dimension — only for non-outreach types
+if path.acquisition_type not in OUTREACH_TYPES:
+    execution =
+        OWNER_HUMAN_STEP  if not path.agent_completable                                                   # a human must act; never AUTO_*
+        else OWNER_LEGAL  if path.legal_attestation and policy.legal_attestation_requires_owner
+        else OWNER_MEMBERSHIP if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner
+        else (AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT) if path.account_required
+        else (AUTO_FREE if auto_free_acquisition === true else OWNER_FREE)
+
+# 2b. PAYMENT dimension — for EVERY paid path, independent of 2a/2c
 if path.payment_required:
-    if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents) and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
-       and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
-       and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
-       and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
-    else → payment = OWNER_PAYMENT
-# 2c. COMMUNICATION dimension (outreach/content types; replaces 2a for them) — evaluated in ADDITION to 2b
-if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):
-    if path.legal_attestation and policy.legal_attestation_requires_owner → communication = OWNER_LEGAL   # a signed agreement / vendor terms is never accepted under AUTO_OUTREACH; the owner's legal approval (action outreach_send, dimension communication) is the only send authority for this path   # guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
-    → communication = AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
-                      and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
-                      else communication = OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
-                      action='outreach_send', bound to the draft hash) — no draft yet ⇒ the row simply awaits a draft lease, no card
-# 2a (continued) — remaining EXECUTION rules for non-outreach types
-elif path.account_required → execution = AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
-else → execution = AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
+    payment =
+        OWNER_MANUAL_PAYMENT if not valid(path.merchant_binding)                                            # no resolvable recipient identity: automated purchase flow closed
+        else AUTO_PAID_WITHIN_POLICY if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents)
+                                    and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
+                                    and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
+                                    and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score
+                                    and d30_conf ≥ auto_paid_min_d30_confidence
+                                    and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents
+        else OWNER_PAYMENT
+
+# 2c. COMMUNICATION dimension — only for outreach/content types (guest posts / content always pass the outreach mandate)
+if path.acquisition_type in OUTREACH_TYPES:
+    communication =
+        OWNER_LEGAL if path.legal_attestation and policy.legal_attestation_requires_owner                    # a signed agreement / vendor terms is never accepted under AUTO_OUTREACH; the owner's legal approval (action outreach_send) is the only send authority
+        else AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
+                            and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7)
+        else OWNER_OUTREACH   # the draft goes to the existing approval queue; the auth'd send click IS the approval row (action='outreach_send', bound to the draft hash) — no draft yet ⇒ the row simply awaits a draft lease, no card
+
 return { execution | communication, payment? }   # the complete set; a paid membership carries BOTH OWNER_MEMBERSHIP and its payment verdict
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
