@@ -244,6 +244,7 @@ function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDay
  * @param {object} input
  * @param {number|null} input.targetInchesPerWeek   this week's turf need (ET₀×Kc or seasonal)
  * @param {number|null} input.lastWeekAppliedInches last week's rain + irrigation (null = unknown)
+ * @param {number|null} input.lastWeekRainInches    last week's observed rain alone (carryover basis when rainSensor)
  * @param {number|null} input.lastWeekTargetInches  last week's need (defaults to target)
  * @param {number|null} input.forecastRainInches    7-day forecast total (null = unavailable)
  * @param {'peak'|'shoulder'|'cool'} input.season
@@ -262,6 +263,7 @@ function resolveApplicationRate({ explicitInchesPerWeek, runMinutes, wateringDay
 function buildWeekPlan({
   targetInchesPerWeek = null,
   lastWeekAppliedInches = null,
+  lastWeekRainInches = null,
   lastWeekTargetInches = null,
   forecastRainInches = null,
   season = 'peak',
@@ -302,13 +304,17 @@ function buildWeekPlan({
   if (legalMaxEvents == null) { reasons.push('restriction_policy_missing'); return base; }
   if (target == null || target < 0) { reasons.push('target_missing'); return base; }
 
-  // Carryover: only a SURPLUS carries, only up to root-zone storage.
-  const applied = finiteOrNull(lastWeekAppliedInches);
+  // Carryover: only a SURPLUS carries, only up to root-zone storage. With a
+  // rain sensor the programmed irrigation is an UPPER BOUND (the sensor may
+  // have skipped runs — which ones is unknowable), so only the observed rain
+  // can prove a surplus; assumed irrigation never tells a sensor customer to
+  // skip a run.
+  const applied = finiteOrNull(rainSensor === true ? lastWeekRainInches : lastWeekAppliedInches);
   const lastTarget = finiteOrNull(lastWeekTargetInches) ?? target;
   let carryover = 0;
   if (applied != null && applied > lastTarget) {
     carryover = round2(clamp(applied - lastTarget, 0, ROOT_ZONE_STORAGE_INCHES));
-    if (carryover > 0) reasons.push('prior_week_overwatered');
+    if (carryover > 0) reasons.push(rainSensor === true ? 'prior_week_rain_surplus' : 'prior_week_overwatered');
   }
   const need = round2(Math.max(0, target - carryover));
   if (season === 'cool') reasons.push('cool_season');

@@ -599,6 +599,7 @@ function buildWeeklyEmailDecision({
       advice,
       grassType,
       et0Inches,
+      lastWeekRainInches: rainfallInches7d,
       forecastRainInches,
       runMinutes: irrigationRunMinutes,
       wateringDays,

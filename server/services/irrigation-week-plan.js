@@ -58,6 +58,7 @@ function decideWeekPlan({
   advice,
   grassType = null,
   et0Inches = null,
+  lastWeekRainInches = null,
   forecastRainInches = null,
   runMinutes = null,
   wateringDays = null,
@@ -74,6 +75,7 @@ function decideWeekPlan({
   const plan = buildWeekPlan({
     targetInchesPerWeek,
     lastWeekAppliedInches: advice?.appliedInchesPerWeek ?? null,
+    lastWeekRainInches,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     forecastRainInches,
     season: classifySeason(planMonth),
@@ -92,6 +94,7 @@ function decideWeekPlan({
     targetInches: targetInchesPerWeek,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     appliedInches: advice?.appliedInchesPerWeek ?? null,
+    lastWeekRainInches,
     rainKnown: advice?.rainKnown !== false,
     forecastRainInches,
     planMonth,
@@ -160,7 +163,9 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action === 'hold') {
     subject = `Skip your turf watering this week, ${name}`;
     heading = `Your lawn is set for the week, ${name}`;
-    const why = overwatered
+    const why = plan.reasons.includes('prior_week_rain_surplus')
+      ? `Last week's rain alone left more in the soil than your ${grassLabel} can use this week`
+      : overwatered
       ? `Last week's rain and irrigation left more in the soil than your ${grassLabel} can use this week`
       : cool
         ? `December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`

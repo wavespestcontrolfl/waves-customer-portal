@@ -57,6 +57,13 @@ describe('renderWeekPlanEmail', () => {
     expect(allText(copy)).not.toMatch(/turn .*off|controller/i);
   });
 
+  test('hold from a rain-only surplus (sensor customer) says rain alone did it', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 2.5, lastWeekRainInches: 1.75, season: 'cool', restriction: ONE_DAY, rainSensor: true, ...SPRAY });
+    const copy = renderWeekPlanEmail(plan, CTX);
+    expect(copy.week_plan).toContain("Last week's rain alone left more in the soil");
+    expect(copy.plan_note).toContain('rain sensor');
+  });
+
   test('conditional: leave the turf irrigation off, run only if < ½" falls', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);

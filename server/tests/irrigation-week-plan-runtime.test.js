@@ -111,6 +111,23 @@ describe('buildWeekPlan — hold threshold and carryover', () => {
     expect(p.action).toBe('hold');
   });
 
+  test('with a rain sensor, carryover comes from observed RAIN only — assumed irrigation never earns a skip', () => {
+    // 0.75" schedule + 0.5" rain vs a 0.75" target: without a sensor that is a
+    // 0.5" surplus (hold-worthy); with a sensor the schedule may have been
+    // skipped, so only the rain counts — no surplus, a run is required.
+    const noSensor = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 1.25, lastWeekRainInches: 0.5, season: 'shoulder', restriction: ONE_DAY, ...SPRAY });
+    expect(noSensor.carryoverInches).toBe(0.5);
+    expect(noSensor.action).toBe('hold');
+    const sensor = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 1.25, lastWeekRainInches: 0.5, season: 'shoulder', restriction: ONE_DAY, rainSensor: true, ...SPRAY });
+    expect(sensor.carryoverInches).toBe(0);
+    expect(sensor.action).toBe('run');
+    // A real rain surplus still carries for a sensor customer, under its own reason.
+    const wet = buildWeekPlan({ targetInchesPerWeek: 0.75, lastWeekAppliedInches: 2.5, lastWeekRainInches: 1.75, season: 'shoulder', restriction: ONE_DAY, rainSensor: true, ...SPRAY });
+    expect(wet.carryoverInches).toBe(0.5);
+    expect(wet.reasons).toContain('prior_week_rain_surplus');
+    expect(wet.reasons).not.toContain('prior_week_overwatered');
+  });
+
   test('a deficit last week never carries (carryover is surplus-only)', () => {
     const p = buildWeekPlan({ targetInchesPerWeek: 1, lastWeekAppliedInches: 0.2, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     expect(p.carryoverInches).toBe(0);
