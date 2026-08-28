@@ -733,6 +733,20 @@ class AutonomousRunner {
         }
       }
       run.topic_targeting_result = { ...(run.topic_targeting_result || {}), framing: topicFraming };
+      // An ENGINE failure (gate unavailable / threw) is not the writer's
+      // mistake: fail closed exactly like step 2d — hold for review without
+      // spending the single feedback retry.
+      const engineFailure = (topicFraming.findings || []).find((f) => f.code === 'TOPIC_TARGETING_UNAVAILABLE' || f.code === 'TOPIC_TARGETING_ERROR');
+      if (engineFailure) {
+        logger.error(`[autonomous-runner] post-draft topic-targeting gate could not run for ${opp.id}: ${engineFailure.message}`);
+        const finalized = await finalize(run, t0, {
+          outcome: 'skipped_gate_fail',
+          skip_reason: 'topic_targeting_unavailable',
+          reviewer_notes: `Post-draft topic-targeting gate could not run (${engineFailure.message}); draft held for review rather than published unchecked.`,
+        });
+        await this._pendingReviewClaimOrThrow(queue, opp.id, 'topic_targeting_unavailable', { claimToken });
+        return finalized;
+      }
     }
     const topicBlocking = topicFraming && !topicFraming.ok
       ? topicFraming.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
@@ -3586,7 +3600,9 @@ async function finalize(run, t0, patch, { persist = true } = {}) {
       seo_completion_gate_result: JSON.stringify(run.seo_completion_gate_result || {}),
       facts_sufficiency: JSON.stringify(run.facts_sufficiency || {}),
       protected_check: JSON.stringify(run.protected_check || {}),
-      topic_targeting_result: JSON.stringify(run.topic_targeting_result || {}),
+      // NULL when the gate did not run (non-applicable runs) — the review
+      // read model must not render a verdict that never happened.
+      topic_targeting_result: run.topic_targeting_result ? JSON.stringify(run.topic_targeting_result) : null,
       seo_completion_gate_ms: run.seo_completion_gate_ms || null,
       draft_payload: JSON.stringify(run.draft_payload || {}),
       agent_id: run.agent_id || null,

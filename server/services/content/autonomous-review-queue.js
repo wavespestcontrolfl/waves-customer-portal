@@ -568,7 +568,10 @@ function summarizeGates(qualityGate, uniquenessGate, comparisonGate = {}, topicG
       ? comparisonGate?.pass !== false
       : null,
     comparison_findings: comparisonFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message })),
-    topic_ok: topicGate ? (topicGate.ok !== false && topicGate.framing?.ok !== false) : null,
+    // Only a verdict that actually carries a result counts; {} / absent → null.
+    topic_ok: topicGate && (typeof topicGate.ok === 'boolean' || topicGate.framing)
+      ? (topicGate.ok !== false && topicGate.framing?.ok !== false)
+      : null,
     topic_findings: topicFindings.map((f) => ({ severity: f.severity, code: f.code, message: f.message, ...(f.cities ? { cities: f.cities } : {}), ...(f.owners ? { owners: f.owners } : {}) })),
   };
 }

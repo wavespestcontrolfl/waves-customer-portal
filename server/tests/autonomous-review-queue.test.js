@@ -250,6 +250,7 @@ describe('run observability exposure', () => {
     expect(item.run.gate_summary.topic_findings[0]).toMatchObject({ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', owners: ['/pest-control/in-wall-pest-control/'] });
     expect(summarizeGates({ ok: true }, { ok: true }, {}, { ok: true, findings: [], framing: { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_GEO_STATEWIDE', message: 'x' }] } })).toMatchObject({ topic_ok: false, topic_findings: [{ code: 'TOPIC_GEO_STATEWIDE' }] });
     expect(summarizeGates({ ok: true }, { ok: true }, {}).topic_ok).toBeNull();
+    expect(summarizeGates({ ok: true }, { ok: true }, {}, {}).topic_ok).toBeNull(); // gate never ran → no verdict
     const bare = buildReviewItem({ opportunity: { id: 'opp-u', status: 'pending_review' }, brief: null, run: { id: 'run-u', outcome: 'completed_pending_review', quality_gate_result: '{}', uniqueness_gate_result: '{}', comparison_table_result: '{}', draft_payload: '{}' } });
     expect(bare.run.topic_targeting_result).toBeNull();
   });

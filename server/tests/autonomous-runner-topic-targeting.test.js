@@ -386,3 +386,22 @@ describe('PR codex r16 — one retry, every finding', () => {
     expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
   });
 });
+
+describe('post-draft topic-gate ENGINE failure parks for review (hook, PR codex r19 push)', () => {
+  test('gate throws on the emitted draft → topic_targeting_unavailable, pending review, no retry spent', async () => {
+    const real = jest.requireActual('../services/content/topic-targeting-gate');
+    const topicGate = { ...real, evaluateDraftTargeting: jest.fn(() => { throw new Error('gate exploded'); }) };
+    const queue = makeQueue({ id: 'opp_boom', action_type: 'new_supporting_blog', query: 'kinds of ants in sarasota', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = { runWithBrief: jest.fn().mockResolvedValue({ ok: true, draft: { url: '/pest-control/kinds-of-ants/', title: 'Kinds of Ants in Sarasota', frontmatter: { title: 'Kinds of Ants in Sarasota', slug: '/pest-control/kinds-of-ants/', primary_keyword: 'kinds of ants in sarasota', meta_description: 'x' }, body: 'Benign copy.' } }) };
+    const { runner, dbMock } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'kinds of ants in sarasota' }), dispatcher, topicGate });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('skipped_gate_fail');
+    expect(result.skip_reason).toBe('topic_targeting_unavailable');
+    expect(queue.pendingReview).toHaveBeenCalledWith('opp_boom', 'topic_targeting_unavailable', expect.anything());
+    expect(queue.defer).not.toHaveBeenCalled();
+    expect(dbMock._updates.map((u) => u.patch).some((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'))).toBe(false);
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_TARGETING_ERROR');
+  });
+});
