@@ -270,15 +270,20 @@ t.text('lease_token');                // the claim lease that holds this slot �
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
-`signup-evidence.js` writes here for the deterministic runner. Its current ledger
-(`seo_signup_attempts`, migration `20260622000010`) is **backfilled idempotently in step 1**
-with an explicit outcome mapping before reads/writes cut over — `blocked_account` →
+The deterministic runner writes here (`signup-runner.js` `recordAttempt`; `signup-evidence.js`
+only stores the screenshot it references). Its current ledger (`seo_signup_attempts`,
+migration `20260622000010`) is **backfilled idempotently in step 1**, and the cutover is
+ATOMIC in that same PR: the migration backfills first (migrations run pre-deploy, so no
+attempt is written to the legacy table after the backfill), and the same deploy moves
+`recordAttempt` and every reader of `seo_signup_attempts` to `seo_link_attempts` — there is
+no dual-write window and no period in which the legacy table has a live writer. Mapping — `blocked_account` →
 `needs_owner`, `blocked_payment` → `needs_owner`, `blocked_price_changed` → `price_changed`,
 `blocked_captcha` → `captcha`, `submitted` → `placed`, `failed`/`error` → `failed`, anything
 else → `failed` — with the verbatim legacy outcome kept in `detail.legacy_outcome` and
 `provider='deterministic_runner'`, so historical attempts and costs appear in the Outcomes/
-provider reports and the CHECK enum holds. The legacy table is kept (read-only) until step 5
-retires its writer.
+provider reports and the CHECK enum holds. `seo_signup_attempts` is then left in place with
+no writer, as read-only history, and dropped by a later cleanup migration once step 5's
+provider work no longer needs to compare against it.
 
 ### 3.4b `seo_link_domain_sources` — every touch, normalized
 
@@ -1011,7 +1016,10 @@ together:
   `prospect` restriction is never applied to the later-stage modes; registry
   `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — claimability is a
   placement property, so a second location's placement is leasable after the first was
-  acquired; the placement's stamped `authority` is an `AUTO_*` level
+  acquired; and — for every mode EXCEPT `mode=draft`, which is exempt from this authority
+  clause by construction (the draft-lease bullet below defines its own predicate; every
+  other clause and the bans on irreversible actions still apply to it) — the placement's
+  stamped `authority` is an `AUTO_*` level
   **or** an `OWNER_*` level with a recorded approval row (a dimension decided under a floor
   waiver is leasable exactly as its underlying level would be — its `floor_waiver_id` waiver
   must still be valid, and a waiver never promotes the level) — except
@@ -1340,7 +1348,8 @@ unset its gate; budget kill = the issuer program's limit.
 
 1. **Registry + paths + provenance + statuses** — migrations for §3.1–3.5, `awaiting_owner`/
    `watching`, `domain_id/path_id/authority` on prospects, intake endpoint skeleton
-   (normalize/dedupe/upsert only). Docs-tested with contract tests on the guard.
+   (normalize/dedupe/upsert only); `seo_signup_attempts` backfill + atomic `recordAttempt`
+   cutover to `seo_link_attempts` (§3.4). Docs-tested with contract tests on the guard.
 2. **Bulk intake** — paste box + CSV import + competitor-gap ingestion job + existing-profile
    baseline. `Backlinks.csv` enters here as `list_import` / `backlinks_csv_2026_08`.
 3. **Path investigator** — job + schema-validated LLM call + probe list + cost caps;
