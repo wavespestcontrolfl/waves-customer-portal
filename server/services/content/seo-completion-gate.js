@@ -415,8 +415,14 @@ const CANONICAL_TAG_SERVICES = {
 // CTA must be tied to THAT topic, or every pest specialty would be allowed
 // on a bed-bug post.
 function ctaBriefTopic(brief = {}) {
+  // Only when the topic resolves to KNOWN CTA vocabulary — a blocklist-
+  // derived topic like "drywood" has no anchor terms of its own, so the
+  // broad service (termite) stays the CTA target.
   const specialty = brief?.gsc_signal?.specialty_topic;
-  if (specialty && ctaBriefService(specialty)) return specialty;
+  if (specialty) {
+    const key = ctaBriefService(specialty);
+    if (key && (CTA_ANCHOR_SERVICE_TERMS[key] || CTA_SERVICE_FAMILY[key]) && !CANONICAL_TAG_SERVICES[String(specialty).toLowerCase().trim()]) return specialty;
+  }
   return brief.service;
 }
 
@@ -880,9 +886,24 @@ function plainAnchor(raw) {
 }
 
 function conversionCtaLinks(body) {
+  return ctaLinksWhere(body, (link) => isConversionPath(link.href));
+}
+// Estimate/quote CTAs pointing at a SERVICE or CITY page ("Request a Lawn
+// Care Quote" → /lawn-care-sarasota-fl/) are CTAs too — the wrong-service
+// rule applies to every CTA anchor, not just conversion endpoints. Same
+// classifier, different destination filter, so the two can never drift.
+function serviceQuoteCtaLinks(body) {
+  return ctaLinksWhere(body, (link) => {
+    const href = String(link.href || '');
+    if (!href.startsWith('/') || isConversionPath(href) || !isServiceOrCityPath(href)) return false;
+    const anchor = plainAnchor(link.anchor);
+    return ESTIMATE_KW_RE.test(anchor) && (ACTION_VERB_RE.test(anchor) || INVITATION_CTA_RE.test(anchor));
+  });
+}
+function ctaLinksWhere(body, accept) {
   const out = [];
   for (const link of extractLinks(body)) {
-    if (!isConversionPath(link.href)) continue;
+    if (!accept(link)) continue;
     // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
     // must be read as "Request a Quote", not evade the gate on a leading
     // asterisk.
@@ -1037,7 +1058,14 @@ function badCtaAnchor(body, brief = {}) {
     }
     return !isProseReferenceAnchor(link.anchor);
   });
-  return bad ? bad.anchor : null;
+  if (bad) return bad.anchor;
+  if (!allowed) return null;
+  // Service/city-page estimate CTAs obey the same brief-service tie.
+  const wrong = serviceQuoteCtaLinks(body).find((link) => {
+    const named = effectiveNamed(link, allowed);
+    return named.length === 0 || !named.every((svc) => allowed.has(svc));
+  });
+  return wrong ? wrong.anchor : null;
 }
 
 // Deterministic backstop to the writer prompt's CTA-wording rule (owner
@@ -1158,7 +1186,7 @@ function collectForbiddenCtaAnchors(body, { service = null } = {}) {
     // Same posture as badCtaAnchor: EVERY estimate/quote conversion anchor
     // must positively name an allowed service — a wrong-service or fully
     // generic anchor is flagged even when a valid CTA exists elsewhere.
-    for (const link of conversionCtaLinks(body)) {
+    for (const link of [...conversionCtaLinks(body), ...serviceQuoteCtaLinks(body)]) {
       if (!link.hasEstimateWording) continue;
       const named = effectiveNamed(link, allowed);
       if (named.length === 0 || !named.every((svc) => allowed.has(svc))) out.push(link.anchor);

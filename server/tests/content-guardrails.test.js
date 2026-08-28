@@ -2360,6 +2360,10 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
       ['<span class="cta">x</span>', 'hidden_or_styled_markup'],
       ['<div className="x">x</div>', 'hidden_or_styled_markup'],
       ['<div {...{hidden: true}}>x</div>', 'jsx_expression_attribute'],
+      ['<div popover>x</div>', 'hidden_or_styled_markup'],
+      ['<div inert>x</div>', 'hidden_or_styled_markup'],
+      ['[See [Our [Termite] Service]](/termite-inspection/)', 'nested_bracket_label'],
+      ['[![alt](/img.webp)](/contact/)', 'nested_bracket_label'],
       ['<div {...props}>x</div>', 'jsx_expression_attribute'],
       ['<span title={x}>x</span>', 'jsx_expression_attribute'],
     ];

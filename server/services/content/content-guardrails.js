@@ -2336,8 +2336,13 @@ const UNSUPPORTED_BODY_SYNTAX = [
   ['template_literal_prop', /=\s*\{`/],
   ['nested_blockquote', /^ {0,3}>[ \t]*>/m],
   ['code_span_in_link_label', /\[[^\]]*`[^\]]*\]\(/],
+  // Nested brackets inside a link label ("[See [Our [Termite] Service]](…)",
+  // image-in-link) — never written by the writer; `{` excluded so
+  // component JSON props ([{ "label": … }]) are not read as labels.
+  ['nested_bracket_label', /\[[^\]\n{]*\[/],
 ];
-const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className)(?:\s*=|\s|\/?>|$)/i;
+// popover / inert subtrees are hidden (or non-interactive) until shown.
+const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className|popover|inert)(?:\s*=|\s|\/?>|$)/i;
 // Every unsupported CONSTRUCT in the body — { reason, text } per match —
 // so refresh grandfathering can compare the actual markup, not just the
 // category (a legacy `<a>` must not license a NEW, differently-hidden

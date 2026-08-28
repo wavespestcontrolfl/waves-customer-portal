@@ -1485,6 +1485,33 @@ describe('seo-completion-gate', () => {
     expect(rightSpecialty.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
     expect(rightSpecialty.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
 
+    // A blocklist-derived specialty topic with no CTA vocabulary of its own
+    // ("drywood") keeps the broad service as the CTA target.
+    const drywood = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Request a Drywood Termite Estimate](/contact/) x.' }),
+      brief: baseBrief({ service: 'termite-control', gsc_signal: { specialty_topic: 'drywood' } }),
+      shadowMode: true,
+    });
+    expect(drywood.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+    expect(drywood.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
+    // Estimate/quote CTAs on SERVICE/CITY destinations obey the brief tie
+    // too — a lawn quote CTA on a termite post is wrong-service even with a
+    // valid termite CTA present; own-service ones pass.
+    const wrongServiceQuote = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get My Free Termite Estimate](/contact/) and [Request a Lawn Care Quote](/lawn-care-sarasota-fl/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(wrongServiceQuote.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(true);
+    expect(SeoCompletionGate.collectForbiddenCtaAnchors('[Get My Free Termite Estimate](/contact/) and [Request a Lawn Care Quote](/lawn-care-sarasota-fl/) x.', { service: 'termite-control' })).toContain('Request a Lawn Care Quote');
+    const ownServiceQuote = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: '[Get My Free Termite Estimate](/contact/) and [Request a Termite Quote](/termite-inspection/) x.' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(ownServiceQuote.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+
     // Canonical service hubs are service destinations: a request-led anchor
     // on /waveguard-memberships/ needs estimate/quote wording.
     const hubCta = SeoCompletionGate.evaluate({
