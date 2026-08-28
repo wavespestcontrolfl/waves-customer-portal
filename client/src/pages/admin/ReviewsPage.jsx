@@ -371,10 +371,13 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   };
   const [editing, setEditing] = useState(false);
   const [replyText, setReplyText] = useState(review.reply || "");
+  // Set by "Use Draft": the pipeline draft's identity, sent with the reply so
+  // the server can refuse a draft the sync invalidated after it was loaded.
+  const [draftToken, setDraftToken] = useState(null);
   // The card keeps its key across reloads; when the live reply changes
   // underneath it (retract, sync, Google-side edit) the editor must follow,
   // or a retracted reply could be re-posted from stale editor text.
-  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); }, [review.reply]);
+  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); }, [review.reply]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -383,7 +386,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim());
+      await onReplySubmit(review.id, replyText.trim(), draftToken);
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -630,6 +633,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             <button
               onClick={() => {
                 setReplyText(review.draftReply);
+                setDraftToken(review.draftToken || null);
                 setEditing(true);
               }}
               style={{
@@ -2113,10 +2117,10 @@ export default function ReviewsPage() {
     loadData();
   };
 
-  const handleReply = async (reviewId, replyText) => {
+  const handleReply = async (reviewId, replyText, draftToken = null) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
-      body: JSON.stringify({ replyText }),
+      body: JSON.stringify(draftToken ? { replyText, draftToken } : { replyText }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
     // With more pages still on the server, keeping the mutable page offset

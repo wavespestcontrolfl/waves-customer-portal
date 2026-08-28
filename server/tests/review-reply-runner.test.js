@@ -790,6 +790,20 @@ describe('processDueAutoReplies — state machine', () => {
     // Account read failure → fail closed.
     mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
     expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/could not be re-read/);
+    // codex r25: "Use Draft" carries the draft's identity. The sync cleared
+    // the draft after the editor loaded (reviewer edit → requeued) — the
+    // editor still holds the old text and the row has nothing to compare:
+    // the token alone refuses it, edited or not.
+    const token = Runner.reviewFingerprint(base);
+    const cleared = { ...base, auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_draft: null, auto_reply_grounding: null, star_rating: 1, review_text: 'Terrible now' };
+    expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })(cleared)).toMatch(/cleared since it was loaded/);
+    expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(cleared)).toMatch(/cleared since it was loaded/);
+    // Draft still held but the review moved underneath → token mismatch.
+    expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, review_text: 'Edited review' , auto_reply_grounding: { ...stored, fingerprint: Runner.reviewFingerprint({ ...base, review_text: 'Edited review' }) } })).toMatch(/changed since this draft was loaded/);
+    // Token matches and nothing changed → posts (even an edited draft).
+    expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
+    // Posted meanwhile via Post now → refuse, the person must reload.
+    expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, auto_reply_status: 'posted', review_reply: draft })).toMatch(/cleared since it was loaded/);
   });
 
   test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {

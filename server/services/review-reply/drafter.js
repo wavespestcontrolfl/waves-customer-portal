@@ -98,8 +98,13 @@ const BANNED_RE = new RegExp([
   '\\bhurt\\w*\\b', '\\binjur\\w*\\b', '\\bendanger\\w*\\b', '\\bsicken\\w*\\b', '\\bthreat\\w*\\b', '\\bjeopard\\w*\\b',
   // Illness family outright: "won't cause illness", "no sickness", "never
   // makes anyone ill", "no allergic reaction", "no symptoms".
+  // Lethal-effect family: lethal / fatal / death / deadly / die outright;
+  // "kill" when its object is anything but a pest ("won't kill your pets",
+  // "kills the grass"), and in the negated wrapper below.
+  '\\blethal\\w*\\b', '\\bfatal\\w*\\b', '\\bdeath\\w*\\b', '\\bdeadly\\b', '\\bd(?:ie|ies|ied|ying)\\b',
+  '\\bkill\\w*\\s+(?:off\\s+)?(?:your\\s+|the\\s+|our\\s+|any\\s+|all\\s+|other\\s+|beneficial\\s+|good\\s+|small\\s+|young\\s+)?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|animals|birds|fish|reptiles|plants|flowers|grass|lawn|turf|trees?|shrubs?|garden|people|humans|anyone|anybody|everything|anything|bees|butterflies|pollinators|wildlife|beneficial\\w*|ladybugs)\\b',
   '\\bsick\\w*\\b', '\\bill\\b', '\\billness(?:es)?\\b', '\\bdisease\\w*\\b', '\\bsymptoms?\\b', '\\bailments?\\b', '\\bunwell\\b', '\\ballerg\\w*\\b', '\\birritat\\w*\\b', '\\bnause\\w*\\b', '\\bmedical\\b', '\\bhealth\\s+(?:risk|concern|hazard|issue|problem|effect|scare)s?\\b',
-  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos)\\w*\\b",
+  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos|kill|die|be\\s+lethal|be\\s+fatal|be\\s+deadly)\\w*\\b",
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
   '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\bsuitab\\w*\\b',

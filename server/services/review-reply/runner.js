@@ -912,12 +912,23 @@ function dismissCancelFields(conn = db) {
  * refuses (409 STALE) unless both fingerprints still match. Any other text
  * (a person's own words, an edited draft) passes untouched.
  */
-function pipelineDraftGuard(text) {
+function pipelineDraftGuard(text, { draftToken = null } = {}) {
   const submitted = String(text || '').trim();
+  const token = draftToken ? String(draftToken) : null;
   return async (fresh) => {
-    if (!fresh || !fresh.auto_reply_draft) return null;
-    if (submitted !== String(fresh.auto_reply_draft).trim()) return null;
-    if (![STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(fresh.auto_reply_status)) return null;
+    if (!fresh) return null;
+    const holdsDraft = !!fresh.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(fresh.auto_reply_status);
+    const isStoredDraft = holdsDraft && submitted === String(fresh.auto_reply_draft).trim();
+    // Draft identity travels with the request ("Use Draft" stamps the
+    // review fingerprint the draft was loaded under): the editor keeps its
+    // copied text even after the sync cleared the draft for a reviewer edit
+    // or re-attribution, and by then the row carries nothing to compare
+    // against. A token is binding whether or not the text was edited.
+    if (!token && !isStoredDraft) return null;
+    if (token) {
+      if (!holdsDraft) return 'this automatic draft was cleared since it was loaded (the review changed, or it was posted or skipped) — reload and draft again';
+      if (token !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was loaded — reload and draft again';
+    }
     const stored = fresh.auto_reply_grounding && typeof fresh.auto_reply_grounding === 'object' ? fresh.auto_reply_grounding : null;
     if (!stored?.fingerprint) return 'this automatic draft has no grounding record — write the reply yourself or use Post now';
     if (stored.fingerprint !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was written — reload and draft again';

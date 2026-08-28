@@ -132,6 +132,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r25: lethal-effect family.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't kill your pets."))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and the product isn't lethal to animals."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nothing we use is fatal to dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and no pet has ever died from it.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the spray kills nothing but ants; it will not kill the grass.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');

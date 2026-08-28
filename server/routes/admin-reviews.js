@@ -285,6 +285,11 @@ router.get('/', async (req, res, next) => {
         starRating: r.star_rating, reviewText: r.review_text,
         reply: isDraftReply(r.review_reply) ? null : r.review_reply,
         draftReply: isDraftReply(r.review_reply) ? stripDraftPrefix(r.review_reply) : null,
+        // Identity of the pipeline's own draft in the slot: "Use Draft" sends
+        // it back with the reply so a draft the sync invalidated meanwhile
+        // (review edit / re-attribution) is refused, not posted as free text.
+        draftToken: isDraftReply(r.review_reply) && r.auto_reply_draft && stripDraftPrefix(r.review_reply).trim() === String(r.auto_reply_draft).trim()
+          ? AutoReply.reviewFingerprint(r) : null,
         replyUpdatedAt: isDraftReply(r.review_reply) ? null : r.reply_updated_at,
         // Auto-reply pipeline state (null = never queued; see review-reply/runner.js).
         autoReply: r.auto_reply_status ? {
@@ -345,7 +350,7 @@ router.get('/', async (req, res, next) => {
 // publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText } = req.body;
+    const { replyText, draftToken } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
@@ -358,7 +363,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // "Use Draft" re-submits the pipeline's stored draft through this
       // route: it must still match the review + account facts it was
       // grounded on (a re-attribution or city fix since then → 409).
-      guard: AutoReply.pipelineDraftGuard(replyText),
+      guard: AutoReply.pipelineDraftGuard(replyText, { draftToken: typeof draftToken === 'string' ? draftToken : null }),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }
