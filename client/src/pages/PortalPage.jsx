@@ -3820,8 +3820,12 @@ function ServicesTab() {
                       // count as a view (GH codex P1).
                       const previewSrc = (() => {
                         // No reportUrl (legacy record) → local fallback card,
-                        // never new URL(null) → "/null" (pre-push P1).
-                        if (!s.reportUrl) return null;
+                        // never new URL(null) → "/null" (pre-push P1). Project
+                        // reports too: /report/project/:token stamps
+                        // projects.report_viewed_at on every data fetch with no
+                        // non-tracking mode, so they get the local card, never
+                        // an iframe (GH codex r2 P1).
+                        if (!s.reportUrl || s.isProjectCompletion) return null;
                         try { const u = new URL(s.reportUrl, window.location.origin); u.searchParams.set('mode', 'static'); return u.toString(); } catch { return null; }
                       })();
                       const download = () => {
