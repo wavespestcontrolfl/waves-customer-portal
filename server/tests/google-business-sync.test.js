@@ -673,7 +673,7 @@ describe('Google Business review sync', () => {
           author_name: 'Paula Placeholder',
           rating: 1,
           text: 'Completely different text',
-          time: 1779307832,
+          time: 1775768075, // == review_created_at second: identity corroborated (hook P1)
         }] } }) };
       }
       return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
@@ -695,6 +695,43 @@ describe('Google Business review sync', () => {
       link: '/admin/reviews?responded=all&review=gbp-row-1',
       metadata: expect.objectContaining({ reason: 'review_edited_after_post', reviewId: 'gbp-row-1' }),
     }));
+    spy.mockRestore();
+  });
+
+  test('Places fallback: an UNCORROBORATED same-name different-content sample never mutates the candidate (display names are not unique) — hook P1', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 1,
+          text: 'A different Paula entirely',
+          time: 1779307832, // ≠ stored creation second: a different account with the same name
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+    await service.syncAllReviews();
+    const rows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: 'gbp-row-1', star_rating: 5, review_text: 'Original text', review_reply: 'Hello Paula! Thanks!', auto_reply_status: 'posted', auto_reply_reason: null });
+    expect(spy.mock.calls.filter(c => /edited/i.test(String(c[1])))).toHaveLength(0);
     spy.mockRestore();
   });
 

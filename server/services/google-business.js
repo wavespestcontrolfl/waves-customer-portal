@@ -1077,7 +1077,16 @@ class GoogleBusinessService {
             // same-name different account costs one human glance at the
             // bell; a rewritten complaint left answered by praise is the
             // worse failure.
-            if (!candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
+            // Display names are not unique (hook P1): only the exact-second
+            // identity proof (Places `time` == stored creation instant, the
+            // same corroboration the stamp clear and synced_at refresh use)
+            // may let this sample mutate the candidate's auto-reply state.
+            // An uncorroborated same-name sample is a different account until
+            // the authoritative GBP feed says otherwise.
+            const editPlacesSec = review.time ? Math.floor(review.time) : null;
+            const editCandidateSec = candidate.review_created_at ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000) : null;
+            const editCorroborated = editPlacesSec != null && editCandidateSec != null && editPlacesSec === editCandidateSec;
+            if (editCorroborated && !candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
               await this._reconcileReviewEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
             }
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);

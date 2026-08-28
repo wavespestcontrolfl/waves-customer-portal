@@ -311,6 +311,36 @@ describe('publishReviewReply', () => {
     expect(mockNotify).not.toHaveBeenCalled();
   });
 
+  test('the dev/preview local-only path runs the SAME row checks (hook P1): observed tokens, foreign draft and guard apply, and the write is a CAS on the observed slot', async () => {
+    const wasConfigured = mockGbp.configured;
+    mockGbp.configured = false;
+    try {
+      const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+      // Stale observed reply → refused, nothing written.
+      state.rows[0].review_reply = 'Newer local reply';
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Stale editor text', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: 'What the page showed' }))
+        .rejects.toMatchObject({ code: CODES.STALE });
+      expect(state.rows[0].review_reply).toBe('Newer local reply');
+      // Stale observed review token → refused.
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x', actor: { type: 'admin' }, allowOverwrite: true, expectedReview: reviewFingerprint({ ...state.rows[0], review_text: 'old' }) }))
+        .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED });
+      // Guard verdict → refused.
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x', actor: { type: 'admin' }, allowOverwrite: true, guard: async () => 'the customer facts changed since this draft was generated' }))
+        .rejects.toMatchObject({ code: CODES.STALE });
+      // Foreign human draft, non-overwriting caller → refused before any write.
+      state.rows[0].review_reply = '[DRAFT] somebody else wrote this';
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x', actor: { type: 'ib' } })).rejects.toMatchObject({ code: CODES.STALE });
+      // Everything matches → local-only write.
+      state.rows[0].review_reply = null;
+      const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null, expectedDraft: null, expectedReview: reviewFingerprint(state.rows[0]) });
+      expect(r).toMatchObject({ googlePosted: false, localOnly: true });
+      expect(state.rows[0].review_reply).toBe('Thanks Dana.');
+      expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    } finally {
+      mockGbp.configured = wasConfigured;
+    }
+  });
+
   test('overwriting callers fail closed when the live review cannot be read', async () => {
     state.rows[0].review_reply = 'Already answered.';
     mockGbp.getReview.mockRejectedValueOnce(new Error('503'));

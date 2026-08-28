@@ -204,14 +204,74 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     }
   };
 
+  // Review content identity as seen INSIDE the claim before the PUT; the
+  // post-PUT persist compares against it (a sync can record a reviewer
+  // edit while the PUT is in flight — applyReviewEditFields defers under a
+  // live claim, so this write is the only place that can notice).
+  let prePutFingerprint = null;
+  // Row-state checks shared by the Google path (run INSIDE the publish
+  // claim on a fresh read) and the dev/preview local-only path below: the
+  // browser-observed reply / draft / review tokens, overwrite rules, the
+  // foreign-draft rule and the caller's guard apply to BOTH writes.
+  const inClaimChecks = async (fresh) => {
+    if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+    prePutFingerprint = reviewFingerprint(fresh);
+    // The review CONTENT the browser displayed (codex r33): manually
+    // written text carries no draft token, so the editor sends the review
+    // token from the list API; a reviewer rewrite the sync recorded since
+    // the page loaded must not receive text written for the old review.
+    if (expectedReview !== undefined && String(expectedReview || '') !== prePutFingerprint) {
+      throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed since this page was loaded — reload it and read the current review first.', { status: 409 });
+    }
+    if (!allowOverwrite && hasRealReply(fresh.review_reply)) {
+      throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
+    }
+    // A "[DRAFT]" that is not the pipeline's own is a person's saved draft:
+    // a non-overwriting caller never posts over it (fail BEFORE the PUT).
+    if (!allowOverwrite && isDraftReply(fresh.review_reply)) {
+      const own = new Set([review.auto_reply_draft, autoFields?.auto_reply_draft, replyText].filter(Boolean).map((t) => String(t).trim()));
+      if (!own.has(stripDraftPrefix(fresh.review_reply))) {
+        throw new ReviewReplyError(CODES.STALE, 'A saved draft is on this review — post it from the editor or clear it first.', { status: 409 });
+      }
+    }
+    // The reply the BROWSER observed (codex r27): the row read at request
+    // start may already carry an owner edit the hourly sync recorded after
+    // the page loaded, which the live GET would then agree with. A caller
+    // that says what it saw is held to it; a mismatch means reload.
+    if (expectedReply !== undefined) {
+      const observed = String(expectedReply || '').trim();
+      const current = hasRealReply(fresh.review_reply) ? String(fresh.review_reply).trim() : '';
+      if (observed !== current) {
+        throw new ReviewReplyError(CODES.STALE, 'The reply changed since this page was loaded — reload it and try again.', { status: 409 });
+      }
+    }
+    // …and the DRAFT slot it observed (codex r30): a human "[DRAFT]" the
+    // editor was seeded from may have been replaced meanwhile (Agent Ops,
+    // another admin); the stale editor must not post over the newer one.
+    if (expectedDraft !== undefined) {
+      const observedDraft = String(expectedDraft || '').trim();
+      const currentDraft = isDraftReply(fresh.review_reply) ? stripDraftPrefix(fresh.review_reply).trim() : '';
+      if (observedDraft !== currentDraft) {
+        throw new ReviewReplyError(CODES.STALE, 'The saved draft on this review changed since this page was loaded — reload it and try again.', { status: 409 });
+      }
+    }
+    const staleReason = guard ? await guard(fresh) : null;
+    if (staleReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${staleReason}`, { status: 409 });
+  };
+
   // Dev/preview without any GBP credentials: keep the historical local-only
   // behavior for HUMAN writers so the page still works. Automation never
-  // fakes a post.
+  // fakes a post. The SAME row checks apply (hook P1): a stale editor or IB
+  // request must not overwrite a newer local reply or post text grounded on
+  // an earlier review here either; the write is a CAS on the observed slot.
   if (!gbp.configured) {
     if (isAuto || requireGoogle) throw new ReviewReplyError(CODES.NOT_CONFIGURED, 'Google Business Profile is not configured — the reply cannot be posted', { status: 503 });
+    const fresh = await db('google_reviews').where({ id: reviewId }).first();
+    await inClaimChecks(fresh);
     const updated = await db('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
+      .modify((qb) => { if (fresh.review_reply == null) qb.whereNull('review_reply'); else qb.where('review_reply', fresh.review_reply); })
       // Pipeline state closes here too (a shadow draft posted from the editor
       // in a dev/preview env must not stay 'drafted' beside a real reply).
       .update({ review_reply: replyText, reply_updated_at: new Date(), ...(autoFields || {}) });
@@ -232,11 +292,6 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   const { publishWithReviewLivenessLock } = require('../social-content-studio');
   let outcome;
   let googleError = null;
-  // Review content identity as seen INSIDE the claim before the PUT; the
-  // post-PUT persist compares against it (a sync can record a reviewer
-  // edit while the PUT is in flight — applyReviewEditFields defers under a
-  // live claim, so this write is the only place that can notice).
-  let prePutFingerprint = null;
   try {
     outcome = await publishWithReviewLivenessLock(reviewId, async () => {
       // Ownership recheck INSIDE the publish claim, on a fresh read: the
@@ -244,49 +299,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // skip, or a dismissal can land in that gap. A stale invocation must
       // abort here rather than overwrite what a person just posted.
       const fresh = await db('google_reviews').where({ id: reviewId }).first();
-      if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
-      prePutFingerprint = reviewFingerprint(fresh);
-      // The review CONTENT the browser displayed (codex r33): manually
-      // written text carries no draft token, so the editor sends the review
-      // token from the list API; a reviewer rewrite the sync recorded since
-      // the page loaded must not receive text written for the old review.
-      if (expectedReview !== undefined && String(expectedReview || '') !== prePutFingerprint) {
-        throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed since this page was loaded — reload it and read the current review first.', { status: 409 });
-      }
-      if (!allowOverwrite && hasRealReply(fresh.review_reply)) {
-        throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
-      }
-      // A "[DRAFT]" that is not the pipeline's own is a person's saved draft:
-      // a non-overwriting caller never posts over it (fail BEFORE the PUT).
-      if (!allowOverwrite && isDraftReply(fresh.review_reply)) {
-        const own = new Set([review.auto_reply_draft, autoFields?.auto_reply_draft, replyText].filter(Boolean).map((t) => String(t).trim()));
-        if (!own.has(stripDraftPrefix(fresh.review_reply))) {
-          throw new ReviewReplyError(CODES.STALE, 'A saved draft is on this review — post it from the editor or clear it first.', { status: 409 });
-        }
-      }
-      // The reply the BROWSER observed (codex r27): the row read at request
-      // start may already carry an owner edit the hourly sync recorded after
-      // the page loaded, which the live GET would then agree with. A caller
-      // that says what it saw is held to it; a mismatch means reload.
-      if (expectedReply !== undefined) {
-        const observed = String(expectedReply || '').trim();
-        const current = hasRealReply(fresh.review_reply) ? String(fresh.review_reply).trim() : '';
-        if (observed !== current) {
-          throw new ReviewReplyError(CODES.STALE, 'The reply changed since this page was loaded — reload it and try again.', { status: 409 });
-        }
-      }
-      // …and the DRAFT slot it observed (codex r30): a human "[DRAFT]" the
-      // editor was seeded from may have been replaced meanwhile (Agent Ops,
-      // another admin); the stale editor must not post over the newer one.
-      if (expectedDraft !== undefined) {
-        const observedDraft = String(expectedDraft || '').trim();
-        const currentDraft = isDraftReply(fresh.review_reply) ? stripDraftPrefix(fresh.review_reply).trim() : '';
-        if (observedDraft !== currentDraft) {
-          throw new ReviewReplyError(CODES.STALE, 'The saved draft on this review changed since this page was loaded — reload it and try again.', { status: 409 });
-        }
-      }
-      const staleReason = guard ? await guard(fresh) : null;
-      if (staleReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${staleReason}`, { status: 409 });
+      await inClaimChecks(fresh);
       if (!allowOverwrite) {
         // Non-overwriting callers (automation) also check Google's LIVE
         // resource: an owner reply written in Google after the last sync is
