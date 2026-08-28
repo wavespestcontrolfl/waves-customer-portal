@@ -136,6 +136,8 @@ const BANNED_RE = new RegExp([
   '\\bspar(?:e|es|ed|ing)\\b',
   // "<protected subject> never noticed / barely knew / didn't mind" (codex r48).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
+  // "<protected subject> sailed | breezed | came | got | made it through …" (codex r52).
+  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:sail|breez|cruis|coast|came|come|got|get|made\\s+it|went|go|pull|power|walk)\\w*\\s+(?:right\\s+|straight\\s+)?through\\b', '\\b(?:sailed|breezed|cruised|coasted)\\s+(?:right\\s+)?through\\b',
   // "agreed with / sat well with / suited / got along with <protected
   // subject>" tolerance framing (codex r51).
   '\\b(?:agree|agreed|agrees|agreeing|sat\\s+well|sits\\s+well|sit\\s+well|went\\s+down\\s+well|goes\\s+down\\s+well|go\\s+down\\s+well|suit|suited|suits|got\\s+along|get\\s+along|gets\\s+along|got\\s+on|get\\s+on|gets\\s+on|work|worked|works)\\s+(?:[\\w-]+\\s+){0,3}?(?:with|for|around)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\b',
@@ -170,8 +172,8 @@ const BANNED_RE = new RegExp([
   // "ready after 30 minutes", "back to normal within an hour".
   // (Timeliness a reviewer wrote — "came out within 2 hours" — stays a
   // provenance question; only the RE-ENTRY shape is banned outright.)
-  '\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b',
-  '\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*)\\b',
+  '\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|set|kick(?:ed|s)?\\s+in|t(?:ake|akes|ook)\\s+effect|effective|working|results?|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|let\\s+back|welcome\\s+back|back\\s+in|back\\s+out|back\\s+on)\\b[^.]{0,30}\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b',
+  '\\b(?:after|within|in|inside\\s+of)\\s+(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|half\\s+an?|an?|one|two|three|four|five|six|ten|fifteen|twenty|thirty|forty[- ]five|sixty|ninety|twenty[- ]four|forty[- ]eight)\\s+(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:ready|back\\s+to\\s+normal|good\\s+to\\s+go|usable|clear|settled|re-?enter\\w*|go\\s+back|be\\s+back|let\\s+\\w+\\s+(?:out|back|in)|return\\w*|reopen\\w*|resum\\w*|access\\w*|open\\s+again|allowed\\s+back|welcome\\s+back)\\b',
   // Rank claims (claims-ledger rule) and competitor names.
   // Rank / superiority language in ANY grammatical wrapper (claims-ledger rule).
   '\\bbest\\b(?!\\s+(?:regards|wishes))', '\\bnumber\\s*one\\b', '#\\s?1\\b', '\\btop[-\\s]?(?:rated|notch|tier|choice|pick|ranked)\\b', '\\b(?:a|the)\\s+top\\s+(?:pest|lawn|company|team|choice|provider|service)\\b',
@@ -211,6 +213,9 @@ const SERVICE_CLAIM_RE = /\b(?:solved?|resolv\w*|handl\w*|clear(?:ed)? up|took c
 // in the review flips ("did not get rid of", "never eliminated", "not under
 // control"). Topic nouns (ants, treatment, lawn) are deliberately absent.
 const OUTCOME_TERM_RE = /^(?:solved?|resolv\w*|handl\w*|clear(?:ed)? up|took care of|take care of|taken care of|dealt with|deal with|fix(?:ed|ing)?|sorted|got rid of|get rid of|wiped out|knocked out|under control|no more|gone|work(?:ed|ing)?|results?|eliminat\w*|exterminat\w*|eradicat\w*|protect\w*|remov(?:ed|al|ing)?|controlled)$/i;
+// Staff credential / award modifiers: nothing in the grounding proves them,
+// so they need the reviewer's own words (codex r52).
+const CREDENTIAL_CLAIM_RE = /\b(?:certified|licen[cs]ed|insured|bonded|background[- ]checked|vetted|accredited|award[- ]winning|trained|state[- ]licen[cs]ed|screened|degreed|qualified|experts?|specialists?|master|veteran|senior|lead|head|top[- ]rated)\b/gi;
 // Visit-experience claims (timeliness, speed, communication) — only the
 // reviewer can vouch for these.
 const EXPERIENCE_CLAIM_RE = /\b(?:stop(?:ped|s)? by|came out|come out|coming out|came by|dropped by|swung by|visit(?:ed|s|ing)?|on[- ]site|was there|were there|made it out|got out to|sent (?:someone|a tech\w*|the tech\w*|our tech\w*)|respect\w*|left (?:everything|it|things|the (?:place|house|home|yard)|no mess)|as (?:we|they) found (?:it|them)|put (?:everything|things|it) back|cleaned up|tidied|booties|shoe covers|no mess|spotless|helpful|honest|efficient(?:ly)?|reliable|dependable|careful(?:ly)?|patient(?:ly)?|kind|attentive|responsive|detailed|diligent|hard-?working|trustworthy|affordable|fair|reasonable|excellent|outstanding|amazing|wonderful|fantastic|great|awesome|superb|effective(?:ly)?|spotless|tidy|neat|on[- ]time|arrived|arrival|showed up|show up|quick(?:ly)?|fast|prompt(?:ly)?|same[- ]day|next[- ]day|right away|punctual|early|explain(?:ed|ing|s)?|walked (?:you|them) through|answered|communicat\w*|kept (?:you|them) (?:informed|updated|posted)|updates?|thorough(?:ly)?|professional(?:ism|ly)?|courteous|polite|friendly|respectful|knowledgeable|clean(?:ed)? up)\b/gi;
@@ -531,6 +536,12 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
     if (relAllowed.has(t) || (relAllowedRe && relAllowedRe.test(t)) || hasPhrase(reviewLower, t) || reviewWords.has(t)) continue;
     return 'unlisted_relationship_claim';
+  }
+  // Staff credentials / awards: the reviewer's words only.
+  for (const term of body.match(CREDENTIAL_CLAIM_RE) || []) {
+    const t = term.toLowerCase().replace(/\s+/g, ' ');
+    if (hasPhrase(reviewLower, t) || reviewWords.has(t) || reviewWords.has(stemOf(t))) continue;
+    return 'unlisted_credential_claim';
   }
   // Visit-experience claims: the reviewer's words only (root-matched).
   for (const term of body.match(EXPERIENCE_CLAIM_RE) || []) {

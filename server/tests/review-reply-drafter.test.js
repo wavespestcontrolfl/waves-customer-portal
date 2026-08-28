@@ -153,6 +153,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g30 = grounding({ text: 'Marcus was in and out in 30 minutes and the ants are gone.' });
     expect(verify(good('Hi Dana, glad the yard was ready after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad everything was back to normal within an hour.'), g30)).toBe('banned_phrase');
+    // codex r52: "sailed through" + reopened/resumed re-entry intervals.
+    expect(verify(good('Hello there, we are glad your pets sailed through the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad the yard reopened after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     // codex r44: "did not trouble your pets".
     expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
@@ -307,6 +311,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('technician credential / award claims need the reviewer\'s words (codex r52)', () => {
+    expect(verify(good('Hi Dana, our certified technician Marcus did a great job with your ants.'))).toBe('unlisted_credential_claim');
+    expect(verify(good('Hi Dana, our award-winning team is glad Marcus got the ants.'))).toBe('unlisted_credential_claim');
+    const g = grounding({ text: 'Marcus, your licensed tech, got the ants out fast. Great.' });
+    expect(verify(good('Hi Dana, glad our licensed tech Marcus got the ants.'), g)).toBeNull();
+  });
+
   test('continuing-customer claims need recurring provenance (codex r45)', () => {
     const g = grounding({ text: 'Great pest service.', mentionedTechNames: [], topics: ['pest'], account: null });
     expect(verify(good('Hello there, thank you for continuing to count on our pest team.'), g)).toBe('unlisted_relationship_claim');

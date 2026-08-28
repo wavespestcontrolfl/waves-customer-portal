@@ -1125,6 +1125,12 @@ class GoogleBusinessService {
             // exact-second match cannot corroborate the edited review itself;
             // the reviewer's profile photo URL is the stable per-account
             // identity the sample also carries (codex r47).
+            // Ordering first (codex r52): an older sample finishing after a
+            // newer authoritative sync must not park / clear anything.
+            if (sampleSyncStart && candidate.synced_at && new Date(candidate.synced_at).getTime() > sampleSyncStart.getTime()) {
+              logger.info(`[gbp] Places sample: older runner yielded on ambiguous candidate ${candidate.id}`);
+              continue;
+            }
             const editPlacesSec = review.time ? Math.floor(review.time) : null;
             const editCandidateSec = candidate.review_created_at ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000) : null;
             const editPhoto = String(review.profile_photo_url || '').trim();
