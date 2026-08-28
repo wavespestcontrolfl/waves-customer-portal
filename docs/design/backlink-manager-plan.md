@@ -294,8 +294,8 @@ auto_account_creation        = true
 auto_outreach_min_score      = 80
 auto_outreach_daily_cap      = 10        (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
 owner_price_tolerance_cents  = 0
-monthly_paid_budget          = 500
-max_auto_purchase            = 50
+monthly_paid_budget_cents    = 50000     ($500 — every money field is integer cents, end to end)
+max_auto_purchase_cents      = 5000      ($50)
 auto_paid_min_score          = 80
 auto_paid_min_d30_confidence = 0.6
 min_score                    = 60        (floor for ANY action, auto or owner-routed)
@@ -319,8 +319,8 @@ if domain.spam_score > policy.max_spam_score
 if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
 if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
 if path.payment_required:
-    if cost ≤ max_auto_purchase and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
-       and (month_spend + cost) ≤ monthly_paid_budget → AUTO_PAID_WITHIN_POLICY
+    if amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
+       and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
     else → OWNER_PAYMENT
 if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
     → AUTO_OUTREACH if score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
@@ -342,8 +342,10 @@ inferred).** Every paid step, auto or owner-approved, is a row:
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
-t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation ended voided / reconciled_not_charged
-t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}:${generation}`
+t.string('purchase_kind').notNullable().defaultTo('initial'); // initial | renewal — each renewal is its own separately authorized purchase
+t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
+t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
+t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${purchase_kind}:${renewal_period_key || '-'}:${generation}` — NOT month-scoped: a placement's initial purchase is unique for all time
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting
 t.string('authority').notNullable();
@@ -355,12 +357,15 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
-  → `month_spend = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
-  → **open-purchase check**: if any row for `(prospect_id, path_id, budget_month)` is in
-  `reserved`, `submitting`, `ambiguous`, `charged` or `reconciled_charged` → no new
-  reservation (409; nothing to retry until it settles). Otherwise `generation` = 1 + the highest
-  ended generation (`voided` / `reconciled_not_charged`) → if `month_spend + amount ≤
-  monthly_paid_budget` insert the `reserved` row (the unique `idempotency_key` makes a
+  → `month_spend_cents = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
+  → **open/settled-purchase check — all-time, not per month**: if ANY row for
+  `(prospect_id, path_id, purchase_kind, renewal_period_key)` is in `reserved`, `submitting`,
+  `ambiguous`, `charged` or `reconciled_charged` → no new reservation (409). A placement that
+  was paid for in March can never be paid for again as `initial` in April; only an explicit
+  `renewal` for a *new* period can be reserved, and `claim()` never leases a placement with an
+  open (`reserved`/`submitting`/`ambiguous`) purchase of any kind. Otherwise `generation` =
+  1 + the highest ended generation (`voided` / `reconciled_not_charged`) for that key → if `month_spend_cents + amount_cents ≤
+  monthly_paid_budget_cents` insert the `reserved` row (the unique `idempotency_key` makes a
   concurrent duplicate a no-op) → commit. All money is integer cents. So a pre-submission failure (voided) can be retried
   in the same month as a new generation, while anything that may have reached the merchant
   never can. Only a committed
@@ -371,13 +376,27 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
   final total (price + tax + fees + renewal terms as displayed) and report it as
   `final_cents` BEFORE the card is exposed. The `reserved → submitting` transition runs under
   the same `link_budget:<budget_month>` advisory lock and: refuses (→ `voided`,
-  `outcome='price_changed'`) if `final_cents > max_auto_purchase` for an `AUTO_PAID` row, or if
+  `outcome='price_changed'`) if `final_cents > max_auto_purchase_cents` for an `AUTO_PAID` row, or if
   the renewal terms differ from the path; otherwise reserves the delta
   (`final_cents − amount_cents`, if positive) against the month under the same budget check —
   no room → `voided`; else commits `submitting` with `final_cents` as the consuming amount.
   An owner-approved purchase whose final total exceeds the approved amount by more than
   `policy.owner_price_tolerance_cents` (default 0) is also refused and re-parked with the new
   total. The provider can never charge an amount the ledger has not reserved.
+- **Renewals are separate purchases; auto-renew is never left armed.** A reservation covers
+  exactly one charge. During checkout the provider MUST select the non-recurring option or
+  disable auto-renew where the merchant offers it, and report `auto_renew_disabled=true`; if
+  the merchant only sells auto-renewing terms the purchase is refused (`voided`,
+  `outcome='auto_renew_unavoidable'`) and re-parked as `OWNER_PAYMENT` with that fact on the
+  card — the owner may approve it knowingly, and the placement is then flagged
+  `recurring_merchant=true` for the renewal job to cancel/re-authorize before the next term.
+  Intentional renewals are produced by a **renewal job** that, `renewal_lead_days` (default 21)
+  before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
+  evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
+  under the same lock/budget/idempotency rules — or lets the listing lapse
+  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal never charges
+  without its own reservation and, where the merchant does not support one-off renewal, its
+  own owner approval.
 - **`submitting` before the external call — non-retryable.** Immediately after that
   validation (the last point at which nothing has been charged) the row is `submitting`
   (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
@@ -401,7 +420,7 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
   or a wrong prior state affects 0 rows and returns 409.
 - **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
   method the runner can use; the bank's limit is a second, independent ceiling — it is not the
-  policy. Owner-approved purchases above `max_auto_purchase` go through the same reservation
+  policy. Owner-approved purchases above `max_auto_purchase_cents` go through the same reservation
   after the click. `seo_link_attempts.cost` mirrors `final_cents` for reporting only.
 
 ### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
