@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import useIsMobile from "../../hooks/useIsMobile";
+import { formatETDate } from "../../lib/timezone";
 import {
   Activity,
   BarChart3,
@@ -2045,7 +2046,7 @@ function BacklinksTab() {
                         <td style={{ ...tdStyle, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.anchor_text || "—"}</td>
                         <td style={{ ...tdStyle, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{l.target_url || "—"}</td>
                         <td style={tdStyle}>{LOST_REASON_LABEL[l.lost_reason] || (l.lost_reason ? l.lost_reason : "unverified (legacy)")}</td>
-                        <td style={tdStyle}>{(l.lost_at || l.updated_at) ? new Date(l.lost_at || l.updated_at).toLocaleDateString() : "—"}</td>
+                        <td style={tdStyle}>{(l.lost_at || l.updated_at) ? formatETDate(l.lost_at || l.updated_at) : "—"}</td>
                       </tr>
                     ))}
                   </tbody>
