@@ -382,7 +382,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   final total (price + tax + fees + renewal terms as displayed) and report it as
   `final_cents` BEFORE the card is exposed. The `reserved → submitting` transition runs under
   the same `link_budget:<budget_month>` advisory lock and: refuses (→ `voided`,
-  `outcome='price_changed'`) if `final_cents > max_auto_purchase_cents` for an `AUTO_PAID` row, or if
+  `outcome='price_changed'`) if `final_cents > max_auto_purchase_cents` for a row whose stamped
+  authority is exactly `AUTO_PAID_WITHIN_POLICY` (regression test: a checkout total raised above
+  the ceiling after reservation is refused), or if
   the renewal terms differ from the path; otherwise reserves the delta
   (`final_cents − amount_cents`, if positive) against the month under the same budget check —
   no room → `voided`; else commits `submitting` with `final_cents` as the consuming amount.
@@ -534,11 +536,15 @@ durable links, not just which produced one.
 
 Two phases, because an acquisition action is irreversible and the board allows one
 conversation/placement per domain:
-1. **Replay phase (non-submitting):** every provider runs `investigate()` and
-   `completeForm()` up to — never through — the submit/send/pay step on the same domains,
-   in a sandbox session that is discarded; outputs (fields, path, evidence) are scored
-   against the investigator's ground truth and each other. No account is created, nothing is
-   sent or bought.
+1. **Replay phase (non-submitting, technically enforced):** every provider runs
+   `investigate()` and `completeForm()` on the same domains inside a **replay sandbox**: the
+   browser context blocks every mutating network request (POST/PUT/PATCH/DELETE, form
+   submissions, `sendBeacon`, WebSocket) at the request-interception layer and answers them
+   with a synthetic 204, so page JavaScript, autosaves and agent mis-clicks cannot create an
+   account, send a message or start a checkout; the identity packet is a **non-production
+   test identity and inbox** (never the canonical NAP, never `HERMES_SIGNUP_EMAIL`); no card
+   is minted; the session is discarded. Outputs (fields, path, evidence) are scored against
+   the investigator's ground truth and each other. Replay attempts are `sandbox=true`.
 2. **Cohort phase (live):** qualified domains are split into **disjoint, matched cohorts**
    (stratified by path type, DR band, lane), one cohort per provider; exactly one provider
    performs the irreversible action for any domain, through the normal guard/ledger. D30 is
