@@ -75,6 +75,7 @@ jest.mock('../models/db', () => {
         if (/publish_claimed_until/.test(sql)) filters.push((r) => r.publish_claimed_until == null || new Date(r.publish_claimed_until) < new Date(params[0]));
         if (/auto_reply_grounding->'review'->>'rating'/.test(sql)) filters.push((r) => (Number(r.auto_reply_grounding?.review?.rating) || Number(r.star_rating) || 0) >= params[0]);
         if (/COALESCE\(dismissed, false\) = false/.test(sql)) filters.push((r) => !r.dismissed);
+        if (/auto_reply_version, ''\) NOT IN/.test(sql)) filters.push((r) => !['human', 'agent_ops'].includes(r.auto_reply_version || ''));
         if (/lower\(location_id\) = ANY/.test(sql)) filters.push((r) => params[0].includes(String(r.location_id).toLowerCase()));
         return api;
       },
@@ -1129,12 +1130,15 @@ describe('processDueAutoReplies — state machine', () => {
       // whose reviewer later raised to 5★ never enters it.
       row({ id: 'f', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_drafted_at: '2026-08-18T00:00:00Z', auto_reply_grounding: { review: { rating: 5 } } }),
       row({ id: 'g', star_rating: 5, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_drafted_at: '2026-08-17T00:00:00Z', auto_reply_grounding: { review: { rating: 2 } } }),
+      // codex r61: human / Agent Ops text posted via Post now never counts.
+      row({ id: 'h', star_rating: 5, auto_reply_status: 'posted', auto_reply_version: 'human', auto_reply_drafted_at: '2026-08-16T00:00:00Z', review_reply: 'x' }),
+      row({ id: 'i', star_rating: 5, auto_reply_status: 'posted', auto_reply_version: 'agent_ops', auto_reply_drafted_at: '2026-08-15T00:00:00Z', review_reply: 'y' }),
     ];
     const st = await Runner.autoReplyStatus();
     expect(st.shadowDrafts).toBe(4);
     expect(st.firstShadowDraftAt).toBe('2026-08-18T00:00:00Z');
-    expect(st.draftsTotal).toBe(6);
-    expect(st.byStatus).toEqual({ drafted: 1, posted: 1, skipped: 1, parked: 3, queued: 1 });
+    expect(st.draftsTotal).toBe(8);
+    expect(st.byStatus).toEqual({ drafted: 1, posted: 3, skipped: 1, parked: 3, queued: 1 });
   });
 
   test('pipelineDraftGuard (Use Draft → human route): the stored draft posts only while its review + account fingerprints still match', async () => {
@@ -1321,8 +1325,6 @@ describe('admin actions', () => {
     await expect(Runner.postNow('st', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
     expect(mockPublish).not.toHaveBeenCalled();
     expect(state.rows[0].auto_reply_claimed_until).toBeNull();
-    // A fresh save clears the mark.
-    expect(Runner.humanDraftSavedFields({ raw: (sql) => ({ sql }) }).auto_reply_reason.sql).toMatch(/human_draft_stale/);
     // applyReviewEditFields works for a never-queued row (NULL state) too.
     const neverQueued = row({ id: 'nq', auto_reply_status: null, auto_reply_reason: null, review_reply: '[DRAFT] ' + text, auto_reply_draft: null });
     state.rows = [{ ...neverQueued }];

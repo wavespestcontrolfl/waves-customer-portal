@@ -1258,17 +1258,6 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
 }
 
 /**
- * Fields a HUMAN-draft writer (Agent Ops, editor save) merges into its
- * "[DRAFT]" write: a fresh save is written for the current review, so a
- * human_draft_stale mark from an earlier review version is cleared.
- */
-function humanDraftSavedFields(conn = db) {
-  return {
-    auto_reply_reason: conn.raw("CASE WHEN auto_reply_reason = 'human_draft_stale' THEN 'human_draft' ELSE auto_reply_reason END"),
-  };
-}
-
-/**
  * Fields an AGENT-authored draft writer (Agent Ops) merges into its
  * "[DRAFT]" write: the text is mirrored into auto_reply_draft with machine
  * provenance and the row parks agent_ops_draft, so Post now re-verifies it
@@ -1427,6 +1416,10 @@ async function autoReplyStatus() {
   // rewrite rollout history in either direction.
   const eligible = () => db('google_reviews')
     .whereNotNull('auto_reply_drafted_at')
+    // Only drafts the CANONICAL drafter produced count toward the shadow
+    // sample (codex r61): a human or Agent Ops text posted via Post now
+    // stamps drafted_at but never exercised the automation.
+    .whereRaw("COALESCE(auto_reply_version, '') NOT IN ('human', 'agent_ops')")
     .whereRaw("COALESCE((auto_reply_grounding->'review'->>'rating')::int, star_rating) >= ?", [Math.max(cfg.minStars, 4)]);
   const shadowDrafts = await eligible().count('* as n').first();
   const firstShadow = await eligible().min('auto_reply_drafted_at as at').first();
@@ -1472,7 +1465,6 @@ module.exports = {
   pipelineDraftGuard,
   groundingToken,
   parseGroundingToken,
-  humanDraftSavedFields,
   agentDraftSavedFields,
   HUMAN_DRAFT_STALE,
   AGENT_OPS_DRAFT,

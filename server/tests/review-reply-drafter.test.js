@@ -139,6 +139,8 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r61: "didn't slow your pets down".
+    expect(verify(good("Hello there, glad the pest treatment didn't slow your pets down."), gpets)).toBe('banned_phrase');
     // codex r60: "weathered the treatment well" / "in stride" + by-the-mark / no-later-than intervals.
     expect(verify(good('Hello there, glad your pets weathered the pest treatment well.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad your pets took the pest treatment in stride.'), gpets)).toBe('banned_phrase');
@@ -183,6 +185,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad everyone returned after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed by the 30-minute mark after the pest treatment.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed no later than 30 minutes after the pest treatment.'), g30)).toBe('banned_phrase');
+    // codex r61: hedged intervals.
+    expect(verify(good('Hi Dana, glad access resumed in about an hour after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad the yard was ready after roughly 30 minutes.'), g30)).toBe('banned_phrase');
     // codex r44: "did not trouble your pets".
     expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
