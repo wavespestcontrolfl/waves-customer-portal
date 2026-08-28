@@ -23,7 +23,6 @@
  * review; the publisher's liveness lock covers the Google side.
  */
 
-const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
 const gbp = require('../google-business');
@@ -410,7 +409,9 @@ function groundingSnapshot(grounding) {
   return {
     version: grounding.version,
     accountFingerprint: accountFingerprint(grounding.account),
-    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}|${String(grounding.reviewerName || '').trim().toLowerCase()}|${grounding.customerId || ''}`).digest('hex'),
+    // ONE identity mechanism: the canonical reviewFingerprint over the
+    // fields the grounding saw (codex r43).
+    fingerprint: reviewFingerprint({ star_rating: grounding.review.rating, review_text: grounding.review.text, reviewer_name: grounding.reviewerName, customer_id: grounding.customerId }),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
     provenance: grounding.provenance,

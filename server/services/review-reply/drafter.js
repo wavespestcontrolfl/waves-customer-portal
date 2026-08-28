@@ -127,6 +127,11 @@ const BANNED_RE = new RegExp([
   // "your pets tolerated the treatment well", "the kids handled it fine".
   '\\btolerat\\w*\\b', '\\btolerance\\b',
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:handl|cop|react|respond|adjust|took|take|did|do|were|was|are|is|fared?|felt|feel)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:well|fine|great|ok|okay|nicely|beautifully|normally|comfortabl\\w*|happil\\w*|without)\\b',
+  // Spared-harm / trouble-free framing (codex r43): "spared your pets from
+  // any trouble", "kept trouble away from the kids", "worry-free".
+  '\\bspar(?:e|es|ed|ing)\\b', '\\b(?:trouble|worry|stress|hassle|risk|harm)[- ]free\\b',
+  '\\b(?:keep|kept|keeps|keeping|steer|hold|held)\\s+(?:[\\w-]+\\s+){0,3}?(?:trouble|harm|worry|worries|problems?|issues?|discomfort|stress|risks?)\\s+(?:away|off|out|at\\s+bay)\\b',
+  '\\bfrom\\s+(?:any\\s+|all\\s+)?(?:trouble|harm|worry|worries|discomfort|stress|distress|upset|danger|exposure)\\b',
   // Quality-of-life / preserve / safeguard framing (codex r37).
   '\\bquality\\s+of\\s+life\\b', '\\bpreserv\\w*\\b', '\\bsafeguard\\w*\\b', '\\bshield\\w*\\b',
   '\\b(?:protect|defend|keep|look\\s+after|watch\\s+over|care\\s+for)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|loved\\s+ones|people|animals|grandkids|grandchildren)\\b',
@@ -636,7 +641,10 @@ async function loadRecentPostedReplies(locationId, { conn = db, limit = RECENT_R
       .where({ location_id: locationId })
       .where('reviewer_name', '!=', '_stats')
       .modify(whereHasRealReply)
-      .orderBy('reply_updated_at', 'desc')
+      // NULLS LAST: replies recorded without a timestamp (legacy "externally
+      // replied" markers) must not crowd out the latest real replies in a
+      // limited DESC read (codex r43).
+      .orderBy([{ column: 'reply_updated_at', order: 'desc', nulls: 'last' }])
       .limit(limit)
       .select('review_reply');
     return rows.map((r) => r.review_reply).filter(Boolean);
