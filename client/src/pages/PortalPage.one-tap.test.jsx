@@ -101,7 +101,7 @@ describe('one-tap purchase CTA gating', () => {
   it('oneTap:false keeps the request-only CTA — no buy button', async () => {
     api.getPropertyRecommendations.mockResolvedValue(recommendations({ oneTap: false }));
     renderDashboard();
-    expect(await screen.findByText('Add Lawn Care')).toBeInTheDocument();
+    expect(await screen.findByText('Get estimate')).toBeInTheDocument();
     expect(screen.queryByText(/Add now —/)).not.toBeInTheDocument();
     expect(screen.queryByText('Ask a question instead')).not.toBeInTheDocument();
   });
@@ -111,7 +111,7 @@ describe('one-tap purchase CTA gating', () => {
       cards: [{ ...PRICED_OFFER_CARD, mode: 'quote_cta', option: null, ctaLabel: 'Request a quote' }],
     }));
     renderDashboard();
-    expect(await screen.findByText('Request a quote')).toBeInTheDocument();
+    expect(await screen.findByText('Get estimate')).toBeInTheDocument();
     expect(screen.queryByText(/Add now —/)).not.toBeInTheDocument();
   });
 
