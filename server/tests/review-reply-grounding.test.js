@@ -54,6 +54,12 @@ describe('review-derived facts', () => {
     expect(G.mentionedTechNames('Marcus was great, so was Al', ['Marcus', 'Bob', 'Al'])).toEqual(['Marcus']);
     expect(G.mentionedTechNames('marcus was great', ['Marcus'])).toEqual(['Marcus']);
     expect(G.mentionedTechNames('', ['Marcus'])).toEqual([]);
+    // codex r35: common-word names need name-like usage (capitalized, not sentence-initial).
+    expect(G.mentionedTechNames('We will definitely use Waves again.', ['Will'])).toEqual([]);
+    expect(G.mentionedTechNames('Will was thorough and kind.', ['Will'])).toEqual([]);
+    expect(G.mentionedTechNames('Our tech Will was thorough and kind.', ['Will'])).toEqual(['Will']);
+    expect(G.mentionedTechNames('I hope Hope comes back next time.', ['Hope'])).toEqual(['Hope']);
+    expect(G.mentionedTechNames('marcus was great', ['Marcus'])).toEqual(['Marcus']);
   });
   test('topics come from the reviewer text', () => {
     expect(G.detectTopics('Came out fast, the ants are gone, highly recommend')).toEqual(

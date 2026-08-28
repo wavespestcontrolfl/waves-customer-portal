@@ -312,6 +312,9 @@ router.get('/', async (req, res, next) => {
         // submission sends it back so text written for the old review is
         // refused after a reviewer rewrite the sync recorded meanwhile.
         reviewToken: AutoReply.reviewFingerprint(r),
+        // A person's saved draft the sync found written for an EARLIER version
+        // of the review: shown, but refused verbatim until edited.
+        draftStale: isDraftReply(r.review_reply) && r.auto_reply_reason === AutoReply.HUMAN_DRAFT_STALE,
         replyUpdatedAt: isDraftReply(r.review_reply) ? null : r.reply_updated_at,
         // Auto-reply pipeline state (null = never queued; see review-reply/runner.js).
         autoReply: r.auto_reply_status ? {

@@ -736,6 +736,10 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
   // fresh (never a 409 the admin cannot get past).
   const accountFpNow = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)).catch(() => null));
   const humanDraft = humanDraftOn(row);
+  if (humanDraft && row.auto_reply_reason === HUMAN_DRAFT_STALE) {
+    await releaseClaim(row);
+    throw new ReviewReplyError(CODES.STALE, 'This draft was written before the review changed — read the current review and edit the draft first.', { status: 409 });
+  }
   let existing = humanDraft
     || (row.auto_reply_draft
       && DRAFT_HOLDING_STATUSES.includes(row.auto_reply_status)
@@ -854,9 +858,11 @@ const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.
 // States whose stored pipeline draft is still offered to a person (Use Draft /
 // Post now): an admin Skip leaves the pipeline but keeps the draft useful.
 const DRAFT_HOLDING_STATUSES = [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED, STATUS.SKIPPED];
+// A human "[DRAFT]" the sync found written for an earlier version of the review.
+const HUMAN_DRAFT_STALE = 'human_draft_stale';
 // review_edited_after_post: a POSTED reply parked for a person after the
 // reviewer's first edit keeps that park (and Retract) through later edits.
-const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft', 'review_edited_after_post']);
+const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'review_edited_after_post']);
 // Parks where the pipeline's own PUT may already be live on Google.
 const RECONCILE_REASONS = new Set(['google_uncertain', 'persist_failed']);
 
@@ -877,8 +883,15 @@ function reviewEditFields(existing, normalized) {
   if (existing.auto_reply_status === STATUS.POSTED) {
     return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
   }
-  if (!REDRAFT_ON_EDIT_STATUSES.has(existing.auto_reply_status) || KEEP_ON_EDIT_REASONS.has(existing.auto_reply_reason)) return {};
-  if (!existing.auto_reply_draft || humanDraftOn(existing)) return {};
+  if (KEEP_ON_EDIT_REASONS.has(existing.auto_reply_reason)) return {};
+  // A person's saved "[DRAFT]" was written for the OLD review: keep their
+  // text (never destroy a human's work) but mark it stale — Use Draft and
+  // Post now refuse it verbatim until it is edited or re-saved.
+  if (humanDraftOn(existing)) {
+    return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null };
+  }
+  if (!REDRAFT_ON_EDIT_STATUSES.has(existing.auto_reply_status)) return {};
+  if (!existing.auto_reply_draft) return {};
   return {
     auto_reply_status: STATUS.QUEUED,
     auto_reply_reason: 'review_changed',
@@ -901,7 +914,8 @@ function reviewEditFields(existing, normalized) {
 async function applyReviewEditFields(reviewId, existing, normalized, { conn = db, now = new Date() } = {}) {
   const fields = reviewEditFields(existing, normalized);
   if (!Object.keys(fields).length) return 0;
-  const q = conn('google_reviews').where({ id: reviewId, auto_reply_status: existing.auto_reply_status });
+  const q = conn('google_reviews').where({ id: reviewId });
+  if (existing.auto_reply_status == null) q.whereNull('auto_reply_status'); else q.where('auto_reply_status', existing.auto_reply_status);
   if (existing.auto_reply_status !== STATUS.POSTED) {
     q.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()]);
     if (existing.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', existing.review_reply);
@@ -1078,6 +1092,10 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
   const gAccount = gSep > 0 ? String(groundingToken).slice(gSep + 1) : null;
   return async (fresh) => {
     if (!fresh) return null;
+    const human = humanDraftOn(fresh);
+    if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
+      return 'this draft was written before the review changed — read the current review and edit the draft first';
+    }
     if (gReview) {
       if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';
       let current;
@@ -1103,6 +1121,17 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
     try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
     if (current !== stored.accountFingerprint) return 'the customer facts changed since this draft was written — reload and draft again';
     return null;
+  };
+}
+
+/**
+ * Fields a HUMAN-draft writer (Agent Ops, editor save) merges into its
+ * "[DRAFT]" write: a fresh save is written for the current review, so a
+ * human_draft_stale mark from an earlier review version is cleared.
+ */
+function humanDraftSavedFields(conn = db) {
+  return {
+    auto_reply_reason: conn.raw("CASE WHEN auto_reply_reason = 'human_draft_stale' THEN 'human_draft' ELSE auto_reply_reason END"),
   };
 }
 
@@ -1181,6 +1210,8 @@ module.exports = {
   autoReplyStatus,
   pipelineDraftGuard,
   groundingToken,
+  humanDraftSavedFields,
+  HUMAN_DRAFT_STALE,
   classifyReplyMode,
   isDraftReply,
 };

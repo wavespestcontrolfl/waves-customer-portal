@@ -118,6 +118,10 @@ jest.mock('../models/db', () => {
 
 const { executeReviewTool } = require('../services/intelligence-bar/review-tools');
 const { executeBITool } = require('../services/bi-agent-tools');
+const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+const { accountFingerprint } = require('../services/review-reply/grounding');
+// The token draft_review_reply hands back: review + (review-only) account facts.
+const tokenFor = (row) => `${reviewFingerprint(row)}|${accountFingerprint(null)}`;
 
 // Rolling-window fixtures derive from the clock (AGENTS.md: no hardcoded
 // dates that rot past a cutoff); historical rows stay fixed — they are
@@ -160,8 +164,9 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
   test('rejects a row already stamped at read time', async () => {
     state.rows.google_reviews = [liveReview({ missing_since: '2026-08-07T09:00:00Z' })];
 
+    const row = state.rows.google_reviews[0];
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Thanks!',
+      review_id: 'rev-1', reply_text: 'Thanks!', grounding_token: tokenFor(row),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -175,7 +180,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     state.afterFirstRead = () => { row.missing_since = '2026-08-07T10:00:00Z'; };
 
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team',
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row),
     });
 
     expect(result.error).toMatch(/removed from Google/);
@@ -188,7 +193,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
 
     const reply = 'Hi Pat,\n\nGlad the service went well. Thanks for having us out.\n\nThe 🌊 Waves Pest Control Bradenton Team';
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: reply,
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row),
     });
 
     expect(result.success).toBe(true);
@@ -224,13 +229,15 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
       });
       tools = require('../services/intelligence-bar/review-tools');
     });
-    const result = await tools.executeReviewTool('submit_review_reply', { review_id: 'rev-1', reply_text: reply });
+    const result = await tools.executeReviewTool('submit_review_reply', {
+      review_id: 'rev-1', reply_text: reply, grounding_token: tokenFor(row),
+    });
     expect(result.success).toBe(true);
     expect(row.review_reply).toBe(reply);
     // The link being confirmed (or cleared) between verification and the PUT
     // changes what the draft was grounded on → stale, never posted.
-    expect(await guards[0]({ ...row, link_source: 'manual' })).toMatch(/customer link changed/);
-    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toMatch(/review changed/);
+    expect(await guards[0]({ ...row, link_source: 'manual' })).toMatch(/could not be re-read|changed/);
+    expect(await guards[0]({ ...row, customer_id: null, link_source: null })).toMatch(/changed since this draft was generated/);
     expect(await guards[0]({ ...row })).toBeNull();
   });
 
@@ -238,7 +245,7 @@ describe('Intelligence Bar submit_review_reply — missing_since lockout', () =>
     const row = liveReview();
     state.rows.google_reviews = [row];
     const result = await executeReviewTool('submit_review_reply', {
-      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team',
+      review_id: 'rev-1', reply_text: 'Hi Pat,\n\nOur pet-safe treatment handled it.\n\nThe 🌊 Waves Pest Control Bradenton Team', grounding_token: tokenFor(row),
     });
     expect(result.code).toBe('verifier_reject');
     expect(row.review_reply).toBeNull();

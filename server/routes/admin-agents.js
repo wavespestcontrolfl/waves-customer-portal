@@ -1372,6 +1372,9 @@ router.post('/reviews/:id/draft-response', async (req, res, next) => {
       .update({
         review_reply: `${DRAFT_REPLY_PREFIX} ${draftResponse}`,
         reply_updated_at: null,
+        // A fresh save is written for the CURRENT review: clear a stale mark
+        // the sync left on an earlier draft (review-reply/runner).
+        ...require('../services/review-reply/runner').humanDraftSavedFields(db),
       })
       .returning('id');
     if (Array.isArray(updated) ? updated.length === 0 : updated === 0) {

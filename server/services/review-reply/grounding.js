@@ -94,12 +94,26 @@ function escapeRe(s) {
 
 // Technician first names the REVIEWER wrote. Only these may appear in the
 // reply (owner ruling: technician names only when present in the review).
+// First names that are also ordinary words ("We will use Waves again" is not
+// a mention of Will). For these, an occurrence counts only when it is
+// written as a name: capitalized AND not at the start of a sentence.
+const COMMON_WORD_NAMES = new Set(['will', 'may', 'hope', 'grace', 'bill', 'mark', 'rob', 'sunny', 'chase', 'ray', 'art', 'guy', 'jack', 'pat', 'rich', 'rose', 'van', 'dawn', 'autumn', 'summer', 'penny', 'holly', 'jay', 'drew', 'chuck', 'frank', 'don', 'sue', 'lance', 'gene', 'wade', 'cliff', 'cole', 'reed', 'rusty', 'sandy', 'lily', 'faith', 'joy', 'august', 'june', 'april', 'may', 'sky', 'star', 'storm', 'chance', 'bud', 'buck', 'hunter', 'miles', 'wayne', 'earl', 'duke', 'king', 'major', 'pierce', 'ward', 'warren', 'grant', 'clay', 'flint', 'ridge', 'rock', 'stone', 'forest', 'river', 'brook', 'lane', 'dale', 'glen', 'hill', 'wood', 'ash', 'basil', 'sage', 'olive', 'ruby', 'amber', 'crystal', 'pearl', 'ivy', 'violet', 'daisy', 'iris', 'heather', 'jasmine', 'fern', 'robin', 'raven', 'wren', 'jade', 'sable', 'ginger', 'candy', 'honey', 'cookie', 'destiny', 'harmony', 'melody', 'liberty', 'justice', 'patience', 'charity', 'mercy', 'temperance', 'victor', 'christian', 'norman', 'german', 'roman', 'frances', 'bob', 'dick', 'tom', 'jimmy', 'johnny', 'sonny', 'randy', 'woody', 'dusty', 'misty', 'windy', 'rainy', 'stormy']);
 function mentionedTechNames(text, techFirstNames) {
   if (!text) return [];
   const found = [];
   for (const name of techFirstNames) {
     if (name.length < 3) continue;
-    if (new RegExp(`\\b${escapeRe(name)}\\b`, 'i').test(text)) found.push(name);
+    const re = new RegExp(`(^|[^\\p{L}'-])(${escapeRe(name)})(?![\\p{L}'-])`, 'giu');
+    let m; let hit = false;
+    while ((m = re.exec(text)) !== null) {
+      if (!COMMON_WORD_NAMES.has(name.toLowerCase())) { hit = true; break; }
+      const word = m[2];
+      const capitalized = word[0] === word[0].toUpperCase() && word[0] !== word[0].toLowerCase();
+      const before = text.slice(0, m.index + m[1].length).replace(/\s+$/, '');
+      const sentenceInitial = before === '' || /[.!?]$/.test(before);
+      if (capitalized && !sentenceInitial) { hit = true; break; }
+    }
+    if (hit) found.push(name);
   }
   return found;
 }

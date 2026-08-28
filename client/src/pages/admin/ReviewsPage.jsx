@@ -646,6 +646,11 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
             >
               {review.draftReply}
             </div>{" "}
+            {review.draftStale && (
+              <div style={{ marginTop: 6, fontSize: 12, color: D.warn || "#b45309" }}>
+                This draft was written before the reviewer changed the review — read the current review and edit it before posting.
+              </div>
+            )}
             <button
               onClick={() => {
                 setReplyText(review.draftReply);

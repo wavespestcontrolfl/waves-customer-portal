@@ -56,8 +56,9 @@ Use for: "post that reply", "send the response I just approved"`,
       properties: {
         review_id: { type: 'string' },
         reply_text: { type: 'string', description: 'The reply to post' },
+        grounding_token: { type: 'string', description: 'The grounding_token returned by draft_review_reply for this exact draft (required — binds the reply to the review it was written for)' },
       },
-      required: ['review_id', 'reply_text'],
+      required: ['review_id', 'reply_text', 'grounding_token'],
     },
   },
   {
@@ -134,7 +135,7 @@ async function executeReviewTool(toolName, input) {
       case 'get_review_stats': return await getReviewStats();
       case 'get_unresponded_reviews': return await getUnrespondedReviews(input);
       case 'draft_review_reply': return await draftReviewReply(input.review_id);
-      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text);
+      case 'submit_review_reply': return await submitReviewReply(input.review_id, input.reply_text, input.grounding_token);
       case 'get_outreach_candidates': return await getOutreachCandidates(input);
       case 'trigger_review_request': return await triggerReviewRequest(input);
       case 'search_reviews': return await searchReviews(input);
@@ -258,12 +259,15 @@ async function draftReviewReply(reviewId) {
     review_text: review.review_text,
     reply_draft: draft.text,
     reply_mode: draft.mode,
-    note: 'This is a DRAFT. Say "post it" or "send it" to submit, or "revise it" to regenerate.',
+    // Binds this draft to the review + account facts it was written from;
+    // submit_review_reply requires it (validated inside the publish claim).
+    grounding_token: require('../review-reply/runner').groundingToken(review, grounding),
+    note: 'This is a DRAFT. Say "post it" or "send it" to submit (pass grounding_token back), or "revise it" to regenerate.',
   };
 }
 
 
-async function submitReviewReply(reviewId, replyText) {
+async function submitReviewReply(reviewId, replyText, groundingToken) {
   // Posts to Google through the canonical publisher (liveness lock + audit).
   // This tool used to write review_reply locally and claim the reply would
   // "sync to Google" — it never did. Now it either reaches Google or errors.
@@ -282,25 +286,16 @@ async function submitReviewReply(reviewId, replyText) {
     const recentReplies = await Drafter.loadRecentPostedReplies(review.location_id);
     const verdict = Drafter.verifyReplyText(replyText, grounding, { recentReplies });
     if (verdict) return { error: `That reply does not pass the public-reply safety checks (${verdict}). Draft it again with draft_review_reply, or post it from the Reviews page editor.`, code: 'verifier_reject', rejection: verdict };
-    // What was verified: the review + the derived account facts. Re-checked
-    // INSIDE the publish claim so a re-attribution / city correction between
-    // verification and the PUT cannot let a claim licensed by old facts post.
-    const { reviewFingerprint } = require('../review-reply/runner');
-    const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('../review-reply/grounding');
-    const reviewFp = reviewFingerprint(review);
-    const accountFp = accountFingerprint(grounding.account);
-    submitGuard = async (fresh) => {
-      if (reviewFingerprint(fresh) !== reviewFp) return 'review changed since it was verified';
-      let current;
-      // Same confirmation policy as drafting: a click_auto link grounds
-      // review-only, so the guard must not reload facts from the raw
-      // customer_id (the fingerprints would never match and every IB
-      // submit would fail as stale).
-      if ((groundingCustomerId(fresh) || null) !== (groundingCustomerId(review) || null)) return 'customer link changed since it was verified';
-      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
-      if (current !== accountFp) return 'account facts changed since it was verified';
-      return null;
-    };
+    // The draft is bound to the review + account facts it was WRITTEN from
+    // (the grounding_token draft_review_reply returned), not to whatever the
+    // row says at submission time: a reviewer rewrite the sync recorded in
+    // between must refuse a draft written for the old review. Same shared
+    // guard as the editor's AI drafts, validated inside the publish claim.
+    if (typeof groundingToken !== 'string' || !groundingToken.includes('|')) {
+      return { error: 'Draft it first with draft_review_reply and pass its grounding_token back — the token binds the reply to the review it was written for.', code: 'grounding_token_required' };
+    }
+    const { pipelineDraftGuard } = require('../review-reply/runner');
+    submitGuard = pipelineDraftGuard(replyText, { groundingToken });
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
     return { error: `Could not verify the reply before posting (${err.message}).`, code: 'verify_failed' };

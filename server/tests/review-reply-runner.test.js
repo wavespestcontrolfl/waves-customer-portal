@@ -913,6 +913,12 @@ describe('processDueAutoReplies — state machine', () => {
     const posted = row({ auto_reply_status: 'posted' });
     expect(Runner.reviewEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
     expect(Runner.reviewEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    // codex r35: a HUMAN draft written for the old review is kept but marked stale.
+    const humanDrafted = { ...posted, auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Owner wrote this for the 5-star version', auto_reply_draft: null };
+    expect(Runner.reviewEditFields(humanDrafted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null });
+    const neverQueued = { ...humanDrafted, auto_reply_status: null, auto_reply_reason: null };
+    expect(Runner.reviewEditFields(neverQueued, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toMatchObject({ auto_reply_reason: 'human_draft_stale' });
+    expect(Runner.reviewEditFields(humanDrafted, { star_rating: 5, review_text: humanDrafted.review_text, reviewer_name: 'Dana W.' })).toEqual({});
     // A SECOND edit keeps that park (and Retract) — it must not requeue and
     // clear the draft while the real reply is still live (hook P1).
     const parkedAfterPost = { ...posted, star_rating: 1, review_text: 'Actually terrible', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' };
@@ -932,8 +938,8 @@ describe('processDueAutoReplies — state machine', () => {
     // Parked with a pipeline draft (e.g. google_failed) → requeue as well; a draft-less queued row has nothing to clear.
     expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_draft: draft }), edit).auto_reply_status).toBe('queued');
     expect(Runner.reviewEditFields(row({ auto_reply_status: 'queued' }), edit)).toEqual({});
-    // A human's [DRAFT] is theirs; reconciliation parks may have a live PUT.
-    expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', auto_reply_draft: draft, review_reply: '[DRAFT] the owner wrote this' }), edit)).toEqual({});
+    // A human's [DRAFT] is theirs: the text is kept but marked stale (codex r35); reconciliation parks may have a live PUT.
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', auto_reply_draft: draft, review_reply: '[DRAFT] the owner wrote this' }), edit)).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', auto_reply_claimed_until: null });
     expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft, review_reply: `[DRAFT] ${draft}` }), edit)).toEqual({});
   });
   test('applyReviewEditFields is a compare-and-set on the snapshot state and reply slot', async () => {
@@ -1135,6 +1141,25 @@ describe('admin actions', () => {
     // The next sync sees the human text live on Google → ours, posted (Retract stays available).
     expect(Runner.syncReplyFields(state.rows[0], { owner_reply: human, owner_reply_updated_at: '2026-08-27T15:00:00Z' }, { now: new Date('2026-08-27T15:05:00Z') }))
       .toMatchObject({ review_reply: human, auto_reply_status: 'posted', auto_reply_reason: null, auto_reply_published_at: '2026-08-27T15:00:00Z' });
+  });
+
+  test('a stale human draft is refused verbatim by Use Draft and Post now until edited or re-saved (codex r35)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const text = 'Owner wrote this for the 5-star version';
+    const stale = row({ id: 'st', star_rating: 1, review_text: 'Actually terrible', auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', review_reply: '[DRAFT] ' + text, auto_reply_draft: null });
+    expect(await Runner.pipelineDraftGuard(text)(stale)).toMatch(/written before the review changed/);
+    expect(await Runner.pipelineDraftGuard(text + ' Edited for the new review.')(stale)).toBeNull();
+    state.rows = [stale];
+    await expect(Runner.postNow('st', { type: 'admin' }, { expectedDraft: text })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+    expect(mockPublish).not.toHaveBeenCalled();
+    expect(state.rows[0].auto_reply_claimed_until).toBeNull();
+    // A fresh save clears the mark.
+    expect(Runner.humanDraftSavedFields({ raw: (sql) => ({ sql }) }).auto_reply_reason.sql).toMatch(/human_draft_stale/);
+    // applyReviewEditFields works for a never-queued row (NULL state) too.
+    const neverQueued = row({ id: 'nq', auto_reply_status: null, auto_reply_reason: null, review_reply: '[DRAFT] ' + text, auto_reply_draft: null });
+    state.rows = [{ ...neverQueued }];
+    expect(await Runner.applyReviewEditFields('nq', neverQueued, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', review_reply: '[DRAFT] ' + text });
   });
 
   test('postNow does not re-verify a human [DRAFT] (the admin\'s own text is the payload)', async () => {
