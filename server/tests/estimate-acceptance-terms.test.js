@@ -163,7 +163,7 @@ describe('accepted-onboarding email acceptance_note', () => {
   });
   afterEach(() => { gateOn = true; });
 
-  test('records → verbatim recorded line + ET instant + estimate link', async () => {
+  test('records → verbatim recorded text + ET instant, self-contained', async () => {
     rows.acceptance = {
       terms_version: 'v2000-01',
       terms_text: 'OLD LINE the customer actually saw.\nServices — old.',
@@ -174,7 +174,10 @@ describe('accepted-onboarding email acceptance_note', () => {
     expect(note).toContain('“OLD LINE the customer actually saw.”');
     expect(note).toContain('(terms v2000-01)');
     expect(note).toContain('Friday, August 28, 2026 at 3:04 PM ET');
-    expect(note).toMatch(/\/estimate\/tok-note-1$/);
+    // The email is the complete copy: every recorded line, and no link that
+    // can 404 once staff archives the estimate.
+    expect(note).toContain('Services — old.');
+    expect(note).not.toContain('/estimate/');
   });
 
   test('no record → empty string (block dropped, email unchanged)', async () => {

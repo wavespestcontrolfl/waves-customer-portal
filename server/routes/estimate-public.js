@@ -254,6 +254,37 @@ async function registerAcceptedEstimateAppointmentReminder({
 // same gate; a filtered preview must not make the estimate look customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
 
+/**
+ * Acceptance terms apply to cancel-anytime lanes only. Termite / WDO work is
+ * governed by its own signed agreement (contracts lane), so an estimate
+ * carrying any termite/WDO row gets NO acceptance line and NO record (GH
+ * Codex P1: the line's "Cancel anytime" would contradict that agreement).
+ * Scans the persisted recurring + one-time rows with the route's own
+ * termite classifiers plus a name guard for WDO inspections.
+ */
+function acceptanceTermsApplyTo(estimate) {
+  let d = estimate?.estimate_data;
+  if (typeof d === 'string') {
+    try { d = JSON.parse(d); } catch { d = null; }
+  }
+  const result = d?.result && typeof d.result === 'object' ? d.result : (d || {});
+  const rows = [
+    ...(Array.isArray(result?.recurring?.services) ? result.recurring.services : []),
+    ...(Array.isArray(result?.oneTime?.items) ? result.oneTime.items : []),
+  ];
+  return !rows.some((r) => {
+    if (!r || typeof r !== 'object') return false;
+    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''}`.toLowerCase();
+    return /termite|\bwdo\b|wood[- ]destroying/.test(names)
+      || String(recurringServiceKey(r) || '').includes('termite')
+      || isTermiteBondRow(r)
+      || isTermiteInstallItem(r)
+      || isTermiteBaitOneTimeItem(r)
+      || isTermiteFoamOneTimeItem(r)
+      || isTermiteTrenchingOneTimeItem(r);
+  });
+}
+
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
     .toString().split(',')[0].trim().slice(0, 64);
@@ -8740,18 +8771,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
-    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms');
+    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms')
+      && acceptanceTermsApplyTo(estimate);
     const recordAcceptanceTerms = acceptanceTermsActive
       && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
-    // Transition for tabs that never received the terms payload (GH Codex
-    // P0): /data stamps `acceptance_terms_served_version` when it serves the
-    // terms to a customer tab, so an unattested accept is refused only when
-    // this estimate WAS served terms (a tab that showed them but did not
-    // attest, or a stale version) — a pre-gate tab (legacy SSR page, the
-    // previous React bundle) that never saw them accepts unrecorded, exactly
-    // as before the gate. Nothing is ever recorded without an attestation.
-    if (acceptanceTermsActive && !recordAcceptanceTerms
-      && (acceptedTermsVersion || estimate.acceptance_terms_served_version)) {
+    // Only a STALE attestation is refused: the tab rendered an older copy
+    // than this server records, so it must reload and read the current line.
+    // An ABSENT attestation accepts unrecorded (GH Codex r1+r2 P0): a tab
+    // loaded before the gate flipped — legacy SSR page, the previous React
+    // bundle, a second tab racing a rollout — never rendered any terms and
+    // cannot be recorded as accepting them; refusing it would strand a live
+    // tokenized flow with no recovery. Every post-gate client attests (the
+    // page sends the served version), so the record is complete for every
+    // customer who actually saw the line. Nothing is ever recorded without
+    // an attestation.
+    if (acceptanceTermsActive && acceptedTermsVersion && !recordAcceptanceTerms) {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
@@ -23507,20 +23541,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
     // its first two octets and reduces the user-agent to a family label —
     // enough to say "this device, this moment" without printing raw
     // telemetry on a PDF.
-    // Serving the terms to a real customer tab (not a headless document
-    // render or a staff draft preview) stamps the estimate so the accept
-    // route can require the attestation from that point on — see the
-    // transition note on PUT /accept.
-    const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms');
-    if (acceptanceTermsServed && !isPdfRenderPass && !adminDraftPreview
-      && estimate.acceptance_terms_served_version !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
-      try {
-        await db('estimates').where({ id: estimate.id })
-          .update({ acceptance_terms_served_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
-      } catch (e) {
-        logger.warn(`[estimate-data] acceptance terms served stamp failed for estimate ${estimate.id}: ${e.message}`);
-      }
-    }
+    const acceptanceTermsServed = featureGates.isEnabled('estimateAcceptanceTerms')
+      && acceptanceTermsApplyTo(estimate);
     let acceptanceRecord = null;
     if (estimate.status === 'accepted' && estimate.terms_version) {
       try {

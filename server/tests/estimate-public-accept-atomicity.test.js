@@ -44,9 +44,8 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  * 12. Gate on + the client attests the served version → ONE estimate_acceptances
  *    row (verbatim snapshot, ip, ua, accepted_at) written in the accept
  *    transaction, estimates.terms_version + customers.accepted_terms_version
- *    stamped; a rolled-back accept leaves no record. A stale version, or an
- *    absent one once /data served the terms to this estimate, 409s
- *    TERMS_VERSION_STALE before any mutation; a never-served (pre-gate) tab
+ *    stamped; a rolled-back accept leaves no record. A stale version 409s
+ *    TERMS_VERSION_STALE before any mutation; an absent one (a pre-gate tab)
  *    accepts unrecorded. A gate-off server ignores the field and records
  *    nothing. The recorded IP is the proxy-validated req.ip.
  */
@@ -1157,12 +1156,8 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     });
   }
 
-  // Served = /data already handed this tab the terms (the stamp /data writes).
-  function seed(overrides, { served = true } = {}) {
-    resetStore(recurringPestEstimate({
-      ...(served ? { acceptance_terms_served_version: CURRENT } : {}),
-      ...overrides,
-    }));
+  function seed(overrides) {
+    resetStore(recurringPestEstimate(overrides));
     db.__state.tables.estimate_acceptances = [];
   }
 
@@ -1229,21 +1224,30 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
-  test('absent version: refused once terms were served; a pre-gate tab (never served) accepts unrecorded; gate OFF records nothing', async () => {
+  test('a termite/WDO estimate (own signed agreement) never gets a record, even when a version is sent', async () => {
+    mockGateState.acceptanceTerms = true;
+    seed({
+      id: 'est-terms-t',
+      token: 'tok-terms-t-x0123456789',
+      estimate_data: JSON.stringify({
+        result: {
+          recurring: { discount: 0, services: [{ name: 'Termite Bait', service: 'termite_bait', mo: 35 }] },
+          oneTime: { items: [], membershipFee: 0 },
+        },
+      }),
+    });
+    conversionOk();
+    const res = await putAccept('tok-terms-t-x0123456789', { termsVersion: CURRENT });
+    expect(res.status).toBe(200);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
+  });
+
+  test('absent version (a pre-gate tab) accepts unrecorded; gate OFF records nothing', async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
-    const noVersion = await putAccept('tok-terms-4-x0123456789', {});
-    expect(noVersion.status).toBe(409);
-    expect(noVersion.data.code).toBe('TERMS_VERSION_STALE');
-    expect(storedEstimate().status).toBe('sent');
-    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
-    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
-
-    // Pre-gate tab: this estimate was never served the terms (legacy SSR page
-    // or the previous React bundle loaded before the flip) — accept as today.
-    seed({ id: 'est-terms-4b', token: 'tok-terms-4b-x012345678' }, { served: false });
     conversionOk();
-    const preGate = await putAccept('tok-terms-4b-x012345678', {});
+    const preGate = await putAccept('tok-terms-4-x0123456789', {});
     expect(preGate.status).toBe(200);
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
     expect(storedEstimate().terms_version == null).toBe(true);

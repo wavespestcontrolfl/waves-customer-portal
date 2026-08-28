@@ -47,27 +47,29 @@ function appointmentLineFor(appointment) {
 }
 
 // Acceptance-terms copy promised "we ... email you a copy"
-// (GATE_ESTIMATE_ACCEPTANCE_TERMS). This is that copy: the verbatim line the
-// customer accepted (from the recorded row, never the live constant), the
-// instant, and where the full terms print. EMPTY when nothing was recorded —
-// renderBlocks drops the empty paragraph, so an email for an accept that
-// showed no terms reads exactly as before. Keyed on the RECORD, not the
-// gate: a row exists only if terms were shown and accepted, and evidence
-// already recorded is never hidden by the kill switch.
+// (GATE_ESTIMATE_ACCEPTANCE_TERMS). This email IS that copy: the complete
+// verbatim text the customer accepted (from the recorded row, never the live
+// constant), the instant and the version — self-contained on purpose, with
+// no link back to the estimate page, which staff can archive later (GH
+// Codex P0). EMPTY when nothing was recorded — renderBlocks drops the empty
+// paragraph, so an email for an accept that showed no terms reads exactly
+// as before. Keyed on the RECORD, not the gate: evidence already recorded is
+// never hidden by the kill switch.
 async function acceptanceNoteFor(estimateId) {
   const row = await db('estimate_acceptances')
     .where({ estimate_id: estimateId })
     .orderBy('accepted_at', 'desc')
     .first('terms_version', 'terms_text', 'accepted_at');
   if (!row) return '';
-  const estimate = await db('estimates').where({ id: estimateId }).first('token');
   const at = row.accepted_at ? new Date(row.accepted_at) : null;
   const when = at && !Number.isNaN(at.getTime())
     ? ` on ${formatETDay(at)}, ${at.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: TZ })} at ${formatETTime(at)} ET`
     : '';
-  const line = String(row.terms_text || '').split('\n')[0].trim();
-  const where = estimate?.token ? ` The full terms are printed on your accepted estimate: ${portalUrl(`/estimate/${estimate.token}`)}` : '';
-  return `You accepted electronically${when} (terms ${row.terms_version}): \u201c${line}\u201d${where}`;
+  // One paragraph (the template renderer does not keep line breaks): the
+  // line, then each drawer line separated by a middle dot.
+  const lines = String(row.terms_text || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const [line, ...terms] = lines;
+  return `You accepted electronically${when} (terms ${row.terms_version}). What you accepted: \u201c${line || ''}\u201d${terms.length ? ` ${terms.join(' \u00b7 ')}` : ''}`;
 }
 
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment } = {}) {

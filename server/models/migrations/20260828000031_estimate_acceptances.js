@@ -45,12 +45,6 @@ exports.up = async function up(knex) {
 
   await knex.schema.alterTable('estimates', (t) => {
     t.string('terms_version', 40);
-    // Stamped when the public /data endpoint actually SERVES the terms to a
-    // customer tab (gate on, not a headless/preview render). The accept
-    // route requires the attestation only once this is set: a tab that
-    // loaded before the gate flipped never saw terms and may still accept
-    // (unrecorded, as today); a tab that was served terms must attest.
-    t.string('acceptance_terms_served_version', 40);
   });
   await knex.schema.alterTable('customers', (t) => {
     t.string('accepted_terms_version', 40);
@@ -62,7 +56,6 @@ exports.down = async function down(knex) {
     t.dropColumn('accepted_terms_version');
   });
   await knex.schema.alterTable('estimates', (t) => {
-    t.dropColumn('acceptance_terms_served_version');
     t.dropColumn('terms_version');
   });
   await knex.schema.dropTableIfExists('estimate_acceptances');

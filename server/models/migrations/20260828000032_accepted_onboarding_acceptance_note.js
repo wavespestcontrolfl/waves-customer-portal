@@ -15,7 +15,7 @@ const TEMPLATE_KEY = 'estimate.accepted_onboarding';
 const VARIABLE = 'acceptance_note';
 const ANCHOR_CONTENT = 'You’ll get a full service report — what we treated, what we found, and photos from your property. It lands in your email and lives in your customer portal.';
 const NEW_BLOCK = { type: 'paragraph', content: '{{acceptance_note}}' };
-const FIXTURE_VALUE = 'You accepted electronically on Friday, August 28, 2026 at 3:04 PM ET (terms v2026-09): “Accepting authorizes these services at the price shown. Cancel anytime — completed visits are still due.” The full terms are printed on your accepted estimate: https://portal.wavespestcontrol.com/estimate/example';
+const FIXTURE_VALUE = 'You accepted electronically on Friday, August 28, 2026 at 3:04 PM ET (terms v2026-09). What you accepted: “Accepting authorizes these services at the price shown. Cancel anytime — completed visits are still due.” Services — at the price and frequency shown, until you cancel. No contract. · Payment — due when each service is completed. Auto Pay is a separate authorization you can change in your portal. · Unpaid balances — stay due; we’ll remind you, and service may pause until you’re current. · Canceling — anytime. Completed visits are still due. Termite/WDO has its own agreement. · Accepting — counts as your signature. We keep the version, time and device, and email you a copy. You’ll get service and billing messages by text, email and phone (reply STOP to end texts).';
 
 function addVariable(list, name) {
   const vars = Array.isArray(list) ? list : JSON.parse(list || '[]');
