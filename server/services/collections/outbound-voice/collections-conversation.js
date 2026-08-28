@@ -779,19 +779,43 @@ class CollectionsConversation {
   // and pay-link scope, in one place (disclosure, send time, credit-cover
   // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
   // is updated — the caller discloses/sends nothing on a partial account.
-  // `callable` = the refreshed account still clears the policy's
-  // account-shaped checks (gh r3/r4 + hook r4): the anchor inside the
-  // 14–60 day pilot window AND with the delivered-touch floor (an older
-  // invoice sent mid-call can become the anchor with zero dunning history).
-  // `notCallable` names why, so the caller says the right thing.
+  // Denials that are about THIS call's own existence or timing — they were
+  // satisfied at dial time and cannot legitimately re-deny a connected call
+  // (the 24h/7d windows would find this very call's ledger row; the call
+  // window can close while the customer is on the line).
+  static get MID_CALL_IGNORED_DENIALS() {
+    return new Set(['outside_call_window', 'contact_within_24h', 'voice_contact_within_7d', 'live_conversation_within_7d']);
+  }
+
+  // The FRESH eligible set → balance, link anchor, register/hold/deadline
+  // and pay-link scope, in one place (disclosure, send time, credit-cover
+  // re-read). `callable` = the LIVE contact policy still allows this
+  // account (hook r7: a payment-plan flag, a microdeposit-pending invoice,
+  // a joined older invoice, a cleared anchor, a missing touch floor — every
+  // account-shaped denial the policy knows, not a hand-rolled subset).
+  // Returns { incomplete, fresh, callable, notCallable }; on an incomplete
+  // read NOTHING is updated — the caller discloses/sends nothing.
   async _refreshBalance() {
-    const {
-      loadEligibleInvoices, deliveredDunningTouches,
-      PILOT_MIN_DAYS_OVERDUE, PILOT_MAX_DAYS_OVERDUE, PILOT_MIN_DUNNING_TOUCHES,
-    } = require('../contact-policy');
+    const ContactPolicy = require('../contact-policy');
     let incomplete = null;
-    const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+    const fresh = await ContactPolicy.loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
     if (incomplete) return { incomplete, fresh, callable: false, notCallable: 'incomplete' };
+    let notCallable = null;
+    if (fresh.length) {
+      const verdict = await ContactPolicy.evaluate(this._ctx.customer.id, {
+        channel: 'voice', purpose: 'late_payment', now: this._now(),
+        supervisedDial: this._supervised === true, excludeCollectionCaseId: this._ctx.caseId,
+      });
+      // The verdict's own set must be the set we are about to disclose —
+      // two reads that disagree are an incomplete picture, not a total.
+      if (Array.isArray(verdict.eligibleInvoiceIds)) {
+        const a = fresh.map((inv) => String(inv.id)).sort().join(',');
+        const b = verdict.eligibleInvoiceIds.map(String).sort().join(',');
+        if (a !== b) return { incomplete: 'policy set differs from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
+      }
+      const live = (verdict.denialReasons || []).filter((r) => !CollectionsConversation.MID_CALL_IGNORED_DENIALS.has(String(r).split(':')[0]));
+      if (!verdict.allowed && live.length) notCallable = live[0];
+    }
     this._ctx.balance = {
       total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
       count: fresh.length,
@@ -799,26 +823,15 @@ class CollectionsConversation {
     };
     this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
     Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
-    let notCallable = null;
-    if (fresh.length) {
-      const accountDays = accountDaysOverdue(this._now(), fresh);
-      if (accountDays < PILOT_MIN_DAYS_OVERDUE) notCallable = 'under_floor';
-      else if (accountDays > PILOT_MAX_DAYS_OVERDUE) notCallable = 'over_ceiling';
-      else if ((await deliveredDunningTouches(anchorInvoiceOf(fresh))) < PILOT_MIN_DUNNING_TOUCHES) notCallable = 'no_dunning_history';
-    }
     return { incomplete: null, fresh, callable: fresh.length > 0 && !notCallable, notCallable };
   }
 
-  // Copy for a refreshed set the policy would no longer call. Under the
-  // floor = the invoice this call was about cleared (what remains may still
-  // be a few days past due — never call it current); anything else = the
-  // office's, not this call's.
+  // ONE neutral copy for a refreshed account the policy no longer allows
+  // (hook r7): the anchor may have been paid, stopped, re-dated or joined
+  // by an older invoice — nothing here is proven, so nothing is asserted.
   _notCallableCopy(notCallable, { atSend = false } = {}) {
-    const lead = atSend ? 'Do not send the link: ' : '';
-    if (notCallable === 'under_floor') {
-      return `${lead}The past-due balance this call was about has been taken care of since we dialed. Thank the customer; do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say the account is current or settled — if they ask, say the office will follow up on anything remaining. End politely.`;
-    }
-    return `${lead}This account is not one this call may collect on — it needs the office's attention. Do NOT state any figure, do NOT ask for payment or offer a link; say the office will follow up, and end politely.`;
+    logger.info(`[collections-voice] account no longer callable mid-call callSid=${this.callSid}: ${notCallable}`);
+    return `${atSend ? 'Do not send the link: ' : ''}The account has changed since we dialed and this call may not collect on it now. Do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say anything was paid, is current, or is settled. Say the office will follow up, thank the customer, and end politely.`;
   }
 
   _ensureSystemBlocks() {

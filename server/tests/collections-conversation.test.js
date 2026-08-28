@@ -52,10 +52,9 @@ jest.mock('../services/collections/contact-policy', () => ({
     return et.dayOfWeek >= 1 && et.dayOfWeek <= 5 && et.hour >= 9 && et.hour < 18;
   }),
   isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
-  PILOT_MIN_DAYS_OVERDUE: 14,
-  PILOT_MAX_DAYS_OVERDUE: 60,
-  PILOT_MIN_DUNNING_TOUCHES: 2,
-  deliveredDunningTouches: jest.fn(async () => 2),
+  // The LIVE policy re-run at every balance refresh (disclosure / send /
+  // credit-cover): allowed by default; ids null = "no set to compare".
+  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [], eligibleInvoiceIds: null })),
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -1371,6 +1370,7 @@ describe('account-level disclosure + registers', () => {
   });
 
   test('the overdue anchor clearing mid-call leaves a not-yet-callable set — nothing is dunned at disclosure or send time', async () => {
+    const ContactPolicy = require('../services/collections/contact-policy');
     process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     const old = { id: 'inv-old', title: 'Lawn Care', status: 'overdue', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }; // 42d
@@ -1381,10 +1381,11 @@ describe('account-level disclosure + registers', () => {
     const { convo } = makeConvo();
     await convo._contextReady;
     convo.verified = true;
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_not_overdue_long_enough'], eligibleInvoiceIds: ['inv-new'] });
     const out = await convo._toolGetBalance();
-    expect(out).toMatch(/taken care of since we dialed/);
-    expect(out).toMatch(/do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say the account is current or settled/); // 7 days overdue is still overdue
-    expect(out).not.toMatch(/105\.30|nothing overdue/);
+    expect(out).toMatch(/The account has changed since we dialed and this call may not collect on it now/);
+    expect(out).toMatch(/do NOT say anything was paid, is current, or is settled/); // the anchor may have been stopped or re-dated, not paid
+    expect(out).not.toMatch(/105\.30|nothing overdue|taken care of/);
     expect(convo.disclosed).toBe(false);
     // Send time: disclosed on the full set, then the anchor cleared.
     loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
@@ -1395,7 +1396,8 @@ describe('account-level disclosure + registers', () => {
     await c2._toolGetBalance();
     c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
     InvoiceService.sendViaSMS.mockClear();
-    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: The past-due balance this call was about has been taken care of/);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_not_overdue_long_enough'], eligibleInvoiceIds: ['inv-new'] });
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: The account has changed since we dialed/);
     expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
     // Over the 60-day ceiling (an older invoice joined after dialing) is the office's, not this call's.
     const ancient = { id: 'inv-ancient', title: 'Termite', status: 'overdue', due_date: '2026-05-01', total: '300.00', credit_applied: 0 }; // 103d
@@ -1404,24 +1406,42 @@ describe('account-level disclosure + registers', () => {
     const { convo: c3 } = makeConvo();
     await c3._contextReady;
     c3.verified = true;
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_overdue_too_long'], eligibleInvoiceIds: ['inv-ancient', 'inv-old'] });
     const over = await c3._toolGetBalance();
-    expect(over).toMatch(/not one this call may collect on — it needs the office's attention/);
+    expect(over).toMatch(/The account has changed since we dialed/);
     expect(over).not.toMatch(/300\.00|nothing overdue/);
     expect(c3.disclosed).toBe(false);
-    // An older invoice SENT mid-call becomes the anchor with no dunning history — the policy's touch floor holds here too.
-    const { deliveredDunningTouches } = require('../services/collections/contact-policy');
-    const freshOld = { id: 'inv-fresh', title: 'Termite', status: 'sent', due_date: '2026-06-25', total: '80.00', credit_applied: 0 }; // 48d, just delivered
-    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([freshOld, old]);
-    deliveredDunningTouches.mockResolvedValueOnce(0); // the refreshed anchor has zero delivered touches (init never consults the floor — origination did)
+    // The LIVE policy is what decides: a payment plan activated during verification, or a
+    // just-sent older invoice with no dunning history, refuse the same way…
+    for (const reason of ['flag_payment_plan_active', 'pilot_insufficient_dunning_history', 'pilot_awaiting_microdeposit_verification']) {
+      loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+      ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: [reason], eligibleInvoiceIds: ['inv-old'] });
+      setDb();
+      const { convo: c4 } = makeConvo();
+      await c4._contextReady;
+      c4.verified = true;
+      const refused = await c4._toolGetBalance();
+      expect(refused).toMatch(/The account has changed since we dialed/);
+      expect(refused).not.toMatch(/44\.55/);
+      expect(c4.disclosed).toBe(false);
+      expect(ContactPolicy.evaluate).toHaveBeenLastCalledWith('cust-1', expect.objectContaining({ channel: 'voice', purpose: 'late_payment', excludeCollectionCaseId: 'case-1' }));
+    }
+    // …while the call's OWN timing/frequency denials never re-deny a connected call.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['outside_call_window', 'contact_within_24h', 'voice_contact_within_7d'], eligibleInvoiceIds: ['inv-old'] });
     setDb();
-    const { convo: c4 } = makeConvo();
-    await c4._contextReady;
-    c4.verified = true;
-    const untouched = await c4._toolGetBalance();
-    expect(deliveredDunningTouches).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'inv-fresh' }));
-    expect(untouched).toMatch(/needs the office's attention/);
-    expect(untouched).not.toMatch(/80\.00/);
-    expect(c4.disclosed).toBe(false);
+    const { convo: c5 } = makeConvo();
+    await c5._contextReady;
+    c5.verified = true;
+    expect(await c5._toolGetBalance()).toMatch(/Total account balance: \$44\.55/);
+    // A policy set that differs from the loaded set is an incomplete picture, never a total.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old', 'inv-other'] });
+    setDb();
+    const { convo: c6 } = makeConvo();
+    await c6._contextReady;
+    c6.verified = true;
+    expect(await c6._toolGetBalance()).toMatch(/could not be verified/);
   });
 
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
