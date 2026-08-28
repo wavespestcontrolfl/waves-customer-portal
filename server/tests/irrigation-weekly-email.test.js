@@ -383,7 +383,10 @@ describe('runWeeklyIrrigationEmailSweep', () => {
       'orWhereRaw', 'orWhereNotNull', 'orWhereExists', 'whereExists', 'select', 'orderBy', 'from', 'first',
     ]) b[m] = jest.fn(() => b);
     b.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
-    b.then = (resolve, reject) => Promise.resolve(cfg.rows ?? []).then(resolve, reject);
+    // `.first()` on a table with no configured rows resolves null, as knex
+    // does — an empty array is truthy and would read as a "sent" week-plan
+    // row / a delivery record in the customer-week dedupe.
+    b.then = (resolve, reject) => Promise.resolve(cfg.rows ?? (b.first.mock.calls.length ? null : [])).then(resolve, reject);
     return b;
   }
 

@@ -1140,10 +1140,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
       const triggerEventId = `irrigation.weekly:${customer.id}:${weekEnding}`;
 
-      // One email per customer-week under the gate, plan or legacy: a late
-      // retry (plan mode off) must not send a second, contradicting email on
-      // a new recipient key after Monday's plan went out.
-      if (weekPlanGate && !decision.weekPlan) {
+      // One email per customer-week, plan or legacy, WHATEVER the gate reads
+      // now: a late retry (plan mode off, or the kill switch unset after
+      // Monday's plan went out) must not send a second, contradicting email
+      // on a new recipient key (email change, customer merge) — hook P1 on
+      // 41705b745: gating this on weekPlanGate let a gate-off retry bypass
+      // the customer-week dedupe.
+      if (!decision.weekPlan) {
         const alreadySentLegacyPath = await hasSentWeekPlan({ customerId: customer.id, weekEnding });
         const priorLegacyPath = alreadySentLegacyPath === true ? { state: 'sent' } : await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
         if (alreadySentLegacyPath === true || priorLegacyPath.state === 'sent') {

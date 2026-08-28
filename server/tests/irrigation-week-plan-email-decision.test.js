@@ -125,7 +125,7 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/const isMondayET = dayOfWeek === 1 && hour < PLAN_WINDOW_END_HOUR_ET;/);
     expect(require('../services/irrigation-weekly-email').PLAN_WINDOW_END_HOUR_ET).toBe(12);
     // A late (legacy-path) retry still dedupes on the customer-week before sending.
-    expect(src).toMatch(/if \(weekPlanGate && !decision\.weekPlan\) \{[\s\S]{0,600}summary\.deduped \+= 1;\s*continue;/);
+    expect(src).toMatch(/if \(!decision\.weekPlan\) \{[\s\S]{0,700}summary\.deduped \+= 1;\s*continue;/); // gate-independent (hook P1 on 41705b745)
     // …and a pending (in-flight / ambiguous) delivery stops the legacy path too.
     expect(src).toMatch(/if \(priorLegacyPath\.state === 'pending'\) \{[\s\S]{0,400}continue;/);
     expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
