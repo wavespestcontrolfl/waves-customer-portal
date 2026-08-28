@@ -1285,6 +1285,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     // Mapped termite rows.
     expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait' }] }, oneTime: { items: [] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    // Canonical pre-slab identities carry no literal "termite".
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termidor', name: 'Pre-Slab Termidor' }] } }))).toBe(false);
     // Other supported containers: root one_time.items, nested result.results.
     expect(acceptanceTermsApplyTo(withData({ one_time: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, results: { oneTime: { items: [{ name: 'Termite foam treatment' }] } } }))).toBe(false);

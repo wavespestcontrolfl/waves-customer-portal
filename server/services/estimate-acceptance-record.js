@@ -45,4 +45,30 @@ async function acceptanceRecordForEstimate(estimate, { strict = false } = {}) {
   }
 }
 
-module.exports = { acceptanceRecordForEstimate };
+/**
+ * A phoneless one-time accept commits with NO customer row; when the /book
+ * flow later creates the customer and proves ownership of that estimate
+ * (phone/email correlation), fan the acceptance ownership out to them:
+ * estimates.customer_id, estimate_acceptances.customer_id and the
+ * customer-level accepted_terms_version (never downgraded). Idempotent;
+ * no-op unless the estimate is accepted with a record and still unowned
+ * (GH Codex #3574 r4 P2). Never throws — the booking must not fail on it.
+ */
+async function attachAcceptanceOwnership(dbh, { estimateId, customerId }) {
+  if (!estimateId || !customerId) return false;
+  try {
+    const estimate = await dbh('estimates').where({ id: estimateId }).first('id', 'status', 'customer_id', 'terms_version');
+    if (!estimate || estimate.status !== 'accepted' || !estimate.terms_version || estimate.customer_id) return false;
+    await dbh('estimates').where({ id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
+    await dbh('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('customer_id').update({ customer_id: customerId });
+    await dbh('customers').where({ id: customerId })
+      .where((q) => q.whereNull('accepted_terms_version').orWhere('accepted_terms_version', '<', estimate.terms_version))
+      .update({ accepted_terms_version: estimate.terms_version });
+    return true;
+  } catch (e) {
+    logger.warn(`[estimate-acceptance] ownership attach failed for estimate ${estimateId} → customer ${customerId}: ${e.message}`);
+    return false;
+  }
+}
+
+module.exports = { acceptanceRecordForEstimate, attachAcceptanceOwnership };

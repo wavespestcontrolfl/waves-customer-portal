@@ -2049,6 +2049,10 @@ async function createSelfBooking(payload = {}) {
       }
       if (owned) {
         sourceEstimateId = srcEstIdStr;
+        // A customer-less accepted estimate (phoneless one-time accept) now
+        // has a proven owner: attach its acceptance record + terms stamp.
+        const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
+        await attachAcceptanceOwnership(db, { estimateId: srcEstIdStr, customerId: custId });
       } else {
         logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} does not belong to booking customer ${custId} — booking proceeds unlinked`);
       }

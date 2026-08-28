@@ -76,6 +76,7 @@ describe('acceptance record customer-facing shape', () => {
     expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0')).toBe('Windows · Edge');
     expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0 Mobile/15E148 Safari/604.1')).toBe('iPhone · Chrome');
     expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15')).toBe('iPad · Firefox');
+    expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 EdgiOS/120.0 Mobile/15E148 Safari/604.1')).toBe('iPhone · Edge');
     expect(serverText.deviceLabelFromUserAgent(null)).toBeNull();
   });
 });
@@ -237,5 +238,46 @@ describe('accepted-onboarding email acceptance_note', () => {
     rows.acceptance = { terms_version: 'v2026-09', terms_text: 'Line.\nMore.', accepted_at: '2026-08-28T19:04:00Z' };
     const { _private } = require('../services/estimate-accepted-email');
     expect(await _private.acceptanceNoteFor('est-1')).toContain('“Line.”');
+  });
+});
+
+describe('attachAcceptanceOwnership (customer-less accept, later /book owner)', () => {
+  function fakeDb(estimateRow) {
+    const updates = [];
+    const dbh = (table) => {
+      const b = { _table: table, _where: [] };
+      b.where = (arg) => { b._where.push(arg); return b; };
+      b.whereNull = () => b;
+      b.orWhere = () => b;
+      b.first = async () => (table === 'estimates' ? estimateRow : undefined);
+      b.update = async (patch) => { updates.push({ table, patch }); return 1; };
+      return b;
+    };
+    return { dbh, updates };
+  }
+
+  test('links estimate + acceptance rows and stamps the customer (max-guarded)', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
+    const { dbh, updates } = fakeDb({ id: 'e1', status: 'accepted', customer_id: null, terms_version: 'v2026-09' });
+    expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(true);
+    expect(updates.map((u) => u.table)).toEqual(['estimates', 'estimate_acceptances', 'customers']);
+    expect(updates[2].patch).toEqual({ accepted_terms_version: 'v2026-09' });
+  });
+
+  test('no-op when already owned, not accepted, or unrecorded', async () => {
+    jest.resetModules();
+    jest.doMock('../models/db', () => jest.fn());
+    const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
+    for (const row of [
+      { id: 'e1', status: 'accepted', customer_id: 'other', terms_version: 'v2026-09' },
+      { id: 'e1', status: 'sent', customer_id: null, terms_version: null },
+      { id: 'e1', status: 'accepted', customer_id: null, terms_version: null },
+    ]) {
+      const { dbh, updates } = fakeDb(row);
+      expect(await attachAcceptanceOwnership(dbh, { estimateId: 'e1', customerId: 'c1' })).toBe(false);
+      expect(updates).toHaveLength(0);
+    }
   });
 });

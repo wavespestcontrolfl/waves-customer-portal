@@ -311,7 +311,10 @@ function acceptanceTermsApplyTo(estimate) {
   return !rows.some((r) => {
     if (!r || typeof r !== 'object') return true;
     const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''} ${r.description || ''}`.toLowerCase();
-    return /termite|\bwdo\b|wood[- ]destroying/.test(names)
+    // Pre-slab termiticide/Termidor (FDACS paper lane) carries no literal
+    // "termite" in its canonical key or mapped name (GH Codex r4 P1).
+    return /termite|\bwdo\b|wood[- ]destroying|pre[_ -]?slab|termiticide|termidor/.test(names)
+      || isPreSlabOneTimeItem(r)
       || String(recurringServiceKey(r) || '').includes('termite')
       || isTermiteBondRow(r)
       || isTermiteInstallItem(r)
@@ -10340,7 +10343,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         await trx('estimates').where({ id: estimate.id })
           .update({ terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
         if (customerId) {
+          // "Latest version accepted on any estimate": never downgrade — an
+          // older app revision handling an accept during an overlapping
+          // deploy must not overwrite a newer version (GH Codex r4 P2).
+          // Versions are 'vYYYY-MM' — string order is chronological.
           await trx('customers').where({ id: customerId })
+            .where((q) => q.whereNull('accepted_terms_version')
+              .orWhere('accepted_terms_version', '<', acceptanceTerms.ACCEPTANCE_TERMS_VERSION))
             .update({ accepted_terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
         }
       }
