@@ -367,6 +367,8 @@ function buildWeeklyEmailDecision({
   // decision stays pure; `now` pins the restriction policy in tests.
   // Week-ahead ET₀ (inches, from the forecast) — sizes the plan's target.
   forecastEt0Inches = null,
+  // The plan week's Sunday (YYYY-MM-DD, ET) — the restriction must cover it.
+  planWeekEnd = null,
   // The home the plan is decided for (bound to the snapshot; the report
   // attaches the plan only to a service at this address).
   home = null,
@@ -642,6 +644,7 @@ function buildWeeklyEmailDecision({
       rainSensor: rainSensor === true || rainSensor === 't',
       county,
       home,
+      planWeekEnd,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -1078,6 +1081,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         weekPlanEnabled,
         county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city }),
         home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
+        // The restriction must cover the WHOLE plan week (through this Sunday).
+        planWeekEnd,
         now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
@@ -1183,8 +1188,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
             // sent AND stored; this one must not send a second plan.
             summary.plan.claimed_elsewhere += 1;
             continue;
+          } else {
+            snapshotArgs.decisionHash = claim.hash;
           }
-          snapshotArgs.decisionHash = claim.hash;
         } else {
           // In flight elsewhere: touch nothing, send nothing.
           summary.plan.claimed_elsewhere += 1;

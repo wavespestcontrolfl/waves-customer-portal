@@ -80,9 +80,12 @@ function decideWeekPlan({
   // The home the plan is decided for (address + coordinates the sweep used);
   // the report attaches the plan only to a service at THIS address.
   home = null,
+  // The plan week's Sunday: a policy that expires before it does not cover
+  // the instruction and yields no plan.
+  planWeekEnd = null,
   now = new Date(),
 } = {}) {
-  const restriction = currentRestrictionPolicy(now, { county });
+  const restriction = currentRestrictionPolicy(now, { county, horizonEnd: planWeekEnd });
   const planMonth = etParts(now).month;
   // The week AHEAD's demand: forecast ET₀ when the forecast carried it, else
   // the seasonal target for this month — never the completed week's ET₀ (a
@@ -124,6 +127,7 @@ function decideWeekPlan({
     explicitInchesPerWeek: explicitInchesPerWeek ?? null,
     rainSensor: rainSensor === true,
     county,
+    planWeekEnd,
     home: home ? {
       addressLine1: home.addressLine1 || null,
       addressLine2: home.addressLine2 || null,
@@ -535,6 +539,14 @@ async function discardUnsentWeekPlan({ customerId, weekEnding, claimToken = null
   }
 }
 
+function etDateStringPlusDays(ymd, days) {
+  const iso = ymd instanceof Date ? ymd.toISOString().slice(0, 10) : String(ymd || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const d = new Date(`${iso}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function samePolicy(a, b) {
   if (!a && !b) return true;
   if (!a || !b) return false;
@@ -568,7 +580,10 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
     const restriction = parse(row.restriction_policy) || null;
     const decisionInputs = parse(row.weather_inputs) || {};
-    if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null }))) return null;
+    // The policy must still be in force for the county AND still cover the
+    // snapshot's whole plan week.
+    const horizonEnd = decisionInputs.planWeekEnd || etDateStringPlusDays(row.week_ending, 7);
+    if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null, horizonEnd }))) return null;
     if (pinned && new Date(row.sent_at).toISOString() !== pinnedSentAt) return null;
     return {
       weekEnding: row.week_ending,

@@ -136,11 +136,12 @@ function validPolicy(p) {
 }
 
 /**
- * The policy in force on `now` (ET calendar date) FOR `county`, or null when
- * none is configured for that date or its coverage of the county cannot be
- * established.
+ * The policy in force on `now` (ET calendar date) FOR `county` — and, when
+ * `horizonEnd` (YYYY-MM-DD) is given, in force through that date — or null
+ * when none is configured, its coverage of the county cannot be established,
+ * or it expires inside the horizon.
  */
-function currentRestrictionPolicy(now = new Date(), { env = process.env, county = null } = {}) {
+function currentRestrictionPolicy(now = new Date(), { env = process.env, county = null, horizonEnd = null } = {}) {
   const today = etDateString(now);
   const envPolicy = parseEnvPolicy(env.IRRIGATION_RESTRICTION_POLICY);
   const candidate = envPolicy.configured ? envPolicy.policy : DEFAULT_POLICY;
@@ -150,6 +151,13 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   }
   if (!coversCounty(candidate, county)) return null;
   if (candidate.effectiveFrom && today < candidate.effectiveFrom) return null;
+  // A plan speaks for a whole week: a policy that expires inside the plan
+  // horizon (before the plan week's Sunday) does not cover the instruction —
+  // no plan until a successor policy is configured (fail closed, logged).
+  if (horizonEnd && /^\d{4}-\d{2}-\d{2}$/.test(String(horizonEnd)) && String(horizonEnd) > candidate.expiresOn) {
+    logOnce(`[irrigation-restrictions] restriction policy "${candidate.label}" expires ${candidate.expiresOn}, inside the plan week ending ${horizonEnd} — set IRRIGATION_RESTRICTION_POLICY for the successor rule; weekly watering plan unavailable until then`);
+    return null;
+  }
   if (today > candidate.expiresOn) {
     logOnce(`[irrigation-restrictions] restriction policy "${candidate.label}" expired ${candidate.expiresOn} — set IRRIGATION_RESTRICTION_POLICY; weekly watering plan unavailable until then`);
     return null;

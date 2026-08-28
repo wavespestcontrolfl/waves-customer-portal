@@ -132,8 +132,11 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/if \(alreadySent === null\) \{[\s\S]{0,400}weekPlanEnabled: false/);
     // The sweep binds the home (address + coords) it decided for into the snapshot.
     expect(src).toMatch(/home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip, latitude: customer\.latitude, longitude: customer\.longitude \}/);
-    // A snapshot-claim DB error falls back to the pre-plan email (never silence).
+    // A snapshot-claim DB error falls back to the pre-plan email (never silence) — and the hash is assigned only on a successful claim.
     expect(src).toMatch(/if \(claim\.error\) \{[\s\S]{0,400}weekPlanEnabled: false/);
+    expect(src).toMatch(/\} else \{\s*snapshotArgs\.decisionHash = claim\.hash;\s*\}/);
+    // The sweep passes the plan week's Sunday so the restriction must cover the whole week.
+    expect(src).toMatch(/planWeekEnd,\s*now: planAsOf,/);
     // Delivery reconciliation is customer/week scoped (trigger_event_id)…
     expect(src).toMatch(/weekPlanDeliveryState\(\{ triggerEventId, idempotencyKey \}\)/);
     // …and a prior delivery ends the customer's turn: never a second email on a new recipient key.

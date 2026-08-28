@@ -31,6 +31,17 @@ describe('currentRestrictionPolicy', () => {
     expect(logger.error).toHaveBeenCalledTimes(1);
   });
 
+  test('a policy that expires inside the plan week does not cover it → null (the week before 10-01 sends no plan without a successor)', () => {
+    // Plan week Mon 09-28 → Sun 10-04 straddles the 10-01 expiry.
+    expect(currentRestrictionPolicy(new Date('2026-09-28T12:00:00Z'), { env: {}, county: 'Manatee', horizonEnd: '2026-10-04' })).toBeNull();
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('inside the plan week ending 2026-10-04'));
+    // The week fully inside the order is fine.
+    expect(currentRestrictionPolicy(new Date('2026-09-21T12:00:00Z'), { env: {}, county: 'Manatee', horizonEnd: '2026-09-27' })).toMatchObject({ maxDaysPerWeek: 1 });
+    // A successor policy covering the horizon restores plans.
+    const env = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-09-28', expiresOn: '2027-12-31', label: 'successor', coverage: 'all' }) };
+    expect(currentRestrictionPolicy(new Date('2026-09-28T12:00:00Z'), { env, county: 'Manatee', horizonEnd: '2026-10-04' })).toMatchObject({ maxDaysPerWeek: 2 });
+  });
+
   test('IRRIGATION_RESTRICTION_POLICY env JSON overrides the default', () => {
     const env = { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-10-02', expiresOn: '2027-12-31', label: 'SWFWMD year-round rule', hoursNote: 'before 10 a.m. or after 4 p.m.', coverage: { counties: ['Manatee', 'Sarasota'], partial: ['Charlotte'] } }) };
     expect(currentRestrictionPolicy(AFTER, { env, county: 'Manatee' })).toMatchObject({ maxDaysPerWeek: 2, label: 'SWFWMD year-round rule' });

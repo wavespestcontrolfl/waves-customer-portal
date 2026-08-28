@@ -186,6 +186,14 @@ describe('decideWeekPlan (server glue)', () => {
     expect(plan.action).toBe('unavailable');
   });
 
+  test('a plan week that straddles the order\'s expiry → unavailable (policy must cover the whole week)', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 9, irrigationInchesPerWeek: 1, rainfallInches7d: 0.2 });
+    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', planWeekEnd: '2026-10-04', now: new Date('2026-09-28T12:00:00Z') });
+    expect(restriction).toBeNull();
+    expect(plan.action).toBe('unavailable');
+    expect(decisionInputs.planWeekEnd).toBe('2026-10-04');
+  });
+
   test('after the order expires with nothing configured → unavailable', () => {
     const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 10, irrigationInchesPerWeek: 1, rainfallInches7d: 0.2 });
     const { plan, restriction } = decideWeekPlan({ advice, grassType: 'st_augustine', ...SPRAY, county: 'Manatee', now: new Date('2026-10-05T12:00:00Z') });
@@ -247,6 +255,9 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
     stubSelect(row(POLICY));
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
+    // A snapshot whose plan week straddles the expiry (recorded planWeekEnd) is no longer covered → null.
+    stubSelect(row(POLICY, { week_ending: '2026-09-27', weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee', planWeekEnd: '2026-10-04' }) }));
+    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-01T12:00:00Z') })).toBeNull();
   });
 
   test('a render pinned to the signature\'s snapshot accepts only that sent_at; pinned-none renders no plan', async () => {
