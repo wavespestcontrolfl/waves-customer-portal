@@ -133,14 +133,17 @@ function buildScheduleAsk({ derived, inputs, toggleOff = false, explicitInches =
   const haveClause = have.length ? ` — ${joinList(have)} — ` : ' for you, ';
   const reason = derived?.reason || 'missing_minutes';
 
-  // Toggle conflict: this branch is only reachable with the toggle off when
+  // System-off conflict: only reachable with irrigation_system = false when
   // a technician's first-hand observation says a system exists (hasSystem).
-  // The blocker is the switch, not a missing field — complete inputs (or an
-  // explicit inches entry) suppressed by the toggle must never be described
-  // as absent (GH codex P1 on #3478 r13).
+  // The blocker is the stored flag, not a missing field — complete inputs
+  // (or an explicit inches entry) suppressed by it must never be described
+  // as absent (GH codex P1 on #3478 r13). The portal toggle is retired
+  // (2026-08-27, every row flipped on), so the flag is staff-side only and
+  // the ask routes the customer to us rather than to a control that no
+  // longer exists.
   if (toggleOff) {
     const scheduleOnFile = explicitInches != null || derived?.inchesPerWeek != null || have.length > 0;
-    return `Our technician noted an in-ground sprinkler system at your property, but your portal has the irrigation system switched off${scheduleOnFile ? ", so the schedule on file isn't being counted" : ''}. If the system is running, switch it on under Irrigation in your portal ${SETUP_CLOSER} If it truly is off, you're all set — we'll plan around the rain alone.`;
+    return `Our technician noted an in-ground sprinkler system at your property, but your account has the irrigation system marked off${scheduleOnFile ? ", so the schedule on file isn't being counted" : ''}. If the system is running, reply to this email and we'll mark it on ${SETUP_CLOSER} If it truly is off, you're all set — we'll plan around the rain alone.`;
   }
 
   // Inputs complete but unconvertible — the two declines that are not about
@@ -701,6 +704,33 @@ function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   };
 }
 
+// Does ONE customer have lawn-service evidence? Gates the portal's Weekly
+// Inches field (and the PUT that stores it) — a render/store gate, not a
+// send, so it is deliberately BROADER than the Monday sweep's audience: any
+// live lawn-flavored visit on or after the trailing cutoff, future visits
+// included and no recurring marker required. That is a strict superset of
+// recurringLawnEvidenceFilter (both branches imply one such visit) and also
+// admits the unstamped-first-visit member class findUnstampedRecurringLawnMembers
+// pages for (GH codex P2 on #3557) — that customer must be able to enter
+// inches even while the series is still unstamped. Tier / lawn_type remain
+// the fast path in routes/property.js. (2026-08-27: a lawn customer's portal
+// showed no Inches field on the day of her service.)
+async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
+  if (!customerId) return false;
+  const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
+  const row = await db('scheduled_services as ss')
+    .where('ss.customer_id', customerId)
+    .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    .where('ss.scheduled_date', '>=', lawnServiceCutoff)
+    .where(function serviceTypes() {
+      for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
+        this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
+      }
+    })
+    .first('ss.id');
+  return !!row;
+}
+
 async function findEligibleCustomers({ now = new Date() } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
@@ -1225,6 +1255,7 @@ module.exports = {
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
+  hasLawnServiceEvidence,
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,

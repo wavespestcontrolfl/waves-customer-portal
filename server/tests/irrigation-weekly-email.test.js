@@ -822,3 +822,45 @@ describe('findLawnEmailAudienceGaps', () => {
     ]);
   });
 });
+
+describe('hasLawnServiceEvidence (portal Weekly Inches gate)', () => {
+  // A render/store gate, not a send: any live lawn-flavored visit in the
+  // trailing window — future included, no recurring marker — so the
+  // unstamped-first-visit member class can still enter inches.
+  test('compiles to one live lawn-flavored visit since the trailing cutoff, no recurring marker', async () => {
+    const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+    const realKnex = require('knex')({ client: 'pg' });
+    const originalRaw = db.raw;
+    let captured;
+    try {
+      db.mockImplementation((table) => {
+        const b = realKnex(table);
+        captured = b;
+        b.then = (resolve, reject) => Promise.resolve(undefined).then(resolve, reject);
+        return b;
+      });
+      db.raw = realKnex.raw.bind(realKnex);
+      await expect(hasLawnServiceEvidence('cust-1', { now: new Date('2026-08-27T12:00:00Z') })).resolves.toBe(false);
+      const { sql, bindings } = captured.toSQL();
+      expect(sql).toMatch(/from "scheduled_services" as "ss"/);
+      expect(sql).toContain('"ss"."customer_id" = ?');
+      expect(bindings).toContain('cust-1');
+      expect(sql).toContain('"ss"."status" not in');
+      expect(sql).toContain('"ss"."scheduled_date" >= ?');
+      expect(bindings).toContain('2026-02-28'); // 180 days back, ET
+      expect(sql).toContain('LOWER(ss.service_type) LIKE ?');
+      expect(sql).not.toMatch(/is_recurring|recurring_parent_id|recurring_pattern/);
+      expect(sql).not.toContain('<= ?');
+    } finally {
+      db.raw = originalRaw;
+      db.mockReset();
+    }
+  });
+
+  test('no customer id → false without a query', async () => {
+    const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
+    db.mockReset();
+    await expect(hasLawnServiceEvidence(null)).resolves.toBe(false);
+    expect(db).not.toHaveBeenCalled();
+  });
+});
