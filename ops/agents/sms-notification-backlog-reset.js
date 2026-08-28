@@ -65,6 +65,12 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
           WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)
             AND n.link = '/admin/communications?thread=' || cv.customer_id::text
             AND NOT (m.id = ANY($1::uuid[]))
+        )
+        AND NOT EXISTS (
+          -- the unified dual-write can fail while sms_log + bell succeed: an
+          -- unread legacy inbound row means the thread still wants an answer
+          SELECT 1 FROM sms_log l WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE)
+            AND n.link = '/admin/communications?thread=' || l.customer_id::text
         )`, [[...wouldRead]]);
     console.log(`inbound_sms bells with no remaining unread message (would clear): ${orphanBells.rows.length}`);
     console.log('dry run — nothing written. Re-run with --execute to apply.');
@@ -81,6 +87,8 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
     return r.rowCount;
   };
   await readMsgs(closers, 'pass 1 (reaction/courtesy)');
+  const rl = await c.query(`UPDATE sms_log l SET is_read=true WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($1::uuid[]) AND twilio_sid IS NOT NULL)`, [closers]);
+  console.log(`pass 1 (legacy sms_log mirror): marked ${rl.rowCount} rows read`);
   if (staleDays) {
     await readMsgs(staleMsgs.rows.map((r) => r.id), `pass 3 (stale >${staleDays}d messages)`);
     const rb = await c.query(`UPDATE notifications SET read_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE category='inbound_sms' AND read_at IS NULL AND created_at < now() - ($2::int * interval '1 day')`, [tag, staleDays]);
@@ -92,7 +100,10 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
       AND NOT EXISTS (
         SELECT 1 FROM messages m JOIN conversations cv ON cv.id = m.conversation_id
         WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)
-          AND n.link = '/admin/communications?thread=' || cv.customer_id::text)`, [tag]);
+          AND n.link = '/admin/communications?thread=' || cv.customer_id::text)
+      AND NOT EXISTS (
+        SELECT 1 FROM sms_log l WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE)
+          AND n.link = '/admin/communications?thread=' || l.customer_id::text)`, [tag]);
   console.log(`pass 2 (bells with no unread message): marked ${r2.rowCount} notifications read`);
   await c.query('COMMIT');
   console.log(`done. Rollback one batch: UPDATE messages SET is_read=false, read_at=NULL WHERE metadata->>'backlog_reset'='${tag}'; UPDATE notifications SET read_at=NULL WHERE metadata->>'backlog_reset'='${tag}';`);

@@ -974,6 +974,12 @@ router.post('/sms', async (req, res) => {
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
         const { triggerNotification } = require('../services/notification-triggers');
+        // Re-check right before writing the bell: if the thread was opened
+        // (message already read) in the window since the dual-write above,
+        // a bell now would outlive its message (hook P1). Fail open — an
+        // unknown state still rings.
+        const unified = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read').catch(() => null);
+        if (unified?.is_read === true) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
         const stats = await triggerNotification('sms_reply', {
           fromName: `${customer.first_name} ${customer.last_name}`,
           fromPhone: From,
@@ -985,7 +991,10 @@ router.post('/sms', async (req, res) => {
         // that would re-create the exact alert the suppression removed.
         knownInboundNotified = Boolean(stats && !stats.error &&
           (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-      } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
+      } catch (e) {
+        if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
+        else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
+      }
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
@@ -1780,7 +1789,9 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
       .orderBy('created_at', 'desc')
       .first('message_body');
     if (!last) return true;
-    return /\?/.test(String(last.message_body || ''));
+    // A question mark OR an explicit reply directive ("Reply YES to confirm",
+    // "let us know", "text back") — templates ask without "?" (hook P1).
+    return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(String(last.message_body || ''));
   } catch (e) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;
