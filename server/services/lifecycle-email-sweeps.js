@@ -379,10 +379,13 @@ async function runAcceptanceCopySweep() {
   let checked = 0;
   let escalated = 0;
   for (const row of rows) {
-    if (seen.has(row.estimate_id)) continue;
-    seen.add(row.estimate_id);
+    if (seen.has(row.id)) continue;
+    seen.add(row.id);
     checked += 1;
-    const baseKey = `estimate.accepted_onboarding:${row.estimate_id}`;
+    const { sendEstimateAcceptedOnboarding, acceptedOnboardingKey } = require('./estimate-accepted-email');
+    // Keyed per acceptance EVENT: a re-accept after a revision is its own
+    // row with its own copy, never deduped against the earlier one.
+    const baseKey = acceptedOnboardingKey(row.estimate_id, row.id);
     try {
       const delivered = await db('email_messages')
         .where('idempotency_key', 'like', `${baseKey}%`)
@@ -390,14 +393,13 @@ async function runAcceptanceCopySweep() {
         .first('id');
       if (delivered) {
         // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
-        await db('estimate_acceptances').where({ estimate_id: row.estimate_id }).whereNull('copy_emailed_at')
+        await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')
           .update({ copy_emailed_at: new Date() });
         continue;
       }
       const wedged = await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
       const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data');
       if (!estimate) continue;
-      const { sendEstimateAcceptedOnboarding } = require('./estimate-accepted-email');
       const EstimateConverter = require('./estimate-converter');
       let estData = estimate.estimate_data;
       if (typeof estData === 'string') { try { estData = JSON.parse(estData); } catch { estData = {}; } }
@@ -408,6 +410,7 @@ async function runAcceptanceCopySweep() {
         estimateId: estimate.id,
         serviceLabel: firstService?.name || firstService?.label || 'service',
         appointment: null,
+        acceptanceId: row.id,
         idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
       });
       if (result?.sent) { sent += 1; continue; }

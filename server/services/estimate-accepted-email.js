@@ -55,11 +55,11 @@ function appointmentLineFor(appointment) {
 // paragraph, so an email for an accept that showed no terms reads exactly
 // as before. Keyed on the RECORD, not the gate: evidence already recorded is
 // never hidden by the kill switch.
-async function acceptanceNoteFor(estimateId) {
+async function acceptanceNoteFor(estimateId, acceptanceId = null) {
   const row = await db('estimate_acceptances')
-    .where({ estimate_id: estimateId })
+    .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
     .orderBy('accepted_at', 'desc')
-    .first('terms_version', 'terms_text', 'accepted_at');
+    .first('id', 'terms_version', 'terms_text', 'accepted_at');
   if (!row) return '';
   const at = row.accepted_at ? new Date(row.accepted_at) : null;
   const when = at && !Number.isNaN(at.getTime())
@@ -72,11 +72,21 @@ async function acceptanceNoteFor(estimateId) {
   return `You accepted electronically${when} (terms ${row.terms_version}). What you accepted: \u201c${line || ''}\u201d${terms.length ? ` ${terms.join(' \u00b7 ')}` : ''}`;
 }
 
-// `idempotencyKey` is overridable ONLY by the daily catch-up sweep
-// (lifecycle-email-sweeps runAcceptanceCopySweep): the stable per-estimate
-// key dedupes the normal post-commit send; a retry after a failed/blocked
-// row needs a day-scoped key, same pattern as the bond renewal sweep.
-async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, idempotencyKey } = {}) {
+// `acceptanceId` scopes the copy to ONE acceptance event: an estimate can be
+// accepted again after a revision (a new estimate_acceptances row), and that
+// acceptance's copy must not dedupe against the first one's email — so the
+// note, the idempotency key and the fulfilment stamp all key on the record
+// (pre-push Codex P1). Without one (gate off / pre-gate accept) the legacy
+// per-estimate key applies, exactly as before.
+// `idempotencyKey` is overridable ONLY by the daily catch-up sweep: a retry
+// after a failed/blocked row needs a day-scoped key (bond-renewal pattern).
+function acceptedOnboardingKey(estimateId, acceptanceId) {
+  return acceptanceId
+    ? `estimate.accepted_onboarding:${estimateId}:acc:${acceptanceId}`
+    : `estimate.accepted_onboarding:${estimateId}`;
+}
+
+async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey } = {}) {
   try {
     if (!estimateId) return null;
     // Recipient: the linked customer, else the estimate's own contact — a
@@ -95,7 +105,7 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       return null;
     }
     const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
-    const acceptanceNote = await acceptanceNoteFor(estimateId);
+    const acceptanceNote = await acceptanceNoteFor(estimateId, acceptanceId);
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'estimate.accepted_onboarding',
       to: email,
@@ -109,8 +119,8 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       },
       recipientType: 'customer',
       recipientId: customerId || null,
-      idempotencyKey: idempotencyKey || `estimate.accepted_onboarding:${estimateId}`,
-      triggerEventId: `estimate.accepted_onboarding:${estimateId}`,
+      idempotencyKey: idempotencyKey || acceptedOnboardingKey(estimateId, acceptanceId),
+      triggerEventId: acceptedOnboardingKey(estimateId, acceptanceId),
       categories: ['estimate_accepted_onboarding'],
       // SendGrid 4xx bodies can echo the recipient address — keep provider
       // errors out of the logs and log a redacted reason below.
@@ -120,7 +130,9 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
     // The copy went out (a deduped sent-ish row counts): stamp fulfilment so
     // the catch-up sweep stops retrying this acceptance.
     if (acceptanceNote && result?.sent) {
-      await db('estimate_acceptances').where({ estimate_id: estimateId }).whereNull('copy_emailed_at')
+      await db('estimate_acceptances')
+        .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
+        .whereNull('copy_emailed_at')
         .update({ copy_emailed_at: new Date() });
     }
     return result;
@@ -133,4 +145,4 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
   }
 }
 
-module.exports = { sendEstimateAcceptedOnboarding, _private: { appointmentLineFor, acceptanceNoteFor } };
+module.exports = { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, _private: { appointmentLineFor, acceptanceNoteFor } };

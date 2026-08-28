@@ -19,6 +19,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({ sent: true })),
+  acceptedOnboardingKey: (estimateId, acceptanceId) => `estimate.accepted_onboarding:${estimateId}:acc:${acceptanceId}`,
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 jest.mock('../services/estimate-converter', () => ({
@@ -71,7 +72,7 @@ test('no email row → resend under the stable key', async () => {
   expect(result).toEqual({ sent: 1, checked: 1, escalated: 0 });
   expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledTimes(1);
   expect(sendEstimateAcceptedOnboarding.mock.calls[0][0]).toMatchObject({
-    customerId: 'cust-1', estimateId: 'est-1', serviceLabel: 'Pest Control', idempotencyKey: 'estimate.accepted_onboarding:est-1',
+    customerId: 'cust-1', estimateId: 'est-1', acceptanceId: 'acc-1', serviceLabel: 'Pest Control', idempotencyKey: 'estimate.accepted_onboarding:est-1:acc:acc-1',
   });
 });
 
@@ -79,7 +80,7 @@ test('wedged failed row under the stable key → resend under a day-scoped key',
   emailRows.wedged = [{ id: 'm1', status: 'failed' }];
   await runAcceptanceCopySweep();
   expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledTimes(1);
-  expect(sendEstimateAcceptedOnboarding.mock.calls[0][0].idempotencyKey).toMatch(/^estimate\.accepted_onboarding:est-1:\d{4}-\d{2}-\d{2}$/);
+  expect(sendEstimateAcceptedOnboarding.mock.calls[0][0].idempotencyKey).toMatch(/^estimate\.accepted_onboarding:est-1:acc:acc-1:\d{4}-\d{2}-\d{2}$/);
 });
 
 test('a sent-ish row → fulfilment stamped, never emailed twice', async () => {

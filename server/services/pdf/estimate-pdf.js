@@ -512,16 +512,22 @@ function acceptanceBlock(ctx, acceptance, y) {
   if (!acceptance || !acceptance.termsText) return y;
   const { doc } = ctx;
   const lines = String(acceptance.termsText).split('\n').map((l) => l.trim()).filter(Boolean);
-  y = ensureSpace(ctx, y, 26);
+  // Reserve the WHOLE block up front (heading + every line + the stamp) so
+  // it never splits across a page boundary or orphans its heading — the
+  // pdfkit counterpart of the browser document's doc-keep (pre-push Codex
+  // P1). Only a block taller than a full page falls back to per-line breaks.
+  doc.fontSize(9).font('Helvetica');
+  const lineHeights = lines.map((line) => doc.heightOfString(line, { width: W, lineGap: 1.5 }) + 6);
+  const blockHeight = 14 + lineHeights.reduce((sum, h) => sum + h, 0) + 14;
+  const keepTogether = blockHeight <= CONTENT_BOTTOM - 56;
+  y = ensureSpace(ctx, y, keepTogether ? blockHeight : 26);
   y = sectionLabel(doc, 'Service & payment authorization', L, y);
-  for (const line of lines) {
-    doc.fontSize(9).font('Helvetica').fillColor(BODY);
-    const lineH = doc.heightOfString(line, { width: W, lineGap: 1.5 });
-    y = ensureSpace(ctx, y, lineH + 6);
+  lines.forEach((line, i) => {
+    if (!keepTogether) y = ensureSpace(ctx, y, lineHeights[i]);
     doc.fontSize(9).font('Helvetica').fillColor(BODY);
     doc.text(line, L, y, { width: W, lineGap: 1.5 });
-    y += lineH + 6;
-  }
+    y += lineHeights[i];
+  });
   const at = acceptance.acceptedAt ? new Date(acceptance.acceptedAt) : null;
   const when = at && !Number.isNaN(at.getTime())
     ? at.toLocaleString('en-US', { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' })
@@ -533,7 +539,7 @@ function acceptanceBlock(ctx, acceptance, y) {
     acceptance.ipMasked ? `IP ${acceptance.ipMasked}` : null,
     acceptance.recordId ? `Record ${acceptance.recordId}` : null,
   ].filter(Boolean).join(' · ');
-  y = ensureSpace(ctx, y, 14);
+  if (!keepTogether) y = ensureSpace(ctx, y, 14);
   doc.fontSize(8).font('Helvetica').fillColor(MUTED).text(meta, L, y, { width: W });
   return y + 14;
 }

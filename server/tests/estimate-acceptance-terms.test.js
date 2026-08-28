@@ -118,11 +118,13 @@ describe('accepted-onboarding email recipient', () => {
       return b;
     });
     const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
-    await sendEstimateAcceptedOnboarding({ customerId: null, estimateId: 'est-cl', serviceLabel: 'Pest Control', appointment: null });
+    await sendEstimateAcceptedOnboarding({ customerId: null, estimateId: 'est-cl', acceptanceId: 'acc-9', serviceLabel: 'Pest Control', appointment: null });
     expect(sendTemplate).toHaveBeenCalledTimes(1);
     const call = sendTemplate.mock.calls[0][0];
     expect(call.to).toBe('pat@example.com');
     expect(call.recipientId).toBeNull();
+    // One copy per acceptance EVENT: keyed on the record, not just the estimate.
+    expect(call.idempotencyKey).toBe('estimate.accepted_onboarding:est-cl:acc:acc-9');
     expect(call.payload.first_name).toBe('Pat');
     expect(call.payload.acceptance_note).toContain('“Line.”');
   });

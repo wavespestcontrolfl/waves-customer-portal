@@ -8831,6 +8831,9 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // (pre-push Codex P1). Nothing is ever recorded without an attestation.
     const acceptanceTermsRequired = acceptanceTermsActive
       && featureGates.isEnabled('estimateAcceptanceTermsRequired');
+    // The record written in the accept transaction — the post-commit copy
+    // email keys on it (one copy per acceptance event).
+    let acceptanceRecordId = null;
     if (acceptanceTermsActive && !recordAcceptanceTerms
       && (acceptedTermsVersion || acceptanceTermsRequired)) {
       return res.status(409).json({
@@ -10321,7 +10324,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       // versa). Retries of an already-accepted estimate never reach here
       // (the guarded UPDATE above 409s first).
       if (recordAcceptanceTerms) {
-        await trx('estimate_acceptances').insert({
+        const [acceptanceRow] = await trx('estimate_acceptances').insert({
           estimate_id: estimate.id,
           customer_id: customerId || null,
           method: 'public_estimate',
@@ -10332,7 +10335,8 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the raw X-Forwarded-For head a requester can supply (GH Codex P1).
           ip: String(req.ip || '').slice(0, 64) || null,
           user_agent: (req.get('user-agent') || '').slice(0, 1000) || null,
-        });
+        }).returning('id');
+        acceptanceRecordId = acceptanceRow?.id || acceptanceRow || null;
         await trx('estimates').where({ id: estimate.id })
           .update({ terms_version: acceptanceTerms.ACCEPTANCE_TERMS_VERSION });
         if (customerId) {
@@ -11842,6 +11846,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       void sendEstimateAcceptedOnboarding({
         customerId,
         estimateId: estimate.id,
+        acceptanceId: acceptanceRecordId,
         serviceLabel: firstAcceptedAppointment?.service_type
           || invoiceServiceLabel
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))

@@ -1203,6 +1203,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(records[0].accepted_at).toBeTruthy();
     expect(storedEstimate().terms_version).toBe(CURRENT);
     expect(db.__state.tables.customers.find((c) => c.id === customerId).accepted_terms_version).toBe(CURRENT);
+    // The post-commit copy email is keyed on THIS acceptance record.
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    expect(sendEstimateAcceptedOnboarding).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'est-terms-1', acceptanceId: records[0].id }));
   });
 
   test('a rolled-back accept leaves no record and no stamps', async () => {
