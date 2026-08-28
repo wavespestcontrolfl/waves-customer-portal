@@ -1659,6 +1659,9 @@ async function imageDHash(buffer) {
   let info;
   try {
     ({ data, info } = await sharp(buffer)
+      // Display orientation first: an orientation-tagged JPEG and its
+      // auto-oriented WebP twin are the same picture to a reader.
+      .rotate()
       .flatten({ background: '#ffffff' })
       .grayscale()
       .resize(9, 8, { fit: 'fill' })
@@ -1721,6 +1724,46 @@ async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
   return { ok: true, reason: null };
 }
 
+// Merge-time contract for the autonomous PR poller: with the gate ON, the
+// post file at the PR HEAD must satisfy the whole body-image contract (refs
+// valid, ≥ minimum distinct, distinct pictures) — a PR opened while the gate
+// was OFF must not auto-merge hero-only the moment the gate flips.
+// Returns { ok, reason }; anything unreadable fails closed.
+async function assertBodyImagesAtHead({ frontmatter, brief = {}, branch }) {
+  if (!bodyImagesEnabled()) return { ok: true, reason: 'gate_off' };
+  if (!branch) return { ok: false, reason: 'PR head branch unknown' };
+  let slug;
+  try {
+    slug = categoryRouteSlug(slugPathFromFrontmatter(frontmatter || {}), normalizeAutonomousCategory(frontmatter || {}, brief || {}));
+  } catch (err) {
+    return { ok: false, reason: `post slug unresolved: ${err.message}` };
+  }
+  const getFile = (path) => gh.getFile(path, branch);
+  let file = null;
+  for (const base of [`${ASTRO_BLOG_DIR}/${slug}`, `${ASTRO_BLOG_DIR}/${slugLeafOf(slug)}`]) {
+    for (const ext of ['.mdx', '.md']) {
+      file = await getFile(`${base}${ext}`);  
+      if (file?.content) break;
+    }
+    if (file?.content) break;
+  }
+  if (!file?.content) return { ok: false, reason: `post file for ${slug} not found on ${branch}` };
+  let parsed;
+  try { parsed = fm.parse(file.content); } catch (err) { return { ok: false, reason: `post file unparseable: ${err.message}` }; }
+  const body = String(parsed?.content || '');
+  const heroSrc = String(parsed?.data?.hero_image?.src || '');
+  try {
+    const valid = await validateBodyImageRefs({ body, heroSrc, getFile });
+    if (!valid.ok) return { ok: false, reason: valid.reason };
+    if (valid.distinct < BODY_IMAGE_MIN) return { ok: false, reason: `${valid.distinct} distinct in-article image(s) on ${branch}, minimum ${BODY_IMAGE_MIN}` };
+    const pictures = await assertDistinctPictures({ srcs: [...new Set(bodyImageRefs(body).map((r) => r.src))], heroSrc, getFile });
+    if (!pictures.ok) return { ok: false, reason: pictures.reason };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+  return { ok: true, reason: null };
+}
+
 async function nearDuplicateOf(buffer, siblings) {
   const hash = await imageDHash(buffer);
   for (const sib of siblings) if (hammingDistance(hash, sib.hash) <= NEAR_DUPLICATE_MAX_DISTANCE) return { label: sib.label, hash };
@@ -1767,8 +1810,11 @@ function blankJsxAndExpressions(text) {
 // link label renders and stays) → tags + MDX expressions.
 function renderedBodyView(body) {
   const { text, depths } = contentGuardrails.blankNonRenderedMarkdownWithDepths(String(body || ''));
+  // Children of a container a reader may never see (<script>, <template>,
+  // <div hidden>, closed <details>, …) are blanked by the guardrails'
+  // visibility walker — the same judgement the attribution rules use.
   const lines = blankJsxAndExpressions(
-    contentGuardrails.blankMarkdownLinkDestinations(text, { keepImages: true }),
+    contentGuardrails.blankMarkdownLinkDestinations(contentGuardrails.blankHiddenContent(text), { keepImages: true }),
   ).split('\n');
   return { lines, depths };
 }
@@ -1864,10 +1910,15 @@ function scanBodySections(body, { title = '' } = {}) {
 
 // The H2 heading a committed image sits under in the LIVE body (null when
 // the body no longer references it).
-function liveSectionHeadingForImage(content, src, { title = '' } = {}) {
+function liveSectionForImage(content, src, { title = '' } = {}) {
   const { sections } = scanBodySections(content, { title });
-  const owner = sections.find((sec) => sec.images.includes(src));
-  return owner ? owner.heading : null;
+  return sections.find((sec) => sec.images.includes(src)) || null;
+}
+// A section's CONTEXT for reuse decisions: heading + the opening prose the
+// image was generated from (headings like "What to expect" carry no subject
+// on their own).
+function sectionContextKey(heading, lead) {
+  return `${headingKey(heading)}|${headingKey(lead).slice(0, 120)}`;
 }
 
 function bodyImageSlots(body, wanted, { title = '' } = {}) {
@@ -1910,7 +1961,7 @@ function insertBodyImages(body, placements) {
 // picture) AND it sat under the same H2 heading — a rewritten or reordered
 // article must not inherit an accurate-but-unrelated picture. Returns the
 // live alt, or null (regenerate).
-function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = {}) {
+function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '', lead = '' } = {}) {
   const content = existingFile?.file?.content;
   if (!content) return null;
   let liveBody;
@@ -1925,8 +1976,11 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = 
   // The intro pseudo-section is named by the TITLE; the live side must use
   // the live file's title, not the new draft's, or a retitled article
   // would always match its old intro illustration.
-  const liveHeading = liveSectionHeadingForImage(liveBody, src, { title: liveTitle || title });
-  if (!liveHeading || headingKey(liveHeading) !== headingKey(slotHeading)) return null;
+  const liveSection = liveSectionForImage(liveBody, src, { title: liveTitle || title });
+  if (!liveSection) return null;
+  // Same heading AND same opening prose — a rewritten section under a kept
+  // heading gets a new picture.
+  if (sectionContextKey(liveSection.heading, liveSection.lead) !== sectionContextKey(slotHeading, lead)) return null;
   return ref.alt;
 }
 
@@ -2046,7 +2100,7 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // Reuse a file already committed on main when the live body still
     // describes it; otherwise (re)generate — never reuse a picture blind.
     if (existingFile) {
-      const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title });
+      const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title, lead: slot.lead });
       // A reused alt is customer-facing copy too: it must clear the same
       // guardrails as a generated alt (no fallback → regenerate) and it joins
       // the compliance second pass below.
@@ -3740,6 +3794,8 @@ module.exports = {
   planInternalLinksForTarget,
   internalLinkPlanningDisabled,
   assertCodexReviewClear,
+  // Merge-time body-image contract for the autonomous PR poller.
+  assertBodyImagesAtHead,
   // Length clamps reused by the autonomous runner to normalize a draft's
   // title/meta BEFORE the quality gate (the gate runs before publish, so the
   // in-publisher normalization above is too late to salvage a length overshoot).
@@ -3757,6 +3813,7 @@ module.exports = {
     validateBodyImageRefs,
     scanBodySections,
     renderedBodyView,
+    assertBodyImagesAtHead,
     imageDHash,
     hammingDistance,
     committedImageBuffer,

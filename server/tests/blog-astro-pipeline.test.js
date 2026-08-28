@@ -3580,7 +3580,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     // Live file carries the category route slug (what a prior publish wrote).
     const liveMd = fmModule.stringify(
       { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
-      'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
     );
     const b64 = (dataUrl) => dataUrl.split(',')[1];
     gh.getFile.mockImplementation(async (path) => {
@@ -3611,7 +3611,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     try {
       const liveMd = fmModule.stringify(
         { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
-        'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+        'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
       );
       const b64 = (dataUrl) => dataUrl.split(',')[1];
       gh.getFile.mockImplementation(async (path) => {
@@ -3633,15 +3633,15 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const { reusableLiveBodyImage } = AstroPublisher._internals;
     const live = { file: { content: fmModule.stringify({ title: 'Old Title' }, 'Intro prose.\n\n![Old intro pic](/images/blog/x/body-1.webp)\n\n## A\n\nProse.\n') } };
     // New slot heading = NEW title (intro pseudo-section) → live side is judged by the OLD title → no match.
-    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'New Title', { title: 'New Title' })).toBeNull();
-    // Same title → reusable.
-    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'Old Title', { title: 'Old Title' })).toBe('Old intro pic');
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'New Title', { title: 'New Title', lead: 'Intro prose.' })).toBeNull();
+    // Same title + same opening prose → reusable.
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'Old Title', { title: 'Old Title', lead: 'Intro prose.' })).toBe('Old intro pic');
   });
 
   test('update run: a REUSED committed body image is hashed too — one that duplicates the reused hero is regenerated instead of reused (hook r8)', async () => {
     const liveMd = fmModule.stringify(
       { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
-      'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+      'Old body.\n\n## Reading the pellets\n\nDrywood frass is hexagonal in cross-section. See [our guide](/termite-control/) for more.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
     );
     const b64 = (dataUrl) => dataUrl.split(',')[1];
     gh.getFile.mockImplementation(async (path) => {
@@ -3783,6 +3783,63 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const slots = bodyImageSlots(body, 2, { title: 'T' });
     const lines = body.split('\n');
     expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['Real prose.', 'Second prose.']);
+  });
+
+  test('bodyImageRefs: images inside hidden containers (<script>, <template>, <div hidden>, closed <details>) are not rendered (GH r7)', () => {
+    const body = [
+      '<script>const x = "![s](/images/blog/x/body-1.webp)";</script>',
+      '<template>![t](/images/blog/x/body-2.webp)</template>',
+      '<div hidden>', '', '![h](/images/blog/x/body-3.webp)', '', '</div>',
+      '<details>', '', '![d](/images/blog/x/body-4.webp)', '', '</details>',
+      '',
+      '![real](/images/blog/x/body-5.webp)',
+    ].join('\n');
+    expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/blog/x/body-5.webp']);
+  });
+
+  test('imageDHash: an orientation-tagged JPEG hashes like its auto-oriented twin (GH r7)', async () => {
+    const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
+    const sharp = require('sharp');
+    const w = 96; const h = 64; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 3; raw[i] = (x * 255) / w; raw[i + 1] = (y * 255) / h; raw[i + 2] = 90; }
+    const upright = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).jpeg({ quality: 95 }).toBuffer();
+    // Store the raster rotated 90° CCW with EXIF orientation 6 → displays upright.
+    const tagged = await sharp(upright).rotate(270).withMetadata({ orientation: 6 }).jpeg({ quality: 95 }).toBuffer();
+    expect(hammingDistance(await imageDHash(upright), await imageDHash(tagged))).toBeLessThanOrEqual(NEAR_DUPLICATE_MAX_DISTANCE);
+  });
+
+  test('update run: reuse requires the same section CONTEXT — a kept heading over rewritten prose regenerates (GH r7)', () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const live = { file: { content: fmModule.stringify({ title: 'T' }, '## What to expect\n\nThe technician sweeps eaves first.\n\n![old](/images/blog/x/body-1.webp)\n') } };
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'What to expect', { title: 'T', lead: 'The technician sweeps eaves first.' })).toBe('old');
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'What to expect', { title: 'T', lead: 'Bait stations go in along the foundation.' })).toBeNull();
+  });
+
+  test('assertBodyImagesAtHead: validates the post file on the PR branch — hero-only withholds, compliant passes, gate off is a no-op (GH r7)', async () => {
+    const { assertBodyImagesAtHead, compressToWebp } = AstroPublisher._internals;
+    const fmData = { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'h' } };
+    const heroOnly = fmModule.stringify(fmData, 'Body with no pictures.\n');
+    const withImages = fmModule.stringify(fmData, 'Body.\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n## B\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n');
+    const webp = async (i) => (await compressToWebp(Buffer.from(PATTERNS[i].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    const bytes = { hero: await webp(0), 'body-1': await webp(1), 'body-2': await webp(2) };
+    const files = { content: heroOnly };
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (ref !== 'content/autonomous-x') return null;
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: files.content, sha: 'f' };
+      const m = path.match(/drywood-frass-venice\/(hero|body-1|body-2)\.webp$/);
+      return m ? { content: '', sha: m[1], raw: { content: bytes[m[1]] } } : null;
+    });
+    const res = await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/0 distinct in-article image\(s\) on content\/autonomous-x, minimum 2/);
+    files.content = withImages;
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/autonomous-x' })).ok).toBe(true);
+    // Unknown branch / missing file fail closed.
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: null })).ok).toBe(false);
+    expect((await assertBodyImagesAtHead({ frontmatter: fmData, branch: 'content/other' })).reason).toMatch(/not found on content\/other/);
+    // Gate off → no-op.
+    featureGates.isEnabled.mockImplementation(() => false);
+    expect(await assertBodyImagesAtHead({ frontmatter: fmData, branch: null })).toEqual({ ok: true, reason: 'gate_off' });
   });
 
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {

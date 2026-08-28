@@ -675,6 +675,12 @@ async function finalizeClosed(run, prNumber) {
  * was built from the PR's CURRENT head commit, AND Codex review is clear —
  * each condition individually blocking.
  */
+function parseDraftPayload(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch (_) { return null; }
+}
+
 async function maybeAutoMerge(run, pr) {
   const gh = require('../content-astro/github-client');
   const branch = pr.head?.ref;
@@ -946,6 +952,27 @@ async function maybeAutoMerge(run, pr) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id}: named-competitor autopublish not (or no longer) eligible — PR left open for a human decision`);
           return { pending: true, reason: 'named_competitor_autopublish_revoked' };
       }
+    }
+  }
+
+  // 3.55 Body-image contract at the HEAD (owner rule: ≥3 images per post).
+  //    publishOrUpdatePage enforced it when the PR opened — but only if
+  //    GATE_BLOG_BODY_IMAGES was on THEN. A PR opened under the old setting
+  //    must not auto-merge hero-only once the gate flips: with the gate on,
+  //    the post file on the PR branch is re-validated here, and a miss
+  //    WITHHOLDS the merge for a human (the same posture as the pin/
+  //    eligibility withholds above). Off → no-op.
+  if (run.action_type === 'new_supporting_blog' && typeof publisher.assertBodyImagesAtHead === 'function') {
+    let bodyImages;
+    try {
+      const draftForImages = parseDraftPayload(run.draft_payload);
+      bodyImages = await publisher.assertBodyImagesAtHead({ frontmatter: draftForImages?.frontmatter || {}, branch });
+    } catch (err) {
+      bodyImages = { ok: false, reason: `body-image check failed: ${err.message}` };
+    }
+    if (!bodyImages.ok) {
+      logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: body images — ${bodyImages.reason}`);
+      return { pending: true, reason: `body_images_required: ${bodyImages.reason}` };
     }
   }
 

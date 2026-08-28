@@ -34,6 +34,7 @@ jest.mock('../services/content-astro/pages-poll', () => ({
 }));
 jest.mock('../services/content-astro/astro-publisher', () => ({
   assertCodexReviewClear: jest.fn(),
+  assertBodyImagesAtHead: jest.fn().mockResolvedValue({ ok: true, reason: 'gate_off' }),
   planInternalLinksForTarget: jest.fn(),
   resolveExistingAstroFileForTarget: jest.fn(),
   internalLinkPlanningDisabled: jest.fn(() => false),
@@ -671,6 +672,29 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(publisher.assertCodexReviewClear).not.toHaveBeenCalled();
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(runUpdates(updates)).toHaveLength(0);
+  });
+
+  test('body-image contract at HEAD: a miss WITHHOLDS the merge (PR opened before the gate flipped); a pass merges (GH r7)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue(openPr().head.sha);
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    gh.mergePr.mockResolvedValue({ merged: true });
+    indexNow.submit.mockResolvedValue({ ok: true, status: 'submitted' });
+    publisher.planInternalLinksForTarget.mockResolvedValue(null);
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: false, reason: '0 distinct in-article image(s) on content/autonomous-test, minimum 2' });
+
+    let res = await poller.pollPending();
+    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^body_images_required: 0 distinct/) });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(publisher.assertBodyImagesAtHead).toHaveBeenCalledWith(expect.objectContaining({ branch: openPr().head.ref, frontmatter: expect.objectContaining({ title: 'Test Post' }) }));
+
+    publisher.assertBodyImagesAtHead.mockResolvedValueOnce({ ok: true, reason: null });
+    res = await poller.pollPending();
+    expect(gh.mergePr).toHaveBeenCalledTimes(1);
   });
 
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {
