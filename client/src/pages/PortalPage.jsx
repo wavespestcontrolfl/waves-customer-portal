@@ -3814,6 +3814,13 @@ function ServicesTab() {
                       const pdfPath = s.isProjectCompletion ? null : s.reportPdfUrl;
                       const canDownload = s.isProjectCompletion ? Boolean(s.reportUrl) : s.reportAvailable !== false;
                       const canShare = Boolean(s.reportUrl);
+                      // ?mode=static: the report route skips report_viewed
+                      // tracking (and the page skips its analytics emit) for
+                      // every non-live mode — merely expanding the row must not
+                      // count as a view (GH codex P1).
+                      const previewSrc = (() => {
+                        try { const u = new URL(s.reportUrl, window.location.origin); u.searchParams.set('mode', 'static'); return u.toString(); } catch { return null; }
+                      })();
                       const download = () => {
                         const authedUrl = api.getServiceReportUrl(s.id);
                         if (isNativeApp()) {
@@ -3835,9 +3842,9 @@ function ServicesTab() {
                         <div style={{ borderTop: '1px solid #E7E2D7', padding: compact ? 14 : 18, background: subtle }}>
                           <div style={{ ...detailCard, padding: 0, overflow: 'hidden' }}>
                             <div style={{ position: 'relative', height: 260, overflow: 'hidden', background: '#fff' }} aria-hidden="true">
-                              {s.reportUrl ? (
+                              {previewSrc ? (
                                 <iframe
-                                  src={s.reportUrl}
+                                  src={previewSrc}
                                   title={reportTitle}
                                   tabIndex={-1}
                                   scrolling="no"
@@ -3864,7 +3871,8 @@ function ServicesTab() {
                                 )}
                                 {canDownload && (
                                   <button type="button" data-glass-accent="" onClick={download} style={actionStyle}>
-                                    <Icon name="document" size={16} strokeWidth={2} /> Download
+                                    {/* Project completion reports are HTML routes — no file to save (GH codex P2). */}
+                                    <Icon name="document" size={16} strokeWidth={2} /> {s.isProjectCompletion ? 'Open' : 'Download'}
                                   </button>
                                 )}
                               </div>
@@ -6580,8 +6588,40 @@ function BillingTab({ customer, refreshCustomer }) {
         )}
 
         {!billingPrefsLoadError && <>
-        {/* Billing recipient email field removed (owner 08-28) — receipts go
-            to the account email; a stored billing_email stays honoured. */}
+        {/* Billing recipient email is no longer offered (owner 08-28 —
+            receipts go to the account email), but a customer who already
+            stored one keeps a visible edit / clear control: the server keeps
+            routing billing mail to it (GH codex P1). Clearing + saving
+            removes it, and the field disappears. */}
+        {String(billingEmail || '').trim() && (
+          <div style={{ marginBottom: 14 }}>
+            <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
+              Billing recipient email
+            </label>
+            <div style={{ display: 'flex', gap: 10 }}>
+              <input
+                id="portal-billing-email"
+                name="billingEmail"
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                autoCapitalize="none"
+                value={billingEmail}
+                onChange={e => setBillingEmail(e.target.value)}
+                aria-label="Billing email"
+                className="waves-focus-ring"
+                style={{
+                  flex: 1, minWidth: 0, minHeight: 44, padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0',
+                  fontSize: 14, fontFamily: FONTS.body, color: B.glassNavy, background: '#fff', boxSizing: 'border-box',
+                }}
+              />
+              <button type="button" data-glass-accent="" onClick={() => setBillingEmail('')} style={{ ...secondaryButton, minHeight: 44, position: 'relative', flexShrink: 0 }}>
+                Clear
+              </button>
+            </div>
+            <div style={{ marginTop: 5, color: muted, fontSize: 14 }}>Invoices and receipts go here instead of your account email. Clear it and save to use your account email.</div>
+          </div>
+        )}
 
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
