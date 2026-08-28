@@ -575,7 +575,7 @@ auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
 auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions (in-flight and unresolved work holds its slot until a terminal, reconciled outcome); re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
-presentment_window_days      = 10        (minimum wait after last card exposure before an ambiguous purchase may be reconciled as not charged; may only be raised)
+presentment_window_days      = 10        (minimum wait after last card exposure — `card_exposed_at` — before an ambiguous purchase may be reconciled as not charged; may only be raised)
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
 owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
 max_auto_purchase_cents      = 0
@@ -759,7 +759,8 @@ t.jsonb('merchant_binding');                        // IMMUTABLE at reservation,
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms a merchant lock is on the card) — defence in depth on top of the merchant-account-id binding, never a substitute for it; if the issuer program declares lock support but the mint returns without it, the post-mint failure path applies (§6.3): the card is closed immediately and the row goes `submitting → ambiguous` with `card_exposed=false`
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
-t.boolean('card_exposed').notNullable().defaultTo(false); // set true the instant PAN/CVV are handed to the broker; a purchase that became `ambiguous` with card_exposed=false (post-mint precondition failure, never presented) may be reconciled_not_charged as soon as the issuer confirms the card is closed with no transaction — no presentment wait, because nothing could have been presented
+t.boolean('card_exposed').notNullable().defaultTo(false); // set true the instant PAN/CVV are handed to the broker;
+t.timestamp('card_exposed_at');                     // written ATOMICALLY in the same UPDATE that sets card_exposed=true (CHECK (card_exposed = (card_exposed_at IS NOT NULL))); the presentment window (§6.3) is measured from THIS instant — never from submitting_at, which precedes the mint; a purchase that became `ambiguous` with card_exposed=false (post-mint precondition failure, never presented) may be reconciled_not_charged as soon as the issuer confirms the card is closed with no transaction — no presentment wait, because nothing could have been presented
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
@@ -958,7 +959,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   never substitute for it): `reconciled_charged` when a
   capture exists; `reconciled_not_charged` **only when (a) the issuer's full settlement/presentment
   window (`policy.presentment_window_days`, default 10, ≥ the issuer's documented late-
-  presentment allowance) has elapsed since the LAST card exposure (`submitting_at`), AND
+  presentment allowance) has elapsed since the LAST card exposure (`card_exposed_at`, stamped atomically with `card_exposed=true` — NOT `submitting_at`, which is set before the mint, so a delayed or resumed mint can never shorten the wait), AND
   (b) an authoritative issuer check after that window confirms the card is irrevocably
   closed and shows no captured, pending, authorized or clearing transaction** — that is the
   precondition for releasing the budget and allowing a new generation, never a lookup that
