@@ -479,6 +479,13 @@ describe('rescheduleSeries — one recorded operation', () => {
     preclose.mockRestore();
   });
 
+  test('a pinned NULL window_start fences a window added meanwhile (presence-based, like window_end)', async () => {
+    wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: BASE, window_start: null },
+    })).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN' });
+  });
+
   test('the series anchor pin also fences window_end and duration (a start-only resolution derives its window from them)', async () => {
     wireSeriesMocks([sib('svc-1', BASE, { estimated_duration_minutes: 90 }), sib('svc-2', SIB1)]);
     await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', {
@@ -586,7 +593,7 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
   const { planCadenceExceptions } = require('../models/migrations/20260828000030_series_moves_and_date_exception.js');
   const parent = { id: 'p', recurring_pattern: 'weekly', recurring_nth: null, recurring_weekday: null, recurring_interval_days: null, skip_weekends: false };
 
-  test('an occurrence off its projected cadence date is planned with the projected date as its position; on-cadence and already-flagged rows are not', () => {
+  test('an occurrence off the series cadence is planned with the cadence date as its position; on-cadence and already-flagged rows are not', () => {
     const rows = [
       { id: 'a', scheduled_date: BASE },
       { id: 'b', scheduled_date: SIB1 },
@@ -594,12 +601,23 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
       { id: 'd', scheduled_date: dayOffset(33), date_exception: true, date_exception_cadence_date: SIB3 }, // already flagged
       { id: 'e', scheduled_date: dayOffset(38) },                                  // cadence dayOffset(38) = on time
     ];
-    expect(planCadenceExceptions(parent, rows)).toEqual([{ id: 'c', expected: SIB2 }]);
+    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'c', expected: SIB2 }], ambiguous: false });
   });
 
-  test('a series with no pattern or a single live row plans nothing', () => {
-    expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }])).toEqual([]);
-    expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }])).toEqual([]);
+  test('the cadence is derived from the MAJORITY, not from the first row — a moved first occurrence is the exception, later rows are not', () => {
+    const rows = [
+      { id: 'a', scheduled_date: dayOffset(12) }, // moved from BASE via the modal (no log)
+      { id: 'b', scheduled_date: SIB1 },
+      { id: 'c', scheduled_date: SIB2 },
+      { id: 'd', scheduled_date: SIB3 },
+    ];
+    expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [{ id: 'a', expected: BASE }], ambiguous: false });
+  });
+
+  test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {
+    expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: dayOffset(19) }])).toEqual({ planned: [], ambiguous: true });
+    expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: SIB1 }])).toEqual({ planned: [], ambiguous: false });
+    expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }])).toEqual({ planned: [], ambiguous: false });
   });
 });
 

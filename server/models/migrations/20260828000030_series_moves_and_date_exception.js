@@ -35,29 +35,35 @@
  * position, so the first collective move shifts it instead of regenerating
  * it. Moves made from the Edit appointment modal before this lane wrote no
  * reschedule_log row — for those, a second pass walks every live series and
- * marks any occurrence whose date deviates from the cadence projected off
- * the series' first live occurrence (same projector rescheduleSeries uses),
- * with that projected date as its cadence position. A false positive costs
- * nothing (the row shifts by the delta instead of being re-projected); a
- * miss would erase a customer's exception — so deviation wins.
+ * marks any occurrence whose date deviates from the series' CADENCE, with
+ * the cadence date as its position. The cadence is not assumed to run
+ * through any particular row (the first live row may itself be the moved
+ * one): every row is tried as the origin, the origin that explains the
+ * MAJORITY of the series wins (same projector rescheduleSeries uses,
+ * weekend shift honored, stepping backward for earlier rows), and a series
+ * no origin can explain for more than half its rows is left alone as
+ * ambiguous. A false positive costs nothing (the row shifts by the delta
+ * instead of being re-projected); a miss would erase a customer's exception.
  */
 const { nextRecurringDate, recurrenceOrdinalOptions, isMonthBasedRecurrence } = require('../../services/rebooker');
 const { parseETDateTime, etParts, etDateString, addETDays } = require('../../utils/datetime-et');
 
 const dateOnly = (v) => (v == null ? null : String(v instanceof Date ? v.toISOString() : v).slice(0, 10));
 
-// Pure: which live occurrences of one series sit off their projected cadence
-// date. `rows` = the series' live occurrences (parent included when live)
-// ordered by series position (cadence date, else date). Exported for tests.
+// Pure: which live occurrences of one series sit off the series' cadence.
+// `rows` = the series' live occurrences (parent included when live) ordered
+// by series position (cadence date, else date). Returns { planned:
+// [{ id, expected }], ambiguous }. Exported for tests.
 function planCadenceExceptions(parent, rows) {
-  if (!parent?.recurring_pattern || !rows.length) return [];
-  const anchorDate = dateOnly(rows[0].date_exception ? rows[0].date_exception_cadence_date || rows[0].scheduled_date : rows[0].scheduled_date);
-  const opts = {
+  if (!parent?.recurring_pattern || rows.length < 2) return { planned: [], ambiguous: false };
+  // Month-based patterns take their ordinal (nth weekday) from the origin
+  // date, so the options are built per candidate origin.
+  const optsFor = (origin) => ({
     ...(isMonthBasedRecurrence(parent.recurring_pattern)
-      ? recurrenceOrdinalOptions(anchorDate)
+      ? recurrenceOrdinalOptions(origin)
       : { nth: parent.recurring_nth, weekday: parent.recurring_weekday }),
     intervalDays: parent.recurring_interval_days,
-  };
+  });
   const shiftWeekend = (out) => {
     if (!parent.skip_weekends) return out;
     const at = parseETDateTime(`${out}T12:00`);
@@ -66,14 +72,29 @@ function planCadenceExceptions(parent, rows) {
     const back = parent.weekend_shift === 'back';
     return etDateString(addETDays(at, back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1)));
   };
-  const planned = [];
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (row.date_exception === true) continue;
-    const expected = shiftWeekend(nextRecurringDate(anchorDate, parent.recurring_pattern, i, opts));
-    if (expected && dateOnly(row.scheduled_date) !== expected) planned.push({ id: row.id, expected });
+  // Each row's POSITION date: an already-flagged exception sits at its
+  // recorded cadence date, everything else at its own date.
+  const positions = rows.map((r) => dateOnly(r.date_exception === true && r.date_exception_cadence_date ? r.date_exception_cadence_date : r.scheduled_date));
+  const project = (origin, k) => {
+    const d = nextRecurringDate(origin, parent.recurring_pattern, k, optsFor(origin));
+    return d ? shiftWeekend(d) : null;
+  };
+  // Try every row as the cadence origin (index = its position); the origin
+  // explaining the most rows wins, and it must explain more than half.
+  let best = null;
+  for (let j = 0; j < rows.length; j++) {
+    const expected = rows.map((_, i) => (i === j ? positions[j] : project(positions[j], i - j)));
+    const matches = expected.filter((e, i) => e && e === positions[i]).length;
+    if (!best || matches > best.matches) best = { matches, expected };
   }
-  return planned;
+  if (!best || best.matches * 2 <= rows.length) return { planned: [], ambiguous: true };
+  const planned = [];
+  rows.forEach((row, i) => {
+    if (row.date_exception === true) return;
+    const expected = best.expected[i];
+    if (expected && dateOnly(row.scheduled_date) !== expected) planned.push({ id: row.id, expected });
+  });
+  return { planned, ambiguous: false };
 }
 exports.planCadenceExceptions = planCadenceExceptions;
 
@@ -89,6 +110,7 @@ async function backfillCadenceDeviations(knex) {
     .whereNotNull('p.recurring_pattern')
     .select('p.*');
   let stamped = 0;
+  let ambiguous = 0;
   for (const parent of parents) {
     const rows = await knex('scheduled_services')
       .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parent.id, parent.id])
@@ -96,16 +118,27 @@ async function backfillCadenceDeviations(knex) {
       .whereRaw("scheduled_date >= (now() AT TIME ZONE 'America/New_York')::date")
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
       .select('id', 'scheduled_date', 'date_exception', 'date_exception_cadence_date');
-    for (const plan of planCadenceExceptions(parent, rows)) {
+    const plan = planCadenceExceptions(parent, rows);
+    if (plan.ambiguous) {
+      ambiguous += 1;
+       
+      console.log(`[20260828000030] series ${parent.id}: no cadence origin explains a majority of its ${rows.length} live rows — left unmarked (ambiguous)`);
+      continue;
+    }
+    for (const entry of plan.planned) {
       stamped += await knex('scheduled_services')
-        .where({ id: plan.id, date_exception: false })
+        .where({ id: entry.id, date_exception: false })
         .update({
           date_exception: true,
           date_exception_source: 'backfill_cadence',
           date_exception_at: knex.fn.now(),
-          date_exception_cadence_date: plan.expected,
+          date_exception_cadence_date: entry.expected,
         });
     }
+  }
+  if (ambiguous) {
+     
+    console.log(`[20260828000030] ${ambiguous} ambiguous series left unmarked`);
   }
   return stamped;
 }

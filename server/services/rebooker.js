@@ -1393,8 +1393,11 @@ class SmartRebooker {
           const expDuration = has('estimated_duration_minutes')
             ? (options.expectAnchor.estimated_duration_minutes ?? null)
             : undefined;
+          // Presence-based for the window: a pinned NULL start (windowless
+          // anchor at planning time) must fail the fence if a window was
+          // added meanwhile, exactly like a pinned start that changed.
           if ((expDate && norm(anchorRow.scheduled_date) !== expDate)
-            || (expStart && hm(anchorRow.window_start) !== expStart)
+            || (has('window_start') && hm(anchorRow.window_start) !== expStart)
             || (expEnd !== undefined && hm(anchorRow.window_end) !== expEnd)
             || (expDuration !== undefined && (anchorRow.estimated_duration_minutes ?? null) !== expDuration)) {
             throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
