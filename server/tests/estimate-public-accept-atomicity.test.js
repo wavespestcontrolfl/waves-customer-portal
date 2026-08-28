@@ -1256,6 +1256,9 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     // Mapped termite rows.
     expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait' }] }, oneTime: { items: [] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    // Other supported containers: root one_time.items, nested result.results.
+    expect(acceptanceTermsApplyTo(withData({ one_time: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, results: { oneTime: { items: [{ name: 'Termite foam treatment' }] } } }))).toBe(false);
     // Engine-shaped rows (result.lineItems / raw engineResult.lineItems).
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, lineItems: [{ service: 'termite_bond', bondTerm: 'annual' }] }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({ engineResult: { lineItems: [{ service: 'termite_trenching', description: 'Termidor trench' }] } }))).toBe(false);

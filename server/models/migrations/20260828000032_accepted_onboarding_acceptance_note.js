@@ -7,10 +7,12 @@
 // renderBlocks drops empty blocks, so gate-off emails read exactly as before.
 //
 // Read-modify-write per the template-migration rule (20260812000000
-// precedent): the allowlist entry always lands; the version body is only
-// rewritten when the seeded "After every visit" report paragraph is still
-// present and no block already references the variable — an admin-edited
-// body is left alone, and `down` removes only the exact block inserted.
+// precedent): the allowlist entry always lands, admin edits are preserved,
+// and the optional block is added to EVERY version that lacks it — after the
+// seeded "After every visit" report paragraph when that anchor survives,
+// otherwise just before the signature / CTA (or at the end) — because a
+// version without the variable would silently break the "email you a copy"
+// promise (pre-push Codex P1). `down` removes only the exact block inserted.
 const TEMPLATE_KEY = 'estimate.accepted_onboarding';
 const VARIABLE = 'acceptance_note';
 const ANCHOR_CONTENT = 'You’ll get a full service report — what we treated, what we found, and photos from your property. It lands in your email and lives in your customer portal.';
@@ -52,13 +54,15 @@ exports.up = async function up(knex) {
     const blocks = parseBlocks(v.blocks);
     if (blocks && !blocks.some(referencesVariable)) {
       const anchorIdx = blocks.findIndex((b) => b && b.content === ANCHOR_CONTENT);
-      if (anchorIdx !== -1) {
-        blocks.splice(anchorIdx + 1, 0, { ...NEW_BLOCK });
-        patch.blocks = JSON.stringify(blocks);
-      }
+      const closingIdx = blocks.findIndex((b) => b && (b.type === 'signature' || b.type === 'cta'));
+      const at = anchorIdx !== -1 ? anchorIdx + 1 : (closingIdx !== -1 ? closingIdx : blocks.length);
+      blocks.splice(at, 0, { ...NEW_BLOCK });
+      patch.blocks = JSON.stringify(blocks);
     }
-    if (typeof v.text_body === 'string' && v.text_body.includes(ANCHOR_CONTENT) && !v.text_body.includes(VARIABLE)) {
-      patch.text_body = v.text_body.replace(ANCHOR_CONTENT, `${ANCHOR_CONTENT}\n\n{{${VARIABLE}}}`);
+    if (typeof v.text_body === 'string' && !v.text_body.includes(VARIABLE)) {
+      patch.text_body = v.text_body.includes(ANCHOR_CONTENT)
+        ? v.text_body.replace(ANCHOR_CONTENT, `${ANCHOR_CONTENT}\n\n{{${VARIABLE}}}`)
+        : `${v.text_body.replace(/\s+$/, '')}\n\n{{${VARIABLE}}}`;
     }
     if (Object.keys(patch).length) {
       await knex('email_template_versions').where({ id: v.id }).update(patch);

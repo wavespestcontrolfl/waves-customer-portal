@@ -277,14 +277,26 @@ function acceptanceTermsApplyTo(estimate) {
   const proposal = d.proposal && typeof d.proposal === 'object' ? d.proposal : null;
   if (proposal?.enabled === true && proposal.commercialTerms && typeof proposal.commercialTerms === 'object') return false;
   const list = (v) => (Array.isArray(v) ? v : []);
-  const rows = [
-    ...list(result?.recurring?.services),
-    ...list(result?.oneTime?.items),
-    ...list(result?.lineItems),
-    ...list(d.engineResult?.lineItems),
-    ...list(proposal?.buildings).flatMap((b) => list(b?.lineItems)),
-    ...list(proposal?.programs),
-  ];
+  // The converter's extractors own the supported containers (result /
+  // nested results / root one_time / oneTimeItems / specItems …) — reuse
+  // them rather than re-listing shapes here (pre-push Codex P1).
+  const Converter = require('../services/estimate-converter');
+  const engineShaped = d.engineResult && typeof d.engineResult === 'object' ? { result: d.engineResult } : null;
+  let rows;
+  try {
+    rows = [
+      ...list(Converter.recurringServicesFromEstimateData(d)),
+      ...list(Converter.estimateOneTimeItemsFromData(d)),
+      ...(engineShaped ? list(Converter.recurringServicesFromEstimateData(engineShaped)) : []),
+      ...(engineShaped ? list(Converter.estimateOneTimeItemsFromData(engineShaped)) : []),
+      ...list(result?.lineItems),
+      ...list(d.engineResult?.lineItems),
+      ...list(proposal?.buildings).flatMap((b) => list(b?.lineItems)),
+      ...list(proposal?.programs),
+    ];
+  } catch {
+    return false;
+  }
   if (!rows.length) return false;
   return !rows.some((r) => {
     if (!r || typeof r !== 'object') return true;
