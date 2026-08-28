@@ -51,10 +51,12 @@ async function fullSync(state) {
     // notify) and expired-history-cursor recovery (genuinely new arrivals
     // are among these, so the 24h age guard decides, as for an incremental
     // sync). Decided from the sync-state row read BEFORE the remote scan —
-    // durable across pods: a pod that has never completed a sync has
-    // emails_synced = 0, so two concurrent first syncs both see "initial"
-    // (both stay silent); recovery has a prior count (hook P1).
-    const initialConnect = !state?.last_history_id && !(Number(state?.emails_synced) > 0);
+    // durable across pods: a pod that has never completed a sync has no
+    // last_sync_at, so two concurrent first syncs both see "initial" (both
+    // stay silent); recovery has a completed prior sync (hook P1).
+    // last_sync_at is the durable completion signal — an empty mailbox that
+    // synced once has a count of 0 but a timestamp (hook P1).
+    const initialConnect = !state?.last_history_id && !state?.last_sync_at;
 
     let failedMessages = 0;
     for (const msg of messages) {
@@ -428,10 +430,12 @@ const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * Re-offer unclaimed, still-eligible customer emails from the last 24h.
  * Cheap (indexed on customer_id / received_at), bounded, idempotent.
  */
-let bellClaimColumnKnown = null;
+// Only a confirmed `true` is cached: a transient schema-check failure must
+// not disable the sweep for the process lifetime (hook P1).
+let bellClaimColumnKnown = false;
 async function bellClaimColumnExists() {
-  if (bellClaimColumnKnown === null) {
-    bellClaimColumnKnown = await db.schema.hasColumn('emails', 'customer_bell_claimed_at').catch(() => false);
+  if (!bellClaimColumnKnown) {
+    bellClaimColumnKnown = await db.schema.hasColumn('emails', 'customer_bell_claimed_at').catch(() => false) === true;
   }
   return bellClaimColumnKnown;
 }
