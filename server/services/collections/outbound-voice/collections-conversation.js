@@ -806,12 +806,21 @@ class CollectionsConversation {
         channel: 'voice', purpose: 'late_payment', now: this._now(),
         supervisedDial: this._supervised === true, excludeCollectionCaseId: this._ctx.caseId,
       });
-      // The verdict's own set must be the set we are about to disclose —
-      // two reads that disagree are an incomplete picture, not a total.
+      // The verdict's own set — ids, per-invoice cents, anchor day — must be
+      // the set we are about to disclose (hook r8): an invoice edited
+      // between the two reads leaves `fresh` stale while the policy judged
+      // newer data. Two reads that disagree are an incomplete picture.
       if (Array.isArray(verdict.eligibleInvoiceIds)) {
         const a = fresh.map((inv) => String(inv.id)).sort().join(',');
         const b = verdict.eligibleInvoiceIds.map(String).sort().join(',');
         if (a !== b) return { incomplete: 'policy set differs from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
+      }
+      if (verdict.eligibleInvoiceCents && typeof verdict.eligibleInvoiceCents === 'object') {
+        const centsAgree = fresh.every((inv) => Math.round(invoiceAmountDue(inv) * 100) === Number(verdict.eligibleInvoiceCents[String(inv.id)]));
+        if (!centsAgree) return { incomplete: 'policy amounts differ from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
+      }
+      if (verdict.eligibleAnchorDueDate && dueDayOf(anchorInvoiceOf(fresh)) !== String(verdict.eligibleAnchorDueDate)) {
+        return { incomplete: 'policy anchor differs from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
       }
       const live = (verdict.denialReasons || []).filter((r) => !CollectionsConversation.MID_CALL_IGNORED_DENIALS.has(String(r).split(':')[0]));
       if (!verdict.allowed && live.length) notCallable = live[0];

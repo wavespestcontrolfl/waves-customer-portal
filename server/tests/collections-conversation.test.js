@@ -1442,6 +1442,29 @@ describe('account-level disclosure + registers', () => {
     await c6._contextReady;
     c6.verified = true;
     expect(await c6._toolGetBalance()).toMatch(/could not be verified/);
+    // …and so are amounts or an anchor day that the policy saw differently (an edit between the two reads).
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 9999 } });
+    setDb();
+    const { convo: c7 } = makeConvo();
+    await c7._contextReady;
+    c7.verified = true;
+    expect(await c7._toolGetBalance()).toMatch(/could not be verified/);
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 4455 }, eligibleAnchorDueDate: '2026-06-01' });
+    setDb();
+    const { convo: c8 } = makeConvo();
+    await c8._contextReady;
+    c8.verified = true;
+    expect(await c8._toolGetBalance()).toMatch(/could not be verified/);
+    // Agreeing reads disclose normally.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 4455 }, eligibleAnchorDueDate: '2026-07-01' });
+    setDb();
+    const { convo: c9 } = makeConvo();
+    await c9._contextReady;
+    c9.verified = true;
+    expect(await c9._toolGetBalance()).toMatch(/Total account balance: \$44\.55/);
   });
 
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
