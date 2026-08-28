@@ -239,8 +239,21 @@ CSV rows. Steps, all idempotent:
 **Feeders that call the same endpoint** (as jobs, not UI):
 - **Competitor-gap ingestion** — every `seo_competitor_backlinks` domain not yet in the
   registry (the 7,553). Weekly after the Sunday scan; `source='competitor_gap'`.
-- **Existing profile** — `seo_backlinks` active domains → `source='existing_backlink'`,
-  `agent_state='acquired'` (so recursive discovery and D30 have a baseline).
+- **Existing profile** — every active, scan-tracked `seo_backlinks` row → a registry domain
+  (`source='existing_backlink'`, `agent_state='acquired'`) **plus** a placement and a path,
+  so the baselines are real rows, not a flag: the placement is `seo_link_prospects`
+  (`source='existing_backlink'`, `status='live'`, `live_url=source_url`,
+  `backlink_id`, `first_live_at = seo_backlinks.first_seen`, `target_page` =
+  `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
+  it like any placement (D30/D90 compute from `first_live_at`, so links older than 30 days
+  are simply `d30_live=true` at ingestion); the path is
+  `seo_link_acquisition_paths` with `acquisition_type` mapped from the link's classified
+  `link_type` (directory/citation → `self_service_free` or `self_service_account`,
+  editorial/resource → `editorial_outreach`/`resource_outreach`, else `unknown` pending the
+  investigator), `submission_url=source_url`, `confidence` low until investigated, and set
+  as `best_path_id` so recursive discovery (§9) can qualify it. Idempotent via
+  `findPlacementRow`/`path_key`; excluded from acquisition (nothing to acquire) and from the
+  Source×funnel *acquired* counts (reported separately as "existing").
 - **Lost recovery** — `lost-link-recovery.js` files its recovery prospect *and* ensures a
   registry row (`source='lost_recovery'`).
 - **Strategist / local opportunity** — unchanged writers; they additionally upsert the domain.
@@ -364,7 +377,7 @@ t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();
-t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
+t.string('state').notNullable();                    // reserved → voided (pre-exposure only) | reserved → submitting → charged | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
@@ -482,8 +495,9 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
 - **Lease safety.** Every purchase transition is conditional on the lease AND on the exact
-  prior state (`reserved→submitting`, `submitting→charged|voided|ambiguous`); a stale lease
-  or a wrong prior state affects 0 rows and returns 409.
+  prior state (`reserved→voided`, `reserved→submitting`, `submitting→charged|ambiguous`,
+  `ambiguous→reconciled_*` by the reconciler only); `submitting→voided` does not exist. A
+  stale lease or a wrong prior state affects 0 rows and returns 409.
 - **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
   method the runner can use; the bank's limit is a second, independent ceiling — it is not the
   policy. Owner-approved purchases above `max_auto_purchase_cents` go through the same reservation
