@@ -373,7 +373,8 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat at example dot com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est8', markCaptured });
       expect(out).toMatch(/still missing: email/);
       expect(out).not.toMatch(/IS on the office queue/);
-      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: false }), expect.anything());
+      // the garbled email never reaches the lead artifact
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: false, email: null }), expect.anything());
       expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true }));
     });
     test('a retry that supplies only the missing field keeps the earlier fields (session accumulation)', async () => {

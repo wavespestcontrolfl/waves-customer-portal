@@ -843,6 +843,14 @@ async function executeTool(name, input = {}, ctx = {}) {
       // supplies only the missing piece keeps what earlier captures gave.
       const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
       const emailNow = extracted.email && isValidEmail(String(extracted.email).trim()) ? extracted.email : null;
+      if (extracted.email && !emailNow) {
+        // A garbled/invalid email never reaches the lead (hook P1): the lead
+        // writer fills empty fields forward, so persisting it would give the
+        // office an address nothing can be sent to. Dropped here, reported as
+        // missing below when an estimate is in play.
+        logger.info(`[voice-relay] capture_lead dropped an invalid email (${String(extracted.email).length} chars) callSid=${ctx.callSid || 'n/a'}`);
+        extracted.email = null;
+      }
       const estimateFields = {
         first_name: extracted.first_name || priorEstimateFields.first_name || null,
         last_name: extracted.last_name || priorEstimateFields.last_name || null,
