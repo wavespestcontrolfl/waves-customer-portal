@@ -129,6 +129,18 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(Drafter.greetingName('Hello there, thanks')).toBeNull();
     expect(Drafter.greetingName('Hey Priya, thanks')).toBe('Priya');
   });
+  test('provenance: an introduced name with no source in the review is rejected (hallucinated / former tech)', () => {
+    expect(verify(good('Hi Dana, Kevin and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, glad the ants are gone. Thanks from Marcus and the Waves Pest Control team.'))).toBeNull();
+    // A capitalized word the reviewer wrote is fine mid-sentence.
+    const g = grounding({ text: 'Marcus took care of the German roaches fast.' });
+    expect(verify(good('Hi Dana, glad Marcus got the German roaches handled so fast.'), g)).toBeNull();
+  });
+  test('drying / curing / wait-before language is banned even when the number came from the review', () => {
+    const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
+    expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad Marcus got the ants. Just wait a few hours before letting pets out.'), g)).toBe('banned_phrase');
+  });
   test('recent replies shown to the model have their greeted names redacted', () => {
     const text = Drafter.buildUserText(grounding(), [good('Hi Priya, glad the wasps are handled.')], null);
     expect(text).toContain('Hi (name), glad the wasps');

@@ -352,13 +352,19 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       return { outcome: 'skipped', reason: code };
     }
     const attempts = (merged.auto_reply_attempts || 0) + 1;
-    if (code === CODES.LOCK_BUSY || (code === CODES.GOOGLE_FAILED && attempts < MAX_ATTEMPTS) || (code === 'unexpected' && attempts < MAX_ATTEMPTS)) {
+    // Every transient class (lock contention, Google failure, unexpected)
+    // shares ONE retry ceiling; after it the row parks for a person.
+    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
       const due = new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };
     }
-    await storeDraft(merged, draft, STATUS.PARKED, code === CODES.NOT_CONFIGURED ? 'gbp_not_configured' : code === CODES.NO_RESOURCE ? 'no_gbp_resource' : 'google_failed', { grounding: snapshot });
+    const parkReason = code === CODES.NOT_CONFIGURED ? 'gbp_not_configured'
+      : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
+        : code === CODES.LOCK_BUSY ? 'lock_busy'
+          : 'google_failed';
+    await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot });
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
     logger.error(`[review-auto-reply] publish failed for ${merged.id}: ${code} (${err.message})`);
     return { outcome: 'parked', reason: code };

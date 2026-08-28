@@ -90,6 +90,10 @@ const BANNED_RE = new RegExp([
   // Site-compliance language (AGENTS.md): no safety claims, no re-entry/drying intervals, no guarantees.
   '\\bsafe\\b', '\\bsafely\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
   '\\bguarantee[ds]?\\b', '\\bwarrant(?:y|ee)\\b',
+  // Drying / curing / wait-before language of any form (fixed intervals are
+  // banned on every customer surface; a reply has no legitimate use for it).
+  '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
+  '\\b(?:wait|stay\\s+off|keep\\s+off|stay\\s+out|keep\\s+out|avoid)\\b[^.]{0,30}\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b',
   // Rank claims (claims-ledger rule) and competitor names.
   "\\bwe(?:'re| are) the (?:best|#1|number one)\\b", '\\btop[-\\s]rated\\b', '\\b#1\\b',
   '\\b(?:terminix|orkin|truly nolen|massey|aptive|rentokil|hometeam|home team)\\b',
@@ -97,6 +101,8 @@ const BANNED_RE = new RegExp([
 // Anything that reads as "we know something you told us privately".
 const PRIVATE_CHANNEL_RE = /\b(?:on the phone|when you called|you called|your call|your text|text message|texted|our records|our notes|our files|transcript|recording|voicemail|your account|invoice|billing|payment|balance|autopay|card on file|you mentioned to (?:our|the) (?:office|team))\b/i;
 const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit card|chargeback|complaint|dispute|cancel(?:led|lation)?)\b/i;
+// Capitalized words a reply may carry without provenance from the review.
+const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast']);
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // "Hi Dana," / "Hello there," → the greeted first name (null for "there").
@@ -205,6 +211,26 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (allowedNames.has(name)) continue;
     if (new RegExp(`\\b${escapeRe(name)}\\b`, 'i').test(body)) return 'forbidden_name';
   }
+  // Allowlist provenance for ANY introduced proper noun: a capitalized word
+  // that is not sentence-initial must be the reviewer's name, a tech name the
+  // reviewer wrote, a word from the review itself, the location/area, or a
+  // brand word. A hallucinated "Kevin" (or a former tech, a date, a product)
+  // has no provenance and is rejected. Served cities are judged above.
+  const reviewWords = new Set(normalizeWords(grounding.review.text));
+  const cityWords = new Set((grounding.allow.cities || []).flatMap((c) => normalizeWords(c)));
+  const servedCityWords = new Set(SERVED_CITIES.flatMap((c) => normalizeWords(c)));
+  const properNounRe = /(^|[^A-Za-z'])([A-Z][a-z'-]+)/g;
+  let pn;
+  while ((pn = properNounRe.exec(body)) !== null) {
+    const before = body.slice(0, pn.index + pn[1].length);
+    // Sentence-initial = start of text, after terminal punctuation, or the
+    // first word of a new line (the greeting line ends with a comma).
+    const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
+    if (sentenceInitial) continue;
+    const w = pn[2].toLowerCase();
+    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || servedCityWords.has(w) || BRAND_WORDS.has(w)) continue;
+    return 'unlisted_name';
+  }
   // Digits: only what the reviewer typed (plus the star rating itself).
   const allowedDigits = new Set([...(grounding.allow.digits || []), String(grounding.review.rating)]);
   for (const d of body.match(/\d+/g) || []) {
@@ -310,6 +336,7 @@ const FEEDBACK_FOR = {
   forbidden_name: 'named a technician the reviewer did not name',
   unlisted_digits: 'included a number the reviewer did not write',
   unlisted_city: 'named a city the reviewer did not mention and that is not this location',
+  unlisted_name: 'introduced a name or proper noun that is not in the review',
   repetitive_opening: 'opened the same way as a recent reply',
   repetitive_body: 'read too much like a recent reply',
   placeholder: 'contained a placeholder or bracket',

@@ -316,6 +316,20 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].review_reply.startsWith('[DRAFT]')).toBe(true);
   });
 
+  test('lock contention shares the retry ceiling and parks after MAX_ATTEMPTS', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValue(new ReviewReplyError('lock_busy', 'busy', { status: 409 }));
+    state.rows = [row()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'lock_busy', auto_reply_attempts: 1 });
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    state.rows[0].auto_reply_attempts = Runner.MAX_ATTEMPTS - 1;
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'lock_busy' });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
