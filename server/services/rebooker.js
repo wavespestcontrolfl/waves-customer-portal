@@ -163,9 +163,16 @@ function snapshotRow(row) {
   const out = {};
   for (const col of SERIES_MOVE_SNAPSHOT_COLUMNS) {
     const v = row[col];
-    out[col] = v instanceof Date
-      ? (col === 'scheduled_date' ? v.toISOString().slice(0, 10) : v.toISOString())
-      : (v === undefined ? null : v);
+    if (v instanceof Date) {
+      out[col] = col === 'scheduled_date' ? v.toISOString().slice(0, 10) : v.toISOString();
+    } else if (v && typeof v === 'object') {
+      // A knex Raw (track_token_expires_at is computed in SQL) is an
+      // expression, not a value — the persisted value comes back through
+      // RETURNING and overlays this; null only when the driver returned none.
+      out[col] = null;
+    } else {
+      out[col] = v === undefined ? null : v;
+    }
   }
   return out;
 }
@@ -1639,9 +1646,10 @@ class SmartRebooker {
           // came from this read — see the single-job CAS above.
           sib,
         )
-          // RETURNING updated_at: the Undo snapshot's version stamp for this
-          // row, from the same statement that wrote it (no second read).
-          .update(updateData, ['updated_at']);
+          // RETURNING the snapshot columns: the persisted values (the
+          // SQL-computed expiry, updated_at = the Undo version stamp) from
+          // the same statement that wrote them — no second read.
+          .update(updateData, SERIES_MOVE_SNAPSHOT_COLUMNS);
         const updatedRows = Array.isArray(updated) ? updated : null;
         if ((updatedRows ? updatedRows.length : updated) === 0) {
           throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
@@ -1677,7 +1685,7 @@ class SmartRebooker {
           anchor: isAnchor,
           exception: !isAnchor && sib.date_exception === true && !rejoinsCadence,
           before: snapshotRow(sib),
-          after: snapshotRow({ ...sib, ...updateData, updated_at: updatedRows?.[0]?.updated_at ?? null }),
+          after: snapshotRow({ ...sib, ...updateData, ...(updatedRows?.[0] || {}) }),
         });
         touched.push({
           id: sib.id,

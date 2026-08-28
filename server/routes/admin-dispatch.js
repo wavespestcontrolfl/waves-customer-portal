@@ -14002,29 +14002,35 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // "ours" and a later SMS failure would re-arm against it — double-texting
 // the customer), board broadcasts only after every sync→capture pair, then
 // ONE appointment_series_rescheduled text. Every effect is keyed on the
-// series_moves row (rebooker.rescheduleSeries): a replayed operation (same
-// operation_key) or a retried effects pass finds the marker stamped and
-// skips, so a retry can never double-text or double-card.
+// series_moves row (rebooker.rescheduleSeries) through an ATOMIC claim —
+// `UPDATE … SET <marker> = now() WHERE <marker> IS NULL` before the effect
+// runs, released again if the effect fails — so a replayed operation (same
+// operation_key), a retried effects pass, or two concurrent passes can never
+// double-text or double-card: only the pass whose claim landed executes.
 // `notify` is explicit and suppresses ONLY the immediate customer text —
 // reminder re-sync, tracker refresh and board broadcasts always run.
 async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify, actorId, reasonText }) {
   const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
   const seriesMoveId = result.seriesMoveId || null;
-  let markers = null;
-  if (seriesMoveId) {
+  // true = this pass owns the effect. A marker-store failure resolves to
+  // owning it: a possible duplicate beats a silent skip (same call the
+  // guard-snapshot fallback below makes).
+  const claimMarker = async (col) => {
+    if (!seriesMoveId) return true;
     try {
-      markers = await db('series_moves').where({ id: seriesMoveId })
-        .first('notified_at', 'conflict_card_at', 'reminders_synced_at');
+      const claimed = await db('series_moves').where({ id: seriesMoveId }).whereNull(col).update({ [col]: db.fn.now() });
+      return Number(claimed) > 0;
     } catch (err) {
-      logger.warn(`[dispatch] series_moves marker read failed for ${seriesMoveId}: ${err.message}`);
+      logger.warn(`[dispatch] series_moves ${col} claim failed for ${seriesMoveId}: ${err.message}`);
+      return true;
     }
-  }
-  const stampMarker = async (col, extra = {}) => {
+  };
+  const releaseMarker = async (col) => {
     if (!seriesMoveId) return;
     try {
-      await db('series_moves').where({ id: seriesMoveId }).whereNull(col).update({ [col]: db.fn.now(), ...extra });
+      await db('series_moves').where({ id: seriesMoveId }).update({ [col]: null });
     } catch (err) {
-      logger.warn(`[dispatch] series_moves ${col} stamp failed for ${seriesMoveId}: ${err.message}`);
+      logger.warn(`[dispatch] series_moves ${col} release failed for ${seriesMoveId}: ${err.message}`);
     }
   };
   // Occurrences the rebooker committed WITHOUT a window (their projected
@@ -14035,7 +14041,8 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)
     .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-  if (conflicts.length && !markers?.conflict_card_at) {
+  if (conflicts.length && await claimMarker('conflict_card_at')) {
+    let carded = false;
     try {
       const NotificationService = require('../services/notification-service');
       const notif = await NotificationService.notifyAdmin(
@@ -14044,33 +14051,40 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         `A series move shifted ${conflicts.length} future visit(s) onto already-booked windows; they kept their date and technician but have NO time window (${conflicts.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
         { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts } }
       );
+      carded = !!notif;
       if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
-      else await stampMarker('conflict_card_at');
     } catch (err) {
       logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
     }
+    if (!carded) await releaseMarker('conflict_card_at');
   }
   const seriesReminderGuards = [];
   let seriesGuardSnapshotFailed = false;
-  if (!markers?.reminders_synced_at) {
-    for (const occurrence of occurrences) {
-      await syncRescheduleReminder(
-        occurrence.id,
-        occurrence.date,
-        { start: occurrence.windowStart, end: occurrence.windowEnd },
-        { willNotify: notify },
-      );
-      const occurrenceGuards = await captureReminderGuards(occurrence.id);
-      if (Array.isArray(occurrenceGuards)) {
-        seriesReminderGuards.push(...occurrenceGuards);
-      } else {
-        // Per-occurrence snapshot read failed — degrade the WHOLE set to the
-        // unguarded fallback below. rearmRescheduleReminderWindows' failure
-        // marker is all-or-nothing; a partially-guarded list would silently
-        // skip the re-arm for the failed occurrence, and silence is worse
-        // than a possible duplicate.
-        seriesGuardSnapshotFailed = true;
+  const remindersClaimed = await claimMarker('reminders_synced_at');
+  if (remindersClaimed) {
+    try {
+      for (const occurrence of occurrences) {
+        await syncRescheduleReminder(
+          occurrence.id,
+          occurrence.date,
+          { start: occurrence.windowStart, end: occurrence.windowEnd },
+          { willNotify: notify },
+        );
+        const occurrenceGuards = await captureReminderGuards(occurrence.id);
+        if (Array.isArray(occurrenceGuards)) {
+          seriesReminderGuards.push(...occurrenceGuards);
+        } else {
+          // Per-occurrence snapshot read failed — degrade the WHOLE set to the
+          // unguarded fallback below. rearmRescheduleReminderWindows' failure
+          // marker is all-or-nothing; a partially-guarded list would silently
+          // skip the re-arm for the failed occurrence, and silence is worse
+          // than a possible duplicate.
+          seriesGuardSnapshotFailed = true;
+        }
       }
+    } catch (err) {
+      await releaseMarker('reminders_synced_at');
+      throw err;
     }
     for (const occurrence of occurrences) {
       try {
@@ -14079,12 +14093,12 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
       }
     }
-    await stampMarker('reminders_synced_at');
   }
 
   let notificationSent = false;
   let notificationError = null;
-  if (notify && markers?.notified_at) {
+  if (notify && !(await claimMarker('notified_at'))) {
+    // Another pass owns (or already completed) the series text.
     notificationSent = true;
   } else if (notify) {
     const svc = await db('scheduled_services')
@@ -14134,14 +14148,22 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
         if (notificationSent) {
           await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
-          await stampMarker('notified_at', { customer_notified: true });
+          if (seriesMoveId) {
+            try {
+              await db('series_moves').where({ id: seriesMoveId }).update({ customer_notified: true });
+            } catch (err) {
+              logger.warn(`[dispatch] series_moves customer_notified stamp failed for ${seriesMoveId}: ${err.message}`);
+            }
+          }
         }
       } catch (err) {
         notificationError = err.message;
         logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
       }
     }
-    if (!notificationSent && !markers?.reminders_synced_at) {
+    // Nothing went out: hand the claim back so a retry can send.
+    if (!notificationSent) await releaseMarker('notified_at');
+    if (!notificationSent && remindersClaimed) {
       // Fallback scope for a failed guard snapshot: each occurrence's NEW
       // time, recomputed exactly as syncRescheduleReminder stamped it above.
       const guardsForRearm = seriesGuardSnapshotFailed

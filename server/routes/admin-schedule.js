@@ -6541,15 +6541,18 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
 // ownership check on :id alone cannot vouch for.
 // Collective series move from the Edit appointment modal (owner ruling
 // 2026-08-28, GATE_ADMIN_COLLECTIVE_MOVE): a DATE change on a cadence visit
-// is a series move. It commits through the rebooker's choke point BEFORE the
-// per-row edit transaction, which then sees the visit already on its new
-// date and applies the remaining field edits as a same-slot save; the series
-// effects (reminders, board, ONE series text when the office ticked notify)
-// replace this handler's single-visit notice. Returns null when the save is
-// not a collective date move (gate off, one-time/booster row, same date,
-// terminal row = record correction, or a date the handler's own validation
-// must answer) — the handler then runs exactly as before.
-async function collectiveEditDateMove(req) {
+// is a series move. PLAN it up front (is this save a collective date move?)
+// so the per-row edit transaction saves the remaining fields as a same-slot
+// edit, then COMMIT the series through the rebooker's choke point only
+// after that transaction succeeded — every 400/403/404 the handler can
+// still raise (unknown technician, missing add-on service, …) happens
+// BEFORE any visit moves or any customer is texted. The series effects
+// (reminders, board, ONE series text when the office ticked notify) replace
+// this handler's single-visit notice. Returns null when the save is not a
+// collective date move (gate off, one-time/booster row, same date, terminal
+// row = record correction, or a date the handler's own validation must
+// answer) — the handler then runs exactly as before.
+async function planCollectiveEditDateMove(req) {
   const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
   if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
   const target = validScheduleDate(scheduledDate);
@@ -6560,50 +6563,57 @@ async function collectiveEditDateMove(req) {
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
   const win = { start: normalizeHHMM(windowStart) || null, end: normalizeHHMM(windowEnd) || null };
-  const SmartRebooker = require('../services/rebooker');
-  // Same predicate the choke point evaluates (gate + cadence row + date
-  // delta), so this call always lands as a series move.
-  const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
-    allowLive: true,
-    adminWindowRules: true,
-    overlapAdvisory: true,
-    sourceSurface: 'edit_modal',
-    ...(typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
-      ? { operationKey: req.body.operationKey }
-      : {}),
-    // Pin the anchor to the row this decision read — a concurrent move makes
-    // the delta stale and the series must not shift on it.
-    expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
-  });
-  const { applySeriesMoveEffects } = require('./admin-dispatch');
-  const effects = await applySeriesMoveEffects({
-    result,
-    serviceId: row.id,
-    newDate: target,
-    newWindow: win,
-    notify: notifyCustomer === true,
-    actorId: req.technicianId,
-    reasonText: null,
-  });
+  const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
+    ? req.body.operationKey
+    : null;
   return {
-    seriesMoveId: result.seriesMoveId || null,
-    occurrencesRescheduled: result.occurrencesRescheduled || 0,
-    deltaDays: result.deltaDays || 0,
-    skippedCount: result.skippedCount || 0,
-    exceptionCount: result.exceptionCount || 0,
-    conflicts: effects.conflicts,
-    warnings: Array.isArray(result.warnings) ? result.warnings : [],
-    notificationSent: effects.notificationSent,
-    notificationError: effects.notificationError,
+    async commit() {
+      const SmartRebooker = require('../services/rebooker');
+      // Same predicate the choke point evaluates (gate + cadence row + date
+      // delta), so this call always lands as a series move.
+      const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
+        allowLive: true,
+        adminWindowRules: true,
+        overlapAdvisory: true,
+        sourceSurface: 'edit_modal',
+        ...(operationKey ? { operationKey } : {}),
+        // Pin the anchor to the row the plan read — a concurrent move makes
+        // the delta stale and the series must not shift on it. The per-row
+        // edit above never touches date/window (the body keys were stripped),
+        // so the pin still holds after it.
+        expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
+      });
+      const { applySeriesMoveEffects } = require('./admin-dispatch');
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: row.id,
+        newDate: target,
+        newWindow: win,
+        notify: notifyCustomer === true,
+        actorId: req.technicianId,
+        reasonText: null,
+      });
+      return {
+        seriesMoveId: result.seriesMoveId || null,
+        occurrencesRescheduled: result.occurrencesRescheduled || 0,
+        deltaDays: result.deltaDays || 0,
+        skippedCount: result.skippedCount || 0,
+        exceptionCount: result.exceptionCount || 0,
+        conflicts: effects.conflicts,
+        warnings: Array.isArray(result.warnings) ? result.warnings : [],
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+      };
+    },
   };
 }
 
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
-    const seriesMove = await collectiveEditDateMove(req);
-    if (seriesMove) {
-      // The series trx already landed the visit on its new date/window; the
-      // per-row edit below runs as a same-slot save of the remaining fields
+    const seriesMovePlan = await planCollectiveEditDateMove(req);
+    if (seriesMovePlan) {
+      // The series commit lands the date/window after the per-row edit
+      // below; that edit saves the remaining fields as a same-slot edit
       // (windowIntakeFromBody reads req.body, so the body keys go too).
       delete req.body.scheduledDate;
       delete req.body.windowStart;
@@ -9301,6 +9311,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (scheduleMoveForNotice) {
       const { activateLegacyOutboundReviewRowIfNeeded } = require('../services/outbound-review-confirm');
       await activateLegacyOutboundReviewRowIfNeeded(db, req.params.id, 'schedule-update-details');
+    }
+
+    // Collective series move — committed only now that everything else in
+    // this save validated and landed (planCollectiveEditDateMove). A series
+    // that cannot shift (concurrent move, plan-level clash) answers with the
+    // rebooker's own status; the field edits above stay saved and the
+    // response says so — nothing customer-facing has happened by then.
+    let seriesMove = null;
+    if (seriesMovePlan) {
+      try {
+        seriesMove = await seriesMovePlan.commit();
+      } catch (err) {
+        if (!err?.statusCode) throw err;
+        return res.status(err.statusCode).json({
+          error: `${err.message} — the other appointment details were saved; the date did not change.`,
+          ...(err.code ? { code: err.code } : {}),
+          ...(err.subcode ? { subcode: err.subcode } : {}),
+        });
+      }
     }
 
     // Immediate reschedule text — only when the edit actually moved the

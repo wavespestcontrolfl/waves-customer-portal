@@ -71,7 +71,13 @@ function chain(overrides = {}) {
   });
   return Object.assign(builder, overrides);
 }
-const rawFactory = (label) => jest.fn((sql, bindings) => ({ label, sql, bindings }));
+// Knex Raw stand-in that is CIRCULAR, like the real one: a snapshot that
+// serialized it would throw and roll back the move.
+const rawFactory = (label) => jest.fn((sql, bindings) => {
+  const raw = { label, sql, bindings };
+  raw.client = { raw };
+  return raw;
+});
 
 function anchorRow(overrides = {}) {
   return {
@@ -305,7 +311,7 @@ describe('rescheduleSeries — one recorded operation', () => {
   });
 
   test('writes a committed series_moves row with counts + before/after snapshots carrying the RETURNING version stamp, links reschedule_log, returns the id', async () => {
-    const { seriesMovesInsert, logInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const { updates, seriesMovesInsert, logInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
       ...ADMIN_OPTS, operationKey: 'op-123', sourceSurface: 'edit_modal',
     });
@@ -331,6 +337,11 @@ describe('rescheduleSeries — one recorded operation', () => {
     const rows = JSON.parse(row.rows);
     expect(rows).toHaveLength(2);
     expect(rows[0]).toMatchObject({ id: 'svc-1', anchor: true, before: { scheduled_date: BASE, route_order: 3, status: 'confirmed' }, after: { scheduled_date: TARGET, route_order: null, updated_at: 'stamp-0' } });
+    // The SQL-computed expiry is a Raw expression in updateData: the snapshot
+    // takes the persisted value from RETURNING (absent in this mock → null),
+    // never the expression itself.
+    expect(rows[0].after.track_token_expires_at).toBeNull();
+    expect(updates[0].update).toHaveBeenCalledWith(expect.any(Object), expect.arrayContaining(['updated_at', 'track_token_expires_at', 'scheduled_date']));
     expect(rows[1]).toMatchObject({ id: 'svc-2', anchor: false, before: { scheduled_date: SIB1 }, after: { scheduled_date: dayOffset(19), updated_at: 'stamp-1' } });
     expect(logInsert.insert.mock.calls[0][0]).toMatchObject({ series_move_id: result.seriesMoveId, reason_code: 'admin_series' });
     // The committed result is stamped post-commit for operation_key replays.
@@ -418,10 +429,16 @@ describe('caller wiring (source)', () => {
     expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single' }");
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");
-    const intercept = sched.indexOf('const seriesMove = await collectiveEditDateMove(req);', handler);
+    const plan = sched.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);', handler);
     const destructure = sched.indexOf('} = req.body;', handler);
-    expect(intercept).toBeGreaterThan(handler);
-    expect(intercept).toBeLessThan(destructure);
-    expect(sched.slice(intercept, destructure)).toContain('delete req.body.scheduledDate;');
+    const commit = sched.indexOf('seriesMove = await seriesMovePlan.commit();', handler);
+    const notice = sched.indexOf('// Immediate reschedule text', handler);
+    expect(plan).toBeGreaterThan(handler);
+    expect(plan).toBeLessThan(destructure);
+    expect(sched.slice(plan, destructure)).toContain('delete req.body.scheduledDate;');
+    // The series commits only after the per-row edit — before the notice
+    // block, after every validation the handler can still fail on.
+    expect(commit).toBeGreaterThan(destructure);
+    expect(commit).toBeLessThan(notice);
   });
 });
