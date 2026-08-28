@@ -193,7 +193,7 @@ async function findOpenCommsExceptions({ customerId, serviceId, knex = db }) {
     .where('created_at', '>=', inboundFloor)
     .orderBy('created_at', 'desc')
     .limit(SMS_SCAN_CAP)
-    .select('id', 'created_at', 'message_type', 'message_body', 'from_phone', 'to_phone');
+    .select('id', 'created_at', 'message_type', 'message_body', 'from_phone', 'to_phone', 'metadata');
 
   // One scan covering both legs' type sets; each leg narrows below.
   const outboundRows = await knex('sms_log')
