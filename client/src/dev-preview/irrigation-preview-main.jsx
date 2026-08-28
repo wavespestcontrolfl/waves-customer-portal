@@ -10,8 +10,9 @@
  *   mixed  spray+rotor → declines with the mixed-rates explanation
  *   notype no head type → asks for system type
  *   inches explicit weekly inches → derived figure defers to it
- *   legacyoff row the retired toggle left "off" with inputs — derived line
- *          must say the schedule isn't being counted yet
+ *   legacyoff row the retired toggle left "off" with inputs — a note must
+ *          say the schedule isn't being counted yet (legacyoffinches: the
+ *          same with a typed Weekly Inches, which is suppressed too)
  *   daysonly only watering days saved — summary must not read as empty
  *   lawnplan standalone lawn-plan customer: no tier, no turf type, nothing
  *          entered yet — Inches must still render (server hasLawnCare) and
@@ -64,6 +65,7 @@ const STATES = {
   notype: { irrigationSystemType: [] },
   inches: { irrigationInchesPerWeek: 1.25 },
   legacyoff: {},
+  legacyoffinches: { irrigationInchesPerWeek: 1.25 },
   daysonly: {
     irrigationZones: null, irrigationControllerLocation: '', irrigationRunMinutes: null,
     irrigationSystemType: [], rainSensor: false, irrigationScheduleNotes: '',
@@ -77,7 +79,7 @@ const STATES = {
 const PREFS = { ...BASE_PREFS, ...(STATES[state] || {}) };
 
 // The real GET carries the server's lawn eligibility alongside the row.
-api.getPropertyPreferences = async () => ({ preferences: PREFS, hasLawnCare: true, irrigationSuppressed: state === 'legacyoff' });
+api.getPropertyPreferences = async () => ({ preferences: PREFS, hasLawnCare: true, irrigationSuppressed: state.startsWith('legacyoff') });
 api.updatePropertyPreferences = async (patch) => ({ preferences: { ...PREFS, ...patch } });
 
 const customer = {

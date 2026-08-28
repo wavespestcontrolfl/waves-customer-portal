@@ -7216,6 +7216,13 @@ function ServicePrefsSection() {
 // token swap.
 const inFlightPropertyPrefSaves = new Set();
 
+// Mirrors IRRIGATION_INPUT_FIELDS in server/routes/property.js (camelCase):
+// a successful save of any of these stamps the row's irrigation_system on.
+const IRRIGATION_EDIT_FIELDS = new Set([
+  'irrigationControllerLocation', 'irrigationZones', 'irrigationInchesPerWeek', 'irrigationRunMinutes',
+  'irrigationScheduleNotes', 'wateringDays', 'irrigationSystemType', 'rainSensor', 'irrigationIssues',
+]);
+
 function PropertyTab({ customer }) {
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
@@ -7235,6 +7242,7 @@ function PropertyTab({ customer }) {
   // email suppress derivation until the customer's next irrigation edit
   // stamps it on, so the card must not claim a figure they aren't counting.
   const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
+  const pendingIrrigationEditRef = useRef(false);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -7316,12 +7324,19 @@ function PropertyTab({ customer }) {
     // Merge into pending so earlier-edited fields aren't lost when the
     // debounce timer resets for a later field.
     pendingRef.current = { ...pendingRef.current, [field]: value };
+    if (IRRIGATION_EDIT_FIELDS.has(field)) pendingIrrigationEditRef.current = true;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       setSaveStatus('saving');
       flushAllPendingSaves()
         .then(() => {
+          // The server stamps irrigation_system=true on any irrigation
+          // write, so a successful flush that carried one ends suppression.
+          if (pendingIrrigationEditRef.current) {
+            pendingIrrigationEditRef.current = false;
+            setIrrigationSuppressed(false);
+          }
           setSaveStatus('saved');
           setTimeout(() => setSaveStatus(prev => (prev === 'saved' ? null : prev)), 2000);
         })
@@ -7562,13 +7577,16 @@ function PropertyTab({ customer }) {
     systemType: prefs.irrigationSystemType,
   });
   const explicitInchesEntered = Number.isFinite(Number(prefs.irrigationInchesPerWeek)) && Number(prefs.irrigationInchesPerWeek) > 0;
+  // Stored "off" from the retired toggle: the report and Monday email
+  // suppress a prefs-only schedule — typed inches AND a derived figure alike
+  // — until an irrigation save stamps the row on. Say so for either.
+  const irrigationSuppressedNote = irrigationSuppressed && (explicitInchesEntered || derivedIrrigation.inchesPerWeek != null)
+    ? `${explicitInchesEntered ? 'Your Weekly Inches entry' : 'This schedule'} isn't being counted yet — irrigation was switched off earlier. Save any change here and we'll start counting it.`
+    : null;
   const derivedIrrigationLine = (() => {
     if (prefs.irrigationRunMinutes == null) return null;
     if (derivedIrrigation.inchesPerWeek != null) {
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
-      if (irrigationSuppressed && !explicitInchesEntered) {
-        return `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week, but this schedule isn't being counted yet — it was switched off earlier. Save any change here and we'll start counting it.`;
-      }
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
         : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
@@ -7974,6 +7992,11 @@ function PropertyTab({ customer }) {
         </div>
         {/* Lawn customers only — the copy references the Weekly Inches
             field, which is gated on hasLawnCare just above. */}
+        {hasLawnCare && irrigationSuppressedNote && (
+          <div style={{ marginTop: 6, fontSize: 12, color: B.glassNavy, fontWeight: 650, lineHeight: 1.45 }} data-testid="irrigation-suppressed-note">
+            {irrigationSuppressedNote}
+          </div>
+        )}
         {hasLawnCare && derivedIrrigationLine && (
           <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
             {derivedIrrigationLine}
