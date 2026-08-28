@@ -325,12 +325,13 @@ export default function PushSettingsV2() {
           <div className="mb-3">
             {" "}
             <div className="px-3 py-1.5 text-11 uppercase tracking-label text-ink-tertiary font-medium">
-              Bell categories
+              Bell + push categories
             </div>{" "}
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
-              Applies when the admin bell policy is on: these categories are
-              silenced from the bell by default. Toggle one on to ring the
-              bell for it again.
+              The bell, phone banner and app badge ring for customer
+              communication only (texts, emails, calls, voicemails, new
+              leads). These categories are silent by default. Toggle one on
+              to get its bell and phone banner again.
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (

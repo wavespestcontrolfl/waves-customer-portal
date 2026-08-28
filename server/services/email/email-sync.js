@@ -54,9 +54,10 @@ async function fullSync(state) {
     // durable across pods: a pod that has never completed a sync has no
     // last_sync_at, so two concurrent first syncs both see "initial" (both
     // stay silent); recovery has a completed prior sync (hook P1).
-    // last_sync_at is the durable completion signal — an empty mailbox that
-    // synced once has a count of 0 but a timestamp (hook P1).
-    const initialConnect = !state?.last_history_id && !state?.last_sync_at;
+    // initial_sync_completed_at is written exactly once, when a full sync
+    // COMPLETES (failed/incomplete runs also stamp last_sync_at, so that
+    // cannot be the signal — codex P1). Null ⇒ this IS the first connect.
+    const initialConnect = !state?.initial_sync_completed_at;
 
     let failedMessages = 0;
     for (const msg of messages) {
@@ -98,6 +99,9 @@ async function fullSync(state) {
     await db('email_sync_state').where('id', state.id).update({
       last_history_id: anchorHistoryId,
       last_sync_at: new Date(),
+      // First COMPLETED full sync — set once, never cleared (see migration
+      // 20260828000041); later full syncs are recoveries, not first connects.
+      ...(state?.initial_sync_completed_at ? {} : { initial_sync_completed_at: new Date() }),
       errors: null,
     });
     if (newEmails > 0) {
@@ -210,8 +214,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // Match sender to customer
   let customerId = null;
   if (parsed.from_address) {
+    // Case-insensitive, like the request/complaint handlers (codex P2): a
+    // sender whose address differs only by casing is the same customer.
     const customer = await db('customers')
-      .where('email', parsed.from_address)
+      .whereRaw('LOWER(email) = ?', [String(parsed.from_address).trim().toLowerCase()])
       .first();
     if (customer) customerId = customer.id;
   }

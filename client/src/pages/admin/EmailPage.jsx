@@ -266,7 +266,9 @@ export default function EmailPage() {
     (async () => {
       try {
         const r = await adminFetch(`/api/admin/email/message/${id}`);
-        if (r.ok) openEmail(await r.json());
+        // GET /message/:id already marked it read server-side; hand openEmail
+        // the read state so it does not toggle it back (codex P2).
+        if (r.ok) openEmail({ ...(await r.json()), is_read: true });
       } catch { /* the inbox still renders */ }
     })();
   }, [status]);
