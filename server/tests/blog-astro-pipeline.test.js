@@ -3951,6 +3951,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       '[ collapsed   alt ]: </images/blog/x/body-2.webp>',
       '[SHORTCUT]: /images/blog/x/body-3.webp',
       '[body]: /images/blog/x/ignored-second-definition.webp',
+      '![multiline][multi]',
+      '[multi]:',
+      '  /images/blog/x/body-5.webp',
       '```',
       '[fenced]: /images/blog/x/body-4.webp',
       '```',
@@ -3959,6 +3962,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       ['technician', '/images/blog/x/body-1.webp'],
       ['Collapsed Alt', '/images/blog/x/body-2.webp'],
       ['shortcut', '/images/blog/x/body-3.webp'],
+      ['multiline', '/images/blog/x/body-5.webp'],
     ]);
     // The section scanner sees the same pictures: a reference-style image marks its section illustrated.
     const { sections } = AstroPublisher._internals.scanBodySections(`## A\n\nProse.\n\n![pic][body]\n\n## B\n\nMore.\n\n[body]: /images/blog/x/body-1.webp\n`, { title: 'T' });

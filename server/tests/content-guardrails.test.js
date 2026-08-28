@@ -4680,6 +4680,10 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     const defs = guardrails.markdownReferenceDefinitions('[Body]: /a.webp "t"\n[ two   words ]: </b c.webp>\n[body]: /dup.webp\ntext [x]: not-at-line-start');
     expect([...defs.entries()]).toEqual([['body', '/a.webp'], ['two words', '/b c.webp']]);
     expect(guardrails.normalizeReferenceLabel('  Two\n  Words ')).toBe('two words');
+    // Destination on the continuation line (CommonMark allows one line ending after `[label]:`); a bare `[label]:` with nothing after is not a definition.
+    const multi = guardrails.markdownReferenceDefinitions('[pic]:\n  /images/blog/x/body-1.webp "t"\n[angle]:\n</a b.webp>\n[none]:\n\ntext');
+    expect([...multi.entries()]).toEqual([['pic', '/images/blog/x/body-1.webp'], ['angle', '/a b.webp']]);
+    expect(guardrails.blankLinkDefinitionsAndTitles('[pic]:\n  /dest.webp\nprose')).toBe('      \n            \nprose');
   });
 
   test('blankMarkdownLinkDestinations keepImages: reference-style IMAGE tails are kept, reference-style LINK tails are blanked; default path unchanged', () => {

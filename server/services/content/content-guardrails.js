@@ -278,20 +278,28 @@ function isInterruptingBlock(line) {
 
 // Link reference definitions (`[label]: /dest "title"`) → Map(normalized
 // label → destination). CommonMark label matching: case-folded, interior
-// whitespace collapsed; the FIRST definition of a label wins. Callers pass
-// the code/comment-stripped text (a definition inside a fence is code).
-const REF_DEFINITION_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*(?:<([^>\n]*)>|(\S+))/;
+// whitespace collapsed; the FIRST definition of a label wins. The
+// destination may sit on the NEXT line (`[label]:` then `  /dest` — one
+// line ending is allowed between label and destination). Callers pass the
+// code/comment-stripped text (a definition inside a fence is code).
+const REF_DEFINITION_LABEL_RE = /^[ \t]*\[([^\]\n]+)\]:[ \t]*/;
+const REF_DESTINATION_RE = /^(?:<([^>\n]*)>|(\S+))/;
 function normalizeReferenceLabel(label) {
   return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 function markdownReferenceDefinitions(str) {
   const defs = new Map();
-  for (const line of String(str || '').split('\n')) {
-    const m = line.match(REF_DEFINITION_RE);
+  const lines = String(str || '').split('\n');
+  for (let i = 0; i < lines.length; i += 1) {
+    const m = lines[i].match(REF_DEFINITION_LABEL_RE);
     if (!m) continue;
+    let rest = lines[i].slice(m[0].length);
+    if (rest.trim() === '') { rest = String(lines[i + 1] || '').trim(); i += 1; } // continuation line
+    const d = rest.match(REF_DESTINATION_RE);
+    if (!d) continue;
     const label = normalizeReferenceLabel(m[1]);
     if (!label || defs.has(label)) continue;
-    defs.set(label, (m[2] !== undefined ? m[2] : m[3]).trim());
+    defs.set(label, (d[1] !== undefined ? d[1] : d[2]).trim());
   }
   return defs;
 }
@@ -300,7 +308,7 @@ function markdownReferenceDefinitions(str) {
 // balanced scanner below then decides per occurrence (an IMAGE reference
 // is kept under keepImages; a link reference is still blanked).
 function blankLinkDefinitionsAndTitles(str, { keepReferenceTails = false } = {}) {
-  const defsBlanked = String(str || '').replace(/^[ \t]*\[[^\]\n]+\]:[^\n]*/gm, blankSpan);
+  const defsBlanked = String(str || '').replace(/^[ \t]*\[[^\]\n]+\]:(?:[ \t]*\S[^\n]*|[ \t]*\n[ \t]*\S[^\n]*)?/gm, blankSpan);
   return (keepReferenceTails ? defsBlanked : defsBlanked.replace(/\]\s*\[[^\]\n]*\]/g, blankSpan))
     .replace(/(\]\((?:[^()\s]|\([^()\s]*\))*)(\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))(\s*\))/g, (m, dest, title, close) => dest + blankSpan(title) + close);
 }
