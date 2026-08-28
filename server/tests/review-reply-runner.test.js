@@ -702,6 +702,14 @@ describe('processDueAutoReplies — state machine', () => {
     expect(Runner.syncReplyFields(parked, { owner_reply: null }, { now })).toMatchObject({ review_reply: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' });
   });
 
+  test('an authoritative snapshot with NO owner reply resolves a google_uncertain park into the retry lane (codex r41); persist_failed stays parked', () => {
+    const now = new Date('2026-08-27T15:00:00Z');
+    const uncertain = { review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: 'Hi Dana, thanks.', publish_claimed_until: null };
+    expect(Runner.syncReplyFields(uncertain, { owner_reply: null }, { now })).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null });
+    const persistFailed = { ...uncertain, auto_reply_reason: 'persist_failed' };
+    expect(Runner.syncReplyFields(persistFailed, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
+  });
+
   test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {
     const now = new Date('2026-08-27T15:00:00Z');
     const posted = { review_reply: 'Our auto reply', auto_reply_status: 'posted', publish_claimed_until: null };
@@ -1194,6 +1202,7 @@ describe('admin actions', () => {
     expect(r.outcome).toBe('posted');
     const af = mockPublish.mock.calls[0][0].autoFields;
     expect(af).toMatchObject({ auto_reply_draft: human, auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null });
+    expect(mockPublish.mock.calls[0][0].auditMeta).toMatchObject({ version: 'human', mode: null, intent: 'post_now' });
     expect(af.auto_reply_drafted_at).not.toBe('2026-08-20T00:00:00Z');
   });
 

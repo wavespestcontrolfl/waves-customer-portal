@@ -460,7 +460,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'account_read_failed', 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'account_read_failed', 'google_uncertain_cleared', 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -800,7 +800,7 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           auto_reply_error: null,
           auto_reply_claimed_until: null,
         },
-        auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
+        auditMeta: humanDraft ? { version: 'human', mode: null, intent: 'post_now' } : { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
         guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
@@ -1009,6 +1009,14 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
       Object.assign(fields, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'edited_on_google' });
     }
     return fields;
+  }
+  // An authoritative snapshot with NO owner reply resolves a google_uncertain
+  // park: the timed-out PUT did not land. Back into the retry lane with the
+  // attempted draft (reused, re-verified; the publisher's live GET still
+  // yields to a late-landing reply) — codex r41. persist_failed (the PUT is
+  // known to have landed) stays with a person.
+  if (existing?.auto_reply_status === STATUS.PARKED && existing.auto_reply_reason === 'google_uncertain' && !hasRealReply(existing.review_reply)) {
+    return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'google_uncertain_cleared', auto_reply_due_at: now.toISOString(), auto_reply_claimed_until: null };
   }
   // No owner reply on Google: ours is gone (owner deleted it there).
   return removedOwnerReplyFields(existing);

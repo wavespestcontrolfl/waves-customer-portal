@@ -133,6 +133,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r41: direct tolerance / reaction claims.
+    expect(verify(good('Hi Dana, we are glad your pets tolerated our pest treatment well.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids handled it fine.'))).toBe('banned_phrase');
     // codex r39: peril / detriment / noxious / menace.
     expect(verify(good('Hi Dana, Marcus got the ants and our treatments pose no peril to your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing we use is a detriment to your dogs.'))).toBe('banned_phrase');
@@ -274,6 +277,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g2 = grounding({ text: 'Marcus arrived on time and explained everything.', topics: ['technician'] });
     expect(verify(good('Hi Dana, glad Marcus was on time and the explanation landed. Thanks for having us.'), g2)).toBeNull();
   });
+  test('grounded phrases match on token boundaries: "ants" is not inside "plants" (codex r41)', () => {
+    const g = grounding({ text: 'Great care for our plants.', mentionedTechNames: [], topics: ['lawn'] });
+    expect(verify(good('Hello there, we appreciate you trusting us with the ants.'), g)).toBe('unlisted_service_claim');
+    const g2 = grounding({ text: 'Great care for our ants problem.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we appreciate you trusting us with the ants.'), g2)).toBeNull();
+  });
+
   test('a result the reviewer NEGATED does not license the claim (codex r26)', () => {
     const g = grounding({ text: 'Great staff, but they did not get rid of the ants.', topics: ['technician', 'pest'] });
     expect(verify(good("Hi Dana, we're glad we got rid of the ants for you."), g)).toBe('negated_review_claim');

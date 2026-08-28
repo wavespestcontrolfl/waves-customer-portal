@@ -121,6 +121,10 @@ const BANNED_RE = new RegExp([
   '\\b(?:lets?|letting|allow\\w*|leav\\w*|free\\w*|enabl\\w*|permit\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\b',
   '\\b(?:pets?|dogs?|cats?|kids?|children|babies|family|people|animals|everyone)\\s+(?:can|could|may|will|to|still)?\\s*(?:keep|continue|carry\\s+on|go\\s+on|resume|get\\s+back\\s+to|return\\s+to|stay|remain|enjoy|play|roam|run|romp|relax|use|go\\s+(?:out|outside|back))\\w*\\b',
   '\\bas\\s+usual\\b', '\\broutines?\\b', '\\bwithout\\s+(?:changing|interrupt\\w*|disrupt\\w*|missing|skipping|pausing)\\b', '\\bno\\s+(?:change|interruption|disruption)s?\\b', '\\buninterrupted\\b', '\\bundisturbed\\b',
+  // Direct tolerance / reaction claims about protected subjects (codex r41):
+  // "your pets tolerated the treatment well", "the kids handled it fine".
+  '\\btolerat\\w*\\b', '\\btolerance\\b',
+  '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:handl|cop|react|respond|adjust|took|take|did|do|were|was|are|is|fared?|felt|feel)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:well|fine|great|ok|okay|nicely|beautifully|normally|comfortabl\\w*|happil\\w*|without)\\b',
   // Quality-of-life / preserve / safeguard framing (codex r37).
   '\\bquality\\s+of\\s+life\\b', '\\bpreserv\\w*\\b', '\\bsafeguard\\w*\\b', '\\bshield\\w*\\b',
   '\\b(?:protect|defend|keep|look\\s+after|watch\\s+over|care\\s+for)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|family|families|loved\\s+ones|people|animals|grandkids|grandchildren)\\b',
@@ -216,15 +220,23 @@ function isNegatedAt(idx, windows) {
 }
 // null = phrase absent; true = every occurrence negated; false = at least
 // one un-negated occurrence.
+// Start indexes of a phrase as a WHOLE token sequence ("ants" is not inside
+// "plants", "tick" is not inside "sticker") — codex r41.
+function phraseIndexes(text, phrase) {
+  const out = [];
+  if (!phrase) return out;
+  const re = new RegExp(`(^|[^\\p{L}\\p{N}])(${escapeRe(phrase)})(?![\\p{L}\\p{N}])`, 'giu');
+  let m;
+  while ((m = re.exec(text)) !== null) { out.push(m.index + m[1].length); if (m[0].length === 0) re.lastIndex++; }
+  return out;
+}
+function hasPhrase(text, phrase) { return phraseIndexes(text, phrase).length > 0; }
 function allOccurrencesNegated(text, phrase, windows) {
   if (!phrase) return null;
-  let idx = text.indexOf(phrase); let found = false;
-  while (idx >= 0) {
-    found = true;
-    if (!isNegatedAt(idx, windows)) return false;
-    idx = text.indexOf(phrase, idx + phrase.length);
-  }
-  return found ? true : null;
+  const idxs = phraseIndexes(text, phrase);
+  if (!idxs.length) return null;
+  for (const idx of idxs) if (!isNegatedAt(idx, windows)) return false;
+  return true;
 }
 // Root-matched provenance ("eliminate" ↔ "eliminated"): find the reviewer's
 // words sharing the root and check their occurrences the same way.
@@ -340,7 +352,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   if (DISPUTE_RE.test(body)) return 'dispute_words';
   if (STOCK_PHRASE_RE.test(body)) return 'stock_phrase';
   for (const phrase of body.match(new RegExp(DATE_CLAIM_RE.source, 'gi')) || []) {
-    if (!grounding.review.text.toLowerCase().includes(phrase.toLowerCase())) return 'date_claim';
+    if (!hasPhrase(grounding.review.text.toLowerCase(), phrase.toLowerCase())) return 'date_claim';
   }
 
   // Private-channel phrasing is allowed only when the reviewer used the same
@@ -348,7 +360,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   const reviewLower = grounding.review.text.toLowerCase();
   const priv = body.match(new RegExp(PRIVATE_CHANNEL_RE.source, 'gi')) || [];
   for (const phrase of priv) {
-    if (!reviewLower.includes(phrase.toLowerCase())) return 'private_channel';
+    if (!hasPhrase(reviewLower, phrase.toLowerCase())) return 'private_channel';
   }
 
   // Provenance allowlist — names: only the reviewer's first name and tech
@@ -477,11 +489,11 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   ]);
   for (const term of body.match(QUANTIFIED_TENURE_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (!reviewLower.replace(/\s+/g, ' ').includes(t)) return 'unlisted_relationship_claim';
+    if (!hasPhrase(reviewLower.replace(/\s+/g, ' '), t)) return 'unlisted_relationship_claim';
   }
   for (const term of body.match(RELATIONSHIP_CLAIM_RE) || []) {
     const t = term.toLowerCase().replace(/\s+/g, ' ');
-    if (relAllowed.has(t) || reviewLower.includes(t) || reviewWords.has(t)) continue;
+    if (relAllowed.has(t) || hasPhrase(reviewLower, t) || reviewWords.has(t)) continue;
     return 'unlisted_relationship_claim';
   }
   // Visit-experience claims: the reviewer's words only (root-matched).
