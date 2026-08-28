@@ -181,7 +181,12 @@ function whereTargetingUnchanged(query, snapshot) {
   for (const col of TARGETING_COLUMNS) {
     query = snapshot[col] === null || snapshot[col] === undefined ? query.whereNull(col) : query.where(col, snapshot[col]);
   }
-  if (snapshot.updated_at) query = query.where('updated_at', snapshot.updated_at);
+  // pg materializes timestamps as ms-precision Dates while Postgres keeps
+  // microseconds — compare at the DB side truncated to ms, or an untouched
+  // row would never match.
+  if (snapshot.updated_at instanceof Date && !Number.isNaN(snapshot.updated_at.getTime())) {
+    query = query.whereRaw("date_trunc('milliseconds', updated_at) = ?", [snapshot.updated_at]);
+  }
   return query;
 }
 function targetingChanged(before, after) {

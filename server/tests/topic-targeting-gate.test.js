@@ -811,3 +811,13 @@ describe('PR codex r13 (1673eea02)', () => {
     expect(gate._internals.headingsOf('   ## What Taexx Does\n\n  ### Costs\n    ## not a heading\n')).toEqual(['What Taexx Does', 'Costs']);
   });
 });
+
+describe('PR codex r15 (a25de03e8)', () => {
+  test('formulation suffixes on governed products are not states; a real SC locality still is', () => {
+    for (const t of ['Termidor SC application rate', 'taurus sc vs termidor sc for termites', 'Suspend SC mixing per gallon', 'Demand CS for spiders in sarasota', 'Celsius WG on st augustine', 'bifen sc termiticide label']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    expect(gate.classifyGeoScope('Columbia SC pest control').out_of_area).toContain('SC');
+    expect(gate.classifyGeoScope('pest control charleston, sc').out_of_area).toContain('SC');
+  });
+});

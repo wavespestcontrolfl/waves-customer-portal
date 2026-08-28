@@ -353,7 +353,7 @@ async function reconcileTopicBlockedPrs(gh) {
       .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
       .whereNotNull('astro_pr_url')
       .limit(25)
-      .select('id', 'astro_pr_url', 'skip_reason', 'outcome');
+      .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes');
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] topic-blocked reconcile query failed: ${err.message}`);
     return { count: 0 };
@@ -361,17 +361,66 @@ async function reconcileTopicBlockedPrs(gh) {
   // Belt and braces: only rows in the parked state (never a pending run).
   rows = rows.filter((r) => r.skip_reason === TOPIC_BLOCKED_SKIP_REASON && r.outcome === PENDING_OUTCOME && r.astro_pr_url);
   let retired = 0;
+  let unparked = 0;
   for (const run of rows) {
     const prNumber = prNumberFromUrl(run.astro_pr_url);
     if (!prNumber) continue;
     let pr = null;
     try { pr = await gh.getPr(prNumber); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile getPr #${prNumber} failed: ${err.message}`); continue; }
-    if (pr && pr.state === 'open' && !pr.merged) {
+    if (!pr) continue;
+    if (pr.merged || pr.merged_at) {
+      // A human merged it between the durable park and the retire: hand the
+      // run back to the pending lifecycle (live-deploy verification,
+      // IndexNow, link planning, social) instead of leaving it parked.
+      if (await unparkTopicBlockedRun(run, prNumber)) unparked++;
+      continue;
+    }
+    if (pr.state === 'open') {
       const r = await retireTopicBlockedPr(run, prNumber, gh, { pr });
       if (r.retired) retired++;
+      continue;
     }
+    // Closed (by the retire, or by a human): terminal bookkeeping — idempotent,
+    // so a lost stamp converges.
+    try {
+      const { markPrTerminal } = require('./codex-remediation');
+      await markPrTerminal(prNumber, 'closed');
+    } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal for closed topic-blocked PR #${prNumber} failed: ${err.message}`); }
   }
-  return { count: rows.length, retired };
+  return { count: rows.length, retired, unparked };
+}
+
+// Merged after the park: restore the run's pending reason (CAS on the parked
+// state) and the queue row's, with a note — the next pollPending tick
+// finalizes it through the normal merged path.
+async function unparkTopicBlockedRun(run, prNumber) {
+  const pendingReason = pendingSkipReasonForRun(run);
+  const note = `PR #${prNumber} was merged after the topic-targeting park — returned to the pending lifecycle for merged finalization by autonomous-pr-poller.`;
+  try {
+    const fresh = await db('autonomous_runs').where('id', run.id).first('reviewer_notes');
+    const n = await db('autonomous_runs')
+      .where('id', run.id)
+      .where('outcome', PENDING_OUTCOME)
+      .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+      .update({
+        skip_reason: pendingReason,
+        reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+        updated_at: new Date(),
+      });
+    if (Number(n) !== 1) return false;
+    if (run.opportunity_id) {
+      await db('opportunity_queue')
+        .where('id', run.opportunity_id)
+        .where('status', 'pending_review')
+        .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+        .update({ skip_reason: pendingReason, updated_at: new Date() });
+    }
+    logger.warn(`[autonomous-pr-poller] un-parked topic-blocked run ${run.id}: PR #${prNumber} merged by a human — finalizing through the merged lifecycle`);
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] un-park after merge failed for run ${run.id}: ${err.message} (retried next tick)`);
+    return false;
+  }
 }
 
 /**

@@ -246,6 +246,10 @@ function geoCompoundExemptRe() {
 // Country / nation words inside species, plant and material names are not
 // markets: stripped with the state-named species before the matchers.
 const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:oaks?|vultures?|tail)|wild\s+turkeys?|spanish\s+(?:moss|needles?|bayonets?|daggers?|lime)|french\s+drains?|italian\s+cypress|english\s+ivy|irish\s+moss|jamaica\s+dogwood|china\s+(?:rose|doll)|chile\s+peppers?|india\s+hawthorn|panama\s+hats?|greece\s+laurel|japan\s+(?:cedar|privet)|guatemala\s+rhubarb|brazil\s+nuts?|cuba\s+laurel|dubai\s+chocolate|peru\s+lily)\b/gi;
+// Pesticide formulation suffixes (SC = suspension concentrate, CS, WP, WDG,
+// …) after a governed product name are not state abbreviations — scrubbed
+// before the abbreviation matchers. "Columbia SC pest control" still is.
+const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bifen|bifenthrin|suspend|fipro|tengard|cyzmic|onslaught|dominion|premise|altriset|transport|alpine|phantom|demand|talstar|tempo|celsius|advion|blindside|headway|prodiamine|dimension|arena|acelepryn|merit|safari|xylecore|specticle|certainty|manuscript|tribute|sedgehammer|quali-pro|lesco)\s+(?:sc|cs|wp|wsb|ec|wg|wdg|sg|me|ew|ulv|xt|zc|g|p|pro|total)\b|\b[a-z-]+\s+sc\s+(?:termiticide|insecticide|fungicide|herbicide|label|rate|mix)\b/gi;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
@@ -425,7 +429,7 @@ function classifyGeoScope(text) {
   ];
   // State-named species / plants ("Texas sage", "Maine Coon") and metro-named
   // compounds ("San Jose scale", "Portland cement") are not markets.
-  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(FORMULATION_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), tg),
     ...findAll(OUT_OF_STATE_RE, tg),

@@ -779,6 +779,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getPr).not.toHaveBeenCalled();
   });
 
+  test('reconcileTopicBlockedPrs: a PR merged by a human after the park is UN-PARKED into the merged lifecycle; a closed PR gets its terminal stamp (r15)', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review' });
+    let updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r1 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r1).toMatchObject({ count: 1, retired: 0, unparked: 1 });
+    expect(gh.closePr).not.toHaveBeenCalled();
+    const runBack = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'astro_pr_pending_merge');
+    expect(runBack).toBeDefined();
+    expect(runBack.updates.reviewer_notes).toMatch(/merged after the topic-targeting park/);
+    expect(updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'astro_pr_pending_merge')).toBeDefined();
+
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r2).toMatchObject({ count: 1, retired: 0, unparked: 0 });
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+    expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+  });
+
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     setupDb({ pending: [makeRun()], updateResult: 0 });

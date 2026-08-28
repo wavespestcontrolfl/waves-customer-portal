@@ -124,6 +124,20 @@ describe('blog-writer generatePost — every persisted row is gated before write
     expect(dbMock._updates[0].patch.status).toBe('idea');
   });
 
+  test('the updated_at fence compares at DB millisecond precision, not Date equality (PR codex r15)', async () => {
+    const stamped = { ...TAEXX_ROW, updated_at: new Date('2026-08-28T05:00:00.123Z') };
+    const { writer, dbMock } = load({ post: stamped });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED' });
+    // The de-queue succeeded (status → idea), and the fence used date_trunc rather than where('updated_at', Date).
+    const patch = dbMock._updates.find((u) => u.patch.status === 'idea');
+    expect(patch).toBeDefined();
+    const chainCalls = dbMock.mock.results.map((r) => r.value);
+    const rawCalls = chainCalls.flatMap((c) => c.whereRaw.mock.calls);
+    expect(rawCalls.some(([sql, binds]) => /date_trunc\('milliseconds', updated_at\) = \?/.test(sql) && binds[0] instanceof Date)).toBe(true);
+    const plainUpdatedAt = chainCalls.flatMap((c) => c.where.mock.calls).some(([col]) => col === 'updated_at');
+    expect(plainUpdatedAt).toBe(false);
+  });
+
   test('the fence covers meta_description / content / secondary_keywords too (hook, PR codex r8 push)', async () => {
     let reads = 0;
     const post = () => (reads++ === 0 ? TAEXX_ROW : { ...TAEXX_ROW, meta_description: 'Rewritten by the operator mid-gate.' });
