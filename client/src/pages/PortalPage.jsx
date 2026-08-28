@@ -1121,7 +1121,19 @@ function RecommendationsCard({ data, customer }) {
   // Advice cards (irrigation nudges etc.) are out (owner 08-28) — this card
   // is for services the customer can ask about.
   const visibleCards = (data?.cards || []).filter((c) => c.kind !== 'advice');
-  if (visibleCards.length === 0) return null;
+  // Same rule as the empty-payload guard above: a restored purchase must
+  // still render when only advice cards came back (pre-push P1).
+  if (visibleCards.length === 0) {
+    if (!purchaseResume) return null;
+    return (
+      <OneTapPurchaseOverlay
+        open
+        card={null}
+        resume={purchaseResume}
+        onClose={() => setPurchaseResume(null)}
+      />
+    );
+  }
 
   return (
     <section data-glass="card" style={{ ...PORTAL_CARD_STYLE, position: 'relative', padding: 20 }}>
