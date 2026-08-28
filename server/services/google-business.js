@@ -1212,17 +1212,22 @@ class GoogleBusinessService {
           // draft must not make this CAS miss), inside the same transaction.
           // An ABSENT Places reply is still never a downgrade (the sample is
           // not authoritative for deletions).
+          let placesPromotedParked = false;
           if (ownerReply) {
             const after = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || live;
             if (ownerReply.trim() !== String(after.review_reply || '').trim()) {
               const { syncReplyFields, applySyncReplyFields, validatePromotionAccountFacts } = require('./review-reply/runner');
               const placesFields = await validatePromotionAccountFacts(after, syncReplyFields(after, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { conn: trx });
-              await applySyncReplyFields(existing.id, placesFields, { conn: trx, expectedReply: after.review_reply ?? null });
+              const n = await applySyncReplyFields(existing.id, placesFields, { conn: trx, expectedReply: after.review_reply ?? null });
+              // A landed write promoted straight into a park (review /
+              // account facts moved) needs the bell too (codex r54).
+              placesPromotedParked = n > 0 && placesFields.auto_reply_status === 'parked' && placesFields.auto_reply_reason === 'review_edited_after_post';
             }
           }
           const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
           const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
-          return this._reconcileReviewEdit(basis, placesEdit, { conn: trx, bell: false });
+          const reconciled = await this._reconcileReviewEdit(basis, placesEdit, { conn: trx, bell: false });
+          return placesPromotedParked ? 'posted_parked' : reconciled;
         });
         if (edited === 'yielded') continue;
         if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, placesEdit);

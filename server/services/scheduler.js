@@ -5467,7 +5467,18 @@ function initScheduledJobs() {
   // an unset gate is a no-op tick.
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
-    if (!isEnabled('reviewAutoReply')) return;
+    if (!isEnabled('reviewAutoReply')) {
+      // Gate off: only the failed-bell sweep runs (a bell_failed stamp left
+      // while the lane was on must still be re-rung) — codex r54.
+      try {
+        await runExclusive('review-auto-reply', async () => {
+          const { retryFailedEditedBells } = require('./review-reply/runner');
+          const n = await retryFailedEditedBells();
+          if (n > 0) logger.info(`Review auto-reply (off): re-rang ${n} failed bell(s)`);
+        });
+      } catch (err) { logger.warn(`Review auto-reply bell sweep (gate off) failed: ${err.message}`); }
+      return;
+    }
     try {
       await runExclusive('review-auto-reply', async () => {
         const { processDueAutoReplies } = require('./review-reply/runner');

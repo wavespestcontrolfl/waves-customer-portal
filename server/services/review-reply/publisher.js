@@ -143,13 +143,20 @@ async function recordLiveOwnerReply(reviewId, live, fresh) {
   // …and a landed google_uncertain / persist_failed draft is promoted only
   // through the same transactional account-fact validation the sync uses
   // (codex r49): row locked, facts re-read, mismatch → parked for a person.
-  const { syncReplyFields, validatePromotionAccountFacts } = require('./runner');
+  const { syncReplyFields, validatePromotionAccountFacts, notifyReviewEditedAfterPost } = require('./runner');
+  let parkedPromotion = null;
   await db.transaction(async (trx) => {
     const locked = (await trx('google_reviews').where({ id: reviewId }).forUpdate().first()) || fresh || {};
     const base = syncReplyFields({ ...locked, publish_claimed_until: null }, { owner_reply: liveReply, owner_reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() });
     const fields = await validatePromotionAccountFacts(locked, base, { conn: trx });
-    await trx('google_reviews').where({ id: reviewId }).whereNull('missing_since').update({ ...fields, auto_reply_claimed_until: null });
+    const n = await trx('google_reviews').where({ id: reviewId }).whereNull('missing_since').update({ ...fields, auto_reply_claimed_until: null });
+    if ((Array.isArray(n) ? n.length : n) > 0 && fields.auto_reply_status === 'parked' && fields.auto_reply_reason === 'review_edited_after_post') parkedPromotion = locked;
   }).catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+  // A landed write that parked (review / account facts moved since the
+  // draft) needs a person: the retrying edited-after-post bell (codex r54).
+  if (parkedPromotion) {
+    await notifyReviewEditedAfterPost({ id: reviewId }, { location_id: parkedPromotion.location_id, star_rating: parkedPromotion.star_rating, cause: 'edit' });
+  }
 }
 
 async function recordLiveOwnerReplyRemoved(reviewId, fresh) {
@@ -232,6 +239,9 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   // foreign-draft rule and the caller's guard apply to BOTH writes.
   const inClaimChecks = async (fresh) => {
     if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+    // A dismissal that landed since the caller's read is a person's decision
+    // (codex r54): nothing is posted onto a dismissed review.
+    if (fresh.dismissed) throw new ReviewReplyError(CODES.STALE, 'This review was dismissed since the page was loaded — reload it.', { status: 409 });
     prePutFingerprint = reviewFingerprint(fresh);
     prePutContent = { star_rating: fresh.star_rating, review_text: fresh.review_text, reviewer_name: fresh.reviewer_name, customer_id: fresh.customer_id };
     // The review CONTENT the browser displayed (codex r33): manually
@@ -311,6 +321,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       return trx('google_reviews')
         .where({ id: reviewId })
         .whereNull('missing_since')
+        .where(function notDismissed() { this.whereNull('dismissed').orWhere('dismissed', false); })
         .modify((qb) => { if (fresh.review_reply == null) qb.whereNull('review_reply'); else qb.where('review_reply', fresh.review_reply); })
         // …and on the review content the checks ran against (codex r36).
         .modify((qb) => whereSameContent(qb, prePutContent))
@@ -504,6 +515,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     const base = (conn = db) => conn('google_reviews')
       .where({ id: reviewId })
       .whereNull('missing_since')
+      .where(function notDismissed() { this.whereNull('dismissed').orWhere('dismissed', false); })
       // Non-overwriting callers: the reply slot must still be empty or the
       // pipeline's own draft — a human "[DRAFT]" saved while the PUT was in
       // flight is not overwritten (zero rows → PERSIST_FAILED → reconcile).

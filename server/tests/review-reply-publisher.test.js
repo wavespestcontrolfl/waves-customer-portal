@@ -443,8 +443,12 @@ describe('publishReviewReply', () => {
     // Facts moved since the timed-out PUT → recorded, but parked for a person.
     mockAccountFacts.mockReset().mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: draft }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    mockNotify.mockClear();
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    // codex r54: the parked promotion rings the retrying edited-after-post bell.
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', needsAction: true });
     // Facts unchanged → clean posted.
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' };
     mockAccountFacts.mockReset().mockResolvedValue({ city: 'Venice', tenure: 'new' });
@@ -452,6 +456,20 @@ describe('publishReviewReply', () => {
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Another auto attempt.', actor: { type: 'auto' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(state.rows[0]).toMatchObject({ review_reply: draft, auto_reply_status: 'posted', auto_reply_reason: null });
     mockAccountFacts.mockReset().mockResolvedValue(null);
+  });
+
+  test('a dismissal that landed since the caller\'s read is honoured inside the claim (codex r54)', async () => {
+    state.rows[0].dismissed = true;
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBeNull();
+    // Local-only path too.
+    const wasConfigured = mockGbp.configured; mockGbp.configured = false;
+    try {
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true })).rejects.toMatchObject({ code: CODES.STALE });
+      expect(state.rows[0].review_reply).toBeNull();
+    } finally { mockGbp.configured = wasConfigured; }
+    state.rows[0].dismissed = false;
   });
 
   test('overwriting callers fail closed when the live review cannot be read', async () => {
