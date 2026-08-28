@@ -161,6 +161,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi José, glad Marcus got the ants out of your kitchen so fast.'), g)).toBeNull();
     expect(Drafter.greetingName('Hi José, thanks')).toBe('José');
   });
+  test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
+    expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nWe will keep the ants out. Marcus says thanks.'))).toBeNull();
+  });
   test('all-caps names need provenance too; common acronyms are fine', () => {
     expect(verify(good('Hi Dana, KEVIN and Marcus are glad the ants are gone from your kitchen.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana, glad Marcus got the ants handled before your HOA walk-through.'))).toBeNull();

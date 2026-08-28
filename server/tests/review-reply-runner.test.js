@@ -13,7 +13,7 @@ jest.mock('../services/google-business', () => mockGbp);
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 jest.mock('../config/locations', () => ({ WAVES_LOCATIONS: [{ id: 'sarasota', name: 'Sarasota' }, { id: 'venice', name: 'Venice' }] }));
 jest.mock('../services/review-reply/grounding', () => ({
-  buildReplyGrounding: jest.fn(async (row) => ({ version: 'grounding-v1', reviewId: row.id, review: { rating: row.star_rating, text: row.review_text || '' }, account: null, provenance: {} })),
+  buildReplyGrounding: jest.fn(async (row) => ({ version: 'grounding-v1', reviewId: row.id, reviewerName: row.reviewer_name, review: { rating: row.star_rating, text: row.review_text || '' }, account: null, provenance: {} })),
   loadActiveTechFirstNames: jest.fn(async () => ['Marcus']),
 }));
 jest.mock('../services/review-reply/drafter', () => ({
@@ -501,8 +501,8 @@ describe('processDueAutoReplies — state machine', () => {
       .toEqual({ review_reply: 'Owner replied in Google', reply_updated_at: '2026-08-27T14:00:00Z', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
     expect(Runner.syncReplyFields(drafted, { owner_reply: null }, { now })).toEqual({});
     expect(Runner.syncReplyFields({ review_reply: 'live', publish_claimed_until: '2099-01-01T00:00:00Z' }, { owner_reply: null }, { now })).toEqual({});
-    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'posted', publish_claimed_until: null }, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
-    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'posted', publish_claimed_until: null }, { owner_reply: 'edited' }, { now, fnNow: 'NOW()' })).toEqual({ review_reply: 'edited', reply_updated_at: 'NOW()' });
+    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'skipped', publish_claimed_until: null }, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null });
+    expect(Runner.syncReplyFields({ review_reply: 'old', auto_reply_status: 'skipped', publish_claimed_until: null }, { owner_reply: 'edited' }, { now, fnNow: 'NOW()' })).toEqual({ review_reply: 'edited', reply_updated_at: 'NOW()' });
   });
 
   test('a human draft saved while the model was drafting aborts the publish and parks human_draft', async () => {
@@ -514,6 +514,39 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Agent Ops template' });
   });
 
+  test('a reviewer display-name change while drafting invalidates the draft (fingerprint + guard)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].reviewer_name = 'D. Whitfield'; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ retry: 1, posted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
+    expect(Runner.reviewFingerprint(row())).not.toBe(Runner.reviewFingerprint(row({ reviewer_name: 'D. Whitfield' })));
+  });
+
+  test('gbp_not_configured retries on the identity backoff, parks after the ceiling, and the GBP sync revives it', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
+    state.rows = [row({ location_id: 'venice' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: 1 });
+    mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    state.rows[0].auto_reply_attempts = Runner.MAX_ATTEMPTS - 1;
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured' });
+    expect(Runner.requeueFieldsOnIdentity(state.rows[0], { gbp_review_name: 'accounts/1/locations/2/reviews/9', owner_reply: null }))
+      .toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'gbp_connected', auto_reply_attempts: 0 });
+  });
+
+  test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {
+    const now = new Date('2026-08-27T15:00:00Z');
+    const posted = { review_reply: 'Our auto reply', auto_reply_status: 'posted', publish_claimed_until: null };
+    expect(Runner.syncReplyFields(posted, { owner_reply: 'Our auto reply' }, { now })).toEqual({ review_reply: 'Our auto reply', reply_updated_at: now.toISOString() });
+    expect(Runner.syncReplyFields(posted, { owner_reply: 'Owner rewrote it' }, { now })).toMatchObject({ review_reply: 'Owner rewrote it', auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' });
+    expect(Runner.syncReplyFields(posted, { owner_reply: null }, { now })).toEqual({ review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' });
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
@@ -523,12 +556,12 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied' });
   });
 
-  test('location without GBP credentials parks without drafting', async () => {
+  test('location without GBP credentials defers without drafting', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockGbp.isLocationConfigured.mockResolvedValueOnce(false);
     state.rows = [row({ location_id: 'venice' })];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured' });
     expect(mockDraft).not.toHaveBeenCalled();
   });
 

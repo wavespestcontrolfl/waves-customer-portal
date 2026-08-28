@@ -181,7 +181,8 @@ function claimGuard(row, { publishingText = null } = {}) {
     // sync applied meanwhile (a 5★ turned 2★, a rewritten body) makes the
     // draft stale — and may move the review under the human-only rule.
     if (Number(fresh.star_rating) !== Number(row.star_rating)
-      || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()) return REVIEW_CHANGED;
+      || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()
+      || String(fresh.reviewer_name || '').trim().toLowerCase() !== String(row.reviewer_name || '').trim().toLowerCase()) return REVIEW_CHANGED;
     // A "[DRAFT]" that is not ours (Agent Ops / operator saved one while we
     // were drafting) is a human intervention: never post over it.
     const human = humanDraftOn({ ...fresh, auto_reply_draft: row.auto_reply_draft || fresh.auto_reply_draft });
@@ -274,6 +275,7 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
       // The draft was written for THIS rating + text; a reviewer edit the
       // sync applied meanwhile must not get a stale draft saved against it.
       .where('star_rating', row.star_rating)
+      .where('reviewer_name', row.reviewer_name)
       .where(function sameText() {
         if (row.review_text == null || row.review_text === '') this.whereNull('review_text').orWhere('review_text', '');
         else this.where('review_text', row.review_text);
@@ -305,14 +307,14 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
 // What a draft was written FOR. A stored draft may only be reused when the
 // review's rating + text still hash to this.
 function reviewFingerprint(row) {
-  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}`).digest('hex');
+  return crypto.createHash('sha1').update(`${Number(row.star_rating) || 0}|${String(row.review_text || '').trim()}|${String(row.reviewer_name || '').trim().toLowerCase()}`).digest('hex');
 }
 
 function groundingSnapshot(grounding) {
   // Everything the model saw, minus the review text itself (already on the row).
   return {
     version: grounding.version,
-    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}`).digest('hex'),
+    fingerprint: crypto.createHash('sha1').update(`${Number(grounding.review.rating) || 0}|${String(grounding.review.text || '').trim()}|${String(grounding.reviewerName || '').trim().toLowerCase()}`).digest('hex'),
     review: { ...grounding.review, text: undefined },
     account: grounding.account,
     provenance: grounding.provenance,
@@ -354,7 +356,15 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'parked', reason: 'location_disabled' };
   }
   if (!(await gbp.isLocationConfigured(merged.location_id))) {
-    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured' });
+    // Credentials can arrive (OAuth connect, token-store recovery): retry on
+    // the identity backoff, park after the ceiling. The authoritative GBP
+    // sync also revives a parked row for that location (requeueFieldsOnIdentity).
+    const attempts = (merged.auto_reply_attempts || 0) + 1;
+    if (attempts < MAX_ATTEMPTS) {
+      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts, auto_reply_due_at: new Date(Date.now() + IDENTITY_BACKOFF_MIN * attempts * 60000).toISOString() });
+      return { outcome: 'retry', reason: 'gbp_not_configured' };
+    }
+    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts });
     return { outcome: 'parked', reason: 'gbp_not_configured' };
   }
 
@@ -639,10 +649,18 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
     const pending = [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED];
     if (existing && pending.includes(existing.auto_reply_status)) {
       Object.assign(fields, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'owner_replied_on_google', auto_reply_claimed_until: null });
+    } else if (existing?.auto_reply_status === STATUS.POSTED && ownerReply !== String(existing.review_reply || '').trim()) {
+      // The owner edited our posted reply directly in Google: it is theirs
+      // now — close the automatic state so Retract is no longer offered.
+      Object.assign(fields, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'edited_on_google' });
     }
     return fields;
   }
   if (isDraftReply(existing?.review_reply)) return {};
+  if (existing?.auto_reply_status === STATUS.POSTED && hasRealReply(existing.review_reply)) {
+    // Our posted reply is gone from Google (owner deleted it there).
+    return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.RETRACTED, auto_reply_reason: 'removed_on_google' };
+  }
   return { review_reply: null, reply_updated_at: null };
 }
 
@@ -652,9 +670,15 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
  * the moment the authoritative sync attaches its GBP identity.
  */
 function requeueFieldsOnIdentity(existing, normalized) {
-  if (!existing || existing.auto_reply_status !== STATUS.PARKED || existing.auto_reply_reason !== 'no_gbp_resource') return {};
+  if (!existing || existing.auto_reply_status !== STATUS.PARKED) return {};
+  if (hasRealReply(normalized?.owner_reply) || existing.dismissed) return {};
+  // Called only from the AUTHORITATIVE GBP sync, so the location's
+  // credentials demonstrably work: a row parked on gbp_not_configured revives.
+  if (existing.auto_reply_reason === 'gbp_not_configured') {
+    return { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'gbp_connected', auto_reply_due_at: new Date().toISOString(), auto_reply_attempts: 0 };
+  }
+  if (existing.auto_reply_reason !== 'no_gbp_resource') return {};
   if (existing.gbp_review_name || !normalized?.gbp_review_name) return {};
-  if (hasRealReply(normalized.owner_reply) || existing.dismissed) return {};
   return { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'identity_attached', auto_reply_due_at: new Date().toISOString(), auto_reply_attempts: 0 };
 }
 

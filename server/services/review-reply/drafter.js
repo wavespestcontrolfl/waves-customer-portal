@@ -104,7 +104,9 @@ const BANNED_RE = new RegExp([
 const PRIVATE_CHANNEL_RE = /\b(?:on the phone|when you called|you called|your call|your text|text message|texted|our records|our notes|our files|transcript|recording|voicemail|your account|invoice|billing|payment|balance|autopay|card on file|you mentioned to (?:our|the) (?:office|team))\b/i;
 const DISPUTE_RE = /\b(?:refund|lawsuit|attorney|legal|unpaid|balance due|credit card|chargeback|complaint|dispute|cancel(?:led|lation)?)\b/i;
 // Capitalized words a reply may carry without provenance from the review.
-// Words that legitimately open a sentence in a short thank-you reply. A
+// Words that legitimately open a sentence in a short thank-you reply (name-
+// like words such as Will/May/Hope are deliberately absent — "Will handled
+// the ants" must fail provenance). A
 // sentence-initial capitalized word outside this list (and outside the
 // review / allowed names / location words) has no provenance — "Kevin was
 // glad to help" with no Kevin in the review is a false staff attribution.
@@ -112,12 +114,12 @@ const SENTENCE_STARTERS = new Set(`
 a about after again all also always an and any anyone anything appreciate appreciated as at
 be being both but by call can come could did do does doing don't either enjoy even every
 feel for from get getting give glad go good got great had happy has have having he hear hearing
-hello here hey hi his hope hoping how if in is it its it's just keep keeping knowing know let
-like looking love made make making many may more most much never next no not nothing now of
+hello here hey hi his hoping how if in is it its it's just keep keeping knowing know let
+like looking love made make making many more most much never next no not nothing now of
 on once one only or other our ours out over own please same see seeing should since so
 some sounds still stop such sure take thank thanks that that's the their them then there there's
 these they this those though to too up us very was we we'll we're we've welcome well were
-what when where whether which while who why will wish with would yes you your you're yours
+what when where whether which while who why wish with would yes you your you're yours
 `.split(/\s+/).filter(Boolean));
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
