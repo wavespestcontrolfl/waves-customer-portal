@@ -811,6 +811,14 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
     const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r3).toMatchObject({ count: 1, unparked: 0 });
+
+    // A NEWER run for the same opportunity → this run is stale: the queue row is not ours (hook, r16 push).
+    jest.clearAllMocks();
+    updates = setupDb({ pending: [parked], newerRun: { id: 'run-newer' } });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r4 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r4).toMatchObject({ count: 1, unparked: 0 });
+    expect(updates.find((u) => u.table === 'opportunity_queue')).toBeUndefined();
   });
 
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {

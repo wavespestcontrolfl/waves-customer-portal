@@ -284,6 +284,18 @@ const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
 // opportunity_queue row's skip_reason so the review queue shows why. The PR
 // stays open — the operator edits/replaces the draft or dismisses; a
 // requeue re-drives the lane.
+// queueRowParkedState's rule, usable inside a transaction: the opportunity's
+// lifecycle belongs to its NEWEST run — a newer sibling means this run is
+// stale and the queue row is not ours to change.
+async function newerSiblingRun(q, run) {
+  if (!run.opportunity_id || !run.created_at) return null;
+  return q('autonomous_runs')
+    .where('opportunity_id', run.opportunity_id)
+    .whereNot('id', run.id)
+    .where('created_at', '>', run.created_at)
+    .first('id');
+}
+
 // Atomic: both writes run on `trx` (the topic-merge lock's transaction) and
 // each must affect exactly one row — a lost CAS (operator requeue/dismiss
 // landed meanwhile) throws TOPIC_PARK_LOST, which rolls the transaction
@@ -297,6 +309,7 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
   // FIRST, then the run) so an operator requeue/dismiss racing this tick
   // cannot deadlock against it.
   if (run.opportunity_id) {
+    if (await newerSiblingRun(q, run)) throw lost('newer-sibling');
     const queueRows = await q('opportunity_queue')
       .where('id', run.opportunity_id)
       .where('status', 'pending_review')
@@ -418,6 +431,7 @@ async function unparkTopicBlockedRun(run, prNumber) {
       // Same lock order as the park and the review-decision path: queue
       // row first, then the run.
       if (run.opportunity_id) {
+        if (await newerSiblingRun(trx, run)) throw new Error('a newer run owns this opportunity — stale run, queue row left alone');
         const q = await trx('opportunity_queue')
           .where('id', run.opportunity_id)
           .where('status', 'pending_review')

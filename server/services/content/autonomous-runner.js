@@ -710,6 +710,34 @@ class AutonomousRunner {
       await this._pendingReviewClaimOrThrow(queue, opp.id, 'content_guardrails_unavailable', { claimToken });
       return finalized;
     }
+    // Topic targeting on the EMITTED draft is judged BEFORE the guardrail
+    // verdict is acted on: the single feedback retry (one gate_retry per
+    // opportunity) must carry every actionable finding, so a guardrail
+    // failure folds these in and a guardrail pass falls through to the topic
+    // verdict below. Corpus index reused from 2d; loaded only if 2d never
+    // needed it.
+    let topicFraming = null;
+    if (draft && topicApplicable) {
+      if (!topicGate) {
+        topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_UNAVAILABLE', message: 'topic-targeting gate failed to load' }] };
+      } else {
+        try {
+          if (!topicIndex) {
+            const corpus = await this._loadBlogCorpus({ required: true });
+            if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
+            topicIndex = topicGate.indexCorpus(corpus);
+          }
+          topicFraming = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
+        } catch (err) {
+          topicFraming = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
+        }
+      }
+      run.topic_targeting_result = { ...(run.topic_targeting_result || {}), framing: topicFraming };
+    }
+    const topicBlocking = topicFraming && !topicFraming.ok
+      ? topicFraming.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1')
+      : [];
+
     if (contentGuardrails && draft) {
       // Option derivation is shared with the named-competitor approval
       // re-check (_deriveGuardrailOptions) so the stored-draft revalidation
@@ -748,39 +776,18 @@ class AutonomousRunner {
         // feedback so the second attempt hears them too (Codex r3 P2) —
         // pass/fail stays P0/P1-only.
         const advisory = guardResult.findings.filter((f) => f.severity === 'P2').slice(0, 2);
-        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`;
+        const notes = `Content guardrails failed: ${blocking.map((f) => `${f.severity} ${f.code}`).join('; ')}`
+          + (topicBlocking.length ? `; topic targeting also failed: ${topicBlocking.map((f) => `${f.severity} ${f.code}`).join('; ')}` : '');
         return this._gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
-          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...advisory],
+          claimToken, skipReason: 'content_guardrails_failed', notes, blocking: [...blocking, ...topicBlocking, ...advisory],
         });
       }
     }
 
-    // 3c'. Topic targeting on the EMITTED draft (owner rulings 2026-08-27):
-    //      the writer's OWN title/slug may not frame a new blog statewide-only
-    //      or around an out-of-footprint metro (step 2d passes bare statewide
-    //      queries on purpose), and the writer's OWN primary_keyword is
-    //      re-checked for entity ownership — emit_draft does not require it to
-    //      equal the brief keyword, so a clean brief can still emit the owned
-    //      sibling. Same one-redraft-then-skip loop as the guardrails; the
-    //      finding tells the writer how to re-anchor. Corpus index is reused
-    //      from 2d; loaded here only when 2d never needed it.
-    if (draft && topicApplicable) {
-      let framing;
-      if (!topicGate) {
-        framing = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_UNAVAILABLE', message: 'topic-targeting gate failed to load' }] };
-      } else {
-        try {
-          if (!topicIndex) {
-            const corpus = await this._loadBlogCorpus({ required: true });
-            if (!Array.isArray(corpus) || corpus.length === 0) throw new Error('empty_blog_corpus');
-            topicIndex = topicGate.indexCorpus(corpus);
-          }
-          framing = topicGate.evaluateDraftTargeting(draft, { index: topicIndex, service: brief.service || opp.service || null, city: brief?.voice_constraints?.operator_brief?.city || brief.city || opp.city || null });
-        } catch (err) {
-          framing = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_TARGETING_ERROR', message: err.message }] };
-        }
-      }
-      run.topic_targeting_result = { ...(run.topic_targeting_result || {}), framing };
+    // 3c'. Topic verdict on its own (the guardrails passed): same one-redraft-
+    //      then-skip loop; the finding tells the writer how to re-anchor.
+    if (topicFraming) {
+      const framing = topicFraming;
       if (!framing.ok) {
         const blocking = framing.findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
         const skipReason = framing.stage === 'ownership' ? 'topic_ownership_failed' : 'topic_framing_failed';

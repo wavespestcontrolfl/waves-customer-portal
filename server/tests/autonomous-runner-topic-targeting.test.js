@@ -44,7 +44,7 @@ const BENIGN = {
 
 const claimedAt = new Date('2026-08-27T13:00:00Z');
 
-function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn() }, corpus = [IN_WALL, BENIGN], corpusError = null, topicGate, dbMock = makeDbMock(), factsOk = false }) {
+function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn() }, corpus = [IN_WALL, BENIGN], corpusError = null, topicGate, dbMock = makeDbMock(), factsOk = false, guardrails = { pass: true, findings: [] } }) {
   jest.resetModules();
   // A brief that carries a city makes the facts-sufficiency gate (step 2b,
   // before the topic gate) applicable; `factsOk` stubs it sufficient so the
@@ -70,7 +70,7 @@ function loadRunner({ queue, briefBuilder, dispatcher = { runWithBrief: jest.fn(
       ? jest.fn().mockRejectedValue(new Error(corpusError))
       : jest.fn().mockResolvedValue(corpus),
   }));
-  jest.doMock('../services/content/content-guardrails', () => ({ evaluate: jest.fn().mockReturnValue({ pass: true, findings: [] }) }));
+  jest.doMock('../services/content/content-guardrails', () => ({ evaluate: jest.fn().mockReturnValue(guardrails) }));
   jest.doMock('../services/content/seo-completion-gate', () => ({ evaluate: jest.fn().mockReturnValue({ passed: true, score: 100, summary: { p0: 0, p1: 0, p2: 0 }, findings: [] }) }));
   jest.doMock('../services/content/ai-visibility-gate', () => ({ evaluateStatic: jest.fn().mockReturnValue({ passed: true, findings: [], summary: { p0: 0, p1: 0, p2: 0, p3: 0, needs_review: false } }) }));
   if (topicGate) jest.doMock('../services/content/topic-targeting-gate', () => topicGate);
@@ -359,5 +359,30 @@ describe('approval path — the stored draft is re-validated for topic targeting
     runner._evaluatePublishingGuards = jest.fn().mockResolvedValue({ ok: false, reason: 'stop_here' });
     await expect(runner._approveNamedCompetitorLocked('opp_x', { runId: 'run_x' })).rejects.toMatchObject({ message: expect.stringMatching(/Publishing guard blocked: stop_here/) });
     expect(runner._evaluatePublishingGuards).toHaveBeenCalled();
+  });
+});
+
+describe('PR codex r16 — one retry, every finding', () => {
+  const draftWith = (title) => ({
+    runWithBrief: jest.fn().mockResolvedValue({
+      ok: true,
+      draft: { url: '/pest-control/kinds-of-ants/', title, frontmatter: { title, slug: '/pest-control/kinds-of-ants/', primary_keyword: 'kinds of ants in florida', meta_description: 'x' }, body: 'Benign copy.' },
+    }),
+  });
+  test('a guardrail failure AND a topic failure on one draft → the single gate retry carries both findings', async () => {
+    const queue = makeQueue({ id: 'opp_both', action_type: 'new_supporting_blog', query: 'kinds of ants in florida', service: 'pest', claimed_at: claimedAt, signal_metadata: {} });
+    const dispatcher = draftWith('Kinds of Ants in Florida: A Field Guide');
+    const { runner, dbMock } = loadRunner({ queue, briefBuilder: blogBrief({ query: 'kinds of ants in florida' }), dispatcher, guardrails: { pass: false, findings: [{ severity: 'P0', code: 'PRICE_CLAIM', message: 'names a price' }] } });
+
+    const result = await runner.runNext();
+
+    expect(result.outcome).toBe('deferred_gate_retry');
+    expect(result.skip_reason).toBe('content_guardrails_failed');
+    expect(result.reviewer_notes).toMatch(/topic targeting also failed: P0 TOPIC_GEO_STATEWIDE/);
+    const retry = dbMock._updates.map((u) => u.patch).find((p) => typeof p.signal_metadata === 'string' && p.signal_metadata.includes('gate_retry'));
+    expect(retry).toBeDefined();
+    const codes = JSON.parse(retry.signal_metadata).gate_retry.findings.map((f) => f.code);
+    expect(codes).toEqual(expect.arrayContaining(['PRICE_CLAIM', 'TOPIC_GEO_STATEWIDE']));
+    expect(result.topic_targeting_result.framing.findings[0].code).toBe('TOPIC_GEO_STATEWIDE');
   });
 });
