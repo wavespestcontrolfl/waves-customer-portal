@@ -640,7 +640,7 @@ t.uuid('approval_id');                              // → seo_link_approvals (d
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
-t.jsonb('merchant_binding').notNullable();          // IMMUTABLE at reservation: { checkout_origin (scheme+host of the investigated submission_url), allowed_processor_hosts[] (explicit, from the investigator's observed checkout chain, e.g. stripe.com/paypal.com), issuer_merchant_descriptor (when the issuer exposes it) } — validated immediately before mint AND before submit against the LIVE checkout page origin/redirect chain; any mismatch ⇒ voided (pre-exposure) or refused; where the issuer supports merchant/MCC restrictions the single-use card is minted locked to that merchant
+t.jsonb('merchant_binding').notNullable();          // IMMUTABLE at reservation: { checkout_origin, processor: { host, merchant_account_id } — the processor-level RECIPIENT identity observed at investigation (Stripe account/`acct_…` or checkout session's account, PayPal merchant id, etc.), issuer_merchant_descriptor } — a processor HOST alone never binds anything (any merchant can sit on stripe.com); validated immediately before mint AND before submit against the LIVE checkout (origin + the processor merchant/account id read from the live checkout session/form); mismatch or unreadable id ⇒ voided (pre-exposure) or refused
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.uuid('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease: every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
@@ -691,8 +691,15 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   submit against the live page: the checkout page's origin and every redirect hop must be
   the bound origin or an allowed processor host; anything else — a redirect elsewhere, a
   changed domain, an injected form — refuses (`voided` if pre-exposure, else `ambiguous`
-  with the card closed). Where the issuer supports it the single-use card is minted with a
-  merchant/MCC lock to that binding, so even a leaked number cannot fund another merchant.
+  with the card closed). The recipient is bound at the **processor merchant/account level**
+  (the merchant's Stripe/PayPal/etc. account identifier captured at investigation and
+  re-read from the live checkout), never merely at the processor host — a redirect to a
+  different merchant on the same processor fails the binding. Enforcement is
+  **fail-closed on two requirements, at least one of which must hold or no automated
+  purchase is made**: (1) the issuer mints the single-use card with a merchant lock to that
+  identity, or (2) the broker can read and verify the processor merchant/account id from
+  the live checkout. A merchant whose recipient identity cannot be verified either way is
+  refused (`instrument_unavailable`) and parked for the owner to pay manually.
 - **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
   final total is `0` (waived/discounted fee), the row is `voided` with
   `outcome='no_payment_required'` BEFORE any mint (no card exists), the placement proceeds
@@ -1202,7 +1209,8 @@ Production enablement is explicit per gate, in that order, after each step's rev
 ## 15. What v1 got right (retained by reference)
 
 - §2 invariants and "verify, don't trust" — unchanged.
-- §4 reconciliation jobs (verifier 04:30 ET, indexer 05:00 ET, profile cross-link) — unchanged.
+- §4 reconciliation jobs (verifier 04:30 ET, indexer 05:00 ET) — unchanged. The v1 "profile
+  cross-link" was never built; it is scheduled in step 4 (§8, §14), not retained.
 - §14 dual-ROI target taxonomy: Tier 1 realtor / inspector / property-manager / complementary-
   service partnerships (WDO wedge); Tier 2 local media + HARO with seasonal hooks and the Pest
   Pressure engine as the linkable asset; Tier 3 chambers / sponsorships; Tier 4 NPMA / FPMA /
