@@ -5288,9 +5288,31 @@ function ScheduleTab({ customer, properties = [], onRequestVisit }) {
 // =========================================================================
 const CARD_REFRESH_MISS_MSG = 'Saved — but the card list didn’t refresh. Reopen the Billing tab to see it.';
 
-function BillingTab({ customer }) {
+function BillingTab({ customer, refreshCustomer }) {
   const portalGlass = usePortalGlass();
   const [payments, setPayments] = useState([]);
+  // "Apply my credit automatically" slider (owner ruling 2026-08-28): the
+  // balance stays on the account until the customer turns this on. Server-
+  // authoritative (/auth/me autoApplyAccountCredit); optimistic flip, revert
+  // on failure.
+  const [autoApplyCredit, setAutoApplyCredit] = useState(!!customer?.autoApplyAccountCredit);
+  const [autoApplyCreditBusy, setAutoApplyCreditBusy] = useState(false);
+  useEffect(() => { setAutoApplyCredit(!!customer?.autoApplyAccountCredit); }, [customer?.autoApplyAccountCredit]);
+  const handleAutoApplyCreditToggle = async () => {
+    if (autoApplyCreditBusy) return;
+    const next = !autoApplyCredit;
+    setAutoApplyCreditBusy(true);
+    setAutoApplyCredit(next);
+    try {
+      await api.updateAccountCreditPreference(next);
+      if (typeof refreshCustomer === 'function') refreshCustomer();
+    } catch (err) {
+      setAutoApplyCredit(!next);
+      console.error('account-credit preference update failed', err);
+    } finally {
+      setAutoApplyCreditBusy(false);
+    }
+  };
   const [balance, setBalance] = useState(null);
   const [cards, setCards] = useState([]);
   const [autopay, setAutopay] = useState(null);
@@ -6505,6 +6527,30 @@ function BillingTab({ customer }) {
             }}>
               <span>Total Account Credit</span>
               <span>{money(totalCredits)}</span>
+            </div>
+          )}
+          {(totalCredits > 0 || autoApplyCredit) && (
+            <div
+              data-testid="auto-apply-credit-row"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+                padding: '10px 12px', background: subtle, borderRadius: 8, marginBottom: 12, border: '1px solid #E7E2D7',
+              }}
+            >
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Apply my credit to invoices automatically</div>
+                <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
+                  {autoApplyCredit
+                    ? 'Your credit is applied to each new invoice before anything is charged.'
+                    : 'Off — your credit stays on your account until you turn this on.'}
+                </div>
+              </div>
+              <ToggleSwitch
+                checked={autoApplyCredit}
+                disabled={autoApplyCreditBusy}
+                onChange={handleAutoApplyCreditToggle}
+                label="Apply my account credit to invoices automatically"
+              />
             </div>
           )}
           {[
@@ -15262,7 +15308,7 @@ function ChatWidget({ customer, onClose, initialQuestion }) {
 }
 
 export default function PortalPage() {
-  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty } = useAuth();
+  const { customer, logout, properties, propertiesError, refreshProperties, switchProperty, refreshCustomer } = useAuth();
   const isMobileShell = useIsMobile(900);
   // Honor ?tab=billing etc. so deep-links from SMS (e.g. the "update your
   // card" link in autopay-failure texts) land the customer on the right tab.
@@ -15963,7 +16009,7 @@ export default function PortalPage() {
           // history entries.
           navigate(sub === 'completed' ? '/?tab=services' : '/?tab=schedule', { replace: true });
         }} onRequestVisit={() => setShowReportIssue(true)} />}
-        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} />}
+        {activeTab === 'billing' && <BillingTab key={`billing-${propertyRenderKey}`} customer={customer} refreshCustomer={refreshCustomer} />}
         {activeTab === 'refer' && <ReferTab key={`refer-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'documents' && <DocumentsTab key={`documents-${propertyRenderKey}`} customer={customer} onSwitchTab={switchTab} />}
         {activeTab === 'property' && <PropertyTab key={`property-${propertyRenderKey}`} customer={customer} />}

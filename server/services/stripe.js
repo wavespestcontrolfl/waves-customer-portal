@@ -2241,7 +2241,11 @@ const StripeService = {
         // invoice with an abandoned /pay PI, which would block the route-level
         // apply) could collect gross while the customer's credit sits unused.
         // Gated + idempotent; on full coverage there is nothing to charge.
-        if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+        // Customer opt-in (customers.auto_apply_account_credit, owner ruling
+        // 2026-08-28) checked before the PI column is touched — an opted-out
+        // customer's charge-now path runs exactly as before this seam existed.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit
+          && await require('./customer-credit').customerAutoApplyEnabled(lockedInvoice.customer_id, trx)) {
           if (lockedInvoice.stripe_payment_intent_id) {
             await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
             lockedInvoice.stripe_payment_intent_id = null;
@@ -3413,12 +3417,16 @@ const StripeService = {
         // 409 on an in-flight one, replace a canceled one via the idempotency
         // key). The triage must NEVER cancel/clear a PI when there's nothing to
         // draw down. A missing customer row reads as zero.
+        // ...and only when the customer has turned automatic application ON
+        // (customers.auto_apply_account_credit, owner ruling 2026-08-28) —
+        // an opted-out balance reads as zero here, so the stale-PI triage,
+        // the coverage probe and the apply all leave it untouched.
         let availableCredit = 0;
         if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
           const creditRow = await trx('customers')
             .where({ id: lockedInvoice.customer_id })
-            .first('account_credits');
-          availableCredit = Number(creditRow?.account_credits) || 0;
+            .first('account_credits', 'auto_apply_account_credit');
+          availableCredit = creditRow?.auto_apply_account_credit === true ? (Number(creditRow?.account_credits) || 0) : 0;
         }
 
         // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice

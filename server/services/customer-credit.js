@@ -231,7 +231,18 @@ function computeApplication({ total, creditApplied = 0, balance = 0, fullCoverag
  * due, up to the remaining balance. Best-effort caller contract — callers must
  * not let a credit hiccup roll back invoice creation.
  */
-async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false }, trx = null) {
+// Owner ruling 2026-08-28: automatic credit application is the CUSTOMER's
+// choice — customers.auto_apply_account_credit (portal slider, default
+// false). Read with the caller's connection so a locked transaction sees
+// one snapshot; a missing row or column reads as OFF (fail toward leaving
+// the balance untouched).
+async function customerAutoApplyEnabled(customerId, dbh = db) {
+  if (!customerId) return false;
+  const row = await dbh('customers').where({ id: customerId }).first('auto_apply_account_credit');
+  return row?.auto_apply_account_credit === true;
+}
+
+async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fullCoverageOnly = false, maxAuthorizedSubtotal = null, requireSelfPayScheduledServiceId = null, requireOneTimeLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, requireNoAppointmentCardLane = false, customerRequested = false }, trx = null) {
   const run = async (t) => {
     // The lane check lives inside the visit-lock block — without a visit
     // to lock it cannot be verified, so fail closed rather than silently
@@ -246,6 +257,14 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // The customer's opt-in gates every AUTOMATIC apply (owner ruling
+    // 2026-08-28). `customerRequested` marks the one non-automatic caller
+    // — estimate acceptance, where the customer just accepted a price
+    // presented net of their credit — and the admin apply-credit route
+    // posts its movement directly. Checked before any lock or side effect.
+    if (!customerRequested && !(await customerAutoApplyEnabled(invoice.customer_id, t))) {
+      return { applied: 0, skipped: 'customer_opt_out' };
+    }
     // Stopped-dunning honored on the CREDIT side too (pre-push P0 round
     // 9): "stop collecting this invoice" (disputed bill, check in the
     // mail) must not have account credit consumed — or the invoice flipped
@@ -683,6 +702,7 @@ async function reverseCreditAndStampPayer({ invoiceId, payerId, poNumber = null,
 }
 
 module.exports = {
+  customerAutoApplyEnabled,
   VALID_SOURCES,
   CREDIT_DISPLAY_TYPE_BY_SOURCE,
   WAVEGUARD_EXTENSION_CREDIT_BY,
