@@ -21,6 +21,9 @@ jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.fn = { now: jest.fn(() => 'NOW()') };
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
+  // A2's customer_dunning_sequences: present by default in this suite (the
+  // read is memoized per process — tests that need "absent" reset the memo).
+  fn.schema = { hasTable: jest.fn(async () => true) };
   return fn;
 });
 
@@ -39,7 +42,7 @@ jest.mock('@anthropic-ai/sdk', () => jest.fn(() => ({
 // dial time (prb-r1) — mocked as one $258 eligible invoice.
 jest.mock('../services/collections/contact-policy', () => ({
   loadEligibleInvoices: jest.fn(async () => ([
-    { id: 'inv-1', invoice_number: 'WPC-0001', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
+    { id: 'inv-1', invoice_number: 'WPC-0001', status: 'overdue', due_date: '2026-07-20', total: '258.00', credit_applied: 0 },
   ])),
   // staffed-hours delegates to the policy's ONE window predicate — real
   // 9–18 ET Mon–Fri math here (no override in this suite).
@@ -49,6 +52,9 @@ jest.mock('../services/collections/contact-policy', () => ({
     return et.dayOfWeek >= 1 && et.dayOfWeek <= 5 && et.hour >= 9 && et.hour < 18;
   }),
   isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
+  // The LIVE policy re-run at every balance refresh (disclosure / send /
+  // credit-cover): allowed by default; ids null = "no set to compare".
+  evaluate: jest.fn(async () => ({ allowed: true, denialReasons: [], eligibleInvoiceIds: null })),
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -73,6 +79,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 }));
 jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(async () => ({ sent: true, ok: true })),
+  SEND_CLAIMABLE_STATUSES: ['draft', 'scheduled', 'sent', 'viewed', 'overdue'],
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
@@ -122,7 +129,7 @@ function chain({ first } = {}) {
   return q;
 }
 
-function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER } = {}) {
+function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER, dunning = undefined } = {}) {
   const queues = {
     call_log: [chain({ first: callRow }), chain(), chain(), chain()],
     collection_cases: [chain({ first: caseRow })],
@@ -131,6 +138,8 @@ function setDb({ callRow = CALL_ROW, caseRow = CASE_ROW, customer = CUSTOMER } =
     // customers is read at init AND at the pay-link phone re-check (prb-r16)
     // — always serve the same row rather than a finite queue.
     if (table === 'customers') return chain({ first: customer });
+    // A2's account dunning row (consequence_due_at) — absent by default.
+    if (table === 'customer_dunning_sequences') return chain({ first: dunning });
     const queue = queues[table];
     if (!queue || !queue.length) return chain();
     return queue.shift();
@@ -1209,6 +1218,317 @@ describe('prb-r17', () => {
   });
 });
 
+// ACCOUNT-LEVEL disclosure (owner ruling 2026-08-28): every open invoice is
+// named — service and date, oldest marked past due — then ONE total, and she
+// asks for the full balance. Registers from the oldest-due invoice; the
+// consequence lines only on true state.
+describe('account-level disclosure + registers', () => {
+  const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+  const { buildSystemPrompt, readDunningState } = require('../services/collections/outbound-voice/collections-conversation');
+
+  test('get_balance_details itemizes every invoice oldest-first with its age and states the total; asks for the full balance', async () => {
+    // Read twice: by _init (constructor) and again at disclosure time.
+    const two = [
+      { id: 'inv-new', title: 'Pest Control', service_date: '2026-08-24', due_date: '2026-08-24', total: '105.30', credit_applied: 0, status: 'overdue' },
+      { id: 'inv-old', title: 'Lawn Care', service_date: '2026-07-12', due_date: '2026-07-29', total: '44.55', credit_applied: 0, status: 'overdue' },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    convo._ctx.register = 'friendly';
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/^Total account balance: \$149\.85 across 2 open invoices/);
+    expect(out.indexOf('Lawn Care on 2026-07-12')).toBeLessThan(out.indexOf('Pest Control on 2026-08-24'));
+    expect(out).toMatch(/Lawn Care on 2026-07-12: \$44\.55 \(\d+ days past due\)/);
+    expect(out).toMatch(/ask to take care of the full balance today; offer to text the secure payment link — it opens our secure payment page, which lists the open invoices it can take together/);
+    expect(out).toMatch(/do not promise which invoices it will bundle/); // /pay re-selects siblings at open time — no send-time set is durable
+    expect(out).not.toMatch(/consequence/i); // friendly register never carries one
+    expect(convo._ctx.invoiceId).toBe('inv-old'); // the link carries the OLDEST-DUE invoice, not the loader's first row
+  });
+
+  test('the pay link rides the oldest-due SENDABLE invoice — a legacy unpaid row anchors the clock but never the link', async () => {
+    const mixed = [
+      { id: 'inv-legacy', title: 'Lawn Care', status: 'unpaid', due_date: '2026-06-20', total: '44.55', credit_applied: 0 },
+      { id: 'inv-mid', title: 'Mosquito', status: 'overdue', due_date: '2026-07-25', total: '20.00', credit_applied: 0 },
+      { id: 'inv-new', title: 'Pest Control', status: 'sent', due_date: '2026-08-10', total: '105.30', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(mixed).mockResolvedValueOnce(mixed);
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    expect(convo._ctx.invoiceId).toBe('inv-mid');
+    convo.verified = true;
+    const out = await convo._toolGetBalance();
+    expect(convo._ctx.register).toBe('firm'); // the clock still anchors on the legacy row (53d)
+    expect(out.indexOf('Lawn Care on 2026-06-20')).toBeLessThan(out.indexOf('Mosquito on 2026-07-25'));
+    expect(convo._ctx.invoiceId).toBe('inv-mid');
+    // Nothing sendable ⇒ no link target, the office number instead.
+    const legacyOnly = [mixed[0]];
+    loadEligibleInvoices.mockResolvedValueOnce(legacyOnly).mockResolvedValueOnce(legacyOnly).mockResolvedValueOnce(legacyOnly); // init, disclosure, send-time
+    setDb();
+    const { convo: c2 } = makeConvo();
+    await c2._contextReady;
+    c2.verified = true;
+    await c2._toolGetBalance();
+    expect(c2._ctx.invoiceId).toBeNull();
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/No sendable invoice/);
+  });
+
+  test('the send records and promises only the invoice the link CARRIES — /pay bundles siblings by its own live selection', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const two = [
+      { id: 'inv-old', title: 'Lawn Care', status: 'overdue', due_date: '2026-07-29', total: '44.55', credit_applied: 0, stripe_payment_intent_id: 'pi_old' },
+      { id: 'inv-new', title: 'Pest Control', status: 'sent', due_date: '2026-08-24', total: '105.30', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two).mockResolvedValueOnce(two); // init, disclosure, send-time
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    expect(await convo._toolGetBalance()).toMatch(/do not promise which invoices it will bundle/);
+    convo._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(out).toMatch(/opens our secure payment page, where they can pay the open invoices it lists together/);
+    expect(out).not.toMatch(/full account balance/);
+    expect(InvoiceService.sendViaSMS).toHaveBeenLastCalledWith('inv-old', expect.anything()); // the oldest-due SENDABLE invoice carries the link
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-old'] })); // never the dynamic sibling set
+    // An UNREADABLE set at send time sends nothing at all.
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+    setDb();
+    const { convo: c2 } = makeConvo();
+    await c2._contextReady;
+    c2.verified = true;
+    await c2._toolGetBalance();
+    loadEligibleInvoices.mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('payer resolve failed'); return two; });
+    c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockClear();
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/could not be re-checked right now — do not send the link/);
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    expect(c2.payLinkSent).toBe(false);
+  });
+
+  test('the overdue anchor clearing mid-call leaves a not-yet-callable set — nothing is dunned at disclosure or send time', async () => {
+    const ContactPolicy = require('../services/collections/contact-policy');
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const old = { id: 'inv-old', title: 'Lawn Care', status: 'overdue', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }; // 42d
+    const young = { id: 'inv-new', title: 'Pest Control', status: 'sent', due_date: '2026-08-05', total: '105.30', credit_applied: 0 }; // 7d — under the 14-day floor
+    // Disclosure: the anchor was paid between dial and verification.
+    loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_not_overdue_long_enough'], eligibleInvoiceIds: ['inv-new'] });
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/The account has changed since we dialed and this call may not collect on it now/);
+    expect(out).toMatch(/do NOT say anything was paid, is current, or is settled/); // the anchor may have been stopped or re-dated, not paid
+    expect(out).not.toMatch(/105\.30|nothing overdue|taken care of/);
+    expect(convo.disclosed).toBe(false);
+    // Send time: disclosed on the full set, then the anchor cleared.
+    loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
+    setDb();
+    const { convo: c2 } = makeConvo();
+    await c2._contextReady;
+    c2.verified = true;
+    await c2._toolGetBalance();
+    c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockClear();
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_not_overdue_long_enough'], eligibleInvoiceIds: ['inv-new'] });
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: The account has changed since we dialed/);
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    // Over the 60-day ceiling (an older invoice joined after dialing) is the office's, not this call's.
+    const ancient = { id: 'inv-ancient', title: 'Termite', status: 'overdue', due_date: '2026-05-01', total: '300.00', credit_applied: 0 }; // 103d
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([ancient, old]);
+    setDb();
+    const { convo: c3 } = makeConvo();
+    await c3._contextReady;
+    c3.verified = true;
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['pilot_overdue_too_long'], eligibleInvoiceIds: ['inv-ancient', 'inv-old'] });
+    const over = await c3._toolGetBalance();
+    expect(over).toMatch(/The account has changed since we dialed/);
+    expect(over).not.toMatch(/300\.00|nothing overdue/);
+    expect(c3.disclosed).toBe(false);
+    // The LIVE policy is what decides: a payment plan activated during verification, or a
+    // just-sent older invoice with no dunning history, refuse the same way…
+    for (const reason of ['flag_payment_plan_active', 'pilot_insufficient_dunning_history', 'pilot_awaiting_microdeposit_verification']) {
+      loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+      ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: [reason], eligibleInvoiceIds: ['inv-old'] });
+      setDb();
+      const { convo: c4 } = makeConvo();
+      await c4._contextReady;
+      c4.verified = true;
+      const refused = await c4._toolGetBalance();
+      expect(refused).toMatch(/The account has changed since we dialed/);
+      expect(refused).not.toMatch(/44\.55/);
+      expect(c4.disclosed).toBe(false);
+      expect(ContactPolicy.evaluate).toHaveBeenLastCalledWith('cust-1', expect.objectContaining({ channel: 'voice', purpose: 'late_payment', excludeCollectionCaseId: 'case-1' }));
+    }
+    // …while the call's OWN timing/frequency denials never re-deny a connected call.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: false, denialReasons: ['outside_call_window', 'contact_within_24h', 'voice_contact_within_7d'], eligibleInvoiceIds: ['inv-old'] });
+    setDb();
+    const { convo: c5 } = makeConvo();
+    await c5._contextReady;
+    c5.verified = true;
+    expect(await c5._toolGetBalance()).toMatch(/Total account balance: \$44\.55/);
+    // A policy set that differs from the loaded set is an incomplete picture, never a total.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old', 'inv-other'] });
+    setDb();
+    const { convo: c6 } = makeConvo();
+    await c6._contextReady;
+    c6.verified = true;
+    expect(await c6._toolGetBalance()).toMatch(/could not be verified/);
+    // …and so are amounts or an anchor day that the policy saw differently (an edit between the two reads).
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 9999 } });
+    setDb();
+    const { convo: c7 } = makeConvo();
+    await c7._contextReady;
+    c7.verified = true;
+    expect(await c7._toolGetBalance()).toMatch(/could not be verified/);
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 4455 }, eligibleAnchorDueDate: '2026-06-01' });
+    setDb();
+    const { convo: c8 } = makeConvo();
+    await c8._contextReady;
+    c8.verified = true;
+    expect(await c8._toolGetBalance()).toMatch(/could not be verified/);
+    // Agreeing reads disclose normally.
+    loadEligibleInvoices.mockResolvedValueOnce([old]).mockResolvedValueOnce([old]);
+    ContactPolicy.evaluate.mockResolvedValueOnce({ allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-old'], eligibleInvoiceCents: { 'inv-old': 4455 }, eligibleAnchorDueDate: '2026-07-01' });
+    setDb();
+    const { convo: c9 } = makeConvo();
+    await c9._contextReady;
+    c9.verified = true;
+    expect(await c9._toolGetBalance()).toMatch(/Total account balance: \$44\.55/);
+  });
+
+  test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
+    const legacy = [
+      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: new Date('2026-06-20T03:30:00Z'), total: '10.00', credit_applied: 0 }, // 53d — inside the window; 23:30 ET on 06-19
+      { id: 'l2', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-07-01T12:00:00Z', total: '12.00', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(legacy).mockResolvedValueOnce(legacy);
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/Pest Control on 2026-06-19: \$10\.00/); // ET calendar day, never String(Date) in UTC
+    expect(out).toMatch(/Pest Control on 2026-07-01: \$12\.00/);
+  });
+
+  test('an INCOMPLETE disclosure-time read discloses nothing — never a partial "total", never "settled"', async () => {
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady; // init read = the default fixture
+    loadEligibleInvoices.mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('candidate bound hit'); return []; });
+    convo.verified = true;
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/could not be verified/);
+    expect(out).toMatch(/do NOT state any figure and do NOT say the account is settled/);
+    expect(convo.disclosed).toBe(false);
+  });
+
+  test('the register follows the FRESH set at disclosure and the system prompt is rebuilt to match', async () => {
+    const young = [{ id: 'a', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }]; // 18d on Aug 12 → friendly
+    const old = [{ id: 'b', title: 'Lawn Care', due_date: '2026-07-01', total: '10.00', credit_applied: 0 }]; // 42d → firm
+    loadEligibleInvoices.mockResolvedValueOnce(young).mockResolvedValueOnce(old);
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    expect(convo._ctx.register).toBe('friendly');
+    convo._ensureSystemBlocks();
+    expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FRIENDLY REMINDER/);
+    convo.verified = true;
+    await convo._toolGetBalance();
+    expect(convo._ctx.register).toBe('firm');
+    expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FIRM/);
+    expect(convo._systemBlocks[0].text).not.toMatch(/REGISTER: FRIENDLY/);
+  });
+
+  test('firm/final registers speak a consequence ONLY when the state is true — read from the DB at disclosure', async () => {
+    const firmSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }]; // 42d on Aug 12 → firm
+    const finalSet = [{ id: 'inv-old', title: 'Lawn Care', due_date: '2026-06-13', total: '44.55', credit_applied: 0 }]; // exactly 60d → final (the pilot ceiling is 60)
+    const disclose = async (set, { customer = CUSTOMER, dunning } = {}) => {
+      loadEligibleInvoices.mockResolvedValueOnce(set).mockResolvedValueOnce(set);
+      setDb({ customer, dunning });
+      const { convo } = makeConvo();
+      await convo._contextReady;
+      convo.verified = true;
+      return { convo, out: await convo._toolGetBalance() };
+    };
+    let r = await disclose(firmSet);
+    expect(r.convo._ctx.register).toBe('firm');
+    expect(r.out).toMatch(/No consequence is authorized on this call/);
+    r = await disclose(firmSet, { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } }); // A2 actually placed the hold
+    expect(r.convo._ctx.holdActive).toBe(true);
+    expect(r.out).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
+    // customers.service_pause_reason / service_paused_at are NOT a scheduling hold (dues-cron only) — never a consequence.
+    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: '2026-08-01T12:00:00Z' }, dunning: { hold_applied_at: null } });
+    expect(r.convo._ctx.holdActive).toBe(false);
+    expect(r.out).toMatch(/No consequence is authorized on this call/);
+    r = await disclose(finalSet);
+    expect(r.convo._ctx.register).toBe('final');
+    expect(r.out).toMatch(/No consequence is authorized/);
+    r = await disclose(finalSet, { dunning: { consequence_due_at: '2026-09-15' } });
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
+    // Knex returns a timestamptz as a Date — rendered as its ET calendar day, never "Tue Sep 15".
+    r = await disclose(finalSet, { dunning: { consequence_due_at: new Date('2026-09-16T02:30:00Z') } }); // 22:30 ET on 09-15
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled/);
+    expect(r.out).not.toMatch(/Sep 1/);
+    // A UTC-MIDNIGHT timestamptz is still the previous ET day — never read as a date-only value.
+    r = await disclose(finalSet, { dunning: { consequence_due_at: new Date('2026-09-16T00:00:00Z') } }); // 20:00 ET on 09-15
+    expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled/);
+    expect(r.convo._ctx.consequenceDueAt).toBe('2026-09-15');
+    // An unparseable deadline authorizes nothing.
+    r = await disclose(finalSet, { dunning: { consequence_due_at: 'not-a-date' } });
+    expect(r.out).toMatch(/No consequence is authorized/);
+    // A hold on a FRIENDLY account is never spoken (the register gates it too).
+    r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } });
+    expect(r.convo._ctx.register).toBe('friendly');
+    expect(r.out).not.toMatch(/consequence/i);
+  });
+
+  test('the prompt carries exactly one register, the full-balance ask, the pay-link default, and the fee prohibition', () => {
+    const friendly = buildSystemPrompt({ firstName: 'Pat', today: '2026-08-28', register: 'friendly' });
+    expect(friendly).toMatch(/REGISTER: FRIENDLY REMINDER/);
+    expect(friendly).not.toMatch(/REGISTER: FIRM|REGISTER: FINAL/);
+    expect(friendly).toMatch(/state the TOTAL account balance, then name each open invoice/);
+    expect(friendly).toMatch(/ALWAYS offer to text the secure payment link \(send_pay_link\) — the balance tool result says what it covers/);
+    expect(friendly).toMatch(/Never mention late fees, interest, or collection costs/);
+    expect(buildSystemPrompt({ firstName: 'Pat', register: 'firm' })).toMatch(/REGISTER: FIRM/);
+    expect(buildSystemPrompt({ firstName: 'Pat', register: 'final' })).toMatch(/REGISTER: FINAL NOTICE/);
+    expect(buildSystemPrompt({ firstName: 'Pat' })).toMatch(/REGISTER: FRIENDLY/); // default
+  });
+
+  test('readDunningState issues NO query while the A2 table is absent (memoized hasTable), and lights up once it exists', async () => {
+    const Convo = require('../services/collections/outbound-voice/collections-conversation');
+    Convo._resetDunningTableMemo();
+    db.schema.hasTable.mockResolvedValueOnce(false);
+    db.mockClear();
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(db).not.toHaveBeenCalledWith('customer_dunning_sequences');
+    expect(db.schema.hasTable).toHaveBeenCalledTimes(1); // memoized
+    Convo._resetDunningTableMemo();
+    setDb({ dunning: { hold_applied_at: '2026-08-01T12:00:00Z', consequence_due_at: '2026-09-15' } });
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: '2026-08-01T12:00:00Z', consequenceDueAt: '2026-09-15' });
+  });
+
+  test('readDunningState is all-null when the A2 table is absent or unreadable', async () => {
+    db.mockImplementationOnce(() => { throw new Error('relation "customer_dunning_sequences" does not exist'); });
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(await readDunningState(null)).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+  });
+});
+
 // prb-r18 pins.
 describe('prb-r18', () => {
   test('a PAN read across turns is caught, and the prior fragments are sanitized out of the model history', async () => {
@@ -1235,6 +1555,68 @@ describe('prb-r18', () => {
     expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ pay_link_agreement_verbatim: 'yes please text it over' }),
     }));
+  });
+
+  test('credit covering the anchor invoice while siblings stay open re-opens the pay link for the remainder — never "settled"', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    const rest = [{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-07-20', total: '30.00', credit_applied: 0, status: 'overdue' }]; // 23d — still callable
+    // Each attempt reads twice: the send-time re-proof, then the post-credit remainder.
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce([...rest, { id: 'inv-1', title: 'Pest', due_date: '2026-07-20', total: '258.00', credit_applied: 0, status: 'overdue' }]).mockResolvedValueOnce(rest);
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(out).toMatch(/\$30\.00 across 1 invoice is still open/);
+    expect(out).not.toMatch(/settled/);
+    expect(convo.payLinkSent).toBe(false); // latch re-opened for the remainder
+    expect(convo._ctx.invoiceId).toBe('inv-2'); // re-anchored
+    // Nothing left ⇒ settled, latch stays closed.
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockResolvedValueOnce([]);
+    const again = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(again).toMatch(/account is settled/); // zero raw open rows (the default chain) proves it
+    expect(convo.payLinkSent).toBe(true);
+    // An empty ELIGIBLE set with a surviving raw open row (dunning-stopped, resolve failure) is NOT settled.
+    convo.payLinkSent = false;
+    const prevDb = db.getMockImplementation();
+    db.mockImplementation((t) => (t === 'invoices' ? chain({ first: { id: 'inv-stopped' } }) : prevDb(t)));
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockResolvedValueOnce([]);
+    const unproven = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(unproven).toMatch(/could not be verified/);
+    expect(unproven).toMatch(/do NOT say the account is settled/);
+    db.mockImplementation(prevDb);
+    // None of the attempts texted anything — every reservation is released so the
+    // retry (and other outreach) is not fenced by a phantom contact.
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledTimes(3);
+    expect(ContactLedger.markSendFailed).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'ledger-sms-1' }), expect.objectContaining({ code: 'covered_by_credit', never_contacted: true }));
+    // The release stamp is checked with one retry; if it cannot be made durable the latch stays CLOSED.
+    convo.payLinkSent = false;
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest);
+    ContactLedger.markSendFailed.mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+    const stuck = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(stuck).toMatch(/cannot be re-offered on this call/);
+    expect(stuck).toMatch(/do NOT say the account is settled/);
+    expect(convo.payLinkSent).toBe(true); // latch NOT re-opened behind a phantom contact
+    ContactLedger.markSendFailed.mockResolvedValue(true);
+    // An INCOMPLETE remainder read is never "settled" either.
+    convo.payLinkSent = false;
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('payer resolve failed'); return []; });
+    const partial = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(partial).toMatch(/could not be verified/);
+    expect(partial).toMatch(/do NOT say the account is settled/);
+    // An unreadable remainder is never "settled" either.
+    convo.payLinkSent = false;
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockRejectedValueOnce(new Error('db down')); // send-time ok, post-credit read fails
+    const unsure = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(unsure).toMatch(/could not be checked/);
+    expect(unsure).toMatch(/do NOT say the account is settled/);
   });
 
   test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {

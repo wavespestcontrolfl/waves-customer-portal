@@ -831,6 +831,23 @@ function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   };
 }
 
+// Is ONE customer on a recurring lawn program? The SAME predicate the
+// Monday sweep's audience uses (recurringLawnEvidenceFilter): an upcoming
+// lawn visit on a recurring series, or ≥2 live lawn visits in the trailing
+// window. Gates customer-facing lawn surfaces (Lawn Health card, weather
+// lawn advisories) — a single one-time lawn job must NOT qualify there
+// (pre-push P1 on the 08-28 portal pass).
+async function hasRecurringLawnEvidence(customerId, { now = new Date() } = {}) {
+  if (!customerId) return false;
+  const todayET = etDateString(now);
+  const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
+  const row = await db('customers as c')
+    .where('c.id', customerId)
+    .where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+    .first('c.id');
+  return !!row;
+}
+
 // Does ONE customer have lawn-service evidence? Gates the portal's Weekly
 // Inches field (and the PUT that stores it) — a render/store gate, not a
 // send, so it is deliberately BROADER than the Monday sweep's audience: any
@@ -1553,6 +1570,7 @@ module.exports = {
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
   hasLawnServiceEvidence,
+  hasRecurringLawnEvidence,
   fetchUpcomingWeekForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,

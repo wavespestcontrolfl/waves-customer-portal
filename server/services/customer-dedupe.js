@@ -1338,6 +1338,15 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
     if (loser.autopay_enabled === false && winner.autopay_enabled !== false) {
       autopayRestrictions.autopay_enabled = false;
     }
+    // The account-credit auto-apply opt-in (owner ruling 2026-08-28) is
+    // consent the same way: the loser's ledger and cached balance move to
+    // the winner, so a retired row that said "don't apply my credit" must
+    // keep that answer on the surviving row — its credit would otherwise
+    // be consumed by the next automatic seam. Journaled + undone with the
+    // other most-restrictive columns.
+    if (loser.auto_apply_account_credit === false && winner.auto_apply_account_credit === true) {
+      autopayRestrictions.auto_apply_account_credit = false;
+    }
     const pauseTs = (v) => (v ? new Date(v).getTime() : null);
     const loserPause = pauseTs(loser.autopay_paused_until);
     const winnerPause = pauseTs(winner.autopay_paused_until);
@@ -1532,6 +1541,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_at = winner.service_contacts_consent_at;
       winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
+    }
+    // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
+    // estimate_acceptances rows repoint to the winner below, so the winner's
+    // customer-level "latest version accepted on any estimate" must absorb a
+    // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
+    // chronological. The winner's prior value is journaled for the undo.
+    if (!isEmptyValue(loser.accepted_terms_version)
+      && (isEmptyValue(winner.accepted_terms_version)
+        || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
+      if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
+      backfills.accepted_terms_version = loser.accepted_terms_version;
     }
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
     // widened r24 P1): the payer case is the sharpest hazard (every
@@ -3409,6 +3429,15 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // vacating to null here. Pre-upgrade journals lack the key and keep the
     // old behavior (clear-to-null / stay-cleared).
     const priorValues = recorded.winner_prior_values || {};
+    // accepted_terms_version (GH Codex #3574 r4/r5, pre-push P1): the merge
+    // may have folded the loser's version onto the winner (backfill +
+    // journaled prior). The generic clear/restore below runs as usual; the
+    // FINAL word is derived at the end of this transaction from the
+    // acceptance rows that remain winner-owned once the journaled rows are
+    // back on the loser — commit-safe (no timestamps), so an acceptance the
+    // winner made since the merge is never erased.
+    const acceptanceStampTouched = Object.prototype.hasOwnProperty.call(backfills, 'accepted_terms_version')
+      || Object.prototype.hasOwnProperty.call(priorValues, 'accepted_terms_version');
     // The ADDRESS is an atomic tuple (r27): the forward merge backfills it
     // whole, and clearing its unchanged members while preserving one an
     // operator edited (a corrected ZIP) would strand a partial mixed
@@ -3913,6 +3942,25 @@ async function revertMerge({ journalId, performedBy, performedById }) {
             .merge({ monthly_rate: row.monthly_rate, updated_at: new Date() });
         }
       });
+    }
+
+    if (acceptanceStampTouched) {
+      let remainingLatest = null;
+      try {
+        const rows = await trx('estimate_acceptances').where({ customer_id: winnerId }).select('terms_version');
+        remainingLatest = rows.map((r) => String(r.terms_version || '')).filter(Boolean).sort().pop() || null;
+      } catch (e) {
+        // Fail CLOSED: an undo that cannot verify the kept customer's
+        // acceptance history could leave a stale stamp behind.
+        refuse(`Could not verify the kept customer's acceptance history (${e.message}) — undo refused.`);
+      }
+      if (remainingLatest) {
+        const current = await trx('customers').where({ id: winnerId }).first('accepted_terms_version');
+        const cur = current?.accepted_terms_version ? String(current.accepted_terms_version) : '';
+        if (remainingLatest > cur) {
+          await trx('customers').where({ id: winnerId }).update({ accepted_terms_version: remainingLatest, updated_at: trx.fn.now() });
+        }
+      }
     }
 
     await trx('customer_merge_journal').where({ id: journalId }).update({

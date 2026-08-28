@@ -672,21 +672,29 @@ const StripeService = {
    * to pay, so the dunning sweeps divert it to a verification re-nudge instead of
    * an "overdue" notice.
    *
-   * FAIL OPEN: returns false on a missing PI, no Stripe, or any retrieve error —
-   * uncertainty must never SUPPRESS legitimate dunning for a genuinely-overdue
-   * invoice. The caller only treats a positive result as "divert".
+   * FAIL OPEN by default: returns false on a missing PI, no Stripe, or any
+   * retrieve error — uncertainty must never SUPPRESS legitimate dunning for a
+   * genuinely-overdue invoice. The caller only treats a positive result as
+   * "divert". `throwOnError` inverts that for callers whose safe direction is
+   * the opposite (the outbound voice policy: an unknown verification state
+   * must DENY the call, never let Sandy demand payment mid-verification).
    */
-  async isInvoiceAwaitingMicrodepositVerification(invoice) {
+  async isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError = false } = {}) {
     const piId = invoice?.stripe_payment_intent_id;
     if (!piId) return false;
     const stripe = getStripe();
-    if (!stripe) return false;
+    if (!stripe) {
+      // An unavailable client is the same unknown as a failed retrieve.
+      if (throwOnError) throw new Error('Stripe client unavailable — microdeposit state unknown');
+      return false;
+    }
     try {
       const pi = await stripe.paymentIntents.retrieve(piId);
       return pi.status === 'requires_action'
         && pi.next_action?.type === 'verify_with_microdeposits';
     } catch (e) {
       logger.warn(`[stripe] micro-deposit-pending check failed for invoice ${invoice?.id || piId}: ${e.message}`);
+      if (throwOnError) throw e;
       return false;
     }
   },
@@ -1208,8 +1216,12 @@ const StripeService = {
   /**
    * Detach a payment method via Stripe.
    */
-  async removeCard(customerId, cardId) {
-    const card = await db('payment_methods')
+  async removeCard(customerId, cardId, { cascadeAutopay = true, db: knex = db } = {}) {
+    // `db` may be the caller's transaction: the portal DELETE route holds
+    // FOR UPDATE locks on the customer + card rows across this call so a
+    // concurrent Auto Pay switch cannot land between its guard check and
+    // the detach (pre-push r1 P0).
+    const card = await knex('payment_methods')
       .where({ id: cardId, customer_id: customerId })
       .first();
 
@@ -1261,34 +1273,51 @@ const StripeService = {
         }
         logger.warn(`[stripe] Detach warning (PM already detached, proceeding with DB removal): ${err.message}`);
       }
-      await db('payment_methods').where({ id: cardId }).del();
-      await this._disableAutopayIfMethodRemoved(customerId, card);
+      await knex('payment_methods').where({ id: cardId }).del();
+      if (cascadeAutopay) await this._disableAutopayIfMethodRemoved(customerId, card, knex);
       logger.info(`[stripe] Payment method removed for ${customerId}: ${cardId}`);
       return { success: true };
     }
 
     // Fallback — just remove from DB
-    await db('payment_methods').where({ id: cardId }).del();
-    await this._disableAutopayIfMethodRemoved(customerId, card);
+    await knex('payment_methods').where({ id: cardId }).del();
+    if (cascadeAutopay) await this._disableAutopayIfMethodRemoved(customerId, card, knex);
     logger.info(`[stripe] Payment method removed (DB only) for ${customerId}: ${cardId}`);
     return { success: true };
   },
 
   /**
+   * LEGACY cascade — only runs while GATE_PORTAL_METHOD_REMOVAL_GUARD is
+   * off (the DELETE route passes cascadeAutopay:false under the gate).
+   * Under the guard the in-charge method can never reach removeCard, so
+   * there is nothing to cascade; removal is side-effect-free (owner ruling
+   * 2026-08-27). Out-of-band detaches are reconciled transactionally by
+   * handlePaymentMethodDetached in stripe-webhook.js, not here.
+   *
    * Removing the card that carried Auto Pay used to leave the customer's
    * autopay flags pointing at a deleted row — the cron silently stopped
    * charging while the AutopayCard still showed Active. Disable autopay
-   * honestly so the UI shows Off with a set-up CTA.
+   * honestly so the UI shows Off with a set-up CTA. Best-effort and NOT
+   * transactional (a failure here leaves autopay_enabled=true with the row
+   * gone) — the guard exists to retire this path.
    */
-  async _disableAutopayIfMethodRemoved(customerId, removedCard) {
+  async _disableAutopayIfMethodRemoved(customerId, removedCard, knex = db) {
     if (!removedCard?.autopay_enabled) return;
     try {
-      await db('customers')
-        .where({ id: customerId })
-        .update({ autopay_enabled: false, autopay_payment_method_id: null });
-      const { logAutopay } = require('./autopay-log');
-      await logAutopay(customerId, 'autopay_disabled', {
-        details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+      // SAVEPOINT (knex nests a transaction on a trx handle): the caller's
+      // removal transaction must survive a failed cascade — a swallowed
+      // error inside an aborted PG transaction would roll back the local
+      // delete AFTER Stripe already detached the method (GH codex r4 P2).
+      await knex.transaction(async (sp) => {
+        await sp('customers')
+          .where({ id: customerId })
+          .update({ autopay_enabled: false, autopay_payment_method_id: null });
+        const { logAutopay } = require('./autopay-log');
+        await logAutopay(customerId, 'autopay_disabled', {
+          details: { source: 'payment_method_removed', payment_method_id: removedCard.id },
+          db: sp,
+          required: true,
+        });
       });
     } catch (err) {
       logger.warn(`[stripe] autopay cleanup after card removal failed for ${customerId}: ${err.message}`);
@@ -1810,8 +1839,13 @@ const StripeService = {
     }
 
     let projectedCreditApplied = Number(invoice.credit_applied) || 0;
-    if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
-      const { getBalance, computeApplication } = require('./customer-credit');
+    // Same eligibility as the charge path's apply (gate AND the customer's
+    // opt-in, owner ruling 2026-08-28) — an opted-out customer's quote must
+    // be the gross total, or the confirmed quote and the charge disagree
+    // and the charge rejects it as stale.
+    const { getBalance, computeApplication, customerAutoApplyEnabled } = require('./customer-credit');
+    if (require('../config/feature-gates').gates.autoApplyAccountCredit
+      && await customerAutoApplyEnabled(invoice.customer_id)) {
       const balance = await getBalance(invoice.customer_id);
       const projection = computeApplication({
         total: invoice.total,
@@ -2241,7 +2275,11 @@ const StripeService = {
         // invoice with an abandoned /pay PI, which would block the route-level
         // apply) could collect gross while the customer's credit sits unused.
         // Gated + idempotent; on full coverage there is nothing to charge.
-        if (require('../config/feature-gates').gates.autoApplyAccountCredit) {
+        // Customer opt-in (customers.auto_apply_account_credit, owner ruling
+        // 2026-08-28) checked before the PI column is touched — an opted-out
+        // customer's charge-now path runs exactly as before this seam existed.
+        if (require('../config/feature-gates').gates.autoApplyAccountCredit
+          && await require('./customer-credit').customerAutoApplyEnabled(lockedInvoice.customer_id, trx)) {
           if (lockedInvoice.stripe_payment_intent_id) {
             await trx('invoices').where({ id: invoiceId }).update({ stripe_payment_intent_id: null });
             lockedInvoice.stripe_payment_intent_id = null;
@@ -3413,12 +3451,16 @@ const StripeService = {
         // 409 on an in-flight one, replace a canceled one via the idempotency
         // key). The triage must NEVER cancel/clear a PI when there's nothing to
         // draw down. A missing customer row reads as zero.
+        // ...and only when the customer has turned automatic application ON
+        // (customers.auto_apply_account_credit, owner ruling 2026-08-28) —
+        // an opted-out balance reads as zero here, so the stale-PI triage,
+        // the coverage probe and the apply all leave it untouched.
         let availableCredit = 0;
         if (require('../config/feature-gates').gates.autoApplyAccountCredit && lockedInvoice.customer_id) {
           const creditRow = await trx('customers')
             .where({ id: lockedInvoice.customer_id })
-            .first('account_credits');
-          availableCredit = Number(creditRow?.account_credits) || 0;
+            .first('account_credits', 'auto_apply_account_credit');
+          availableCredit = creditRow?.auto_apply_account_credit === true ? (Number(creditRow?.account_credits) || 0) : 0;
         }
 
         // Stale-PI triage BEFORE auto-apply: applyAccountCreditToInvoice

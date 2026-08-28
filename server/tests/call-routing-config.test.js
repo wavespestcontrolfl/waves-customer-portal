@@ -21,6 +21,18 @@ describe('mergeCallRoutingConfig', () => {
     expect(mergeCallRoutingConfig({ agentTimeoutSec: 99 }).agentTimeoutSec).toBe(30);
   });
 
+  test('Spanish vestibule fields: off/blank by default, strict boolean, trimmed + capped voice id', () => {
+    const d = mergeCallRoutingConfig(null);
+    expect(d.spanishMenuEnabled).toBe(false);
+    expect(d.spanishVoice).toBe('');
+    expect(DEFAULT_CALL_ROUTING_CONFIG.spanishMenuEnabled).toBe(false);
+    expect(mergeCallRoutingConfig({ spanishMenuEnabled: 'true' }).spanishMenuEnabled).toBe(false);
+    expect(mergeCallRoutingConfig({ spanishMenuEnabled: true }).spanishMenuEnabled).toBe(true);
+    expect(mergeCallRoutingConfig({ spanishVoice: '  CaJslL1xziwefCeTNzHv ' }).spanishVoice).toBe('CaJslL1xziwefCeTNzHv');
+    expect(mergeCallRoutingConfig({ spanishVoice: 'x'.repeat(100) }).spanishVoice).toHaveLength(64);
+    expect(mergeCallRoutingConfig({ spanishVoice: 42 }).spanishVoice).toBe('');
+  });
+
   test('coerces booleans strictly', () => {
     expect(mergeCallRoutingConfig({ aiAnswersFirst: 'yes' }).aiAnswersFirst).toBe(false);
     expect(mergeCallRoutingConfig({ aiAnswersFirst: true }).aiAnswersFirst).toBe(true);

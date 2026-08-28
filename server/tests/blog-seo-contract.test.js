@@ -5,7 +5,7 @@ const {
   inferContentCluster,
   validateBlogSeoContract,
 } = require('../services/content/blog-seo-contract');
-const { inferLinkReason } = require('../services/content/blog-seo-contract')._internals;
+const { inferLinkReason, extractMarkdownLinks } = require('../services/content/blog-seo-contract')._internals;
 
 function draft(overrides = {}) {
   return {
@@ -202,10 +202,33 @@ describe('blog SEO contract helpers', () => {
     expect(inferContentCluster({ keyword: 'chinch bugs vs drought stress in Bradenton lawns' })).toBe('lawn_turf');
   });
 
+  test('body links that cross a paragraph boundary do not count as included links', () => {
+    // A blank line, heading, list opener, blockquote marker, or HTML block
+    // opener inside the label or after "(" ends the paragraph — CommonMark
+    // renders text, not a link — so the required service/city link is
+    // still MISSING. A single soft-wrap newline still links.
+    expect(extractMarkdownLinks('[Pest Control](\n\n/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest\n\nControl](/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](\n> /pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](\n# /pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest\n- Control](/pest-control/)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a\n\n)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a b)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/#a\tb)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?a=(1)')).toEqual([]);
+    expect(extractMarkdownLinks('[Pest Control](/pest-control/?utm=x#top)')).toEqual(['/pest-control/']);
+    expect(extractMarkdownLinks('[Pest Control](\n/pest-control/)')).toEqual(['/pest-control/']);
+    expect(extractMarkdownLinks('[Pest\nControl](/pest-control/)')).toEqual(['/pest-control/']);
+  });
+
   test('classifies city-service URLs by pattern, not a fixed city whitelist', () => {
     expect(inferLinkReason('/pest-control-punta-gorda-fl/')).toBe('city');
     expect(inferLinkReason('/termite-control-englewood-fl/')).toBe('city');
     expect(inferLinkReason('/termite-control/')).toBe('service');
+    expect(inferLinkReason('/blog/lawn-care-tips/')).toBe('related_blog');
+    expect(inferLinkReason('/blog/termite-control-cost/')).toBe('related_blog');
+    expect(inferLinkReason('/blog/how-estimates-work/')).toBe('related_blog');
+    expect(inferLinkReason('/blog/pest-control-calculator-guide/')).toBe('related_blog');
   });
 
   test('defaults breadcrumbs to the layout trail when the draft carries none', () => {

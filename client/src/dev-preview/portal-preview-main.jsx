@@ -15,6 +15,7 @@ import '../styles/brand-tokens.css';
 import api from '../utils/api';
 import { AuthProvider } from '../hooks/useAuth';
 import PortalPage from '../pages/PortalPage';
+import CustomerDialogHost from '../components/brand/CustomerDialogHost';
 
 // ── auth seed ──────────────────────────────────────────────────────────────
 // useAuth only base64url-decodes the payload segment ({ customerId,
@@ -51,7 +52,9 @@ const CUSTOMER = {
   monthlyRate: null, // per-application billing — no monthly subscription rate
   memberSince: '2024-03-14',
   referralCode: 'JORDAN941',
-  accountCredit: 0,
+  accountCredit: 45,
+  // portal slider (owner ruling 2026-08-28) — starts OFF; the stub below flips it
+  autoApplyAccountCredit: false,
   credits: [],
   annualPrepay: null,
   notificationPrefs: {
@@ -189,6 +192,15 @@ const CARD = {
   lastFour: '4242', expMonth: 12, expYear: 2028, isDefault: true,
   autopayEnabled: true, bankName: null, bankLastFour: null, achStatus: null,
 };
+// A second, non-autopay card so the Payment Methods row hierarchy (in-use
+// row = Replace card / Turn off Auto Pay; other rows = Set default / Remove)
+// is visible in the preview. ?guard=0 renders the legacy (gate-off) layout.
+const SPARE_CARD = {
+  id: 'pm-demo-2', processor: 'stripe', methodType: 'card', brand: 'mastercard',
+  lastFour: '1881', expMonth: 4, expYear: 2029, isDefault: false,
+  autopayEnabled: false, bankName: null, bankLastFour: null, achStatus: null,
+};
+const REMOVAL_GUARD = new URLSearchParams(window.location.search).get('guard') !== '0';
 
 const AUTOPAY = {
   state: 'active',
@@ -208,7 +220,12 @@ const AUTOPAY = {
   payment_methods: [{
     id: 'pm-demo-1', brand: 'visa', last4: '4242', exp_month: 12, exp_year: 2028,
     is_default: true, autopay_enabled: true, method_type: 'card', bank_name: null, ach_status: null,
+  }, {
+    id: 'pm-demo-2', brand: 'mastercard', last4: '1881', exp_month: 4, exp_year: 2029,
+    is_default: false, autopay_enabled: false, method_type: 'card', bank_name: null, ach_status: null,
   }],
+  autopay_selected_method_ids: ['pm-demo-1'],
+  removal_guard: REMOVAL_GUARD,
   recent_events: [],
 };
 
@@ -314,7 +331,7 @@ Object.assign(api, {
     currentBalance: 0, upcomingCharges: 0, monthlyRate: 0, tier: 'Silver',
     processor: 'stripe', nextCharge: null, lastPaymentFailed: false,
   }),
-  getCards: async () => ({ cards: [CARD] }),
+  getCards: async () => ({ cards: [CARD, SPARE_CARD] }),
   getAutopay: async () => AUTOPAY,
   updateAutopay: async () => ({ success: true, updated: true, changes: [] }),
   pauseAutopay: async () => ({ success: true }),
@@ -328,6 +345,7 @@ Object.assign(api, {
   // notifications
   getNotificationPrefs: async () => NOTIFICATION_PREFS,
   updateNotificationPrefs: async () => ({ success: true }),
+  updateAccountCreditPreference: async (on) => { CUSTOMER.autoApplyAccountCredit = !!on; return { autoApplyAccountCredit: !!on }; },
   getPropertyNotificationPrefs: async () => ({
     properties: [{
       id: 'cust-demo-1',
@@ -500,6 +518,9 @@ ReactDOM.createRoot(document.getElementById('root')).render(
   <BrowserRouter>
     <AuthProvider>
       <PortalPage />
+      {/* The confirm/alert host App.jsx mounts — without it every
+          showCustomerConfirm() (Remove, Turn off Auto Pay) hangs forever. */}
+      <CustomerDialogHost />
     </AuthProvider>
   </BrowserRouter>,
 );

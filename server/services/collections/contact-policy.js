@@ -15,10 +15,10 @@
  *   suppression_<reason> (canonical messaging_suppression row covering the channel),
  *   contact_within_24h, voice_contact_within_7d, live_conversation_within_7d,
  *   outside_call_window,
- *   pilot_requires_single_invoice, pilot_balance_below_minimum,
- *   pilot_balance_above_maximum, pilot_not_overdue_long_enough,
+ *   pilot_not_overdue_long_enough (account clock = OLDEST unpaid invoice),
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
- *   pilot_awaiting_microdeposit_verification,
+ *   customer_prefers_spanish,
+ *   pilot_awaiting_microdeposit_verification, balance_read_incomplete,
  *   line_type_unknown, line_type_not_mobile, commercial_customer,
  *   consent_no_evidence, rnd_check_required,
  *   policy_evaluation_error
@@ -28,8 +28,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { openBalanceInvoices } = require('../open-balance');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { etParts, etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
+const { etParts } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
+const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueDayOf } = require('./account-anchor');
 
 const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
 
@@ -59,12 +60,23 @@ const FLAG_BLOCKED_CHANNELS = {
   do_not_text: ['sms'],
   do_not_email: ['email'],
   automated_voice_consent_revoked: ['voice'],
+  // Owner ruling 2026-08-28: customers known to pay by check get NO
+  // late-payment outreach — no automated call, no late-payment text or
+  // email. Pre-visit balance reminders and human calls are unaffected
+  // (see FLAG_LATE_PAYMENT_ONLY). Set via ops/agents/collections-flag.js.
+  pays_by_check: ['voice', 'sms', 'email'],
+  // Approved payment plan (A2 mirrors its PAYMENT_PLAN state here in the
+  // same txn): the whole sequence pauses — every channel.
+  payment_plan_active: ALL_CHANNELS,
 };
+// Flags whose sms/email block applies ONLY to the late_payment purpose —
+// the customer still gets ordinary balance reminders; only dunning stops.
+// Voice is always blocked for these (the automated lane is dunning-only).
+const FLAG_LATE_PAYMENT_ONLY = new Set(['pays_by_check']);
 
-// Voice pilot caps (owner-scoped): ONE invoice, $50.00–$500.00, 14–60 days
+// Voice pilot caps (owner-scoped): ONE invoice, ANY balance (owner ruling
+// 2026-08-28 removed the $50–$500 band), 14–60 days
 // overdue, ≥2 delivered dunning touches, mobile line, residential only.
-const PILOT_MIN_BALANCE_CENTS = 5000;
-const PILOT_MAX_BALANCE_CENTS = 50000;
 const PILOT_MIN_DAYS_OVERDUE = 14;
 const PILOT_MAX_DAYS_OVERDUE = 60;
 const PILOT_MIN_DUNNING_TOUCHES = 2;
@@ -119,16 +131,6 @@ function isSupervisedApprover(approvedBy) {
 const RND_STALENESS_DAYS = 90;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-// Whole ET calendar days between a due value (date column or timestamp) and
-// `now` — overdue age is COMPUTED from due_date, never read off a status.
-function daysOverdueOn(now, dueValue) {
-  const dueStr = etCalendarDayOf(dueValue);
-  const nowStr = etDateString(now);
-  const [dy, dm, dd] = dueStr.split('-').map(Number);
-  const [ny, nm, nd] = nowStr.split('-').map(Number);
-  return Math.round((Date.UTC(ny, nm - 1, nd) - Date.UTC(dy, dm - 1, dd)) / DAY_MS);
-}
 
 function isVoiceLike(channel) {
   return channel === 'voice' || channel === 'manual_call';
@@ -188,8 +190,15 @@ async function deliveredDunningTouches(invoice) {
 // account was settled because it read a different loader). Open-balance
 // rows + legacy 'unpaid' (same predicates, same self-pay authority) minus
 // admin-stopped sequences (fail closed on a check error).
-async function loadEligibleInvoices(customerId) {
-  const eligible = await openBalanceInvoices(customerId);
+// `onIncomplete(reason)` fires when open-balance DROPPED a row it could not
+// prove (payer resolve failure) or hit its candidate bound — the survivors
+// then UNDERSTATE the account; a caller presenting the total as definitive
+// (the voice disclosure) must fail closed rather than call it "the total".
+async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
+  const eligible = await openBalanceInvoices(customerId, {
+    onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); },
+    onTruncation: () => { if (onIncomplete) onIncomplete('candidate bound hit'); },
+  });
   const legacyUnpaid = await db('invoices')
     .where({ customer_id: customerId, status: 'unpaid' })
     .whereNull('payer_id')
@@ -202,7 +211,9 @@ async function loadEligibleInvoices(customerId) {
     const seenIds = new Set(eligible.map((inv) => String(inv.id)));
     for (const row of legacyUnpaid) {
       if (seenIds.has(String(row.id))) continue;
-      if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
+      // Same incomplete signal as open-balance (gh r3): a dropped legacy
+      // row on a resolve failure must not leave the survivors as "the total".
+      if (await rowIsSelfPayDue(customerId, row, { onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); } })) eligible.push(row);
     }
   }
   if (eligible.length) {
@@ -211,7 +222,11 @@ async function loadEligibleInvoices(customerId) {
     for (const inv of eligible) {
       try {
         if (!(await isDunningStopped(inv.id))) kept.push(inv);
-      } catch { /* excluded — fail closed */ }
+      } catch {
+        // Excluded — fail closed for outreach; and the survivors are no
+        // longer "the total" (hook r5): same incomplete signal.
+        if (onIncomplete) onIncomplete('dunning-stop check failed');
+      }
     }
     eligible.length = 0;
     eligible.push(...kept);
@@ -225,6 +240,9 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     denialReasons: [],
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
+    eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
+    eligibleAccountTier: null, // dunning tier of the OLDEST-due eligible invoice (the register)
+    eligibleAnchorDueDate: null, // its ET due day
     nextEligibleAt: null,
     consentEvidence: null,
     activeHolds: [],
@@ -276,16 +294,22 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    const eligible = await loadEligibleInvoices(customerId);
+    let balanceIncomplete = null;
+    const eligible = await loadEligibleInvoices(customerId, { onIncomplete: (reason) => { balanceIncomplete = reason; } });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
     // prb-r1.) Historical rationale for the arms lives on the loader.
     // Legacy 'unpaid' status (codex r-gh2)
     result.eligibleInvoiceIds = eligible.map((inv) => inv.id);
-    result.eligibleBalanceCents = eligible.reduce(
-      (sum, inv) => sum + Math.round(invoiceAmountDue(inv) * 100),
-      0,
+    result.eligibleInvoiceCents = Object.fromEntries(
+      eligible.map((inv) => [String(inv.id), Math.round(invoiceAmountDue(inv) * 100)]),
     );
+    result.eligibleBalanceCents = Object.values(result.eligibleInvoiceCents).reduce((sum, c) => sum + c, 0);
+    if (eligible.length) {
+      const anchor = anchorInvoiceOf(eligible);
+      result.eligibleAccountTier = dunningTierForOverdue(accountDaysOverdue(now, eligible));
+      result.eligibleAnchorDueDate = dueDayOf(anchor);
+    }
     // Dues-only carve-out (codex 2026-08-14 P1): the previsit rail
     // legitimately reminds about late MONTHLY-MEMBERSHIP DUES with zero
     // open invoices — dues aren't invoiced until collected. The caller
@@ -313,7 +337,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     for (const row of flags) {
       const blocked = FLAG_BLOCKED_CHANNELS[row.flag];
       // Unknown flag string = fail closed on every channel.
-      if (!blocked || blocked.includes(channel)) deny(`flag_${row.flag}`);
+      if (!blocked || blocked.includes(channel)) {
+        if (blocked && FLAG_LATE_PAYMENT_ONLY.has(row.flag) && !isVoiceLike(channel) && purpose !== 'late_payment') continue;
+        deny(`flag_${row.flag}`);
+      }
     }
 
     // ── Canonical suppression list (codex gh-r1) ────────────────────────
@@ -468,42 +495,50 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // ── Automated-voice-only checks ─────────────────────────────────────
     if (channel === 'voice') {
       if (purpose === 'late_payment') {
-        if (eligible.length !== 1) {
-          if (eligible.length > 1) deny('pilot_requires_single_invoice');
-        } else {
-          const invoice = eligible[0];
-          if (result.eligibleBalanceCents < PILOT_MIN_BALANCE_CENTS) deny('pilot_balance_below_minimum');
-          if (result.eligibleBalanceCents > PILOT_MAX_BALANCE_CENTS) deny('pilot_balance_above_maximum');
-
-          // Overdue age is computed from due_date (created_at fallback — the
-          // same reference the late-payment rails use), never status.
-          const daysOverdue = daysOverdueOn(now, invoice.due_date || invoice.created_at);
+        // An account read that dropped an unprovable row or hit the bound is
+        // not "the total" — the call would disclose a partial balance as the
+        // whole. Fail closed (gh r1).
+        if (balanceIncomplete) deny('balance_read_incomplete');
+        // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
+        // is collected as ONE balance; the clock is the OLDEST unpaid
+        // invoice's due date. (The single-invoice pilot rule is gone.)
+        if (eligible.length) {
+          const anchor = anchorInvoiceOf(eligible);
+          const daysOverdue = accountDaysOverdue(now, eligible);
           if (daysOverdue < PILOT_MIN_DAYS_OVERDUE) deny('pilot_not_overdue_long_enough');
           if (daysOverdue > PILOT_MAX_DAYS_OVERDUE) deny('pilot_overdue_too_long');
 
-          const touches = await deliveredDunningTouches(invoice);
+          // Touch floor on the ANCHOR invoice until the account-level dunning
+          // sequence exists (A2 will expose countAccountTouches).
+          const touches = await deliveredDunningTouches(anchor);
           if (touches < PILOT_MIN_DUNNING_TOUCHES) deny('pilot_insufficient_dunning_history');
 
           // Microdeposit-blocked invoices (codex r5 P1): the customer
           // isn't ignoring the bill — they haven't confirmed their two ACH
           // micro-deposits, and the SMS rails deliberately divert them to
           // verification copy. An automated voice call asking them to PAY
-          // would contradict that. Same definitive check the rails use;
-          // an error is a denial (fail closed). This denies ONLY the
-          // call-shaped pilot — the invoice stays in the eligible set so
-          // the SMS rails' membership check still permits their
-          // verification re-nudge.
-          if (invoice.stripe_payment_intent_id) {
+          // would contradict that. ANY invoice in the set awaiting
+          // verification denies the call (fail closed on error).
+          for (const invoice of eligible) {
+            if (!invoice.stripe_payment_intent_id) continue;
             try {
               const StripeService = require('../stripe');
-              const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice);
-              if (mdPending) deny('pilot_awaiting_microdeposit_verification');
+              // throwOnError: the helper fails OPEN for the SMS rails; this
+              // policy's safe direction is to DENY on an unknown state (gh r6).
+              const mdPending = await StripeService.isInvoiceAwaitingMicrodepositVerification(invoice, { throwOnError: true });
+              if (mdPending) { deny('pilot_awaiting_microdeposit_verification'); break; }
             } catch (mdErr) {
               logger.warn(`[contact-policy] microdeposit check failed for invoice ${invoice.id}: ${mdErr.message} — denying voice`);
               deny('pilot_awaiting_microdeposit_verification');
+              break;
             }
           }
         }
+
+        // Owner ruling 2026-08-28: a customer who prefers Spanish never gets
+        // the English automated call (no Spanish collections script yet).
+        // Owner rule = /^es/: 'es', 'es-US', and free-form 'español' alike.
+        if (/^es/i.test(String(customer.preferred_language || '').trim())) deny('customer_prefers_spanish');
 
         // Mobile line only, from the EXISTING phone-keyed Lookup cache.
         // readCachedLineType is discriminated (hit/miss/error); its own
@@ -556,9 +591,10 @@ module.exports = {
   loadEligibleInvoices,
   isWithinCallWindow,
   isSupervisedApprover,
+  // The anchor's delivered-touch count — exported so the live call
+  // revalidates a refreshed anchor against the SAME floor (gh r4).
+  deliveredDunningTouches,
   // Exported for tests / PR B reuse.
-  PILOT_MIN_BALANCE_CENTS,
-  PILOT_MAX_BALANCE_CENTS,
   PILOT_MIN_DAYS_OVERDUE,
   PILOT_MAX_DAYS_OVERDUE,
   PILOT_MIN_DUNNING_TOUCHES,

@@ -110,13 +110,17 @@ function nodeFetch(url, { signal, headers, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
     try {
       req = mod.request(u, { method: 'GET', headers, signal, lookup: rejectingLookup }, (res) => {
         const status = res.statusCode || 0;
-        const wrap = (body) => ({ ok: status >= 200 && status < 300, status, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: async () => body });
+        // `complete` is false when the body was cut (600 KB cap or the socket
+        // closed before 'end') so callers never treat a partial page as proof
+        // that something is absent from it.
+        const wrap = (body, complete = true) => ({ ok: status >= 200 && status < 300, status, complete, headers: { get: (k) => res.headers[String(k).toLowerCase()] ?? null }, text: async () => body });
         if (status < 200 || status >= 300) { res.resume(); return done(wrap('')); } // incl. 3xx (caller follows)
         let data = '';
+        let ended = false;
         res.setEncoding('utf8');
-        res.on('data', (c) => { data += c; if (data.length >= 600000) { data = data.slice(0, 600000); res.destroy(); done(wrap(data)); } });
-        res.on('end', () => done(wrap(data)));
-        res.on('close', () => done(wrap(data)));      // never wait forever if 'end' is skipped
+        res.on('data', (c) => { data += c; if (data.length >= 600000) { data = data.slice(0, 600000); res.destroy(); done(wrap(data, false)); } });
+        res.on('end', () => { ended = true; done(wrap(data, true)); });
+        res.on('close', () => done(wrap(data, ended)));      // never wait forever if 'end' is skipped
         res.on('error', () => done(null));
       });
     } catch { return done(null); }
@@ -188,13 +192,20 @@ function extractEmails(html, domain) {
 
 // Fetch with manual redirect handling so EVERY hop's host is SSRF-revalidated
 // (a public domain can 30x to an internal one). Bounded redirects; fail-soft.
-async function fetchText(url, { fetchFn, timeoutMs, resolveHostFn = hostResolvesPublic, maxRedirects = 2 }) {
+// fetchPage keeps the HTTP status so callers that need to tell "page gone"
+// from "page fine, link missing" (the backlink loss verifier) can; fetchText is
+// the html-or-null convenience the contact paths use.
+//   → { status, html, blocked, truncated, error }  — blocked: a hop targeted a
+//     private/internal host (never fetched); truncated: the 2xx body was cut
+//     short (size cap / early close) so absence-of-X in it proves nothing;
+//     status 0 on network failure.
+async function fetchPage(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIMEOUT_MS, resolveHostFn = hostResolvesPublic, maxRedirects = 2 } = {}) {
   let current = url;
   for (let hop = 0; hop <= maxRedirects; hop++) {
     let u;
-    try { u = new URL(current); } catch { return null; }
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
-    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return null;
+    try { u = new URL(current); } catch { return { status: 0, html: null, blocked: false, truncated: false, error: 'invalid_url' }; }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return { status: 0, html: null, blocked: true, truncated: false, error: 'unsupported_protocol' };
+    if (isBlockedHostname(u.hostname) || !(await resolveHostFn(u.hostname))) return { status: 0, html: null, blocked: true, truncated: false, error: 'blocked_host' };
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -204,22 +215,33 @@ async function fetchText(url, { fetchFn, timeoutMs, resolveHostFn = hostResolves
         signal: controller.signal,
         headers: { 'User-Agent': 'WavesPestControl-LinkResearch/1.0 (+https://wavespestcontrol.com)' },
       });
-      if (res && res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
+      if (!res) return { status: 0, html: null, blocked: false, truncated: false, error: 'no_response' };
+      if (res.status >= 300 && res.status < 400 && res.headers && typeof res.headers.get === 'function') {
         const loc = res.headers.get('location');
-        if (!loc) return null;
+        if (!loc) return { status: res.status, html: null, blocked: false, truncated: false, error: 'redirect_without_location' };
         current = new URL(loc, current).toString(); // re-validated on next loop
         continue;
       }
-      if (!res || !res.ok) return null;
-      const html = await res.text();
-      return typeof html === 'string' ? html.slice(0, 600000) : null; // cap pathological pages
-    } catch {
-      return null; // timeout / DNS / TLS / abort — treated as "no signal"
+      if (!res.ok) return { status: res.status || 0, html: null, blocked: false, truncated: false, error: null };
+      const raw = await res.text();
+      const html = typeof raw === 'string' ? raw : '';
+      // Injected fetchers (tests, global fetch) don't report `complete`; only an
+      // explicit false — or our own size cap — marks the body as partial.
+      const truncated = res.complete === false || html.length > 600000;
+      const contentType = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || null;
+      return { status: res.status, html: html.slice(0, 600000), blocked: false, truncated, contentType, error: null }; // cap pathological pages
+    } catch (err) {
+      return { status: 0, html: null, blocked: false, truncated: false, error: (err && err.message) || 'fetch_failed' }; // timeout / DNS / TLS / abort
     } finally {
       clearTimeout(timer);
     }
   }
-  return null; // redirect budget exhausted
+  return { status: 0, html: null, blocked: false, truncated: false, error: 'redirect_budget_exhausted' };
+}
+
+async function fetchText(url, opts) {
+  const page = await fetchPage(url, opts);
+  return page.html && page.status >= 200 && page.status < 300 ? page.html : null;
 }
 
 /**
@@ -292,5 +314,5 @@ async function fetchPageText(url, { fetchFn = nodeFetch, timeoutMs = DEFAULT_TIM
   return { title, snippet: text.slice(0, 400) || null };
 }
 
-module.exports = { findContact, fetchPageText };
-module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, fetchText, CONTACT_PATHS };
+module.exports = { findContact, fetchPageText, fetchPage };
+module.exports._internals = { normalizeDomain, extractEmails, isUsableEmail, scoreEmail, isBlockedHostname, isPrivateIp, hostResolvesPublic, fetchText, fetchPage, CONTACT_PATHS };

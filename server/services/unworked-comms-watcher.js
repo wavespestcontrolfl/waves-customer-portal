@@ -449,9 +449,9 @@ async function loadUnansweredThreads(cutoff = new Date()) {
       -- Endpoint-scoped (codex r45): conversations are unique per
       -- (peer, our number) — a later text to the AI number must not
       -- swallow an unanswered HQ thread from the same phone.
-      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, created_at
+      SELECT DISTINCT ON (peer, endpoint) peer, endpoint, message_body, metadata, created_at
       FROM (
-        SELECT message_body, created_at,
+        SELECT message_body, metadata, created_at,
                RIGHT(REGEXP_REPLACE(COALESCE(from_phone, ''), '\\D', '', 'g'), 10) AS peer,
                RIGHT(REGEXP_REPLACE(COALESCE(to_phone, ''), '\\D', '', 'g'), 10) AS endpoint
         FROM sms_log
@@ -495,7 +495,10 @@ async function loadUnansweredThreads(cutoff = new Date()) {
     -- for knex, which consumes bare question marks as positional bindings
     -- even alongside named bindings (comments included) and fed pg empty
     -- parameters, failing this whole lane at runtime.
-    WHERE TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
+    -- Closers the webhook already resolved on arrival (context-aware
+    -- isCourtesyOnly, sms_log.metadata.courtesyOnly) are retired too.
+    WHERE COALESCE(l.metadata->>'courtesyOnly', '') <> 'true'
+      AND TRIM(COALESCE(l.message_body, '')) !~* '^(thanks\\?( you| u)\\?|thank you( so much| very much)\\?|ty|tysm|got it|perfect|great|awesome|ok(ay)\\?|k|sounds good|will do|no problem|you too|understood|10-4|roger)[.! ]*$'
     -- Answered = a HUMAN outbound after the last inbound. Automated
     -- broadcasts (reminders, receipts, review asks) must not clear a
     -- waiting customer (codex #3232 r1).

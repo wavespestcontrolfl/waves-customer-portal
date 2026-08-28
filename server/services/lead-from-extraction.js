@@ -310,6 +310,91 @@ function notifyContactInstruction(NotificationService, customer, instruction, op
   );
 }
 
+/**
+ * ESTIMATE REQUESTED on a call by an EXISTING customer (codex #3569): a
+ * lifecycle customer deliberately gets no lead, so when Sandy could not give a
+ * number and promised a written estimate, this feed row is the ONLY artifact
+ * that can fulfil the promise. It is the SAME lane as the post-call
+ * "quote promised" bell (call-recording-processor): category 'lead', title
+ * "Quote promised on call — send it", metadata { callSid, quote_promised:true,
+ * no_lead:true } — so quotePromisedAlreadyNotified() recognises it (no second
+ * bell when the recording is processed) and the estimator engine can upgrade
+ * this row in place with the draft. Same doctrine as the contact instruction
+ * above: `bell: true` so the policy cannot silence it, suppressed ≠ persisted,
+ * and relay-tools reads the boolean to decide whether the promise may be
+ * spoken at all. Dedupe: one card per call (notifyAdmin dedupeKey).
+ * @returns {Promise<{persisted:boolean, suppressed:boolean}>}
+ */
+async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opts = {}) {
+  if (!customerId) return { persisted: false, suppressed: false };
+  try {
+    const NotificationService = require('./notification-service');
+    const who = [extracted.first_name, extracted.last_name].filter(Boolean).map((v) => properCase(String(v).trim())).join(' ') || 'an existing customer';
+    const service = extracted.requested_service || extracted.matched_service || null;
+    const notif = await NotificationService.notifyAdmin(
+      'lead',
+      'Quote promised on call — send it',
+      [
+        `${who}: the voice agent could not give a number and promised a written estimate (${service || 'service discussed on the call'}).`,
+        opts.spokenExpectation === 'about_15_minutes'
+          ? '⚠ The caller was told it usually goes out in about 15 minutes — send it NOW.'
+          : (opts.spokenExpectation === 'when_office_opens'
+            ? 'The caller was told it goes out when the office opens — send it first thing.'
+            : 'The caller was told it will be sent as soon as possible.'),
+        'Existing customer — no lead is tracking this promise; this card is the obligation.',
+        // The details collected ON THIS CALL are the fulfilment details (hook
+        // P1): the account's email/address may be stale or a different
+        // property. Nothing here mutates the customer — staff decide.
+        extracted.email ? `Email given on the call: ${extracted.email}` : null,
+        extracted.address_line1
+          ? `Service address given on the call: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}`
+          : null,
+        opts.phone ? `Callback number: ${opts.phone}` : null,
+        extracted.call_summary ? `Call summary: ${String(extracted.call_summary).slice(0, 400)}` : null,
+      ].filter(Boolean).join('\n'),
+      {
+        icon: '📝',
+        link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+        bell: true,
+        // notifyAdmin's own dedupe (advisory lock + metadata dedupeKey):
+        // one card per call, replays return the existing row.
+        ...(opts.callSid ? { dedupeKey: `relay-estimate-request:${opts.callSid}` } : {}),
+        metadata: {
+          // Canonical promised-quote markers (call-recording-processor reads
+          // callSid + quote_promised; no_lead = the no-lead lane).
+          customerId,
+          callSid: opts.callSid || null,
+          quote_promised: true,
+          no_lead: true,
+          property_count: 1,
+          source: 'voice_agent',
+          kind: 'estimate_request',
+          spoken_expectation: opts.spokenExpectation || 'as_soon_as_possible',
+          urgent: opts.spokenExpectation === 'about_15_minutes',
+          requested_service: service,
+          // fulfilment details as captured (never applied to the customer here)
+          first_name: extracted.first_name || null,
+          last_name: extracted.last_name || null,
+          email: extracted.email || null,
+          address_line1: extracted.address_line1 || null,
+          city: extracted.city || null,
+          zip: extracted.zip || null,
+          phone: opts.phone || null,
+        },
+      },
+    );
+    if (!notif || notif.suppressed || !notif.id) {
+      logger.error(`[voice-agent-lead] estimate request for customer ${customerId} did NOT persist to the admin feed${notif && notif.suppressed ? ` (suppressed:${notif.reason || 'internal_test'})` : ''}`);
+      return { persisted: false, suppressed: !!(notif && notif.suppressed) };
+    }
+    logger.info(`[voice-agent-lead] estimate request surfaced for existing customer ${customerId}`);
+    return { persisted: true, suppressed: false };
+  } catch (err) {
+    logger.error(`[voice-agent-lead] estimate request surfacing FAILED for customer ${customerId}: ${err.message}`);
+    return { persisted: false, suppressed: false };
+  }
+}
+
 // ⭐ SUPPRESSED IS NOT PERSISTED. notifyAdmin's suppression sentinel is truthy
 // on purpose (`{ id: null, suppressed: true }`), so a bare truthiness check
 // read "no row was written" as success. With `bell: true` the policy can no
@@ -405,6 +490,28 @@ async function resolveLeadSourceId(toPhone) {
 }
 
 /**
+ * The ONE writer of customers.preferred_language (codex #3561 P1): empty-only
+ * so a prior preference is never clobbered, non-blocking on error. Used by the
+ * lead capture above and by the inbound relay's Spanish-session stamp
+ * (voice-agent/relay-conversation) — never re-implemented.
+ * @returns {Promise<boolean>} true when THIS call filled the column.
+ */
+async function stampCustomerPreferredLanguage(customerId, language) {
+  const lang = language ? String(language).toLowerCase().slice(0, 8) : null;
+  if (!lang || !customerId) return false;
+  try {
+    const updated = await db('customers')
+      .where({ id: customerId })
+      .whereRaw("COALESCE(preferred_language, '') = ''")
+      .update({ preferred_language: lang });
+    return Number(updated) > 0;
+  } catch (e) {
+    logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`);
+    return false;
+  }
+}
+
+/**
  * @param {object} extracted  agent-captured fields:
  *   { first_name, last_name, email, address_line1, city, zip,
  *     requested_service|matched_service, preferred_date_time, pain_points,
@@ -493,13 +600,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
   // Non-routing language hint on the matched customer — applied even if the lead
   // is skipped below. Best-effort; only fills when empty so a prior preference
   // is never clobbered. (Routing never reads this column.)
-  if (language && customerId) {
-    await db('customers')
-      .where({ id: customerId })
-      .whereRaw("COALESCE(preferred_language, '') = ''")
-      .update({ preferred_language: language })
-      .catch((e) => logger.warn(`[voice-agent-lead] customer language hint failed (non-blocking): ${e.message}`));
-  }
+  if (language && customerId) await stampCustomerPreferredLanguage(customerId, language);
 
   // Guard FIRST (mirror the voicemail processor): a matched lifecycle customer
   // that isn't in a lead stage gets NO lead work — even if a historical/
@@ -636,7 +737,7 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
 
     // Urgency: upgrade-only (mirror voicemail path) — hot promotes to urgent,
     // otherwise only fill if still empty so a cold follow-up never downgrades.
-    if (extracted.lead_quality === 'hot') leadUpdates.urgency = 'urgent';
+    if (extracted.lead_quality === 'hot' || extracted.quote_promised_expectation === 'about_15_minutes') leadUpdates.urgency = 'urgent';
     else if (extracted.lead_quality && isEmpty(current?.urgency)) leadUpdates.urgency = 'normal';
 
     if (extracted.call_summary) leadUpdates.transcript_summary = extracted.call_summary;
@@ -658,6 +759,16 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
     merged.source = 'voice_agent';
     merged.language = language || priorExtracted.language || null;
+    // A written-estimate request/promise is STICKY-ON on the lead artifact
+    // (codex #3569), in the shape the Leads UI already renders
+    // (quote_requested → "Quote requested on call", quote_promised → "Quote
+    // promised to caller"): staff working the lead must see the obligation,
+    // and a later capture that does not mention it must not erase it.
+    if (extracted.quote_requested === true) merged.quote_requested = true;
+    if (extracted.quote_promised === true) merged.quote_promised = true;
+    // What the caller was TOLD about turnaround travels with the lead
+    // (hook P1); a 15-minute expectation makes the lead urgent for staff.
+    if (extracted.quote_promised_expectation) merged.quote_promised_expectation = extracted.quote_promised_expectation;
     const contactPreference = contactPreferenceFields(extracted);
     if (contactPreference) {
       if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;
@@ -855,5 +966,5 @@ async function sweepUnsurfacedContactInstructions({ limit = 10 } = {}) {
 
 module.exports = {
   createLeadFromExtraction, findCustomerByPhone, resolveLeadSourceId, contactPreferenceFields,
-  sweepUnsurfacedContactInstructions,
+  sweepUnsurfacedContactInstructions, stampCustomerPreferredLanguage, surfaceEstimateRequestForCustomer,
 };

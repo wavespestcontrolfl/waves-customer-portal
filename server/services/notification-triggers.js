@@ -678,7 +678,7 @@ function pushTagFor(triggerKey, payload = {}) {
  * @param {string} triggerKey — must match a key in TRIGGER_REGISTRY
  * @param {object} payload — trigger-specific data, see each build() for shape
  */
-async function triggerNotification(triggerKey, payload = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -778,6 +778,16 @@ async function triggerNotification(triggerKey, payload = {}) {
     try {
       const enabledUserIds = pushEnabledIds;
 
+      // Caller-supplied last-moment check (e.g. "is the SMS still unread?").
+      // Fail open: a throwing check still pushes.
+      if (enabledUserIds.length > 0 && typeof beforePush === 'function') {
+        const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
+        if (stillWanted === false) {
+          stats.push = { sent: 0, skipped: 'superseded_before_push' };
+          return stats;
+        }
+      }
+
       if (enabledUserIds.length > 0) {
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
@@ -842,6 +852,15 @@ async function triggerNotification(triggerKey, payload = {}) {
             })
         );
 
+        // Second look right before the send: the badge fan-out above can take
+        // up to ~1.5s and a thread opened in that window must not buzz (P2).
+        if (typeof beforePush === 'function') {
+          const stillWanted = await Promise.resolve(beforePush()).catch(() => true);
+          if (stillWanted === false) {
+            stats.push = { sent: 0, skipped: 'superseded_before_push' };
+            return stats;
+          }
+        }
         stats.push = await PushService.sendToAdminUsers(
           enabledUserIds,
           (adminUserId) => {

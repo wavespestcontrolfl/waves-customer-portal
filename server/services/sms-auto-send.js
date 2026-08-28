@@ -147,7 +147,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
 
     await suggest.lockSuggestThread(trx, threadLast10 || customerId);
 
-    if (await suggest.threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at })) {
+    if (await suggest.threadHasLiveAnswer(trx, { threadLast10, customerId, inboundCreatedAt: inbound.created_at, inboundSmsLogId: smsLogId })) {
       return null;
     }
 

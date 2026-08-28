@@ -27,6 +27,8 @@
  *   GATE_LAWN_ASSESSMENT=true   (public lawn-assessment photo funnel — paid vision per upload)
  *   GATE_PEST_IDENTIFIER=true   (public pest-identifier photo funnel — paid vision per upload)
  *   GATE_AUTOPAY_CUSTOMER_SMS=true       (enable customer-facing autopay SMS)
+ *   GATE_PORTAL_METHOD_REMOVAL_GUARD=true (portal DELETE /api/billing/cards/:id refuses the method Auto Pay is using — 409 autopay_method_in_use — and never mutates Auto Pay as a side effect; off = legacy remove-and-silently-disable)
+ *   GATE_PAYMENT_METHOD_CHANGE_EMAILS=true (customer lifecycle emails for Auto Pay turned OFF and saved method REMOVED — portal, and Stripe-dashboard detaches via webhook)
  *   GATE_ESTIMATE_DEPOSIT_ABANDONMENT_SMS=true (deposit-step abandonment recovery SMS)
  *   GATE_INCIDENT_EVAL=true     (weekly live-LLM incident regression eval)
  *   GATE_CALL_REPLAY_EVAL=true  (weekly reviewed-call extraction replay eval)
@@ -81,6 +83,23 @@ const gates = {
   // switch: unset or any non-'true' value. Booking/estimate flows stay
   // card-only regardless (owner ruling 2026-07-13).
   portalAchAutopay: process.env.GATE_PORTAL_ACH_AUTOPAY === 'true',
+
+  // Portal payment-method removal guard (owner ruling 2026-08-27): the
+  // method Auto Pay is using (getAutopaySelectedMethodIds — the charge
+  // resolver's pick + the enrollment pointer, expired included) cannot be
+  // detached from the portal; the customer replaces it or turns Auto Pay
+  // off first. DELETE is side-effect-free under the gate — it never flips
+  // customers.autopay_enabled. Gate off = the legacy path (unconditional
+  // remove + best-effort, non-transactional Auto Pay disable). Customer-
+  // facing money surface — fail-closed ==='true' in every environment.
+  portalMethodRemovalGuard: process.env.GATE_PORTAL_METHOD_REMOVAL_GUARD === 'true',
+
+  // Negative lifecycle emails (payment.autopay_disabled /
+  // payment.method_removed) — the positive counterparts have shipped for
+  // months; these fire on the portal Turn-off, portal remove, and the
+  // payment_method.detached webhook (Stripe-dashboard removals). Separate
+  // from the guard gate so either can run alone. Off = senders no-op.
+  paymentMethodChangeEmails: process.env.GATE_PAYMENT_METHOD_CHANGE_EMAILS === 'true',
 
   // /secure/:token plan-choice step (pay per application vs. annual prepay)
   // on the appointment card-request page. Customer-facing money surface —
@@ -490,6 +509,15 @@ const gates = {
   // calls route exactly as they do today. Behaviour is further tuned (and can be
   // disabled live with no deploy) via the `call_routing` system_settings row.
   voiceAiAgent: process.env.GATE_VOICE_AI_AGENT === 'true',
+
+  // Spanish language vestibule on inbound calls — "Para español, oprima dos"
+  // folded into the greeting; press 2 hands the call to the SAME Sandy relay
+  // agent in an es-US session. Customer-facing and on the live call path, so
+  // explicit opt-in in EVERY environment. Off ⇒ /voice TwiML is byte-identical
+  // to today (no <Gather> is rendered). Also requires voiceAiAgent + a reachable
+  // relay endpoint + `spanishMenuEnabled` in the call_routing settings row —
+  // the vestibule is never offered when no Spanish session could start.
+  voiceSpanishMenu: process.env.GATE_VOICE_SPANISH_MENU === 'true',
 
   // AI Assistant — auto-sends AI replies to customers via SMS
   aiAssistantAutoReply: isProd ? process.env.GATE_AI_ASSISTANT === 'true' : true,
@@ -1320,6 +1348,24 @@ const gates = {
   // blocks on a browser. Off in prod until the rendered document is verified.
   // Kill switch: unset GATE_ESTIMATE_DOC_PDF.
   estimateDocPdf: isProd ? process.env.GATE_ESTIMATE_DOC_PDF === 'true' : true,
+
+  // Estimate acceptance terms (owner ruling 2026-08-28): the public estimate
+  // renders a one-line authorization + inline "View terms" drawer directly
+  // above Accept (same steps, no extra page) and the accept route records
+  // the verbatim text/version, time, IP and device on `estimate_acceptances`
+  // + stamps estimates.terms_version / customers.accepted_terms_version.
+  // Off ⇒ /data payload and the accept flow are byte-identical to today and
+  // nothing is recorded (nothing was shown). Counsel reviews the copy once
+  // before this flips. Kill switch: unset GATE_ESTIMATE_ACCEPTANCE_TERMS.
+  //
+  // Rollout is two-step on the same variable: `true` shows + records, and
+  // an accept that carries NO attestation (a tab loaded before the flip —
+  // legacy SSR page or the previous bundle) still accepts unrecorded, so no
+  // live tokenized flow is stranded; `required` (flip once every open tab
+  // has had time to reload) refuses an unattested accept with the
+  // reloadable 409 too, so every acceptance under the gate has its record.
+  estimateAcceptanceTerms: ['true', 'required'].includes(process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS),
+  estimateAcceptanceTermsRequired: process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS === 'required',
 
   // The liquid-glass theme gates (GATE_ESTIMATE_GLASS / GATE_EMAIL_GLASS /
   // GATE_REPORT_GLASS / GATE_PORTAL_GLASS) were retired once glass shipped to

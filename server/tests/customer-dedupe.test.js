@@ -1084,6 +1084,28 @@ describe('executeMerge', () => {
       .rejects.toThrow(/not a shell \(billing_mode\)/);
   });
 
+  it('accepted_terms_version: a newer (or only) loser version folds into the winner; an older one never downgrades it', async () => {
+    const base = { first_name: 'Fay', last_name: 'Manager', email: 'fay@example.com', phone: '+16124074763' };
+    // Winner never accepted terms, loser did → winner absorbs the loser's version.
+    let built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: null }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2026-09' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    let result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBe('v2026-09');
+    expect(built.state.backfilled.accepted_terms_version).toBe('v2026-09');
+
+    // Loser accepted a NEWER version → winner moves forward.
+    built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: 'v2026-09' }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2027-01' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBe('v2027-01');
+
+    // Loser's version is OLDER → winner keeps its own.
+    built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: 'v2027-01' }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2026-09' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBeUndefined();
+  });
+
   it('contact_role backfills from a loser-only role and never overrides an explicit winner role', async () => {
     // A property-manager duplicate merged into a NULL-role winner must not
     // revert the surviving profile to assumed-owner semantics.
@@ -1167,6 +1189,47 @@ describe('executeMerge', () => {
     });
     expect(result.repointed['customers.autopay_restrictions'])
       .toBe('autopay_enabled, autopay_paused_until, autopay_pause_reason');
+  });
+
+  it('carries a loser account-credit auto-apply opt-out onto an opted-in winner (most-restrictive; its credit moves with it)', async () => {
+    const winner = {
+      id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003',
+      autopay_enabled: true, autopay_paused_until: null, auto_apply_account_credit: true,
+    };
+    const loser = {
+      id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003',
+      autopay_enabled: true, autopay_paused_until: null, auto_apply_account_credit: false, account_credits: '40.00',
+    };
+    const state = { restrictionUpdate: null };
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (table === 'customers') {
+        if (q.called('forUpdate')) return [winner, loser];
+        if (q.called('update')) {
+          const payload = q.args('update')[0];
+          if (payload.auto_apply_account_credit === false) state.restrictionUpdate = payload;
+          return 1;
+        }
+        return [];
+      }
+      if (table === 'customer_merge_journal') return [{ id: 'j1' }];
+      if (table === 'referral_promoters' && q.called('first')) return null;
+      if (q.called('update')) return 1;
+      return [];
+    }));
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.transaction = jest.fn(async (fn) => fn(trx));
+    trx.fn = { now: () => 'NOW' };
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.restrictionUpdate).toMatchObject({ auto_apply_account_credit: false });
+    expect(state.restrictionUpdate.autopay_enabled).toBeUndefined();
+    expect(result.repointed['customers.autopay_restrictions']).toBe('auto_apply_account_credit');
+    // the reverse (loser opted IN, winner opted OUT) never re-enables
+    winner.auto_apply_account_credit = false; loser.auto_apply_account_credit = true; state.restrictionUpdate = null;
+    const again = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.restrictionUpdate).toBeNull();
+    expect(again.repointed['customers.autopay_restrictions']).toBeUndefined();
   });
 
   it('carries a loser-only unit onto a street-only winner (address_line2 backfill)', async () => {
