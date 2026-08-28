@@ -416,8 +416,10 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   construction and any discrepancy is `ambiguous` until explained. (Issuer-generated per
   reservation; the ledger
   stores only the issuer's opaque `issuer_card_id` + `card_last4` — the PAN/CVV are fetched
-  from the issuer at `submitting` time, handed to the provider in memory for that one
-  checkout, and never written to the ledger, attempts, evidence, sessions, logs or prompts)
+  from the issuer at `submitting` time by a **trusted local payment broker** and typed into
+  the checkout's card fields by that broker alone, outside any model/provider context (see
+  §7 "payment boundary"); they are never written to the ledger, attempts, evidence, sessions,
+  logs, prompts, screenshots or traces)
   that is **closed immediately after `charged`/`voided`/reconciliation** — so an
   armed auto-renewal, a merchant retry, or a stored-card charge has no live number to hit.
   The provider still selects the non-recurring option or disables auto-renew where offered
@@ -517,14 +519,29 @@ interface BrowserAgentProvider {
 interface OutreachProvider { draft(prospect, research): Draft; send(draft): SendResult; followUp(prospect): Draft }
 ```
 
+**Payment boundary (P0 — PAN/CVV never cross into a model context).** Only the
+`deterministic_runner` may execute a `submit()` that involves payment, and even it does not
+see card data: a **payment broker** — a small trusted module in the runner process with no
+LLM, no screenshot, no trace — fetches the single-use card from the issuer, fills the card
+fields directly via Playwright locators, and clears them from memory after submission. Any
+provider whose reasoning observes page state (DOM, screenshots, accessibility tree, prompts,
+traces — i.e. every cloud CUA implementation) is restricted to non-payment steps; for a
+paid path it may prepare the checkout up to the payment form, then hands off to the broker
+(`outcome='ready_for_payment'`) and is never resumed on that page until the broker has
+submitted and the card is closed. Screenshots and traces captured on any payment page are
+redacted at capture (card-field regions masked, card inputs excluded from accessibility
+dumps). A provider without a technically enforced secret-input boundary is never granted
+payment execution; this is a hard rule, not a configuration.
+
 Implementations, in order:
 1. **`deterministic_runner`** — the existing `signup-runner.js` (Playwright + form filler),
    extended for `account_required`, `email_verification` (IMAP verifier), `payment_required`
-   (virtual card, only under `AUTO_PAID_WITHIN_POLICY` or after owner approval), and
+   (via the payment broker only, under `AUTO_PAID_WITHIN_POLICY` or after owner approval), and
    **resumable sessions** (persisted browser state per `domain_id`).
 2. **`openai_cua` / `claude_cu` / `stagehand` / `grok`** — same interface, run in the
-   benchmark (§10). A provider never receives credentials it does not need and never
-   receives the Waves identity beyond the canonical NAP packet the contract already sends.
+   benchmark (§10), **non-payment steps only** (payment boundary above). A provider never
+   receives credentials it does not need and never receives the Waves identity beyond the
+   canonical NAP packet the contract already sends.
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
 Provider selection per attempt is a policy field (`preferred_provider`, plus per-path override
@@ -652,8 +669,9 @@ budget kill = the virtual card's limit.
 - **ToS / CAPTCHA** — a CAPTCHA or explicit-consent step is `outcome='captcha'` →
   `awaiting_owner` (never solved by an agent); paid-link-only "sponsored" slots are stored
   with `expected_rel='sponsored'` and scored accordingly.
-- **Money** — only the dedicated virtual card; hard limit at the bank; every charge is an
-  attempt row with cost; owner approval is a portal click.
+- **Money** — single-use per-purchase virtual cards with an issuer-enforced ceiling; PAN/CVV
+  handled only by the local payment broker, never by a model-observed provider; every charge
+  is a ledger row + attempt; owner approval is a portal click.
 - **Truth** — a provider report is a claim; the Judge promotes; `merged`/`lost` semantics
   from #3544 apply to everything acquired.
 
