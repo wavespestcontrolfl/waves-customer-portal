@@ -23,7 +23,8 @@ test('files a billing card with bell:true, the customer link, and a per-call ded
     expect.objectContaining({
       bell: true,
       link: '/admin/customers?customerId=c-1',
-      metadata: expect.objectContaining({ customerId: 'c-1', kind: 'estimate_request', callSid: 'CA1', dedupeKey: 'relay-estimate-request:CA1', requested_service: 'mosquito' }),
+      dedupeKey: 'relay-estimate-request:CA1', // notifyAdmin's top-level dedupe option
+      metadata: expect.objectContaining({ customerId: 'c-1', kind: 'estimate_request', callSid: 'CA1', requested_service: 'mosquito' }),
     }),
   );
 });

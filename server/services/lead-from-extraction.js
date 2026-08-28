@@ -339,12 +339,14 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         icon: '📝',
         link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
         bell: true,
+        // notifyAdmin's own dedupe (advisory lock + metadata dedupeKey):
+        // one card per call, replays return the existing row.
+        ...(opts.callSid ? { dedupeKey: `relay-estimate-request:${opts.callSid}` } : {}),
         metadata: {
           customerId,
           source: 'voice_agent',
           kind: 'estimate_request',
           callSid: opts.callSid || null,
-          dedupeKey: opts.callSid ? `relay-estimate-request:${opts.callSid}` : undefined,
           requested_service: service,
         },
       },
