@@ -351,6 +351,9 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
   const qualityGate = parseJsonMaybe(run?.quality_gate_result, {});
   const uniquenessGate = parseJsonMaybe(run?.uniqueness_gate_result, {});
   const comparisonGate = parseJsonMaybe(run?.comparison_table_result, {});
+  // Topic-targeting verdict (owner rulings 2026-08-27): pre-draft result,
+  // post-draft framing/ownership, entity owners, checked fields, corpus size.
+  const topicTargeting = parseJsonMaybe(run?.topic_targeting_result, null);
   const draft = summarizeDraft(parseJsonMaybe(run?.draft_payload, {}), { includeBody: includeDraftBody });
   const seoCompletion = summarizeSeoCompletion(qualityGate?.seo_completion || draft.seo_completion || draft.seo_contract);
 
@@ -412,6 +415,7 @@ function buildReviewItem({ opportunity, brief, run, remediation = null, includeD
       quality_gate_result: qualityGate,
       uniqueness_gate_result: uniquenessGate,
       comparison_table_result: comparisonGate,
+      topic_targeting_result: topicTargeting,
       gate_summary: summarizeGates(qualityGate, uniquenessGate, comparisonGate),
       seo_completion: seoCompletion,
     } : null,

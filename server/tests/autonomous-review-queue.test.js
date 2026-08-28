@@ -237,6 +237,18 @@ describe('autonomous-review-queue read model helpers', () => {
 describe('run observability exposure', () => {
   const db = require('../models/db');
 
+  test('buildReviewItem exposes the persisted topic-targeting verdict (PR #3549)', () => {
+    const verdict = { ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', entities: ['taexx'], owners: ['/pest-control/in-wall-pest-control/'] }], entity_owners: [{ url: '/pest-control/in-wall-pest-control/', entities: ['taexx'] }], corpus_size: 255, framing: { ok: true, findings: [] } };
+    const item = buildReviewItem({
+      opportunity: { id: 'opp-t', status: 'pending_review' },
+      brief: null,
+      run: { id: 'run-t', outcome: 'skipped_gate_fail', skip_reason: 'topic_targeting:TOPIC_CANNIBALIZES_EXISTING', topic_targeting_result: JSON.stringify(verdict), quality_gate_result: '{}', uniqueness_gate_result: '{}', comparison_table_result: '{}', draft_payload: '{}' },
+    });
+    expect(item.run.topic_targeting_result).toEqual(verdict);
+    const bare = buildReviewItem({ opportunity: { id: 'opp-u', status: 'pending_review' }, brief: null, run: { id: 'run-u', outcome: 'completed_pending_review', quality_gate_result: '{}', uniqueness_gate_result: '{}', comparison_table_result: '{}', draft_payload: '{}' } });
+    expect(bare.run.topic_targeting_result).toBeNull();
+  });
+
   test('buildReviewItem exposes the PR handle, poller pending state, and remediation', () => {
     const item = buildReviewItem({
       opportunity: { id: 'opp-1', status: 'pending_review' },

@@ -732,7 +732,7 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
   });
 
-  test('a GitHub failure while retiring the PR rolls the park back (nothing parked, retried next tick)', async () => {
+  test('a GitHub failure while retiring the PR leaves the park DURABLE (committed) and the PR is reconciled next tick', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
     const updates = setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue(openPr());
@@ -742,15 +742,41 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     publisher.assertCodexReviewClear.mockResolvedValue(true);
     topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'owned' }] }));
     gh.closePr.mockRejectedValueOnce(new Error('github 502'));
-    // A throw inside the transaction callback rejects db.transaction (rollback).
-    db.transaction = jest.fn(async (fn) => fn(fakeTrx(true)));
 
     const res = await poller.pollPending();
 
     expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(res.results[0].parked).toBeUndefined();
-    expect(res.results[0]).toMatchObject({ transient: true, error: expect.stringMatching(/github 502/) });
+    // The park is durable regardless of GitHub: run + queue moved to topic_targeting_blocked…
+    expect(res.results[0]).toMatchObject({ pending: true, parked: true });
+    expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'topic_targeting_blocked')).toBeDefined();
+    // …the retire was attempted after the commit and failed best-effort (no terminal mark yet).
+    expect(gh.closePr).toHaveBeenCalledWith(42);
     expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeUndefined();
+  });
+
+  test('reconcileTopicBlockedPrs retires a parked run whose PR is still open, and leaves closed ones alone', async () => {
+    const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review' });
+    const updates = setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'open', merged: false, head: { ref: 'content/autonomous-test', sha: 'HEADSHA1' } });
+    const r1 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r1).toMatchObject({ count: 1, retired: 1 });
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+
+    jest.clearAllMocks();
+    setupDb({ pending: [parked] });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+    const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r2).toMatchObject({ count: 1, retired: 0 });
+    expect(gh.closePr).not.toHaveBeenCalled();
+
+    // Pending (non-parked) runs are never touched even if the query fake returns them.
+    jest.clearAllMocks();
+    setupDb({ pending: [makeRun()] });
+    const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r3).toMatchObject({ count: 0 });
+    expect(gh.getPr).not.toHaveBeenCalled();
   });
 
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {

@@ -587,10 +587,15 @@ function isLiveRow(post = {}) {
 async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLiveIndex, category = null } = {}) {
   if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
-  return evaluate(
-    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) },
-    { index: index || await loadIndex(), requireCorpus: true }
-  );
+  const candidate = { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) };
+  // Two stages (the runner's pattern): geo first WITHOUT the corpus — a
+  // deterministic geo block never fetches the live corpus and still returns
+  // its verdict during a GitHub outage; only a geo-clean row loads it.
+  if (!index) {
+    const geoOnly = evaluate(candidate, { requireCorpus: false });
+    if (!geoOnly.ok || geoOnly.skipped !== 'no_corpus') return geoOnly;
+  }
+  return evaluate(candidate, { index: index || await loadIndex(), requireCorpus: true });
 }
 
 function isApplicable({ actionType = null, pageType = null } = {}) {

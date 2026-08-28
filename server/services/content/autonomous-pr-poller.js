@@ -288,7 +288,7 @@ const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
 async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
   const q = trx || db;
   const pendingReason = pendingSkipReasonForRun(run);
-  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} closed (branch retired); requeue re-drives the lane with a fresh draft, or dismiss.`;
+  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} is retired (closed, branch deleted; reconciled each tick until it is); requeue re-drives the lane with a fresh draft, or dismiss.`;
   const lost = (what) => { const e = new Error(`topic-block park lost its ${what} CAS (operator action landed) — nothing changed`); e.code = 'TOPIC_PARK_LOST'; return e; };
   const fresh = await q('autonomous_runs').where('id', run.id).first('reviewer_notes');
   const runRows = await q('autonomous_runs')
@@ -310,17 +310,68 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
       .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
     if (Number(queueRows) !== 1) throw lost('queue');
   }
-  // Retire the PR as part of the same transition: a requeue must not leave
-  // a mergeable blocked branch behind and a dismiss must not orphan it. A
-  // GitHub failure here throws → the transaction rolls back → next tick
-  // retries the whole park.
-  if (gh && typeof gh.closePr === 'function') {
-    await gh.closePr(pr.number);
-    if (pr.head?.ref && typeof gh.deleteRef === 'function') {
-      try { await gh.deleteRef(pr.head.ref); } catch (err) { logger.warn(`[autonomous-pr-poller] branch delete after topic-block park failed for PR #${pr.number}: ${err.message}`); }
+  return true;
+}
+
+// The PR is retired AFTER the park is durable (a DB transaction cannot make
+// the GitHub mutation atomic: a closure whose commit then failed would send
+// the still-pending run through finalizeClosed as failed/skipped). Runs the
+// close idempotently — reconcileTopicBlockedPrs repeats it every tick for
+// parked runs whose PR is still open, so a lost response or partial closure
+// converges. Best-effort; never throws.
+async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
+  try {
+    const current = pr || await gh.getPr(prNumber);
+    if (!current) return { retired: false, reason: 'pr_unreadable' };
+    if (current.state === 'open' && !current.merged) {
+      await gh.closePr(prNumber);
+      const ref = current.head?.ref;
+      if (ref && typeof gh.deleteRef === 'function') {
+        try { await gh.deleteRef(ref); } catch (err) { logger.warn(`[autonomous-pr-poller] branch delete after topic-block park failed for PR #${prNumber}: ${err.message}`); }
+      }
+      logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} for topic-blocked run ${run.id}`);
+    }
+    try {
+      const { markPrTerminal } = require('./codex-remediation');
+      await markPrTerminal(prNumber, current.merged ? 'merged' : 'closed');
+    } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal after topic-block park failed for PR #${prNumber}: ${err.message}`); }
+    return { retired: true };
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] PR retire for topic-blocked run ${run.id} failed: ${err.message} (reconciled next tick)`);
+    return { retired: false, reason: err.message };
+  }
+}
+
+// Every tick: parked topic-blocked runs whose PR is still open (a retire
+// that failed or half-completed) are retired again. Cheap — one getPr per
+// parked run, and there are few.
+async function reconcileTopicBlockedPrs(gh) {
+  let rows = [];
+  try {
+    rows = await db('autonomous_runs')
+      .where('outcome', PENDING_OUTCOME)
+      .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+      .whereNotNull('astro_pr_url')
+      .limit(25)
+      .select('id', 'astro_pr_url', 'skip_reason', 'outcome');
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] topic-blocked reconcile query failed: ${err.message}`);
+    return { count: 0 };
+  }
+  // Belt and braces: only rows in the parked state (never a pending run).
+  rows = rows.filter((r) => r.skip_reason === TOPIC_BLOCKED_SKIP_REASON && r.outcome === PENDING_OUTCOME && r.astro_pr_url);
+  let retired = 0;
+  for (const run of rows) {
+    const prNumber = prNumberFromUrl(run.astro_pr_url);
+    if (!prNumber) continue;
+    let pr = null;
+    try { pr = await gh.getPr(prNumber); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile getPr #${prNumber} failed: ${err.message}`); continue; }
+    if (pr && pr.state === 'open' && !pr.merged) {
+      const r = await retireTopicBlockedPr(run, prNumber, gh, { pr });
+      if (r.retired) retired++;
     }
   }
-  return true;
+  return { count: rows.length, retired };
 }
 
 /**
@@ -1083,7 +1134,7 @@ async function maybeAutoMerge(run, pr) {
         if (!topic.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
           // Deterministic → park on this transaction (commits with the lock).
-          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx, gh);
+          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason, trx);
           withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
           return null;
         }
@@ -1098,13 +1149,8 @@ async function maybeAutoMerge(run, pr) {
         return doMerge();
       });
       if (withheld) {
-        if (withheld.parked) {
-          // Committed: the remediation row for the (now closed) PR is terminal.
-          try {
-            const { markPrTerminal } = require('./codex-remediation');
-            await markPrTerminal(pr.number, 'closed');
-          } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal after topic-block park failed for PR #${pr.number}: ${err.message}`); }
-        }
+        // Park committed → retire the PR (idempotent; reconciled every tick).
+        if (withheld.parked) await retireTopicBlockedPr(run, pr.number, gh, { pr });
         return withheld;
       }
     } else {
@@ -1323,7 +1369,11 @@ async function pollPending() {
     logger.warn(`[autonomous-pr-poller] pending-run query failed: ${err.message}`);
     return { count: 0, skipped: true, reason: err.message };
   }
-  if (!rows.length) return { count: 0, results: [] };
+  // Parked topic-blocked runs whose PR is still open converge here every
+  // tick (a retire that failed or half-completed after the durable park).
+  let topicBlocked = { count: 0, retired: 0 };
+  try { topicBlocked = await reconcileTopicBlockedPrs(require('../content-astro/github-client')); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked reconcile failed: ${err.message}`); }
+  if (!rows.length) return { count: 0, results: [], topicBlocked };
 
   // Human review-queue actions (requeue/dismiss) update ONLY the
   // opportunity_queue row and leave the run's parked outcome/skip_reason in
@@ -1386,7 +1436,7 @@ async function pollPending() {
     results.push({ id: run.id, pr_url: run.astro_pr_url, ...r });
   }
   logger.info(`[autonomous-pr-poller] polled ${results.length} parked autonomous PR run(s) (${autoMerges} auto-merged)`);
-  return { count: results.length, results, autoMerges };
+  return { count: results.length, results, autoMerges, topicBlocked };
 }
 
 module.exports = {
@@ -1397,6 +1447,8 @@ module.exports = {
     blogMergeSocialShareEnabled,
     maxAutoMergesPerPoll,
     prNumberFromUrl,
+    reconcileTopicBlockedPrs,
+    retireTopicBlockedPr,
     pendingSkipReasonForRun,
     isMetadataLane,
     closedSkipReasonForRun,
