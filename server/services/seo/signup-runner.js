@@ -117,6 +117,11 @@ function buildNap(profile, prospect = null) {
 // one check covers both the in-batch and cross-run cases. Identity = the board's
 // location_key (plan v2 §3.3; '-' = not scoped), stamped on every runner placement by
 // the worker's placed report (see below) and backfilled from quality_signals.location.
+// ROLLING-DEPLOY FALLBACK (temporary; removed with step 2's contract migration, which
+// re-runs the location_key backfill): an OLD pod placing after the migration stamps only
+// quality_signals.location and leaves location_key at '-', so a row at '-' whose legacy
+// location matches still counts as the durable duplicate.
+const LOCATION_MATCH_SQL = "(location_key = ? OR (location_key = '-' AND COALESCE(quality_signals->>'location', '') = ?))";
 async function alreadyPlacedAt(domain, locId) {
   const dom = normDomain(domain);
   if (!dom) return false;
@@ -124,7 +129,7 @@ async function alreadyPlacedAt(domain, locId) {
     .whereIn('status', ['placed', 'live', 'indexed'])
     // https{0,1} not https? — a literal ? inside a knex whereRaw is parsed as a positional binding.
     .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [dom])
-    .whereRaw('location_key = ?', [locationKeyOf(locId)])
+    .whereRaw(LOCATION_MATCH_SQL, [locationKeyOf(locId), String(locId || 'default')])
     .first();
   return !!row;
 }
@@ -315,4 +320,4 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 }
 
 module.exports = { run };
-module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify, attemptRowFor };
+module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify, attemptRowFor, LOCATION_MATCH_SQL };

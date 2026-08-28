@@ -54,7 +54,16 @@ jest.mock('../models/db', () => {
 const worker = require('../services/seo/link-prospect-worker');
 const { fillCitationForm } = require('../services/seo/browser-form-filler');
 const runner = require('../services/seo/signup-runner');
-const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify } = runner._internals;
+const { buildNap, parseAddress, validateSubmitUrl, leaseGuardedReclassify, LOCATION_MATCH_SQL } = runner._internals;
+
+describe('alreadyPlacedAt location predicate (v2 identity + rolling-deploy fallback)', () => {
+  test('compiles with exactly two bindings (no bare ? eaten by knex) and keeps the legacy quality_signals fallback only for unstamped rows', () => {
+    const knex = require('knex')({ client: 'pg' });
+    const c = knex('seo_link_prospects').whereRaw(LOCATION_MATCH_SQL, ['bradenton', 'bradenton']).toSQL().toNative();
+    expect(c.bindings).toEqual(['bradenton', 'bradenton']);
+    expect(c.sql).toMatch(/location_key = \$1 OR \(location_key = '-' AND COALESCE\(quality_signals->>'location', ''\) = \$2\)/);
+  });
+});
 
 const prospect = (o = {}) => ({ id: 'p1', target_domain: 'citysquares.com', target_url: 'https://citysquares.com/add', offered_link_rel: 'nofollow', lease_token: '2026-06-22T00:00:00.000Z', ...o });
 
