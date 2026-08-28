@@ -160,6 +160,27 @@ describe('case + card creation', () => {
     expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 1, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
   });
 
+  test('a multi-invoice account files ONE card that itemizes every invoice behind the total, oldest-due first', async () => {
+    const second = { id: 'inv-2', invoice_number: 'WPC-2026-1101', title: 'Lawn Care', total: '44.55', credit_applied: 0, due_date: '2026-08-05', created_at: '2026-07-20T12:00:00.000Z' };
+    ContactPolicy.evaluate.mockResolvedValueOnce({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-2', 'inv-1'], eligibleBalanceCents: 12800 + 4455 });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [second, INVOICE] })], // loader order ≠ due order
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 17255 }, chain({ result: [] })] })],
+      notifications: [chain({ result: 1 }), chain({ first: null })],
+    });
+    await ShadowSweep.runShadowSweep({ now: NOW });
+
+    const [, title, body] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(title).toContain('$172.55');
+    expect(body).toContain('Invoices (2) - $172.55 open balance; the oldest is 21 days past due:');
+    expect(body).toMatch(/WPC-2026-1100 - \$128\.00 \(21 days past due\)/);
+    expect(body).toMatch(/WPC-2026-1101 - \$44\.55 \(7 days past due\)/);
+    expect(body.indexOf('WPC-2026-1100')).toBeLessThan(body.indexOf('WPC-2026-1101'));
+    expect(body).toContain('open balance of $172.55 across 2 invoices, the oldest for your Quarterly Pest Control service');
+    expect(`${title}\n${body}`).not.toMatch(/collection|delinquen/i);
+  });
+
   test('the card masks the phone, names the invoice/balance/age/consent, and speaks open-balance language', async () => {
     setDbQueues({
       invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE] })],

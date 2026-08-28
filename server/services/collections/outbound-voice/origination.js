@@ -37,6 +37,8 @@ const ContactPolicy = require('../contact-policy');
 const ContactLedger = require('../contact-ledger');
 const { normalizeE164 } = require('../consent-provenance');
 const { isVoiceLatePaymentEnabled } = require('./gates');
+const { anchorInvoiceOf, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('../account-anchor');
+const { etCalendarDayOf } = require('../../../utils/datetime-et');
 
 const CALL_SOURCE = 'collections_voice';
 
@@ -160,17 +162,32 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   }
   if (setChanged) {
     // The balance only GREW — a new invoice joined the account (owner ruling
-    // 2026-08-28: new invoices join the existing balance silently). Re-snapshot
-    // the case so the disclosed figure and the pay link cover the whole
-    // account, then proceed. Fenced like every other pre-claim write.
+    // 2026-08-28: new invoices join the existing balance silently). The
+    // approval was for a TIER too (the idempotency key's suffix = the
+    // register Sandy will speak): a joining invoice OLDER than the approved
+    // anchor moves the clock, and a call approved as friendly must never go
+    // out firm (hook r3 P1) — cancel and let the sweep re-propose at the
+    // right tier. Same tier ⇒ re-snapshot ids/balance/anchor date and proceed.
+    const liveRows = await db('invoices').whereIn('id', liveIds).select('id', 'due_date', 'created_at');
+    const anchor = anchorInvoiceOf(liveRows);
+    const liveTier = anchor ? dunningTierForOverdue(daysOverdueOn(now, dueValueOf(anchor))) : null;
+    const approvedTier = Number(String(caseRow.idempotency_key || '').split(':').pop());
+    if (!anchor || liveTier !== approvedTier) {
+      await setCaseState(caseRow, {
+        current_state: 'cancelled',
+        hold_reason: `predial_tier_changed: approved ${approvedTier}, live ${liveTier}`,
+      });
+      return { dialed: false, reason: 'snapshot_changed' };
+    }
     const resnapped = await setCaseState(caseRow, {
       eligible_invoice_ids: JSON.stringify(liveIds),
       eligible_balance_snapshot: verdict.eligibleBalanceCents,
+      earliest_due_date: etCalendarDayOf(dueValueOf(anchor)),
     });
     if (!resnapped) return { dialed: false, reason: 'dial_claim_lost' };
     caseRow.eligible_invoice_ids = liveIds;
     caseRow.eligible_balance_snapshot = verdict.eligibleBalanceCents;
-    logger.info(`[collections-origination] case ${caseRow.id} re-snapshotted pre-dial: balance grew to ${verdict.eligibleBalanceCents}c (${liveIds.length} invoices)`);
+    logger.info(`[collections-origination] case ${caseRow.id} re-snapshotted pre-dial: balance grew to ${verdict.eligibleBalanceCents}c (${liveIds.length} invoices, tier ${liveTier})`);
   }
 
   const customer = await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at').first();

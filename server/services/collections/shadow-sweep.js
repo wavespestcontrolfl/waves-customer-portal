@@ -20,7 +20,8 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const ContactPolicy = require('./contact-policy');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
-const { anchorInvoiceOf, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('./account-anchor');
+const { invoiceAmountDue } = require('../invoice-helpers');
+const { orderByDue, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('./account-anchor');
 const { withCaseLock } = require('./case-lock');
 
 function shadowGateEnabled() {
@@ -41,11 +42,14 @@ function normalizedIdSet(value) {
 
 // The opening line a live agent/automation WOULD read — surfaced on the card
 // so Adam reviews the exact words before anything ever dials in a later PR.
-function predictedOpeningScript({ firstName, amountDollars, invoiceTitle }) {
+function predictedOpeningScript({ firstName, amountDollars, invoiceTitle, invoiceCount = 1 }) {
   const name = firstName || 'there';
   const title = invoiceTitle || 'recent';
+  const balance = invoiceCount > 1
+    ? `an open balance of $${amountDollars} across ${invoiceCount} invoices, the oldest for your ${title} service`
+    : `an open balance of $${amountDollars} for your ${title} service`;
   return `Hi ${name}, this is Waves Pest Control with a quick billing follow-up. `
-    + `Our records show an open balance of $${amountDollars} for your ${title} service. `
+    + `Our records show ${balance}. `
     + `Do you have a moment to take care of that today, or would a payment link by text be easier?`;
 }
 
@@ -68,7 +72,9 @@ async function candidateCustomerIds() {
 // One admin card per case version, deduped restart-safely on the case's
 // idempotency key via the notifications metadata dedupeKey pattern
 // (call-ingest-watchdog convention).
-async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOverdue, verdict }) {
+// `invoices` = EVERY open invoice behind the snapshot, oldest-due first
+// (hook r3 P1: the total is the account's, never one invoice's).
+async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoices = [invoice], daysOverdue, verdict, now = new Date() }) {
   const existing = await db('notifications')
     .where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
@@ -82,7 +88,14 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
     firstName: customer.first_name,
     amountDollars,
     invoiceTitle: invoice?.title || invoice?.service_type,
+    invoiceCount: invoices.length,
   });
+  const invoiceLines = invoices.length > 1
+    ? [
+        `Invoices (${invoices.length}) - $${amountDollars} open balance; the oldest is ${daysOverdue} days past due:`,
+        ...invoices.map((inv) => `  ${inv.invoice_number || inv.id} - $${Number(invoiceAmountDue(inv)).toFixed(2)} (${daysOverdueOn(now, dueValueOf(inv))} days past due)`),
+      ]
+    : [`Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`];
 
   const NotificationService = require('../notification-service');
   const notified = await NotificationService.notifyAdmin(
@@ -91,7 +104,7 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, daysOve
     [
       'Shadow mode: no call will be placed. This is what the policy would propose.',
       `Phone: ${maskPhone(customer.phone)}`,
-      `Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`,
+      ...invoiceLines,
       `Consent evidence: ${verdict.consentEvidence?.source || 'unknown'}.`,
       `Predicted opening: "${script}"`,
     ].join('\n'),
@@ -146,8 +159,8 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const invoiceIds = normalizedIdSet(verdict.eligibleInvoiceIds);
       // ONE clock per customer: the anchor is the OLDEST-DUE open invoice
       // (owner ruling 2026-08-28), not the first-created row.
-      const invoiceRows = await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*');
-      const invoice = anchorInvoiceOf(invoiceRows);
+      const invoiceRows = orderByDue(await db('invoices').whereIn('id', verdict.eligibleInvoiceIds).select('*'));
+      const invoice = invoiceRows[0] || null;
       if (!invoice) continue;
 
       const dueValue = dueValueOf(invoice);
@@ -260,8 +273,10 @@ async function runShadowSweep({ now = new Date() } = {}) {
             customer,
             caseRow: existing,
             invoice,
+            invoices: invoiceRows,
             daysOverdue,
             verdict,
+            now,
           });
           if (refiled) cardsFiled++;
         }
@@ -348,7 +363,7 @@ async function runShadowSweep({ now = new Date() } = {}) {
       }
 
       const filed = await fileProposalCard({
-        dedupeKey: idempotencyKey, customer, caseRow, invoice, daysOverdue, verdict,
+        dedupeKey: idempotencyKey, customer, caseRow, invoice, invoices: invoiceRows, daysOverdue, verdict, now,
       });
       if (filed) {
         cardsFiled++;

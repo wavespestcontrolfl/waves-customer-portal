@@ -1267,10 +1267,11 @@ describe('account-level disclosure + registers', () => {
     const [anchorArg, opts] = PayCombined.combinedEligibleSiblings.mock.calls.at(-1);
     expect(anchorArg).toMatchObject({ id: 'inv-old', customer_id: 'cust-1' });
     expect(opts).toEqual({ reusePaymentIntentId: 'pi_old' });
-    // Partial bundle (a sibling holds a live PI, over-cap, …) ⇒ never promise the whole balance.
+    // Partial bundle (a sibling holds a live PI, over-cap, …) ⇒ name exactly what it collects, never the whole balance.
     PayCombined.combinedEligibleSiblings.mockResolvedValue([{ id: 'inv-mid' }]);
     r = await disclose(three);
-    expect(r.out).toMatch(/for the OLDEST invoice only/);
+    expect(r.out).toMatch(/it collects Lawn Care on 2026-07-29 and Mosquito on 2026-08-10 \(\$64\.55 of the total\), not the whole balance/);
+    expect(r.out).not.toMatch(/OLDEST invoice only/);
     expect(r.convo._ctx.payLinkCoversAccount).toBe(false);
     expect(r.convo._ctx.payLinkInvoiceIds).toEqual(['inv-old', 'inv-mid']);
     // Selector failure degrades to the anchor alone.
@@ -1375,6 +1376,35 @@ describe('prb-r18', () => {
     expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ pay_link_agreement_verbatim: 'yes please text it over' }),
     }));
+  });
+
+  test('credit covering the anchor invoice while siblings stay open re-opens the pay link for the remainder — never "settled"', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const { loadEligibleInvoices } = require('../services/collections/contact-policy');
+    const { convo } = makeConvo();
+    await verifyAndDisclose(convo);
+    convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce([{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-08-01', total: '30.00', credit_applied: 0 }]);
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(out).toMatch(/\$30\.00 across 1 invoice is still open/);
+    expect(out).not.toMatch(/settled/);
+    expect(convo.payLinkSent).toBe(false); // latch re-opened for the remainder
+    expect(convo._ctx.invoiceId).toBe('inv-2'); // re-anchored
+    // Nothing left ⇒ settled, latch stays closed.
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockResolvedValueOnce([]);
+    const again = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(again).toMatch(/account is settled/);
+    expect(convo.payLinkSent).toBe(true);
+    // An unreadable remainder is never "settled" either.
+    convo.payLinkSent = false;
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
+    loadEligibleInvoices.mockRejectedValueOnce(new Error('db down'));
+    const unsure = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(unsure).toMatch(/could not be checked/);
+    expect(unsure).toMatch(/do NOT say the account is settled/);
   });
 
   test('the pay-link latch closes BEFORE the provider await — a concurrent attempt cannot double-send', async () => {

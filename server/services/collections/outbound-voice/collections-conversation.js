@@ -1128,12 +1128,15 @@ class CollectionsConversation {
     // for the whole balance.
     const now = this._now();
     const ordered = orderByDue(b.invoices || []);
-    const lines = ordered.map((inv) => {
+    const nameOf = (inv) => {
       const label = inv.title || inv.service_type || 'service';
       const when = inv.service_date || inv.due_date;
+      return `${label}${when ? ` on ${String(when).slice(0, 10)}` : ''}`;
+    };
+    const lines = ordered.map((inv) => {
       const days = daysOverdueOn(now, dueValueOf(inv));
       const age = days > 0 ? `${days} day${days === 1 ? '' : 's'} past due` : 'not yet due';
-      return `${label}${when ? ` on ${String(when).slice(0, 10)}` : ''}: $${Number(invoiceAmountDue(inv)).toFixed(2)} (${age})`;
+      return `${nameOf(inv)}: $${Number(invoiceAmountDue(inv)).toFixed(2)} (${age})`;
     });
     const anchor = anchorInvoiceOf(ordered);
     const anchorDays = anchor ? daysOverdueOn(now, dueValueOf(anchor)) : 0;
@@ -1147,9 +1150,19 @@ class CollectionsConversation {
     } else if (ctx.register === 'firm' || ctx.register === 'final') {
       consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
     }
-    const linkScope = ctx.payLinkCoversAccount
-      ? 'offer to text the secure payment link — it opens the full account balance for one payment.'
-      : 'offer to text the secure payment link for the OLDEST invoice only; say the office will send the rest separately — never promise one link for the full balance.';
+    // What the link would ACTUALLY collect (pay-combined's own selection):
+    // the whole account, a named partial bundle, or the oldest invoice alone.
+    const linkIds = new Set((ctx.payLinkInvoiceIds || []).map(String));
+    const linked = ordered.filter((inv) => linkIds.has(String(inv.id)));
+    let linkScope;
+    if (ctx.payLinkCoversAccount) {
+      linkScope = 'offer to text the secure payment link — it opens the full account balance for one payment.';
+    } else if (linked.length > 1) {
+      const linkedTotal = linked.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
+      linkScope = `offer to text the secure payment link — it collects ${linked.map(nameOf).join(' and ')} ($${linkedTotal.toFixed(2)} of the total), not the whole balance; say the office will send the rest separately — never promise one link for the full balance.`;
+    } else {
+      linkScope = 'offer to text the secure payment link for the OLDEST invoice only; say the office will send the rest separately — never promise one link for the full balance.';
+    }
     return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; ${linkScope}${consequence}`;
   }
 
@@ -1501,15 +1514,42 @@ class CollectionsConversation {
       this.payLinkSent = true;
       const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
       if (result && result.covered_by_credit) {
-        // Account credit fully covered the invoice — nothing was texted and
-        // nothing is owed on it. The truth, not a false "link sent".
-        return 'No text was needed: account credit covered that invoice in full. Tell the customer it is settled.';
+        // Account credit settled the ANCHOR invoice — nothing was texted.
+        // The balance is the account's (hook r3 P1): re-read the eligible
+        // set; anything still open re-opens the latch and re-anchors so a
+        // second send_pay_link collects the remainder. Never "settled" on
+        // an unproven remainder.
+        let remaining;
+        try {
+          const { loadEligibleInvoices } = require('../contact-policy');
+          remaining = await loadEligibleInvoices(this._ctx.customer.id);
+        } catch (err) {
+          logger.error(`[collections-voice] balance re-read after credit cover failed callSid=${this.callSid}: ${err.message}`);
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be checked. Say the office will follow up — do NOT say the account is settled.';
+        }
+        if (!remaining.length) {
+          return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
+        }
+        this._ctx.balance = {
+          total: remaining.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+          count: remaining.length,
+          invoices: remaining,
+        };
+        this._ctx.invoiceId = anchorInvoiceOf(remaining)?.id || null;
+        Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, remaining));
+        this.payLinkSent = false;
+        return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;
       }
       if (result && (result.sent || result.ok)) {
         this._captures.payLinkSent = true;
-        return this._ctx.payLinkCoversAccount
-          ? 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page with the full account balance.'
-          : 'The payment link for the oldest invoice was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page; the office will send the rest.';
+        const linkedCount = (this._ctx.payLinkInvoiceIds || []).length;
+        if (this._ctx.payLinkCoversAccount) {
+          return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page with the full account balance.';
+        }
+        if (linkedCount > 1) {
+          return `The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page for ${linkedCount} of the open invoices; the office will send the rest.`;
+        }
+        return 'The payment link for the oldest invoice was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page; the office will send the rest.';
       }
       this.payLinkSent = false; // provider REPORTED non-delivery — retry is safe
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });

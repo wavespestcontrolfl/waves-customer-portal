@@ -191,13 +191,34 @@ test('a new invoice joining the account re-snapshots the case pre-dial and the c
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), resnap],
     customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    // The joining invoice is YOUNGER than the approved anchor (due 07-22 → 21d → tier 14, the key's suffix).
+    invoices: [chain('invoices', { result: [{ id: 'inv-2', due_date: '2026-08-05', created_at: '2026-07-20T12:00:00Z' }, { id: 'inv-1', due_date: '2026-07-22', created_at: '2026-07-01T12:00:00Z' }] })],
     call_log: [chain('call_log', { first: undefined })],
   });
   const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
   expect(res).toEqual({ dialed: false, reason: 'outside_call_window' }); // got PAST the snapshot gate
   expect(resnap._updated.eligible_invoice_ids).toBe(JSON.stringify(['inv-1', 'inv-2']));
   expect(resnap._updated.eligible_balance_snapshot).toBe(30255);
+  expect(resnap._updated.earliest_due_date).toBe('2026-07-22'); // anchor unchanged
   expect(resnap._updated.current_state).toBeUndefined(); // not cancelled
+});
+
+// Hook r3 P1: a joining invoice OLDER than the approved anchor moves the
+// clock — the approval was for a tier (friendly/firm/final), so cancel and
+// let the sweep re-propose rather than speak a firmer register unapproved.
+test('a joining invoice that moves the account into a firmer tier ⇒ cancelled (predial_tier_changed), never dialed', async () => {
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455, eligibleInvoiceCents: { 'inv-1': 25800, 'inv-2': 4455 } });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+    invoices: [chain('invoices', { result: [{ id: 'inv-1', due_date: '2026-07-22' }, { id: 'inv-2', due_date: '2026-06-20' }] })], // 53d → tier 30 ≠ approved 14
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+  expect(res).toEqual({ dialed: false, reason: 'snapshot_changed' });
+  expect(stateChain._updated.current_state).toBe('cancelled');
+  expect(stateChain._updated.hold_reason).toBe('predial_tier_changed: approved 14, live 30');
+  expect(mockCallsCreate).not.toHaveBeenCalled();
 });
 
 // Hook P1: net GROWTH must not hide a payment on an approved invoice — the
