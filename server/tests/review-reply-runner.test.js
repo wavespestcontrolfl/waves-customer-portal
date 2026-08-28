@@ -1174,6 +1174,29 @@ describe('admin actions', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft_stale', review_reply: '[DRAFT] ' + text });
   });
 
+  test('a 4★ under REVIEW_AUTO_REPLY_MIN_STARS=5 parks below_threshold, never low_rating (codex r40)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    process.env.REVIEW_AUTO_REPLY_MIN_STARS = '5';
+    state.rows = [row({ id: 't4', star_rating: 4 })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'below_threshold' });
+    expect(mockNotify.mock.calls.at(-1)[1]).toMatch(/below the auto-post threshold/);
+    state.rows = [row({ id: 't2', star_rating: 2 })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'low_rating' });
+  });
+
+  test('postNow of a human [DRAFT] stamps human provenance, never the earlier model version / grounding (codex r40)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const human = 'Thanks Dana, the owner here.';
+    state.rows = [row({ id: 'hp', auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] ' + human, auto_reply_draft: 'old model draft', auto_reply_version: 'reply-v1', auto_reply_mode: 'results', auto_reply_grounding: { accountFingerprint: 'fp:old' }, auto_reply_drafted_at: '2026-08-20T00:00:00Z' })];
+    const r = await Runner.postNow('hp', { type: 'admin' }, { expectedDraft: human });
+    expect(r.outcome).toBe('posted');
+    const af = mockPublish.mock.calls[0][0].autoFields;
+    expect(af).toMatchObject({ auto_reply_draft: human, auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null });
+    expect(af.auto_reply_drafted_at).not.toBe('2026-08-20T00:00:00Z');
+  });
+
   test('postNow does not re-verify a human [DRAFT] (the admin\'s own text is the payload)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const human = 'Hi Dana,\n\nThe owner wrote this.\n\nThe 🌊 Waves Pest Control Sarasota Team';

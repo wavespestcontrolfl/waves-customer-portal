@@ -397,6 +397,10 @@ router.post('/:id/reply', async (req, res, next) => {
       expectedReply: expectedReply === undefined ? undefined : (expectedReply == null ? null : String(expectedReply)),
       expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
       expectedReview: typeof expectedReview === 'string' && expectedReview ? expectedReview : undefined,
+      // The account half of an editor AI draft's grounding token: the
+      // post-PUT check parks a reply whose facts changed while Google's PUT
+      // was in flight, human path included (codex r40).
+      expectedAccountFingerprint: typeof groundingToken === 'string' && groundingToken.includes('|') ? groundingToken.slice(groundingToken.indexOf('|') + 1) : undefined,
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

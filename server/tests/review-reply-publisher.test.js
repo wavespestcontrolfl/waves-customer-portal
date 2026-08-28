@@ -55,6 +55,7 @@ jest.mock('../models/db', () => {
       whereNotIn(col, vals) { filters.push((r) => !vals.includes(r[col])); return api; },
       orWhereNotIn() { return api; },
       forUpdate() { return api; },
+      select() { return api; },
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
@@ -343,11 +344,23 @@ describe('publishReviewReply', () => {
     // Matching account facts → clean posted.
     mockNotify.mockClear();
     state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null };
-    mockAccountFacts.mockResolvedValueOnce({ city: 'Venice', tenure: 'new' });
+    mockAccountFacts.mockReset().mockResolvedValue({ city: 'Venice', tenure: 'new' });
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     const rb = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' }, autoFields: { auto_reply_status: 'posted', auto_reply_grounding: JSON.stringify({ accountFingerprint: 'fp:Venice|new' }) } });
+    expect(mockAccountFacts).toHaveBeenCalledWith('c1', expect.anything());
     expect(rb.editedDuringPut).toBe(false);
     expect(state.rows[0].auto_reply_status).toBe('posted');
+    // codex r40: an editor / IB AI draft passes the account half of its
+    // grounding token; changed facts during the PUT still park + bell even
+    // though no pipeline snapshot is stamped (human path keeps close fields).
+    mockNotify.mockClear();
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: null, auto_reply_reason: null, review_text: 'Great', star_rating: 5, customer_id: 'c1' };
+    mockAccountFacts.mockReset().mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const rc = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, autoFields: { auto_reply_status: null }, expectedAccountFingerprint: 'fp:Venice|new' });
+    expect(rc.editedDuringPut).toBe(true);
+    expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: null });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
     // A HUMAN reply edited-during-PUT keeps the caller's own close fields
     // (never the automatic park — no auto-reply Retract for a person's text)
     // but the bell still rings (hook P1).

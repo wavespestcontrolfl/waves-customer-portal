@@ -312,6 +312,7 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
       allowOverwrite: false,
       autoFields: require('../review-reply/runner').manualReplyCloseFields(db),
       guard: submitGuard,
+      expectedAccountFingerprint: groundingToken.slice(groundingToken.indexOf('|') + 1),
     });
     const review = await db('google_reviews').where('id', reviewId).first();
     logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId}`);

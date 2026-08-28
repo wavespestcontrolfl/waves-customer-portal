@@ -920,13 +920,23 @@ class GoogleBusinessService {
         // draft-preservation rule above.
         const { review_reply: _loserReply, reply_updated_at: _loserReplyAt, ...providerRow } = row;
         const winnerReplyFields = syncReplyFields(winner, normalized, { fnNow: db.fn.now() });
-        await db('google_reviews').where({ id: winner.id }).update({
+        // An OLDER runner losing the race must not write its older snapshot
+        // over the winner's newer content (codex r40): the provider-content
+        // write and the reply sync apply only while this runner's fetch
+        // start is at least as new as the stored liveness token.
+        const loserWrite = db('google_reviews').where({ id: winner.id });
+        if (syncStart) loserWrite.whereRaw('(synced_at IS NULL OR synced_at <= ?::timestamptz)', [new Date(syncStart).toISOString()]);
+        const loserUpdated = await loserWrite.update({
           ...providerRow,
           synced_at: monotonicSyncedAt,
           // Same existing-link-first rule as the row build above.
           customer_id: winner.customer_id || customerId || null,
         });
-        await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
+        if ((Array.isArray(loserUpdated) ? loserUpdated.length : loserUpdated) > 0) {
+          await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
+        } else {
+          logger.info(`[gbp] insert race: older runner yielded to the newer winner row ${winner.id}`);
+        }
         result = { id: winner.id, inserted: false };
       }
     }

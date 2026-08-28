@@ -520,10 +520,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // (or it no longer verified), so the freshly generated text is parked for
   // the person to read. Their next Post now publishes it.
   if (humanOnly) {
-    const reason = rating === 0 ? 'unrated' : 'low_rating';
+    // low_rating / unrated = the hard 1-3★ safety lane; below_threshold = a
+    // 4★ under a configured REVIEW_AUTO_REPLY_MIN_STARS=5 (codex r40).
+    const reason = rating === 0 ? 'unrated' : rating <= 3 ? 'low_rating' : 'below_threshold';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, reason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     if (intent !== 'post_now') {
-      await bell(merged, { title: `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`, body: `${summarize(merged)} — a reply is drafted and waiting for your review. Nothing was posted.`, reason, action: true });
+      const title = reason === 'below_threshold' ? `${rating}-star review — draft ready (below the auto-post threshold)` : `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`;
+      await bell(merged, { title, body: `${summarize(merged)} — a reply is drafted and waiting for your review. Nothing was posted.`, reason, action: true });
     }
     return { outcome: 'parked', reason, mode: draft.mode, drafted: intent === 'post_now' };
   }
@@ -788,7 +791,11 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
           // The attempted text is the pipeline's record of what posted (a
           // human draft too), so reconciliation and Retract see it.
           auto_reply_draft: existing,
-          auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt,
+          // A human draft carries HUMAN provenance — never the earlier model
+          // version / mode / grounding snapshot (codex r40).
+          ...(humanDraft
+            ? { auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: publishedAt }
+            : { auto_reply_drafted_at: row.auto_reply_drafted_at || publishedAt }),
           auto_reply_published_at: publishedAt,
           auto_reply_error: null,
           auto_reply_claimed_until: null,
@@ -813,10 +820,9 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
         // posted instead of an unrelated owner reply (codex r34).
         await db('google_reviews').where({ id: reviewId }).update({
           auto_reply_draft: existing,
-          auto_reply_version: row.auto_reply_version || null,
-          auto_reply_mode: row.auto_reply_mode || null,
-          auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(),
-          ...(humanDraft ? {} : { auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
+          ...(humanDraft
+            ? { auto_reply_version: 'human', auto_reply_mode: null, auto_reply_grounding: null, auto_reply_drafted_at: new Date().toISOString() }
+            : { auto_reply_version: row.auto_reply_version || null, auto_reply_mode: row.auto_reply_mode || null, auto_reply_drafted_at: row.auto_reply_drafted_at || new Date().toISOString(), auto_reply_grounding: JSON.stringify(storedGrounding || null) }),
         }).catch(() => {});
         throw err;
       }

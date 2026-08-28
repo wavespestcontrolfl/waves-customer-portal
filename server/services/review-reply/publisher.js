@@ -177,7 +177,7 @@ function updatedCount(updated) {
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined, expectedReview = undefined, expectedAccountFingerprint = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -494,15 +494,26 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     let accountStale = false;
     let accountCause = null;
     let updated = 0;
+    // The account fingerprint the reply was grounded on: the pipeline stamps
+    // it in the grounding snapshot; the editor / IB pass the account half of
+    // their grounding token (codex r40) — the check does not depend on
+    // pipeline state.
+    const expectedFp = expectedAccountFingerprint || snapshot?.accountFingerprint || null;
     await db.transaction(async (trx) => {
       const locked = await trx('google_reviews').where({ id: reviewId }).forUpdate().first();
-      if (snapshot?.accountFingerprint) {
+      if (expectedFp) {
         try {
           const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('./grounding');
           const customerId = groundingCustomerId(locked || {});
-          if (customerId) await trx('customers').where({ id: customerId }).forUpdate().first('id');
+          if (customerId) {
+            // Lock every row the facts derive from: the customer AND their
+            // service rows (relationship / tenure fallback / categories come
+            // from completed scheduled_services — codex r40).
+            await trx('customers').where({ id: customerId }).forUpdate().first('id');
+            await trx('scheduled_services').where({ customer_id: customerId }).forUpdate().select('id');
+          }
           const nowFp = accountFingerprint(await loadAccountFacts(customerId, trx));
-          if (nowFp !== snapshot.accountFingerprint) { accountStale = true; accountCause = 'account facts changed'; }
+          if (nowFp !== expectedFp) { accountStale = true; accountCause = 'account facts changed'; }
         } catch (e) {
           accountStale = true; accountCause = `account facts could not be re-read (${e.message})`;
         }
