@@ -250,7 +250,7 @@ router.post('/sms', async (req, res) => {
     // grammar candidates, never on every inbound.
     let courtesyOnly = false;
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
-      courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From) });
+      courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
 
     // Try to match sender to a single active customer. Twilio sends E.164,
@@ -1760,14 +1760,16 @@ router.post('/status', async (req, res) => {
 // duplicate SMS/PII on the webhook path at all; the worker-side gate_off
 // outcome is the backstop, not the boundary.
 /**
- * Did the most recent customer-facing outbound to this phone (last 24h) end
- * on a question? Internal alerts are excluded. Fail CLOSED: any error or no
+ * Did the most recent customer-facing outbound from OUR receiving number to
+ * this phone (last 24h) end on a question? Internal alerts are excluded. Fail CLOSED: any error or no
  * recent outbound → true, so a bare "👍" stays loud when in doubt.
  */
-async function lastOutboundAskedQuestion(toPhone) {
+async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   try {
+    // Scoped to the Waves number the customer replied on: a question asked
+    // from a different line is a different thread (hook P1).
     const last = await db('sms_log')
-      .where({ direction: 'outbound', to_phone: toPhone })
+      .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
       .whereNot('message_type', 'internal_alert')
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .orderBy('created_at', 'desc')
