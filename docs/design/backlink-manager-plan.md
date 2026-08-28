@@ -332,7 +332,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -346,6 +346,7 @@ the path's attributes and the policy at decision time, then stamped for the audi
 # SHIPPED DEFAULTS — every AUTO capability is OFF/null until the owner edits it in the
 # Policy panel (each edit is an audited row). Enabling GATE_LINK_AUTHORITY with these
 # defaults changes nothing: every row still routes to the owner.
+auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; free self-service paths route to OWNER_ACCOUNT-style parking)
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
@@ -361,7 +362,7 @@ min_path_confidence          = 0.6
 max_spam_score               = 10
 
 # Suggested first working values (owner sets them; recorded here only as the proposal):
-#   auto_account_creation=true · auto_outreach_min_score=80 · auto_outreach_daily_cap=10 ·
+#   auto_free_acquisition=true · auto_account_creation=true · auto_outreach_min_score=80 · auto_outreach_daily_cap=10 ·
 #   monthly_paid_budget_cents=50000 · max_auto_purchase_cents=5000 · auto_paid_min_score=80 ·
 #   auto_paid_min_d30_confidence=0.6
 ```
@@ -401,7 +402,7 @@ if path.acquisition_type in (resource_outreach, editorial_outreach, partnership)
     → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
 if path.account_required → AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
-else → AUTO_FREE
+else → AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
 including one per policy floor proving DENY beats every AUTO_* and OWNER_* branch, one per
