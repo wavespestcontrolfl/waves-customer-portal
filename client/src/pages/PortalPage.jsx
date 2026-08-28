@@ -7994,7 +7994,9 @@ function PropertyTab({ customer }) {
             {irrigationSuppressedNote}
           </div>
         )}
-        {hasLawnCare && derivedIrrigationLine && (
+        {/* While suppressed the note above is the only word on the figure —
+            a derived line ("is what we'll use") would contradict it. */}
+        {hasLawnCare && derivedIrrigationLine && !irrigationSuppressed && (
           <div style={{ marginTop: 6, fontSize: 12, color: muted, lineHeight: 1.45 }} data-testid="irrigation-derived-line">
             {derivedIrrigationLine}
           </div>
