@@ -1763,6 +1763,11 @@ const OUT_OF_AREA_CITY_CANDIDATES = Object.freeze([
   'Erie', 'Scranton', 'Allentown', 'Harrisburg', 'Wilmington', 'Greenville',
   'Spartanburg', 'Myrtle Beach', 'Santa Fe', 'Las Cruces', 'Nampa', 'Reno',
   'Carson City', 'Green Bay', 'Kenosha',
+  // Out-of-footprint localities that CONTAIN a served city name — listed so
+  // the topic gate's out-of-area precedence wins over the embedded served
+  // match ("Venice Beach pest control" is California, not Venice, FL).
+  'Venice Beach', 'Sarasota Springs', 'Palmetto Bay', 'Englewood Cliffs',
+  'Laurel Springs',
 ]);
 
 function outOfAreaCities() {

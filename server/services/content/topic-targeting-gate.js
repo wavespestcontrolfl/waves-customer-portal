@@ -249,7 +249,7 @@ const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:
 // Pesticide formulation suffixes (SC = suspension concentrate, CS, WP, WDG,
 // …) after a governed product name are not state abbreviations — scrubbed
 // before the abbreviation matchers. "Columbia SC pest control" still is.
-const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bifen|bifenthrin|suspend|fipro|tengard|cyzmic|onslaught|dominion|premise|altriset|transport|alpine|phantom|demand|talstar|tempo|celsius|advion|blindside|headway|prodiamine|dimension|arena|acelepryn|merit|safari|xylecore|specticle|certainty|manuscript|tribute|sedgehammer|quali-pro|lesco)\s+(?:sc|cs|wp|wsb|ec|wg|wdg|sg|me|ew|ulv|xt|zc|g|p|pro|total)\b|\b[a-z-]+\s+sc\s+(?:termiticide|insecticide|fungicide|herbicide|label|rate|mix)\b/gi;
+const FORMULATION_EXEMPT_RE = /\b(?:termidor|taurus|medallion|torque|conserve|bifen|bifenthrin|suspend|fipro|tengard|cyzmic|onslaught|dominion|premise|altriset|transport|alpine|phantom|demand|talstar|tempo|celsius|advion|blindside|headway|prodiamine|dimension|arena|acelepryn|merit|safari|xylecore|specticle|certainty|manuscript|tribute|sedgehammer|quali-pro|lesco|adjourn|floramite|roundup\s+quikpro|quikpro|essentria|mavrik|avid|orthene|sevin|spinosad|conserve|eagle|heritage|banner\s+maxx|prostar|fame|pillar|velocity|monument|katana|revolver|negate|drive\s+xlr8|tenacity|speedzone|trimec|q4|barricade|pendulum|gallery|snapshot|ronstar|regalkade)\s+(?:sc|cs|wp|wsb|ec|wg|wdg|sg|me|ew|ulv|xt|zc|g|p|pro|total|ls|sl|sc\/ls|xlr8|maxx)\b|\b[a-z][a-z-]*\s+(?:sc|cs|wp|wdg|wg|ec|ls|sl)\s+(?:for|mosquito|mosquitoes|mite|mites|weed|weeds|insect|insects|termite|termites|lawn|turf|control|application|applications|rate|rates|label|mix|mixing|per|oz|ounces|gallon|gallons|spray|treatment|termiticide|insecticide|fungicide|herbicide|miticide)\b/gi;
 const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
@@ -536,7 +536,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, city: city || fm.city || (Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag[0] : null) || null, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, city: [city, fm.city, ...(Array.isArray(fm.service_areas_tag) ? fm.service_areas_tag : [fm.service_areas_tag])].filter(Boolean), targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -734,7 +734,11 @@ function proseOf(body) {
   let rest = String(body || '');
   try { ({ content: rest } = parseFrontmatter(rest)); } catch { rest = ''; }
   return rest
-    .replace(/^#.*$/gm, ' ')
+    .replace(/^ {0,3}#.*$/gm, ' ')
+    // Setext (underlined) and inline HTML headings are headings too — Title
+    // Case text that would otherwise count as capitalized prose.
+    .replace(/^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*(?:=+|-{3,})[ \t]*$/gm, ' ')
+    .replace(/<h[1-6]\b[^>]*>[\s\S]*?<\/h[1-6]>/gi, ' ')
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/`[^`]*`/g, ' ')
     .replace(/\]\([^)]*\)/g, ']')
@@ -831,9 +835,12 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   const title = String(candidate.title || '').trim();
   const slug = String(candidate.slug || '').trim();
   // A persisted row's city is handed to the writer verbatim ("City: Tampa"),
-  // so it is targeting even when title/keyword/slug are generic.
-  const city = String(candidate.city || '').trim();
-  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' '), city].filter(Boolean).join(' '));
+  // so it is targeting even when title/keyword/slug are generic. Every
+  // populated semantic city source is validated independently (a brief city
+  // must not mask a drifted emitted city).
+  const cities = [...new Set((Array.isArray(candidate.city) ? candidate.city : [candidate.city]).map((c) => String(c || '').trim()).filter(Boolean))];
+  const city = cities.join(' ');
+  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' '), ...cities].filter(Boolean).join(' '));
   // Pre-draft, statewide is judged only on PINNED framing (an operator
   // working title or slug), each on its own. A bare query is demand — the
   // writer localizes it and evaluateDraftFraming judges the result.
@@ -843,14 +850,15 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     { text: query, where: 'Primary keyword', framing: false },
     { text: title, where: 'Pinned title', framing: true },
     { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
-    { text: city, where: 'Row city', framing: false },
+    ...cities.map((c) => ({ text: c, where: 'Row city', framing: false })),
   ]);
   // The city is a SEMANTIC field the writer is prompted with ("City:
   // Boise") — it must name a served locality or a footprint region, not
   // merely be absent from the curated out-of-area gazetteer.
-  if (city && !findings.length && !ownershipOnly) {
-    if (!isServedCityValue(city)) {
-      findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: [city], message: `Row city "${city}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
+  if (cities.length && !findings.length && !ownershipOnly) {
+    const bad = cities.filter((c) => !isServedCityValue(c));
+    if (bad.length) {
+      findings.push({ severity: 'P0', code: CODES.GEO_OUT_OF_AREA, cities: bad, message: `Row city "${bad.join('", "')}" is not a served locality or Southwest Florida region. A post may not be localized to a place Waves cannot serve.` });
     }
   }
   if (findings.length) return { ...base, ok: false, findings, geo };

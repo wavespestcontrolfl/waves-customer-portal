@@ -821,3 +821,36 @@ describe('PR codex r15 (a25de03e8)', () => {
     expect(gate.classifyGeoScope('pest control charleston, sc').out_of_area).toContain('SC');
   });
 });
+
+describe('PR codex r17 (600d484ae)', () => {
+  test('a compound out-of-footprint locality containing a served name is out-of-area, not footprint', () => {
+    for (const t of ['Venice Beach pest control', 'pest control in Sarasota Springs', 'Palmetto Bay termite bond', 'Englewood Cliffs exterminator']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('Venice pest control').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('pest control englewood fl').scope).toBe('footprint');
+  });
+  test('active catalog formulations (Adjourn SC, Floramite SC/LS, Roundup QuikPro SC) and any "<name> SC <product context>" are not South Carolina', () => {
+    for (const t of ['Adjourn SC mosquito control', 'Floramite SC for mites', 'Floramite SC/LS miticide', 'Roundup QuikPro SC weed control', 'newbrand sc application rate per gallon']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    expect(gate.classifyGeoScope('Columbia SC pest control').out_of_area).toContain('SC');
+  });
+  test('every populated emitted city source is validated: a served brief city cannot mask a drifted fm.city or service_areas_tag', () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', slug: '/pest-control/pest-control-frequency/', primary_keyword: 'pest control frequency' };
+    const drifted = gate.evaluateDraftTargeting({ frontmatter: { ...generic, city: 'Tampa' } }, { index, service: 'pest', city: 'Sarasota' });
+    expect(drifted.ok).toBe(false);
+    expect(drifted.findings[0].cities).toEqual(['Tampa']);
+    const tagDrift = gate.evaluateDraftTargeting({ frontmatter: { ...generic, service_areas_tag: ['Sarasota', 'Boise'] } }, { index, service: 'pest', city: 'Sarasota' });
+    expect(tagDrift.ok).toBe(false);
+    expect(tagDrift.findings[0].cities).toEqual(['Boise']);
+    expect(gate.evaluateDraftTargeting({ frontmatter: { ...generic, city: 'Venice', service_areas_tag: ['Sarasota'] } }, { index, service: 'pest', city: 'Sarasota' }).ok).toBe(true);
+  });
+  test('Setext and HTML headings do not feed the proper-noun statistics', () => {
+    const body = "---\ntitle: Yellow Mites Guide\nslug: /lawn-care/yellow-mites/\nprimary_keyword: yellow mites\ncategory: lawn-care\n---\n\nGuide To Yellow Mites\n----------------------\n\nSome yellow mites feed on grass.\n\n<h2>Yellow Mites In Summer</h2>\n\nMore yellow mites appear in summer.\n\nYellow Mites And Heat\n=====\n\ntext about yellow mites again.\n";
+    const idx = gate.indexCorpus([{ url: '/lawn-care/yellow-mites/', body }]);
+    expect(idx.properNouns.has('yellow')).toBe(false);
+    expect(idx.properNouns.has('mites')).toBe(false);
+  });
+});

@@ -183,3 +183,13 @@ describe('blog-writer generatePost — every persisted row is gated before write
     expect(dispatch).toHaveBeenCalled();
   });
 });
+
+describe('PR codex r17: generation topic block is an operational 400', () => {
+  test('the thrown error carries statusCode 400 + isOperational so the admin generate endpoint returns the finding, not a 500', async () => {
+    const row = { id: 'post_1', title: 'Your New Lakewood Ranch Home Came With Taexx', keyword: 'taexx system lakewood ranch', tag: 'Pest Control', slug: 'lakewood-ranch-taexx', status: 'draft', content: '## Body\n\nprose', astro_status: null };
+    const { writer } = load({ post: row });
+    const err = await writer.generatePost('post_1').catch((e) => e);
+    expect(err).toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED', statusCode: 400, isOperational: true });
+    expect(Array.isArray(err.details)).toBe(true);
+  });
+});

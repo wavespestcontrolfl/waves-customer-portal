@@ -254,6 +254,10 @@ class BlogWriter {
       const e = new Error(`topic-targeting gate blocked "${post.title}": ${summary}`);
       e.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
       e.details = topic.findings;
+      // Author-correctable (the row is back at idea with the reason): an
+      // operational 400 like publish-astro, not a generic 500.
+      e.isOperational = true;
+      e.statusCode = 400;
       throw e;
     }
 
