@@ -174,7 +174,7 @@ function updatedCount(updated) {
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -250,6 +250,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           throw new ReviewReplyError(CODES.STALE, 'A saved draft is on this review — post it from the editor or clear it first.', { status: 409 });
         }
       }
+      // The reply the BROWSER observed (codex r27): the row read at request
+      // start may already carry an owner edit the hourly sync recorded after
+      // the page loaded, which the live GET would then agree with. A caller
+      // that says what it saw is held to it; a mismatch means reload.
+      if (expectedReply !== undefined) {
+        const observed = String(expectedReply || '').trim();
+        const current = hasRealReply(fresh.review_reply) ? String(fresh.review_reply).trim() : '';
+        if (observed !== current) {
+          throw new ReviewReplyError(CODES.STALE, 'The reply changed since this page was loaded — reload it and try again.', { status: 409 });
+        }
+      }
       const staleReason = guard ? await guard(fresh) : null;
       if (staleReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${staleReason}`, { status: 409 });
       if (!allowOverwrite) {
@@ -299,7 +310,9 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
-        const seenReply = hasRealReply(review.review_reply) ? String(review.review_reply).trim() : '';
+        const seenReply = expectedReply !== undefined
+          ? String(expectedReply || '').trim()
+          : (hasRealReply(review.review_reply) ? String(review.review_reply).trim() : '');
         if (liveReply !== seenReply) {
           if (liveReply) {
             await recordLiveOwnerReply(reviewId, live);

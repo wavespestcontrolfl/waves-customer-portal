@@ -328,6 +328,7 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     auto_reply_error: draft?.ok === false ? JSON.stringify({ reason: draft.reason, rejections: draft.rejections, error: draft.error }) : null,
     auto_reply_grounding: JSON.stringify(extra.grounding || null),
     auto_reply_claimed_until: null,
+    ...(extra.fields || {}),
   };
   if (draft?.text) {
     const updated = await db('google_reviews')
@@ -512,7 +513,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await releaseClaim(row, { ...keep, auto_reply_status: STATUS.FAILED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts, auto_reply_due_at: new Date(Date.now() + IDENTITY_BACKOFF_MIN * attempts * 60000).toISOString() });
       return { outcome: 'retry', reason: 'gbp_not_configured' };
     }
-    await releaseClaim(row, { ...keep, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: attempts });
+    // Terminal park: a person takes over, so the draft goes into the
+    // "[DRAFT]" reply slot (Use Draft + draftToken on the Reviews page),
+    // the same way every other park stores it.
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, 'gbp_not_configured', { grounding: snapshot, fields: { auto_reply_attempts: attempts } }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     return { outcome: 'parked', reason: 'gbp_not_configured' };
   }
 
@@ -983,11 +987,23 @@ function dismissCancelFields(conn = db) {
  * refuses (409 STALE) unless both fingerprints still match. Any other text
  * (a person's own words, an edited draft) passes untouched.
  */
-function pipelineDraftGuard(text, { draftToken = null } = {}) {
+function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } = {}) {
   const submitted = String(text || '').trim();
   const token = draftToken ? String(draftToken) : null;
+  // An editor AI draft (/ai-reply) is never stored on the row; its token
+  // carries the review + account fingerprints it was grounded on.
+  // Split at the FIRST separator only: the account fingerprint is opaque.
+  const gSep = groundingToken ? String(groundingToken).indexOf('|') : -1;
+  const gReview = gSep > 0 ? String(groundingToken).slice(0, gSep) : null;
+  const gAccount = gSep > 0 ? String(groundingToken).slice(gSep + 1) : null;
   return async (fresh) => {
     if (!fresh) return null;
+    if (gReview) {
+      if (gReview !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was generated — reload and draft again';
+      let current;
+      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
+      if (current !== (gAccount || '')) return 'the customer facts changed since this draft was generated — reload and draft again';
+    }
     const holdsDraft = !!fresh.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(fresh.auto_reply_status);
     const isStoredDraft = holdsDraft && submitted === String(fresh.auto_reply_draft).trim();
     // Draft identity travels with the request ("Use Draft" stamps the
@@ -1008,6 +1024,11 @@ function pipelineDraftGuard(text, { draftToken = null } = {}) {
     if (current !== stored.accountFingerprint) return 'the customer facts changed since this draft was written — reload and draft again';
     return null;
   };
+}
+
+/** Token for an editor AI draft: the review + account fingerprints it saw. */
+function groundingToken(review, grounding) {
+  return `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
 }
 
 /**
@@ -1077,6 +1098,7 @@ module.exports = {
   reviewFingerprint,
   autoReplyStatus,
   pipelineDraftGuard,
+  groundingToken,
   classifyReplyMode,
   isDraftReply,
 };

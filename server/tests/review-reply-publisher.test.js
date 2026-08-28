@@ -251,6 +251,22 @@ describe('publishReviewReply', () => {
     expect(ok).toHaveBeenCalledTimes(2);
   });
 
+  test('a caller that states the reply it observed is held to it (codex r27): a sync-recorded owner edit since page load blocks the PUT', async () => {
+    // Page loaded with 'Already answered.'; the hourly sync then recorded the owner's Google edit locally.
+    state.rows[0].review_reply = 'Owner edited this in Google';
+    // (fails inside the claim before any live GET — no getReview mock queued)
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: 'Already answered.' }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // Observed null, row now has a reply → stale too.
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null }))
+      .rejects.toMatchObject({ code: CODES.STALE });
+    // Observed matches the row and Google → proceeds.
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner edited this in Google' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: 'Owner edited this in Google' });
+    expect(r.googlePosted).toBe(true);
+  });
+
   test('overwriting callers fail closed when the live review cannot be read', async () => {
     state.rows[0].review_reply = 'Already answered.';
     mockGbp.getReview.mockRejectedValueOnce(new Error('503'));

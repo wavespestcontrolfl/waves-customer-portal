@@ -656,6 +656,12 @@ describe('processDueAutoReplies — state machine', () => {
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text });
     expect(state.rows[0].auto_reply_grounding).toBeTruthy();
+    // codex r27: the terminal park puts the draft in the "[DRAFT]" slot so the
+    // Reviews page offers Use Draft (+ draftToken) when a person takes over.
+    state.rows[0].auto_reply_due_at = '2026-08-27T14:00:00Z';
+    state.rows[0].auto_reply_attempts = Runner.MAX_ATTEMPTS - 1;
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'gbp_not_configured', auto_reply_attempts: Runner.MAX_ATTEMPTS, review_reply: '[DRAFT] ' + GOOD_DRAFT.text });
     mockGbp.isLocationConfigured.mockResolvedValue(true);
   });
 
@@ -899,6 +905,18 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.pipelineDraftGuard(draft + ' Edited.', { draftToken: token })(fresh)).toBeNull();
     // Posted meanwhile via Post now → refuse, the person must reload.
     expect(await Runner.pipelineDraftGuard(draft, { draftToken: token })({ ...fresh, auto_reply_status: 'posted', review_reply: draft })).toMatch(/cleared since it was loaded/);
+    // codex r27: an editor AI draft (/ai-reply, never stored) carries a
+    // grounding token = review fp | account fp; both must still hold.
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    const plain = { ...base, auto_reply_status: null, auto_reply_draft: null, auto_reply_grounding: null };
+    const gt = Runner.groundingToken(plain, { account: { city: 'Venice', tenure: 'new' } });
+    expect(gt).toBe(`${Runner.reviewFingerprint(plain)}|fp:Venice|new`);
+    expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toBeNull();
+    expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })({ ...plain, customer_id: 'c2' })).toMatch(/changed since this draft was generated/);
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toMatch(/customer facts changed since this draft was generated/);
+    mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
+    expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: gt })(plain)).toMatch(/could not be re-read/);
   });
 
   test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {

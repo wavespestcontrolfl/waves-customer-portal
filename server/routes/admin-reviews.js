@@ -350,7 +350,7 @@ router.get('/', async (req, res, next) => {
 // publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText, draftToken } = req.body;
+    const { replyText, draftToken, groundingToken, expectedReply } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
@@ -363,7 +363,13 @@ router.post('/:id/reply', async (req, res, next) => {
       // "Use Draft" re-submits the pipeline's stored draft through this
       // route: it must still match the review + account facts it was
       // grounded on (a re-attribution or city fix since then → 409).
-      guard: AutoReply.pipelineDraftGuard(replyText, { draftToken: typeof draftToken === 'string' ? draftToken : null }),
+      guard: AutoReply.pipelineDraftGuard(replyText, {
+        draftToken: typeof draftToken === 'string' ? draftToken : null,
+        groundingToken: typeof groundingToken === 'string' ? groundingToken : null,
+      }),
+      // What the browser saw in the reply slot when the page loaded (null =
+      // no reply). Omitted by older clients → no browser-side check.
+      expectedReply: expectedReply === undefined ? undefined : (expectedReply == null ? null : String(expectedReply)),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }
@@ -466,7 +472,9 @@ router.post('/:id/ai-reply', async (req, res, next) => {
       if (draft.reason === 'provider_unavailable') return res.status(502).json({ error: 'AI reply providers unavailable' });
       return res.status(422).json({ error: `No draft passed the safety checks (${(draft.rejections || []).join(', ')}) — write this one by hand.`, rejections: draft.rejections || [] });
     }
-    res.json({ reply: draft.text, mode: draft.mode, version: draft.version });
+    // The draft is not stored on the row; the token binds it to the review +
+    // account facts it was grounded on and is validated at publish time.
+    res.json({ reply: draft.text, mode: draft.mode, version: draft.version, groundingToken: AutoReply.groundingToken(review, grounding) });
   } catch (err) {
     logger.error(`AI reply generation failed: ${err.message}`);
     res.status(500).json({ error: err.message });

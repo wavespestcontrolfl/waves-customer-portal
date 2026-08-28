@@ -374,10 +374,13 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
   // Set by "Use Draft": the pipeline draft's identity, sent with the reply so
   // the server can refuse a draft the sync invalidated after it was loaded.
   const [draftToken, setDraftToken] = useState(null);
+  // Set by "AI Reply": binds the generated text to the review + account facts
+  // it was grounded on (validated at publish time).
+  const [groundingToken, setGroundingToken] = useState(null);
   // The card keeps its key across reloads; when the live reply changes
   // underneath it (retract, sync, Google-side edit) the editor must follow,
   // or a retracted reply could be re-posted from stale editor text.
-  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); }, [review.reply]);
+  useEffect(() => { setReplyText(review.reply || ""); setEditing(false); setDraftToken(null); setGroundingToken(null); }, [review.reply]);
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -386,7 +389,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim(), draftToken);
+      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -405,6 +408,8 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
       });
       if (data.reply) {
         setReplyText(data.reply);
+        setGroundingToken(data.groundingToken || null);
+        setDraftToken(null);
         setEditing(true);
       }
     } catch (e) {
@@ -634,6 +639,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               onClick={() => {
                 setReplyText(review.draftReply);
                 setDraftToken(review.draftToken || null);
+                setGroundingToken(null);
                 setEditing(true);
               }}
               style={{
@@ -2117,10 +2123,15 @@ export default function ReviewsPage() {
     loadData();
   };
 
-  const handleReply = async (reviewId, replyText, draftToken = null) => {
+  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null } = {}) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
-      body: JSON.stringify(draftToken ? { replyText, draftToken } : { replyText }),
+      body: JSON.stringify({
+        replyText,
+        expectedReply,
+        ...(draftToken ? { draftToken } : {}),
+        ...(groundingToken ? { groundingToken } : {}),
+      }),
     });
     // A reply removes the row from the server-side "needs reply" result set.
     // With more pages still on the server, keeping the mutable page offset
