@@ -1965,17 +1965,23 @@ function scanBodySections(body, { title = '' } = {}) {
     }
     for (const ref of imageRefsInLine(line, defs)) { cur.hasImage = true; cur.images.push(ref.src); }
     if (line.trim() === '') { closePara(i); continue; }
-    // A thematic break (`---`, `***`, `- - -`) is a divider, never prose: it
-    // closes the paragraph before it (the slot stays ABOVE the divider,
-    // inside the section it illustrates) and opens none — a section holding
-    // only a divider has no prose to generate from. A dashes/equals-only
-    // underline directly under a paragraph is a SETEXT heading in
-    // CommonMark, so that paragraph is heading text, not prose.
-    if (contentGuardrails.isThematicBreak(line) || (paraStart >= 0 && /^ {0,3}=+[ \t]*$/.test(line))) {
-      if (paraStart >= 0 && /^ {0,3}(?:-+|=+)[ \t]*$/.test(line)) paraStart = -1;
-      else closePara(i);
+    // A dashes-only or equals-only underline DIRECTLY under a top-level
+    // paragraph is a SETEXT heading (CommonMark): the paragraph is heading
+    // text, not prose, and — like its ATX twin — `---` opens an H2 section
+    // while `===` (H1) closes the current range.
+    const setext = paraStart >= 0 && topLevel(paraStart) ? line.match(/^ {0,3}(-+|=+)[ \t]*$/) : null;
+    if (setext) {
+      const text = rendered.slice(paraStart, i).join(' ').replace(/\s+/g, ' ').trim();
+      paraStart = -1;
+      sections.push(cur);
+      cur = setext[1][0] === '-' ? { heading: text, start: i, images: [] } : { heading: cur.heading, start: i, sub: true, images: [] };
       continue;
     }
+    // A standalone thematic break (`---`, `***`, `- - -`) is a divider, never
+    // prose: it closes the paragraph before it (the slot stays ABOVE the
+    // divider, inside the section it illustrates) and opens none — a section
+    // holding only a divider has no prose to generate from.
+    if (contentGuardrails.isThematicBreak(line)) { closePara(i); continue; }
     if (paraStart < 0) paraStart = i;
   }
   closePara(rendered.length);

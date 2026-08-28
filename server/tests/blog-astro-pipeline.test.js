@@ -4052,6 +4052,25 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(slots.map((sl) => lines[sl.insertAt - 1])).toEqual(['   Indented prose, still a paragraph.', 'Plain prose.', ' After prose.']);
   });
 
+  test('bodyImageSlots: setext headings are sections — a `---` underline opens an H2 with its own slot, `===` is an H1 that closes the range; an underline under list/quoted text is not a setext heading (hook P1)', () => {
+    const body = [
+      'Intro prose.', '',
+      'Setext Two', '---', '', 'Two prose.', '',
+      'Setext One', '===', '', 'After-H1 prose.', '',
+      '## ATX', '', 'ATX prose.', '',
+      '- item', '  ---', '', 'Tail prose.',
+    ].join('\n');
+    const lines = body.split('\n');
+    const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
+    expect(sections.map((sec) => [sec.heading, !!sec.sub, sec.lastProse == null ? null : lines[sec.lastProse - 1]])).toEqual([
+      ['T', false, 'Intro prose.'],
+      ['Setext Two', false, 'Two prose.'],
+      ['Setext Two', true, 'After-H1 prose.'],
+      ['ATX', false, 'Tail prose.'],
+    ]);
+    expect(bodyImageSlots(body, 2, { title: 'T' }).map((sl) => sl.heading)).toEqual(['Setext Two', 'ATX']);
+  });
+
   test('bodyImageSlots: thematic breaks are dividers, never prose — the slot stays above the break, a divider-only section is ineligible, "- - -" is not a list; a setext underline makes heading text, not prose (GH r9)', () => {
     const body = [
       '## A', '', 'A prose.', '', '---', '',
@@ -4063,7 +4082,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const lines = body.split('\n');
     const { sections } = AstroPublisher._internals.scanBodySections(body, { title: 'T' });
     const byHeading = Object.fromEntries(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.lastProse == null ? null : lines[sec.lastProse - 1]]));
-    expect(byHeading).toEqual({ A: 'A prose.', 'Only divider': null, B: 'B prose.', C: null, D: 'D prose.' });
+    expect(byHeading).toEqual({ A: 'A prose.', 'Only divider': null, B: 'B prose.', C: null, 'Setext-looking text': null, D: 'D prose.' });
     const slots = bodyImageSlots(body, 3, { title: 'T' });
     expect(slots.map((sl) => sl.heading)).toEqual(['A', 'B', 'D']);
     // Insertion lands ABOVE the divider, inside the section.
