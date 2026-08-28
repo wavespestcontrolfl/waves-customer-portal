@@ -132,6 +132,36 @@ function autoReplyInsertFields({ location_id, reviewer_name, owner_reply, review
 }
 
 /**
+ * Catch-up enqueue for rows the insert-time gate skipped: reviews synced
+ * while the kill switch was off, or while their location was outside
+ * REVIEW_AUTO_REPLY_LOCATIONS, stay auto_reply_status = NULL forever
+ * otherwise (later syncs take the update path). Bounded by the same max
+ * queue age as the insert path (deploy-forward: never re-import history),
+ * so a switch that was off for longer than that simply drops the window —
+ * the row stays a normal needs-reply item for a person. Runs every cron
+ * tick while the mode is not off; compare-and-set on NULL state so a row
+ * that was queued / replied meanwhile is left alone. Returns the count.
+ */
+async function enqueueMissedReviews({ now = new Date(), cfg = config(), limit = 200 } = {}) {
+  if (cfg.mode === 'off') return 0;
+  const cutoff = new Date(now.getTime() - cfg.maxQueueAgeHours * 3600000).toISOString();
+  const candidates = await db('google_reviews')
+    .whereNull('auto_reply_status')
+    .whereNull('missing_since')
+    .where('review_created_at', '>=', cutoff)
+    .select('id', 'location_id', 'reviewer_name', 'review_reply', 'review_created_at', 'dismissed');
+  let n = 0;
+  for (const c of (candidates || []).slice(0, limit)) {
+    const fields = autoReplyInsertFields({ ...c, owner_reply: c.review_reply }, { now, cfg });
+    if (!Object.keys(fields).length) continue;
+    const updated = await db('google_reviews').where({ id: c.id }).whereNull('auto_reply_status').update(fields);
+    n += Array.isArray(updated) ? updated.length : (updated || 0);
+  }
+  if (n) logger.info(`[review-auto-reply] catch-up queued ${n} review(s) synced while the pipeline was off / out of scope`);
+  return n;
+}
+
+/**
  * Atomically claim up to `limit` due rows. Postgres has no UPDATE … LIMIT, so
  * the candidate set is selected FOR UPDATE SKIP LOCKED and the claim stamp is
  * the ownership token (only the claimant's token releases it).
@@ -571,8 +601,9 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
  */
 async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   const cfg = config();
-  const stats = { mode: cfg.mode, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
+  const stats = { mode: cfg.mode, enqueued: 0, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
   if (cfg.mode === 'off') return stats;
+  stats.enqueued = await enqueueMissedReviews({ cfg }).catch((err) => { logger.warn(`[review-auto-reply] catch-up enqueue failed: ${err.message}`); return 0; });
   const rows = await claimDueRows({ limit });
   stats.claimed = rows.length;
   if (!rows.length) return stats;
@@ -1007,6 +1038,7 @@ module.exports = {
   config,
   computeDueAt,
   autoReplyInsertFields,
+  enqueueMissedReviews,
   claimDueRows,
   processClaimedRow,
   processDueAutoReplies,

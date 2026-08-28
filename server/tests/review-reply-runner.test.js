@@ -214,6 +214,45 @@ describe('autoReplyInsertFields (merged into the sync INSERT)', () => {
   });
 });
 
+describe('enqueueMissedReviews — catch-up for rows the insert-time gate skipped', () => {
+  test('queues NULL-state rows inside the max age once the switch is on; history, replied, dismissed, out-of-scope and already-stated rows stay put; off = nothing', async () => {
+    const now = new Date('2026-08-27T16:00:00Z');
+    const rows = () => [
+      row({ id: 'fresh', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z' }),
+      row({ id: 'old', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-20T15:00:00Z' }),
+      row({ id: 'replied', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', review_reply: 'Owner replied' }),
+      row({ id: 'dismissed', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', dismissed: true }),
+      row({ id: 'venice', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', location_id: 'venice' }),
+      row({ id: 'stats', auto_reply_status: null, auto_reply_due_at: null, review_created_at: '2026-08-27T15:00:00Z', reviewer_name: '_stats' }),
+      row({ id: 'done', auto_reply_status: 'skipped', review_created_at: '2026-08-27T15:00:00Z' }),
+    ];
+    state.rows = rows();
+    expect(await Runner.enqueueMissedReviews({ now })).toBe(0); // gate unset = off
+    expect(state.rows.every((r) => r.id === 'done' || r.auto_reply_status == null)).toBe(true);
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'sarasota';
+    expect(await Runner.enqueueMissedReviews({ now })).toBe(1);
+    const by = Object.fromEntries(state.rows.map((r) => [r.id, r]));
+    expect(by.fresh.auto_reply_status).toBe('queued');
+    expect(new Date(by.fresh.auto_reply_due_at).getTime()).toBeGreaterThan(now.getTime());
+    for (const id of ['old', 'replied', 'dismissed', 'venice', 'stats']) expect(by[id].auto_reply_status).toBeNull();
+    expect(by.done.auto_reply_status).toBe('skipped');
+    // Idempotent: a second tick finds nothing.
+    expect(await Runner.enqueueMissedReviews({ now })).toBe(0);
+    // Widening the location scope later picks Venice up while it is still inside the window.
+    delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
+    expect(await Runner.enqueueMissedReviews({ now })).toBe(1);
+    expect(by.venice.auto_reply_status).toBe('queued');
+  });
+  test('the cron runs the catch-up before claiming', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [row({ id: 'fresh', auto_reply_status: null, auto_reply_due_at: null, review_created_at: new Date(Date.now() - 3600000).toISOString() })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.enqueued).toBe(1);
+    expect(state.rows[0].auto_reply_status).not.toBeNull();
+  });
+});
+
 describe('processDueAutoReplies — state machine', () => {
   test('auto mode: 5★ due row is drafted, published via the publisher as actor auto, and bells FYI', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
