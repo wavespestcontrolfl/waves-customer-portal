@@ -3731,9 +3731,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   });
 
   test('variation: a generated body image must also differ from a DRAFT-authored committed image (hook r9)', async () => {
-    const b64 = (dataUrl) => dataUrl.split(',')[1];
-    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a', raw: { content: b64(PATTERNS[1]) } } : null));
-    // hero = P0; body first try = P1 (same as the draft's a.webp) → regenerate → P2.
+    // The committed file is what a publish commits: the WebP-compressed bytes.
+    const committedWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a', raw: { content: committedWebp.toString('base64') } } : null));
+    // hero = P0; body first try = P1 (same picture as the draft's a.webp) → regenerate → P2.
     const sequence = [PATTERNS[0], PATTERNS[1], PATTERNS[2]];
     let call = 0;
     heroImageGenerator.generate.mockImplementation(async ({ mode }) => ({ dataUrl: sequence[call++], model: 'm', alt: mode === 'blog-body' ? 'b' : 'h', attempts: [] }));
