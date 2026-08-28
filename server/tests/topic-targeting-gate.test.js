@@ -854,3 +854,13 @@ describe('PR codex r17 (600d484ae)', () => {
     expect(idx.properNouns.has('mites')).toBe(false);
   });
 });
+
+describe('slug collision scope (hook, PR codex r17 push)', () => {
+  test('a category-qualified route with the same leaf under another category is NOT a collision; a leaf-only slug still is', () => {
+    const corpus = [{ url: '/termite/foo/', body: '---\ntitle: Foo for termites\nslug: /termite/foo/\nprimary_keyword: foo termite\ncategory: termite\n---\n\ntext\n' }];
+    const idx = gate.indexCorpus(corpus);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo mosquito', title: 'Foo for mosquitoes', slug: '/mosquito/foo/', category: 'mosquito' }, { index: idx }).ok).toBe(true);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo termite', title: 'Foo again', slug: '/termite/foo/', category: 'termite' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+    expect(gate.evaluate({ actionType: 'new_supporting_blog', query: 'foo', title: 'Foo', slug: '/foo/', category: 'mosquito' }, { index: idx }).findings.map((f) => f.code)).toContain(gate.CODES.SLUG_COLLIDES_LIVE);
+  });
+});

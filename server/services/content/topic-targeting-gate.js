@@ -870,6 +870,11 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   }
   const selfUrl = normalizeSlug(slug);
   const selfLeaf = slugLeaf(selfUrl);
+  // Only a LEAF-ONLY slug (no category segment) is written to the flat
+  // src/content/blog/<leaf>.md and can overwrite a legacy file serving a
+  // category-qualified URL; category-qualified candidates collide on the
+  // exact route only (the publisher allows one leaf under many categories).
+  const leafOnly = selfUrl.split('/').filter(Boolean).length === 1;
   // A NEW blog may not reuse a live post's URL — or its LEAF: the publisher
   // writes a leaf-only row slug to src/content/blog/<leaf>.md, which can
   // overwrite the legacy file serving the category-qualified URL. Either way
@@ -877,7 +882,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // (Rows already live are exempted upstream by isLiveRow /
   // refresh_existing_page; nothing that enters evaluate() legitimately owns
   // an existing URL.)
-  const collided = selfUrl ? idx.posts.find((post) => post.url === selfUrl || (selfLeaf && slugLeaf(post.url) === selfLeaf)) : null;
+  const collided = selfUrl ? idx.posts.find((post) => post.url === selfUrl || (leafOnly && selfLeaf && slugLeaf(post.url) === selfLeaf)) : null;
   if (collided) {
     findings.push({ severity: 'P0', code: CODES.SLUG_COLLIDES_LIVE, url: collided.url, message: `Slug ${selfUrl} collides with the LIVE post ${collided.url}${collided.url === selfUrl ? '' : ' (same leaf — the publisher writes one file per leaf)'}. A new blog may not reuse a live URL — grow the existing post as a refresh instead.` });
   }
