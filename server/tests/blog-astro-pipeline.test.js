@@ -3420,6 +3420,19 @@ describe('PR bodies disclose backfilled schema-required fields (Codex r1)', () =
     }
   });
 
+  test('serviceAreasForCity is the one service-area mapping: served localities resolve to their office area, regions to their areas (PR #3549 codex r12)', () => {
+    expect(AstroPublisher.serviceAreasForCity('Ruskin')).toEqual(['Parrish']);
+    expect(AstroPublisher.serviceAreasForCity('Anna Maria')).toEqual(['Bradenton']);
+    expect(AstroPublisher.serviceAreasForCity('Venice, FL')).toEqual(['Venice']);
+    expect(AstroPublisher.serviceAreasForCity('Lakewood Ranch')).toEqual(['Lakewood Ranch']);
+    expect(AstroPublisher.serviceAreasForCity('Charlotte County')).toEqual(['Port Charlotte']);
+    expect(AstroPublisher.serviceAreasForCity('Southwest Florida')).toHaveLength(8);
+    for (const c of ['Tampa', 'Boise', 'Venice Beach', '']) expect(AstroPublisher.serviceAreasForCity(c)).toEqual([]);
+    const { inferServiceAreas } = AstroPublisher._internals;
+    expect(inferServiceAreas({ title: 'Ant trails', city: 'Ruskin' }, {})).toEqual(['Parrish']);
+    expect(inferServiceAreas({ title: 'Ant trails', city: 'Apollo Beach' }, {})).toEqual(['Parrish']);
+  });
+
   test('inferServiceAreas rejects an explicit out-of-area city — all-area fallback is for posts with NO city signal (Codex r11)', () => {
     const { inferServiceAreas } = AstroPublisher._internals;
     // Explicit invalid city → corrupt geography data → empty, so schema

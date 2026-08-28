@@ -690,9 +690,9 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runUpdates(updates)).toHaveLength(0);
   });
 
-  test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7)', async () => {
+  test('pre-merge topic-targeting recheck on the PR head blocks the direct merge (PR #3549 codex r7) and PARKS the run (r12)', async () => {
     process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
-    setupDb({ pending: [makeRun()] });
+    const updates = setupDb({ pending: [makeRun()] });
     gh.getPr.mockResolvedValue(openPr());
     pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
     pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
@@ -704,11 +704,18 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const res = await poller.pollPending();
 
     expect(gh.mergePr).not.toHaveBeenCalled();
-    expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: P0 TOPIC_CANNIBALIZES_EXISTING/) });
+    expect(res.results[0]).toMatchObject({ pending: true, parked: true, reason: expect.stringMatching(/^topic_targeting_blocked: P0 TOPIC_CANNIBALIZES_EXISTING/) });
     // The head file — not the stored draft — is what was re-evaluated, against a fresh index.
     expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/pest-control/test-post.mdx', expect.any(String));
     expect(topicGate.loadLiveIndex).toHaveBeenCalled();
     expect(topicGate.evaluateDraftTargeting.mock.calls[0][0].frontmatter.title).toBe('Test Post');
+    // Deterministic → parked out of the pending set (CAS on the pending state), queue row stamped, PR untouched.
+    const runPark = updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'topic_targeting_blocked');
+    expect(runPark).toBeDefined();
+    expect(runPark.updates.reviewer_notes).toMatch(/TOPIC_CANNIBALIZES_EXISTING/);
+    expect(runPark.updates.poll_pending_reason).toBeNull();
+    const queuePark = updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'topic_targeting_blocked');
+    expect(queuePark).toBeDefined();
   });
 
   test('a busy topic-merge lock defers the merge to the next tick (hook, PR codex r11 push)', async () => {
@@ -742,6 +749,8 @@ describe('auto-merge gating (each condition individually blocking)', () => {
 
     expect(gh.mergePr).not.toHaveBeenCalled();
     expect(res.results[0]).toMatchObject({ pending: true, reason: expect.stringMatching(/^topic_targeting_blocked: branch file .* unreadable/) });
+    // Transient (not a gate verdict): no park.
+    expect(res.results[0].parked).toBeUndefined();
   });
 
   test('head-sha comparison is case-insensitive (normalized, not string-equal)', async () => {

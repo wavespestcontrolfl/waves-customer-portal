@@ -772,3 +772,31 @@ describe('metro-named compounds (hook, PR codex r11 push)', () => {
     }
   });
 });
+
+describe('PR codex r12 (4e38a9eb8)', () => {
+  test('a comma before "or" is a list (category seeds P03/P04/P06/P08); locality-aware "or" forms accept a comma', () => {
+    for (const t of ['Roof Rat, Norway Rat, or Mouse?', 'Termites, Carpenter Ants, or Powderpost Beetles?', 'Fleas, ticks, or mites in Sarasota']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+    expect(gate.classifyGeoScope('portland, or pest control').out_of_area).toContain('OR');
+    expect(gate.classifyGeoScope('pest control portland, or').out_of_area).toContain('OR');
+  });
+  test('foreign countries and localities are out of footprint; name-like foreign cities need context; species with country words are not', () => {
+    for (const t of ['Toronto pest control', 'termite treatment London UK', 'pest control Canada', 'pest control in London', 'Sydney, Australia termite bond', 'mumbai exterminator cost']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['london plane tree pests in sarasota', 'victoria asked about ants', 'nice weather for termites', 'norway rat vs roof rat', 'turkey oak pests', 'spanish moss removal in sarasota', 'mexican petunia pests in venice', 'german cockroach control in bradenton']) {
+      expect(gate.classifyGeoScope(t).out_of_area).toEqual([]);
+    }
+  });
+  test('the semantic city validates through the publisher service-area mapping', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', keyword: 'pest control frequency', slug: 'pest-control-frequency', status: 'draft' };
+    for (const city of ['Ruskin', 'Anna Maria', 'Venice, FL', 'Manatee County', 'Southwest Florida']) {
+      expect((await gate.evaluateBlogPostRow({ ...generic, city }, { index })).ok).toBe(true);
+    }
+    for (const city of ['Boise', 'Venice Beach', 'Toronto']) {
+      expect((await gate.evaluateBlogPostRow({ ...generic, city }, { index })).ok).toBe(false);
+    }
+  });
+});

@@ -144,7 +144,9 @@ const SERVICE_TOKENS = [...new Set(`${SERVICE_INTENT}|${SERVICE_FILLER}|${PEST_N
 const STATE_ABBR_RE = new RegExp(
   `(?:^\\s*|\\b[a-z]+,?\\s+)(${STATE_ABBR_SAFE})\\b(?![a-z])`
   + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
-  + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`
+  // Comma form: non-word abbreviations only — "Roof Rat, Norway Rat, or
+  // Mouse?" is a list, and "in/me/ok/hi/oh" after a comma are English too.
+  + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_SEMI}|${STATE_ABBR_TRAILING})\\b(?![a-z])`
   // "pest control in va" — a non-word ambiguous abbreviation right after a
   // geo preposition, at the end of the phrase ("pest control near me" and
   // "ants in or around" are not: me/or are English words).
@@ -163,8 +165,8 @@ const STATE_ABBR_RE = new RegExp(
   // or pest control", "salem or termite treatment" — or trailing after
   // "<service> <locality>" ("pest control portland or"). "pest control or
   // exterminator" and "termite treatment cost or price" stay clear.
-  + `|\\b(?!(?:${SERVICE_TOKENS})\\b)[a-z]+\\s+(or)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`
-  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?!(?:${SERVICE_TOKENS})\\b)[a-z]+\\s+(or)(?=\\s*(?:$|[,:;|?!–—-]))`,
+  + `|\\b(?!(?:${SERVICE_TOKENS})\\b)[a-z]+,?\\s+(or)\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?:${SERVICE_INTENT})\\b`
+  + `|\\b(?:${SERVICE_INTENT})\\s+(?:(?:${SERVICE_FILLER})\\s+)?(?!(?:${SERVICE_TOKENS})\\b)[a-z]+,?\\s+(or)(?=\\s*(?:$|[,:;|?!–—-]))`,
   'i'
 );
 // Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
@@ -203,6 +205,10 @@ const CONTEXT_PLACE_NAMES = Object.freeze([
   'Bend', 'Kent', 'Fremont', 'Pasadena', 'Burbank', 'Augusta', 'Macon',
   'Lafayette', 'Alexandria', 'Rochester', 'Lancaster', 'Warren', 'Sterling',
   'Henderson',
+  // Foreign cities that are also names / words (PR #3549 codex r12).
+  'London', 'Sydney', 'Paris', 'Rome', 'Victoria', 'Hamilton', 'Kingston',
+  'Windsor', 'Cambridge', 'Oxford', 'Newcastle', 'Brighton', 'Adelaide',
+  'Darwin', 'Halifax', 'Regina', 'Nice', 'Bath', 'Reading', 'Milton',
 ]);
 // Washington and Virginia are common person names (Virginia runs the Waves
 // office), so they count only with state context: "in/near Washington",
@@ -231,11 +237,21 @@ function geoCompoundExemptRe() {
   } catch { geoCompoundCache = /$^/g; }
   return geoCompoundCache;
 }
+// Foreign targeting is out of footprint by construction: countries /
+// regions, and the major foreign localities that appear in search demand.
+// Foreign cities that are also names or words (London, Sydney, Paris, Rome,
+// Victoria, Hamilton, Kingston, Windsor, Cambridge, Oxford, Newcastle,
+// Brighton, Adelaide, Darwin, Halifax, Regina, Nice, Bath, Reading) live in
+// CONTEXT_PLACE_NAMES and count only with geo/service context.
+// Country / nation words inside species, plant and material names are not
+// markets: stripped with the state-named species before the matchers.
+const FOREIGN_EXEMPT_RE = /\b(?:norway\s+(?:rats?|spruces?|maples?)|turkey\s+(?:oaks?|vultures?|tail)|wild\s+turkeys?|spanish\s+(?:moss|needles?|bayonets?|daggers?|lime)|french\s+drains?|italian\s+cypress|english\s+ivy|irish\s+moss|jamaica\s+dogwood|china\s+(?:rose|doll)|chile\s+peppers?|india\s+hawthorn|panama\s+hats?|greece\s+laurel|japan\s+(?:cedar|privet)|guatemala\s+rhubarb|brazil\s+nuts?|cuba\s+laurel|dubai\s+chocolate|peru\s+lily)\b/gi;
+const OUT_OF_COUNTRY_RE = /\b(canada|mexico|united kingdom|uk|u\.k\.|england|scotland|wales|northern ireland|ireland|australia|new zealand|india|pakistan|bangladesh|germany|france|spain|italy|portugal|netherlands|belgium|switzerland|austria|sweden|norway|denmark|finland|poland|greece|turkey|brazil|argentina|chile|colombia|peru|venezuela|costa rica|panama|guatemala|honduras|el salvador|nicaragua|dominican republic|haiti|jamaica|bahamas|bermuda|cayman islands|trinidad|barbados|cuba|south africa|nigeria|kenya|egypt|morocco|ghana|israel|saudi arabia|uae|dubai|abu dhabi|qatar|singapore|malaysia|indonesia|philippines|thailand|vietnam|japan|china|hong kong|taiwan|south korea|korea|toronto|vancouver|montreal|calgary|ottawa|edmonton|winnipeg|mississauga|brampton|surrey|quebec city|mexico city|cancun|tijuana|monterrey|guadalajara|puerto vallarta|sao paulo|rio de janeiro|buenos aires|bogota|lima|santiago|madrid|barcelona|lisbon|berlin|munich|frankfurt|amsterdam|brussels|zurich|vienna|stockholm|oslo|copenhagen|warsaw|athens|istanbul|dublin|edinburgh|glasgow|cardiff|belfast|leeds|liverpool|bristol|sheffield|birmingham uk|mumbai|delhi|new delhi|bangalore|bengaluru|chennai|hyderabad|kolkata|karachi|lahore|dhaka|manila|jakarta|bangkok|kuala lumpur|seoul|taipei|tokyo|osaka|shanghai|beijing|shenzhen|johannesburg|cape town|nairobi|lagos|cairo|tel aviv|riyadh|doha|brisbane|perth|melbourne australia|sydney australia|auckland|wellington|christchurch|nassau|kingston jamaica|montego bay|san juan)\b/i;
 const OUT_OF_STATE_RE = /\b(alabama|alaska|arizona|arkansas|california|colorado|connecticut|delaware|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|utah|vermont|west virginia|wisconsin|wyoming|puerto rico)\b/i;
 
 // Tokens that are geo qualifiers, not topic entities — excluded from the
 // entity-ownership scan regardless of document frequency.
-const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)" → alternatives
+const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2) + '|' + OUT_OF_COUNTRY_RE.source.slice(3, -3); // states + countries as "<Name>, <where>" suffixes
 // "in/near <Name>" counts only at a phrase boundary — end of text, a comma,
 // colon, dash, or a state suffix — so "pest control in mobile homes" and
 // "pests in cocoa mulch" stay topics, while "pest control in Brandon" and
@@ -318,12 +334,19 @@ function normalizeCityValue(value) {
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
+// The publisher owns the service-area vocabulary (frontmatter
+// service_areas_tag): a semantic city is valid exactly when the publisher can
+// map it to service areas (serviceAreasForCity — served localities resolve
+// to their office's area, footprint regions to their areas). Fallback when
+// the publisher is unavailable: the served-locality set + regions.
 let servedSetCache = null;
 function isServedCityValue(value) {
   const v = normalizeCityValue(value);
   if (!v) return false;
-  // A footprint region is compared whole ("southwest florida" keeps its
-  // "florida"); a locality may carry a trailing FL / Florida ("Venice, FL").
+  try {
+    const { serviceAreasForCity } = require('../content-astro/astro-publisher');
+    if (typeof serviceAreasForCity === 'function') return serviceAreasForCity(value).length > 0;
+  } catch { /* fall through */ }
   const region = REGIONAL_RE.exec(v);
   if (region && region[0] === v) return true;
   const locality = v.replace(/\s+(?:fl|florida)$/, '');
@@ -396,10 +419,11 @@ function classifyGeoScope(text) {
   ];
   // State-named species / plants ("Texas sage", "Maine Coon") and metro-named
   // compounds ("San Jose scale", "Portland cement") are not markets.
-  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
+  const tg = t.replace(OUT_OF_STATE_EXEMPT_RE, ' ').replace(FOREIGN_EXEMPT_RE, ' ').replace(geoCompoundExemptRe(), ' ');
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), tg),
     ...findAll(OUT_OF_STATE_RE, tg),
+    ...findAll(OUT_OF_COUNTRY_RE, tg),
     ...findAll(NAME_STATE_RE, tg),
     ...findAll(CONTEXT_PLACE_RE, tg),
     ...findAll(STATE_ABBR_RE, tg).map((s) => s.toUpperCase()),

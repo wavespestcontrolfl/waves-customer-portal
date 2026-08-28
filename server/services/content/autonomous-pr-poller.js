@@ -266,9 +266,45 @@ async function recheckTopicTargeting(run, pr, gh) {
     const index = await topicGate.loadLiveIndex();
     const res = topicGate.evaluateDraftTargeting({ frontmatter: data, body: file.content }, { index, service: brief.service || null });
     if (res.ok) return { ok: true };
-    return { ok: false, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
+    // Gate findings are deterministic for this head + live corpus (another
+    // post owns the entity / framing drifted); everything above is transient.
+    return { ok: false, deterministic: true, reason: res.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ') };
   } catch (err) {
     return { ok: false, reason: `gate could not run: ${err.message}` };
+  }
+}
+
+const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
+// A deterministic merge-time topic block cannot clear by polling: park the
+// run out of the pending set (CAS on the exact pending state, like
+// supersedeRun) with the verdict in reviewer_notes, and stamp the parked
+// opportunity_queue row's skip_reason so the review queue shows why. The PR
+// stays open — the operator edits/replaces the draft or dismisses; a
+// requeue re-drives the lane.
+async function parkTopicBlockedRun(run, pr, reason) {
+  const pendingReason = pendingSkipReasonForRun(run);
+  const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR left open; edit/replace the draft or dismiss.`;
+  try {
+    const fresh = await db('autonomous_runs').where('id', run.id).first('reviewer_notes');
+    await db('autonomous_runs')
+      .where('id', run.id)
+      .where('outcome', PENDING_OUTCOME)
+      .where('skip_reason', pendingReason)
+      .update({
+        skip_reason: TOPIC_BLOCKED_SKIP_REASON,
+        reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+        poll_pending_reason: null,
+        updated_at: new Date(),
+      });
+    if (run.opportunity_id) {
+      await db('opportunity_queue')
+        .where('id', run.opportunity_id)
+        .where('status', 'pending_review')
+        .where('skip_reason', pendingReason)
+        .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
+    }
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] topic-block park failed for run ${run.id}: ${err.message} (retried next tick)`);
   }
 }
 
@@ -1031,7 +1067,8 @@ async function maybeAutoMerge(run, pr) {
         const topic = await recheckTopicTargeting(run, pr, gh);
         if (!topic.ok) {
           logger.warn(`[autonomous-pr-poller] auto-merge WITHHELD for run ${run.id} PR #${pr.number}: topic-targeting gate not clear against the live corpus — ${topic.reason}`);
-          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}` };
+          if (topic.deterministic) await parkTopicBlockedRun(run, pr, topic.reason);
+          withheld = { pending: true, reason: `topic_targeting_blocked: ${topic.reason}`, ...(topic.deterministic ? { parked: true } : {}) };
           return null;
         }
         // 3.8 The recheck above was more async work (GitHub + corpus reads):

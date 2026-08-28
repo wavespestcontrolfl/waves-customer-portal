@@ -361,11 +361,38 @@ function normalizePostType(postType) {
   return mapped || 'location';
 }
 
+// The ONE service-area vocabulary. A served locality that is not itself a
+// service-area label resolves to its office's area (config/locations
+// CITY_TO_LOCATION: Ruskin → Parrish, Anna Maria → Bradenton); a footprint
+// region resolves to its areas. Anything else → [] (not publishable). The
+// topic-targeting gate validates semantic city fields through this, so a
+// row the gate accepts always carries schema-valid service_areas_tag.
+const OFFICE_SERVICE_AREA = Object.freeze({ bradenton: 'Bradenton', sarasota: 'Sarasota', venice: 'Venice', parrish: 'Parrish' });
+const REGION_SERVICE_AREAS = Object.freeze({
+  'manatee county': ['Bradenton', 'Lakewood Ranch', 'Palmetto', 'Parrish'],
+  'sarasota county': ['Sarasota', 'Venice', 'North Port'],
+  'charlotte county': ['Port Charlotte'],
+  'southwest florida': DEFAULT_SERVICE_AREAS, 'sw florida': DEFAULT_SERVICE_AREAS, swfl: DEFAULT_SERVICE_AREAS,
+  'gulf coast': DEFAULT_SERVICE_AREAS, suncoast: DEFAULT_SERVICE_AREAS, 'sun coast': DEFAULT_SERVICE_AREAS,
+});
+function serviceAreasForCity(city) {
+  const raw = String(city || '').trim();
+  if (!raw) return [];
+  if (SERVICE_AREAS.has(raw)) return [raw];
+  const key = raw.toLowerCase().replace(/[’'.]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+  if (REGION_SERVICE_AREAS[key]) return [...REGION_SERVICE_AREAS[key]];
+  const locality = key.replace(/\s+(?:fl|florida)$/, '');
+  for (const area of SERVICE_AREAS) if (area.toLowerCase() === locality) return [area];
+  let officeByCity = {};
+  try { ({ CITY_TO_LOCATION: officeByCity } = require('../../config/locations')); } catch { officeByCity = {}; }
+  const office = officeByCity?.[locality];
+  return office && OFFICE_SERVICE_AREA[office] ? [OFFICE_SERVICE_AREA[office]] : [];
+}
+
 function normalizeServiceAreas(value, city) {
   const areas = normalizeArray(value).filter((area) => SERVICE_AREAS.has(area));
   if (areas.length > 0) return areas;
-  if (SERVICE_AREAS.has(city)) return [city];
-  return [];
+  return serviceAreasForCity(city);
 }
 
 function inferServiceAreas(frontmatter = {}, brief = {}) {
@@ -378,7 +405,7 @@ function inferServiceAreas(frontmatter = {}, brief = {}) {
   // empty so schema validation rejects the row; the fallback chain below is
   // reserved for genuinely generic posts with NO city signal (Codex r11).
   const explicitCity = String(frontmatter.city || brief.city || '').trim();
-  if (explicitCity && !SERVICE_AREAS.has(explicitCity)) return [];
+  if (explicitCity && serviceAreasForCity(explicitCity).length === 0) return [];
 
   const haystack = [
     frontmatter.title,
@@ -3264,6 +3291,7 @@ function isCodexAuthor(login) {
 module.exports = {
   publishAstro,
   normalizeCategory,
+  serviceAreasForCity,
   publishOrUpdatePage,
   publishMetadataRewrite,
   publishRefresh,
