@@ -235,6 +235,22 @@ describe('publishReviewReply', () => {
     expect(r.googlePosted).toBe(true);
     expect(mockGbp.replyToReview).toHaveBeenCalledTimes(2);
   });
+  test('overwriting callers re-run the guard on a fresh read after the live GET, right before the PUT (codex r24)', async () => {
+    let calls = 0;
+    const guard = jest.fn(() => (++calls === 2 ? 'the customer facts changed since this draft was written' : null));
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, guard }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(guard).toHaveBeenCalledTimes(2);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // Both verdicts clean → posts, guard still consulted twice.
+    const ok = jest.fn(() => null);
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, guard: ok });
+    expect(r.googlePosted).toBe(true);
+    expect(ok).toHaveBeenCalledTimes(2);
+  });
+
   test('overwriting callers fail closed when the live review cannot be read', async () => {
     state.rows[0].review_reply = 'Already answered.';
     mockGbp.getReview.mockRejectedValueOnce(new Error('503'));

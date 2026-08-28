@@ -318,6 +318,17 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         if (liveReviewChanged(live, fresh)) {
           throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed on Google since it was synced — reload it and try again.', { status: 409 });
         }
+        // The live GET is a network round-trip (up to the Google deadline);
+        // a re-attribution or a grounded-fact correction can land during it
+        // and the pipelineDraftGuard verdict above is then stale. Re-read
+        // the row and run the guard again IMMEDIATELY before the PUT, as
+        // the non-overwrite branch does.
+        if (guard) {
+          const again = await db('google_reviews').where({ id: reviewId }).first();
+          if (!again || again.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+          const lateReason = await guard(again);
+          if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
+        }
       }
       try {
         await withDeadline((signal) => gbp.replyToReview(resourceName, replyText, review.location_id, { signal }), 'GBP replyToReview');

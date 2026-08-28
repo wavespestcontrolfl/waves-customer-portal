@@ -126,6 +126,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and it never makes anyone ill.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with no allergic reaction for the kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and there are no health concerns for your family.'))).toBe('banned_phrase');
+    // codex r24: suitability / tolerance framing.
+    expect(verify(good('Hi Dana, Marcus got the ants and our treatments are suitable around pets.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product appropriate for use near children.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');

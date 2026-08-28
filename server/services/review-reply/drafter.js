@@ -102,7 +102,13 @@ const BANNED_RE = new RegExp([
   "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos)\\w*\\b",
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
-  '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\b(?:okay|ok|fine|gentle)\\s+(?:around|for|with)\\s+(?:your\\s+)?(?:pets?|dogs?|cats?|kids?|children|family|babies|plants)\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
+  '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\bsuitab\\w*\\b',
+  // Suitability / tolerance framing in any wrapper ("suitable around pets",
+  // "appropriate for use near children", "no problem with your dogs"), and
+  // ANY "around <pets/kids/…>" — a thank-you reply has no other use for it.
+  '\\b(?:okay|ok|fine|gentle|mild|appropriate|acceptable|friendly|compatible|approved|comfortable|harmless|tolerable|tolerated|recommended|designed|formulated|intended|made|meant|no\\s+(?:problem|issue|worry|worries|concern)s?)\\s+(?:to\\s+use\\s+|for\\s+use\\s+|to\\s+apply\\s+)?(?:around|for|with|near|on|by|in\\s+homes\\s+with)\\s+(?:your\\s+|the\\s+|our\\s+|all\\s+|small\\s+|young\\s+)?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|newborns|family|families|grandkids|grandchildren|animals|birds|fish|reptiles|plants|garden|people|humans|everyone|pregnan\\w+|elderly|seniors)\\b',
+  '\\baround\\s+(?:your\\s+|the\\s+|our\\s+|all\\s+|small\\s+|young\\s+)?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|infants|newborns|grandkids|grandchildren|animals|birds|fish|reptiles|pregnan\\w+|elderly|seniors)\\b',
+  '\\b(?:people|pet|kid|child|children|family|animal|planet|environment|bee|wildlife)[- ]?(?:safe|friendly|conscious|aware)\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',
   '\\bguarantee\\w*\\b', '\\bwarrant\\w*\\b',
   // Drying / curing / wait-before language of any form (fixed intervals are
   // banned on every customer surface; a reply has no legitimate use for it).
