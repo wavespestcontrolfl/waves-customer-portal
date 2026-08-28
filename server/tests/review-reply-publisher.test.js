@@ -208,19 +208,32 @@ describe('publishReviewReply', () => {
     expect(state.rows[0].review_reply).toBeNull();
   });
 
-  test('a Google call that never completes hits the total deadline → GOOGLE_FAILED (retryable), nothing recorded', async () => {
+  test('a Google PUT that never completes hits the total deadline → GOOGLE_UNCERTAIN, row parked for reconciliation', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
     jest.isolateModules(() => {});
     mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
     const started = Date.now();
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    // A timed-out PUT may have landed: parked for reconciliation, never retried blindly.
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
+    expect(Date.now() - started).toBeLessThan(31000 + 5000);
+  });
+
+  test('a live GET that never completes → GOOGLE_FAILED (retryable), no PUT attempted', async () => {
+    mockGbp.getReview.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
-    expect(state.rows[0].review_reply).toBeNull();
-    expect(Date.now() - started).toBeLessThan(31000 + 5000);
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
   });
 
   test('Google rejection → GOOGLE_FAILED, local row untouched', async () => {

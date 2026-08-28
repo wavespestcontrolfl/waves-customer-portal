@@ -34,7 +34,7 @@ jest.mock('../services/review-reply/publisher', () => {
   return {
     publishReviewReply: (...a) => mockPublish(...a),
     ReviewReplyError,
-    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed', REVIEW_CHANGED: 'review_changed' },
+    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed', REVIEW_CHANGED: 'review_changed', GOOGLE_UNCERTAIN: 'google_uncertain' },
   };
 });
 jest.mock('../models/db', () => {
@@ -667,6 +667,19 @@ describe('processDueAutoReplies — state machine', () => {
     await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toThrow('token store down');
     expect(state.rows[0].auto_reply_claimed_until).toBeNull();
     expect(state.rows[0].auto_reply_status).toBe('queued');
+  });
+
+  test('GOOGLE_UNCERTAIN (PUT timed out, may be live) → parked with an action bell, never retried', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockImplementationOnce(async ({ reviewId }) => { const r = state.rows.find((x) => x.id === reviewId); Object.assign(r, { auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_claimed_until: null }); throw new ReviewReplyError('google_uncertain', 'timed out', { status: 502 }); });
+    state.rows = [row()];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.parked).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: GOOD_DRAFT.text });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'google_uncertain', needsAction: true });
+    await Runner.processDueAutoReplies();
+    expect(mockPublish).toHaveBeenCalledTimes(1);
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

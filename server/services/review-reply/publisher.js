@@ -46,6 +46,7 @@ const CODES = {
   STALE: 'stale_claim',
   PERSIST_FAILED: 'persist_failed',
   REVIEW_CHANGED: 'review_changed',
+  GOOGLE_UNCERTAIN: 'google_uncertain',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
@@ -55,7 +56,9 @@ const MISSING_MSG = 'This review has been removed from Google — replies are di
 const GOOGLE_CALL_TIMEOUT_MS = Math.max(5000, parseInt(process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS, 10) || 30000);
 function withDeadline(promise, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
   let timer;
-  const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms); });
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => { const e = new Error(`${label} timed out after ${ms}ms`); e.timedOut = true; reject(e); }, ms);
+  });
   timer.unref?.();
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
@@ -76,7 +79,7 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
     const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
     if (!loc?.googleLocationResourceName) return null;
     // GBP caps pageSize at 50; the helper pages until exhausted.
-    const gbpReviews = await gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50);
+    const gbpReviews = await withDeadline(gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
     const rName = (review.reviewer_name || '').toLowerCase();
     const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
     const rRating = Number(review.star_rating) || 0;
@@ -247,11 +250,33 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
         }
       }
-      await withDeadline(gbp.replyToReview(resourceName, replyText, review.location_id), 'GBP replyToReview');
+      try {
+        await withDeadline(gbp.replyToReview(resourceName, replyText, review.location_id), 'GBP replyToReview');
+      } catch (e) {
+        if (e.timedOut) {
+          // The write may have landed after the deadline. Neither "posted"
+          // nor "failed" is provable — never retry blindly (a redraft would
+          // replace a live reply). Keep the claim standing (self-expires)
+          // and hand the row to a person; the next sync shows the truth.
+          outcome?.abandonClaim?.();
+          throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });
+        }
+        throw e;
+      }
       return true;
     });
   } catch (e) {
-    if (e instanceof ReviewReplyError) throw e;
+    if (e instanceof ReviewReplyError) {
+      if (e.code === CODES.GOOGLE_UNCERTAIN) {
+        // The lock helper released the claim on throw; take the row out of
+        // the automatic lane ourselves (best effort) so no retry re-PUTs.
+        await db('google_reviews').where({ id: reviewId })
+          .update({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000), auto_reply_claimed_until: null })
+          .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
+        logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, parked for reconciliation`);
+      }
+      throw e;
+    }
     googleError = e;
     logger.error(`Google reply failed: ${e.message}`);
   }
@@ -375,6 +400,9 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
     });
   } catch (e) {
     if (e instanceof ReviewReplyError) throw e;
+    if (e.timedOut) {
+      throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the deletion may have landed; reload after the next sync before retrying.`, { status: 502, cause: e });
+    }
     throw new ReviewReplyError(CODES.GOOGLE_FAILED, e.message || 'Could not delete the reply on Google.', { status: 502, cause: e });
   }
   if (outcome.blocked) {

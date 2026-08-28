@@ -508,6 +508,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await parkPersistFailed(merged, draft, err);
       return { outcome: 'parked', reason: 'persist_failed' };
     }
+    if (code === CODES.GOOGLE_UNCERTAIN) {
+      // The PUT timed out: it may have landed. Publisher already parked the
+      // row; keep the draft for the reconciler and ring an action bell.
+      await db('google_reviews').where({ id: merged.id }).update({ auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode }).catch(() => {});
+      await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — Google did not answer in time; the reply MAY be live. Check the review after the next sync.`, reason: 'google_uncertain', action: true });
+      return { outcome: 'parked', reason: 'google_uncertain' };
+    }
     if (code === CODES.STALE && err.message.includes(HUMAN_DRAFT)) {
       await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft' });
       return { outcome: 'parked', reason: 'human_draft' };
@@ -645,6 +652,10 @@ async function postNow(reviewId, actor) {
       if (err instanceof ReviewReplyError && err.code === CODES.PERSIST_FAILED) {
         // Live on Google, unrecorded locally: park, never back into the retry lane.
         await parkPersistFailed(row, { text: existing, version: row.auto_reply_version, mode: row.auto_reply_mode }, err);
+        throw err;
+      }
+      if (err instanceof ReviewReplyError && err.code === CODES.GOOGLE_UNCERTAIN) {
+        // Publisher parked it; never release back into the retry lane.
         throw err;
       }
       if (err instanceof ReviewReplyError && [CODES.HAS_REPLY, CODES.MISSING, CODES.RACE].includes(err.code)) {
