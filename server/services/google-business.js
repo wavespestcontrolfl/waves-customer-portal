@@ -309,7 +309,11 @@ class GoogleBusinessService {
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
     const res = await mutationFetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }), ...(signal ? { signal } : {}) });
-    return readJsonOrThrow(res, 'GBP replyToReview');
+    // A 2xx whose body cannot be read or parsed is an APPLIED mutation with
+    // an unprovable result — flag it like a transport failure so the
+    // publisher parks for reconciliation instead of retrying (codex r65).
+    try { return await readJsonOrThrow(res, 'GBP replyToReview'); }
+    catch (e) { if (res.ok && e && typeof e === 'object') e.transport = true; throw e; }
   }
 
   // Single-review read (v4 GET {name}) — used by the reply publisher to see

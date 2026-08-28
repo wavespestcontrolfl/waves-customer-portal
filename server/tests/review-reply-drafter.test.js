@@ -93,6 +93,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus was glad to help — the ants are gone for good now.'))).toBe('em_dash');
     expect(verify(good('Hi Dana, I am so glad Marcus could get the ants out of your kitchen.'))).toBe('first_person_singular');
     expect(verify(good("Hi Dana, i'm thankful Marcus could get the ants out of your kitchen."))).toBe('first_person_singular');
+    // codex r65: the former company name never publishes.
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn & Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn and Pest for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Lawn for your home. Marcus got the ants.'))).toBe('legacy_brand');
+    expect(verify(good('Hi Dana, thank you for choosing Waves Pest Control for your home. Marcus got the ants.'))).toBe(null);
     expect(verify(good('Hi Dana, thank you for your kind words about Marcus and the ants.'))).toBe('stock_phrase');
   });
   test('never a link, email, phone, money, or street address', () => {

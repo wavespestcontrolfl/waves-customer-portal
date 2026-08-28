@@ -258,6 +258,9 @@ const RELATIONSHIP_CLAIM_RE = /\b(?:years?|loyal|loyalty|long-?time|longtime|fir
 // Resolution paraphrases ("the ants are behind you", "a thing of the past"):
 // licensed only when the reviewer stated some un-negated outcome (codex r63).
 const RESOLUTION_PARAPHRASE_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the past|in the past|in the rearview|(?:a )?distant memory|history|over and done)$/i;
+// The company is "Waves Pest Control" in written copy — the former name
+// is never published (AGENTS.md; codex r65).
+const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // Negation scopes: each negation token opens a window that runs to the next
@@ -409,6 +412,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   if (EMOJI_RE.test(body)) return 'emoji';
   if (body.includes('—') || body.includes('–')) return 'em_dash';
   if (FIRST_PERSON_SINGULAR_RE.test(body)) return 'first_person_singular';
+  if (LEGACY_BRAND_RE.test(body)) return 'legacy_brand';
   if (EMAIL_RE.test(body)) return 'email';
   if (URL_RE.test(body)) return 'url';
   if (PHONE_RE.test(body)) return 'phone';

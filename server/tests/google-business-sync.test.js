@@ -271,6 +271,17 @@ describe('Google Business review sync', () => {
     delete process.env.GOOGLE_MAPS_API_KEY;
   });
 
+  test('replyToReview flags ambiguous mutation outcomes: transport rejection and 2xx-unparseable body carry e.transport; HTTP rejection does not (codex r64/r65)', async () => {
+    global.fetch = jest.fn(async () => { throw new Error('fetch failed: ECONNRESET'); });
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    global.fetch = jest.fn(async () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, text: async () => '<html>ok</html>' }));
+    await expect(service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota')).rejects.toMatchObject({ transport: true });
+    global.fetch = jest.fn(async () => ({ ok: false, status: 429, headers: { get: () => 'application/json' }, text: async () => '{"error":"quota"}' }));
+    const err = await service.replyToReview('accounts/1/locations/2/reviews/rev-1', 'Thanks.', 'sarasota').catch((e) => e);
+    expect(err.message).toMatch(/429/);
+    expect(err.transport).toBeUndefined();
+  });
+
   test('paginates GBP reviews and upserts each page by GBP resource name', async () => {
     global.fetch = jest.fn(async (url) => {
       if (String(url).includes('maps.googleapis.com')) {
