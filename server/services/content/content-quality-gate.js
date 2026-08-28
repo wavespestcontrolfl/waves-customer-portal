@@ -1041,15 +1041,13 @@ function checkNoRawMarkdownTables(draft, _brief, context = {}) {
 // Fail-closed park for unsupported body syntax — single-source predicate
 // in content-guardrails (unsupportedBodySyntax); the completion gate raises
 // the matching P1 so both enforcement points agree.
-// Refresh grandfather mirrors the guardrails finding: forms the live prior
-// body already carried (by feature NAME) pass; any newly introduced form
-// still parks.
+// Refresh grandfather mirrors the guardrails finding: exact constructs the
+// live prior body already carried pass; any new or changed construct parks.
 function checkBodySyntaxSupported(draft, _brief, context = {}) {
-  const { unsupportedBodySyntax } = require('./content-guardrails');
-  const reasons = unsupportedBodySyntax(draft.body);
-  if (!reasons.length) return { ok: true };
-  const prior = new Set(context.previousVersion ? unsupportedBodySyntax(context.previousVersion.body) : []);
-  const added = reasons.filter((r) => !prior.has(r));
+  const { unsupportedBodySyntax, unsupportedBodySyntaxAdded } = require('./content-guardrails');
+  const added = context.previousVersion
+    ? unsupportedBodySyntaxAdded(draft.body, context.previousVersion.body)
+    : unsupportedBodySyntax(draft.body);
   if (!added.length) return { ok: true };
   return { ok: false, reason: `unsupported_body_syntax:${added.join(',')}` };
 }

@@ -2158,13 +2158,20 @@ describe('unsupported body syntax on the manual lanes (owner ruling 2026-08-28)'
     expect(guardrails.evaluate({ body: 'Plain [Get a Termite Estimate](/contact/) text.', frontmatter: {} }, { targetIsBlog: true }).findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
   });
 
-  test('refresh grandfathers forms the live prior body already carried, by feature name only', () => {
+  test('refresh grandfathers exact constructs the live prior body already carried — never the category', () => {
     const kept = guardrails.evaluate({ body: HTML_ANCHOR + '\nMore text.', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
     expect(kept.findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
     const added = guardrails.evaluate({ body: HTML_ANCHOR + '\n<span hidden>x</span>', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
     const f = added.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX');
     expect(f && f.message).toMatch(/hidden_or_styled_markup/);
     expect(f.message).not.toMatch(/raw_html_anchor/);
+    // Same category, DIFFERENT markup — a swapped-in anchor is not licensed
+    // by the legacy one (prior multiset is consumed per construct).
+    const swapped = guardrails.evaluate({ body: '<a href="/contact/" style="opacity:0">Get a Termite Estimate</a>', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(swapped.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX').message).toMatch(/raw_html_anchor/);
+    const duplicated = guardrails.evaluate({ body: HTML_ANCHOR + HTML_ANCHOR, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(duplicated.findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(true);
+    expect(guardrails.unsupportedBodySyntaxAdded(HTML_ANCHOR, HTML_ANCHOR)).toEqual([]);
   });
 });
 

@@ -409,6 +409,7 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     const legacy = '<a href="tel:+19412975749">Call</a>';
     expect(checkBodySyntaxSupported({ body: legacy + ' more' }, {}, { previousVersion: { body: legacy } }).ok).toBe(true);
     expect(checkBodySyntaxSupported({ body: legacy + '<span hidden>x</span>' }, {}, { previousVersion: { body: legacy } }).reason).toBe('unsupported_body_syntax:hidden_or_styled_markup');
+    expect(checkBodySyntaxSupported({ body: '<a href="/contact/">Get a Termite Estimate</a>' }, {}, { previousVersion: { body: legacy } }).reason).toBe('unsupported_body_syntax:raw_html_anchor');
     // Aligned/colon variants of the delimiter row still match.
     expect(checkNoRawMarkdownTables({ body: '| A | B |\n|:---|---:|\n| 1 | 2 |' }).ok).toBe(false);
     // GFM tables WITHOUT outer pipes are still tables.

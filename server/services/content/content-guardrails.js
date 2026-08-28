@@ -2318,9 +2318,12 @@ function extractRawMarkdownTables(text) {
 const UNSUPPORTED_BODY_SYNTAX = [
   ['cr_line_endings', /\r/],
   ['html_comment', /<!--/],
-  ['raw_html_anchor', /<a(?:[\s/>]|$)/im],
-  ['raw_html_table', /<table(?:[\s/>]|$)/im],
-  ['unsupported_html_container', /<(?:template|script|style|noscript|datalist|dialog|details|pre|iframe|object|embed|form|input|button|textarea|select|svg|math)(?:[\s/>]|$)/im],
+  // Tag-shaped rules capture the WHOLE element (open tag through its
+  // close tag when present) so the refresh grandfather compares real
+  // markup — a legacy anchor never licenses a differently-attributed one.
+  ['raw_html_anchor', /<(a)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
+  ['raw_html_table', /<(table)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
+  ['unsupported_html_container', /<(template|script|style|noscript|datalist|dialog|details|pre|iframe|object|embed|form|input|button|textarea|select|svg|math)(?=[\s/>]|$)(?:"[^"]*"|'[^']*'|[^>"'])*>?(?:[\s\S]*?<\/\1\s*>)?/im],
   ['reference_link_definition', /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?\[(?:\\.|[^\]\\\n])*\]:/m],
   ['reference_link', /\]\s*\[/],
   ['wrapped_link_syntax', /\[[^\]]*\n[^\]]*\]\(|\]\([^)]*\n/],
@@ -2335,28 +2338,56 @@ const UNSUPPORTED_BODY_SYNTAX = [
   ['code_span_in_link_label', /\[[^\]]*`[^\]]*\]\(/],
 ];
 const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className)(?:\s*=|\s|\/?>|$)/i;
-function unsupportedBodySyntax(body) {
+// Every unsupported CONSTRUCT in the body — { reason, text } per match —
+// so refresh grandfathering can compare the actual markup, not just the
+// category (a legacy `<a>` must not license a NEW, differently-hidden
+// anchor). Matches use a global clone of each rule.
+function unsupportedBodySyntaxConstructs(body) {
   const text = String(body || '');
-  const reasons = [];
-  for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) if (re.test(text)) reasons.push(name);
-  // Lowercase (raw HTML) tags carrying a visibility-affecting attribute.
-  // Quoted / template-literal attribute VALUES are blanked first so their
-  // text never reads as an attribute name; MDX components (uppercase) are
-  // the writer contract and validated by their own gates.
+  const out = [];
+  for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) {
+    const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+    let mm;
+    while ((mm = g.exec(text)) !== null) {
+      out.push({ reason: name, text: mm[0] });
+      if (mm[0].length === 0) g.lastIndex += 1;
+    }
+  }
+  // Raw (lowercase) HTML tags: ANY brace is an MDX expression — a spread
+  // ("{...{hidden: true}}"), a computed prop, a template — which a static
+  // scan cannot evaluate; and a visibility-affecting attribute (quoted /
+  // template-literal VALUES blanked first so their text never reads as an
+  // attribute name). MDX components (uppercase) are the writer contract
+  // and are validated by their own gates.
   const tagScan = /<\/?[a-z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}|[^>"'{])*>/g;
   let tm;
-  let hiddenSeen = false;
-  let exprSeen = false;
   while ((tm = tagScan.exec(text)) !== null) {
-    // ANY brace on a raw (lowercase) element is an MDX expression — a
-    // spread ("{...{hidden: true}}"), a computed prop, a template — which a
-    // static scan cannot evaluate; the writer never writes them.
-    if (!exprSeen && tm[0].includes('{')) { reasons.push('jsx_expression_attribute'); exprSeen = true; }
+    if (tm[0].includes('{')) out.push({ reason: 'jsx_expression_attribute', text: tm[0] });
     const bare = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}/g, '""');
-    if (!hiddenSeen && VISIBILITY_ATTR_RE.test(bare)) { reasons.push('hidden_or_styled_markup'); hiddenSeen = true; }
-    if (hiddenSeen && exprSeen) break;
+    if (VISIBILITY_ATTR_RE.test(bare)) out.push({ reason: 'hidden_or_styled_markup', text: tm[0] });
   }
-  return reasons;
+  return out;
+}
+function unsupportedBodySyntax(body) {
+  return [...new Set(unsupportedBodySyntaxConstructs(body).map((c) => c.reason))];
+}
+// Refresh grandfather: constructs the live prior body already carried
+// (exact text, whitespace-normalized, as a MULTISET) pass; every other
+// construct — a new one, or a changed one — is reported by reason. Both
+// the manual-lane finding and the quality gate's hard check use this so
+// they can never disagree.
+function unsupportedBodySyntaxAdded(body, priorBody) {
+  const key = (c) => `${c.reason}\u0000${c.text.replace(/\s+/g, ' ').trim()}`;
+  const prior = new Map();
+  for (const c of unsupportedBodySyntaxConstructs(priorBody)) { const k = key(c); prior.set(k, (prior.get(k) || 0) + 1); }
+  const added = [];
+  for (const c of unsupportedBodySyntaxConstructs(body)) {
+    const k = key(c);
+    const n = prior.get(k) || 0;
+    if (n > 0) { prior.set(k, n - 1); continue; }
+    if (!added.includes(c.reason)) added.push(c.reason);
+  }
+  return added;
 }
 
 function hasRawMarkdownTable(text) {
@@ -2400,10 +2431,7 @@ function rawMarkdownTableFinding(body, { targetIsBlog = false, isRefresh = false
 // make the post unpublishable, but any NEWLY introduced form still parks.
 function unsupportedBodySyntaxFinding(body, { targetIsBlog = false, isRefresh = false, priorBody = null } = {}) {
   if (!targetIsBlog) return null;
-  const reasons = unsupportedBodySyntax(body);
-  if (!reasons.length) return null;
-  const prior = new Set(isRefresh ? unsupportedBodySyntax(priorBody) : []);
-  const added = reasons.filter((r) => !prior.has(r));
+  const added = isRefresh ? unsupportedBodySyntaxAdded(body, priorBody) : unsupportedBodySyntax(body);
   if (!added.length) return null;
   return finding('P1', 'UNSUPPORTED_BODY_SYNTAX', `Body uses Markdown/HTML syntax outside the supported writer subset (${added.join(', ')}) — parked for review (owner ruling 2026-08-28).`);
 }
@@ -4596,6 +4624,7 @@ module.exports = {
   blankDefinitelyHiddenContent,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,
+  unsupportedBodySyntaxAdded,
   // entity decoder (fail-closed, sentinel for control chars) — consumed by
   // seo-completion-gate so CTA anchors are classified as RENDERED text.
   decodeEntitiesForScan,
