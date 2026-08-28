@@ -311,10 +311,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
   if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
   // A new inbound email from someone on the customer list rings the admin
-  // bell like a text does (owner ruling 2026-08-28). Vendor/spam/bulk mail
-  // (classification set, or a List-Unsubscribe header) never does.
-  // Fire-and-forget: the bell is never allowed to fail the sync.
-  if (customerEmailBellEligible({
+  // bell like a text does (owner ruling 2026-08-28) — but only AFTER the
+  // async classifier has had its say (spam / marketing_newsletter arrive
+  // later than the insert), so the bell fires from inside that path below.
+  const bellCandidate = customerEmailBellEligible({
     customerId,
     classification: emailData.classification,
     listUnsubscribe: parsed.list_unsubscribe,
@@ -323,17 +323,7 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     fromAddress: parsed.from_address,
     receivedAt: parsed.received_at,
     backfill,
-  })) {
-    try {
-      const { triggerNotification } = require('../notification-triggers');
-      void triggerNotification('customer_email_received', {
-        fromName: parsed.from_name || parsed.from_address,
-        subject: parsed.subject,
-        emailId: inserted[0].id,
-        customerId,
-      }).catch((e) => logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`));
-    } catch (e) { logger.warn(`[email-sync] customer_email_received wiring failed: ${e.message}`); }
-  }
+  });
   const [email] = inserted;
 
   // Store list_unsubscribe for auto-unsubscribe
@@ -387,14 +377,47 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     setImmediate(() => {
       (async () => {
         const { classifyEmail } = require('./email-classifier');
-        await classifyEmail(email);
+        let classified = false;
+        try {
+          await classifyEmail(email);
+          classified = true;
+        } catch (err) {
+          logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+        }
+        if (bellCandidate) await ringCustomerEmailBell(email, { customerId, parsed, classified });
       })().catch((err) => {
-        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+        logger.error(`[email-sync] post-insert handling failed for ${email.id}: ${err?.message || err}`);
       });
     });
   }
 
   return true; // new email
+}
+
+// Bulk/spam classes the classifier may assign after insert — never ring.
+const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor']);
+
+/**
+ * Fire the bell for an already-eligible candidate once classification is
+ * known. Reads the row back (the classifier writes there). Fallback policy
+ * when the classifier FAILED: ring — the sender already passed DMARC
+ * alignment and matches a customer, and a missed customer email costs more
+ * than a rare unwanted bell. An archived row (auto-trashed / bulk) never
+ * rings. Fail-soft: the bell can never fail the sync.
+ */
+async function ringCustomerEmailBell(email, { customerId, parsed, classified }) {
+  try {
+    const row = await db('emails').where('id', email.id).first('classification', 'is_archived');
+    if (!row || row.is_archived) return;
+    if (classified && row.classification && NEVER_RING_CLASSES.has(row.classification)) return;
+    const { triggerNotification } = require('../notification-triggers');
+    await triggerNotification('customer_email_received', {
+      fromName: parsed.from_name || parsed.from_address,
+      subject: parsed.subject,
+      emailId: email.id,
+      customerId,
+    });
+  } catch (e) { logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`); }
 }
 
 /**
