@@ -1285,6 +1285,8 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     // Mapped termite rows.
     expect(acceptanceTermsApplyTo(withData({}, { recurring: { services: [{ name: 'Termite Bait', service: 'termite_bait' }] }, oneTime: { items: [] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ name: 'WDO Inspection' }] } }))).toBe(false);
+    // Raw pricing-engine WDO line: canonical underscored key, no display name.
+    expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'wdo_inspection', price: 125 }] } }))).toBe(false);
     // Canonical pre-slab identities carry no literal "termite".
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termiticide', name: 'Pre-Slab Termiticide Treatment' }] } }))).toBe(false);
     expect(acceptanceTermsApplyTo(withData({}, { ...pest, oneTime: { items: [{ service: 'pre_slab_termidor', name: 'Pre-Slab Termidor' }] } }))).toBe(false);

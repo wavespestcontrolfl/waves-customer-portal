@@ -80,7 +80,7 @@ function deviceLabelFromUserAgent(ua) {
             : 'Device';
   // iOS Chrome/Firefox carry CriOS/FxiOS (plus a Safari/ token) — matched
   // before the Safari fallback so provenance names the real browser.
-  const browser = /Edg\/|EdgiOS\//i.test(ua) ? 'Edge'
+  const browser = /Edg\/|EdgiOS\/|EdgA\//i.test(ua) ? 'Edge'
     : /CriOS\//i.test(ua) ? 'Chrome'
       : /FxiOS\//i.test(ua) ? 'Firefox'
         : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'

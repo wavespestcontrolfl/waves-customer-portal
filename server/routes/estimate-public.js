@@ -310,10 +310,14 @@ function acceptanceTermsApplyTo(estimate) {
   if (!rows.length) return false;
   return !rows.some((r) => {
     if (!r || typeof r !== 'object') return true;
-    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''} ${r.description || ''}`.toLowerCase();
+    // Canonical keys are underscored (`wdo_inspection`, `pre_slab_termidor`)
+    // — `_` is a regex word character, so normalize separators to spaces
+    // before the word-boundary match (GH Codex r8 P1).
+    const names = `${r.name || ''} ${r.service || ''} ${r.key || ''} ${r.label || ''} ${r.description || ''}`
+      .toLowerCase().replace(/[_-]+/g, ' ');
     // Pre-slab termiticide/Termidor (FDACS paper lane) carries no literal
     // "termite" in its canonical key or mapped name (GH Codex r4 P1).
-    return /termite|\bwdo\b|wood[- ]destroying|pre[_ -]?slab|termiticide|termidor/.test(names)
+    return /termite|\bwdo\b|wood destroying|pre ?slab|termiticide|termidor/.test(names)
       || isPreSlabOneTimeItem(r)
       || String(recurringServiceKey(r) || '').includes('termite')
       || isTermiteBondRow(r)
