@@ -510,7 +510,8 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
 
         // Owner ruling 2026-08-28: a customer who prefers Spanish never gets
         // the English automated call (no Spanish collections script yet).
-        if (/^es(?:[-_]|$)/i.test(String(customer.preferred_language || ''))) deny('customer_prefers_spanish');
+        // Owner rule = /^es/: 'es', 'es-US', and free-form 'español' alike.
+        if (/^es/i.test(String(customer.preferred_language || '').trim())) deny('customer_prefers_spanish');
 
         // Mobile line only, from the EXISTING phone-keyed Lookup cache.
         // readCachedLineType is discriminated (hit/miss/error); its own

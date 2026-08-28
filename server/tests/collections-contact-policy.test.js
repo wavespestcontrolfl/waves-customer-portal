@@ -477,6 +477,8 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
     armAllowedBaseline({ customer: customerRow({ preferred_language: 'es-US' }) });
     expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
+    armAllowedBaseline({ customer: customerRow({ preferred_language: 'Español' }) }); // legacy free-form value
+    expect((await evalVoice()).denialReasons).toContain('customer_prefers_spanish');
     armAllowedBaseline({ customer: customerRow({ preferred_language: 'en' }) });
     expect((await evalVoice()).denialReasons).not.toContain('customer_prefers_spanish');
     armAllowedBaseline();
