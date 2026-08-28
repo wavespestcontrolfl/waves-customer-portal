@@ -350,13 +350,30 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(result).toMatchObject({ deltaDays: 2, skippedCount: 0, exceptionCount: 0, occurrencesRescheduled: 2, seriesMoveId: row.id });
   });
 
-  test('a repeated operation_key replays the committed result without re-running the sweep', async () => {
+  test('a kept sibling window must still pass the admin window rules — an off-hour sibling aborts with the visit named', async () => {
+    wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '09:30:00', window_end: '11:30:00' })]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ message: expect.stringContaining(`The future visit on ${SIB1} keeps a time this move can't carry forward`) });
+  });
+
+  test('an operation_key reused for a DIFFERENT target of the same appointment is rejected, never replayed', async () => {
     wireSeriesMocks([sib('svc-1', BASE)], {
-      priorMove: { id: 'sm-prior', result: { success: true, newDate: TARGET, occurrencesRescheduled: 2 } },
+      priorMove: { id: 'sm-prior', new_date: SIB1, result: { success: true, newDate: SIB1 } },
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'OPERATION_KEY_REUSED' });
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a repeated operation_key replays the committed result without re-running the sweep', async () => {
+    const { priorLookup } = wireSeriesMocks([sib('svc-1', BASE)], {
+      priorMove: { id: 'sm-prior', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2 } },
     });
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00' }, 'admin', 'admin', { ...ADMIN_OPTS, operationKey: 'op-123' });
     expect(result).toEqual({ success: true, newDate: TARGET, occurrencesRescheduled: 2, seriesMoveId: 'sm-prior', replayed: true });
     expect(db.transaction).not.toHaveBeenCalled();
+    // The replay lookup is scoped to THIS appointment's key.
+    expect(priorLookup.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: 'op-123', status: 'committed' });
   });
 
   test('a replay whose stored result is missing rebuilds the occurrence list from the row snapshots', async () => {

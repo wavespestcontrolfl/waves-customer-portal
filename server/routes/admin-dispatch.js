@@ -14010,8 +14010,11 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
 // landing. A replayed operation (same operation_key), a retried pass, or a
 // second concurrent pass therefore never double-cards or double-texts; a
 // pass that dies mid-way leaves an expired lease + unfinished markers, so
-// the next retry finishes exactly the incomplete effects. The one remaining
-// window is provider-send → notified_at stamp (at-least-once by design).
+// the next retry finishes exactly the incomplete effects. The lease carries
+// an owner token: stamps and the release are fenced on it, so a pass that
+// outlives its lease can neither stamp over nor release a successor's. The
+// one remaining window is provider-send → notified_at stamp (at-least-once
+// by design).
 // `notify` is explicit and suppresses ONLY the immediate customer text —
 // reminder re-sync, tracker refresh and board broadcasts always run.
 const SERIES_EFFECTS_LEASE_MS = 5 * 60 * 1000;
@@ -14021,20 +14024,24 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   const conflicts = occurrences
     .filter((occ) => occ.conflicted)
     .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-  const moveRow = (q) => q.where({ id: seriesMoveId });
+  const leaseOwner = crypto.randomUUID();
+  // Every marker write is fenced on the owner token: only the pass holding
+  // the CURRENT lease can stamp or release.
+  const ownedRow = (q) => q.where({ id: seriesMoveId, effects_lease_owner: leaseOwner });
   let markers = { conflict_card_at: null, reminders_synced_at: null, notified_at: null };
   if (seriesMoveId) {
     // Lease: NULL or expired → ours. A marker-store failure resolves to
     // running the effects — a possible duplicate beats a silent skip (the
     // same call the guard-snapshot fallback below makes).
     try {
-      const leased = await moveRow(db('series_moves'))
+      const leased = await db('series_moves')
+        .where({ id: seriesMoveId })
         .where((q) => q.whereNull('effects_lease_until').orWhere('effects_lease_until', '<', db.fn.now()))
-        .update({ effects_lease_until: new Date(Date.now() + SERIES_EFFECTS_LEASE_MS) });
+        .update({ effects_lease_until: new Date(Date.now() + SERIES_EFFECTS_LEASE_MS), effects_lease_owner: leaseOwner });
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await moveRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at')) || markers;
     } catch (err) {
       logger.warn(`[dispatch] series_moves lease failed for ${seriesMoveId}: ${err.message}`);
     }
@@ -14042,7 +14049,10 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   const stampMarker = async (col, extra = {}) => {
     if (!seriesMoveId) return;
     try {
-      await moveRow(db('series_moves')).whereNull(col).update({ [col]: db.fn.now(), ...extra });
+      const stamped = await ownedRow(db('series_moves')).whereNull(col).update({ [col]: db.fn.now(), ...extra });
+      if (Number(stamped) === 0) {
+        logger.warn(`[dispatch] series_moves ${col} stamp lost the lease for ${seriesMoveId} — the effect ran past the lease; a successor may repeat it`);
+      }
     } catch (err) {
       logger.warn(`[dispatch] series_moves ${col} stamp failed for ${seriesMoveId}: ${err.message}`);
     }
@@ -14050,7 +14060,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   const releaseLease = async () => {
     if (!seriesMoveId) return;
     try {
-      await moveRow(db('series_moves')).update({ effects_lease_until: null });
+      await ownedRow(db('series_moves')).update({ effects_lease_until: null, effects_lease_owner: null });
     } catch (err) {
       logger.warn(`[dispatch] series_moves lease release failed for ${seriesMoveId}: ${err.message}`);
     }

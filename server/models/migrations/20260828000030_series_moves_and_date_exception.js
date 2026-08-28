@@ -54,6 +54,7 @@ exports.up = async function up(knex) {
       // so a pass that dies mid-way leaves an expired lease and unfinished
       // markers for the next retry — never a permanent skip.
       t.timestamp('effects_lease_until', { useTz: true });
+      t.string('effects_lease_owner', 64);
       t.timestamp('reverted_at', { useTz: true });
       t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
       t.index('anchor_service_id');
@@ -61,9 +62,11 @@ exports.up = async function up(knex) {
       t.index('created_at');
     });
   }
-  // Partial unique: a failed attempt must not block the retry that succeeds.
+  // Partial unique, scoped to the anchor: a failed attempt must not block the
+  // retry that succeeds, and a caller-minted key only ever replays a move of
+  // the SAME appointment (rebooker.rescheduleSeries checks the target too).
   await knex.raw(
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_series_moves_operation_key_committed ON series_moves (operation_key) WHERE operation_key IS NOT NULL AND status = 'committed'",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_series_moves_operation_key_committed ON series_moves (anchor_service_id, operation_key) WHERE operation_key IS NOT NULL AND status = 'committed'",
   );
 
   if (!(await knex.schema.hasColumn('reschedule_log', 'series_move_id'))) {

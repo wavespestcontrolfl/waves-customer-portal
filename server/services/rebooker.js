@@ -181,7 +181,16 @@ function snapshotRow(row) {
 // stored WITH the row in the move transaction, or — for a row whose result
 // column is somehow empty — the same occurrence list rebuilt from the
 // per-row snapshots, so a replaying caller can always run its effects.
-function replaySeriesMoveResult(prior) {
+function replaySeriesMoveResult(prior, requestedDate) {
+  // A key is bound to ONE move: the same key with a different target is a
+  // caller bug, never a silent replay of the earlier move's occurrences.
+  if (requestedDate && dateOnly(prior.new_date) !== dateOnly(requestedDate)) {
+    throw Object.assign(new Error('This operation key was already used for a different move of this appointment'), {
+      statusCode: 409,
+      isOperational: true,
+      code: 'OPERATION_KEY_REUSED',
+    });
+  }
   const base = prior.result && typeof prior.result === 'object'
     ? prior.result
     : (() => {
@@ -1078,9 +1087,9 @@ class SmartRebooker {
     // carries is the idempotency key for every downstream effect.
     if (options.operationKey) {
       const prior = await db('series_moves')
-        .where({ operation_key: options.operationKey, status: 'committed' })
+        .where({ anchor_service_id: serviceId, operation_key: options.operationKey, status: 'committed' })
         .first();
-      if (prior) return replaySeriesMoveResult(prior);
+      if (prior) return replaySeriesMoveResult(prior, newDate);
     }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
@@ -1401,12 +1410,25 @@ class SmartRebooker {
         // window, status, tech and overrides — a Sep 10 1–3 PM visit moved
         // to Sep 15 8–10 AM must not silently make Oct–Dec 8–10 AM, and a
         // pending placeholder must stay a placeholder (isSeededPlaceholderRow
-        // keys on status; plan-extend counts only pending rows). Sibling
-        // windows skip the admin validator: a legacy 07:00 sibling keeping
-        // its own time is not this move's edit.
-        const occurrenceWindow = isAnchor
-          ? seriesOccurrenceWindow(win, sib, options)
-          : seriesOccurrenceWindow({ start: null, end: null }, sib, { ...options, adminWindowRules: false });
+        // keys on status; plan-extend counts only pending rows). A kept
+        // window is still a window this move writes onto a new date, so under
+        // adminWindowRules it must satisfy the shared admin validator
+        // (windows start on the hour — AGENTS.md); a sibling that can't is
+        // named so the operator fixes that visit's time first instead of the
+        // series silently carrying an off-hour start forward.
+        let occurrenceWindow;
+        if (isAnchor) {
+          occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
+        } else {
+          try {
+            occurrenceWindow = seriesOccurrenceWindow({ start: null, end: null }, sib, options);
+          } catch (err) {
+            if (err && (err.statusCode === 422 || err.status === 422)) {
+              err.message = `The future visit on ${dateOnly(sib.scheduled_date)} keeps a time this move can't carry forward (${err.message}) — fix that visit's time first, then move the series`;
+            }
+            throw err;
+          }
+        }
         // An exception row this shift lands exactly on its cadence date has
         // rejoined the series — clear the flag (the only clearing path until
         // an explicit rejoin operation exists).
@@ -1786,7 +1808,7 @@ class SmartRebooker {
     }).catch(async (err) => {
       if (err?.code === '23505' && options.operationKey) {
         const prior = await db('series_moves')
-          .where({ operation_key: options.operationKey, status: 'committed' })
+          .where({ anchor_service_id: serviceId, operation_key: options.operationKey, status: 'committed' })
           .first()
           .catch(() => null);
         if (prior) return { replayedFrom: prior };
@@ -1795,7 +1817,7 @@ class SmartRebooker {
       throw err;
     });
     if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
-      return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom);
+      return replaySeriesMoveResult(occurrencesRescheduled.replayedFrom, newDate);
     }
 
     // Live-anchor post-commit cleanup — same pattern as the single-job
