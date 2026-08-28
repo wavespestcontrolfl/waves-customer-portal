@@ -123,7 +123,7 @@ t.string('acquisition_type').notNullable();
 //  editorial_outreach | partnership | content_submission | not_reproducible | unknown
 t.text('submission_url');
 t.integer('estimated_cost_cents'); t.integer('renewal_cost_cents'); t.string('renewal_period'); // annual|monthly|none
-t.string('currency').notNullable().defaultTo('unknown'); // CHECK (currency IN ('USD','unknown','foreign')) — 'foreign' = a confirmed non-USD marker (never automated; §6.3 ⇒ OWNER_MANUAL_PAYMENT), 'unknown' = no/uncertain marker (⇒ price-entry card) — set by the investigator's currency gate (§5); a payment_required path is only ever VALID with 'USD'; a payment input for revision_payment and every payment hash/snapshot
+t.string('currency').notNullable().defaultTo('unknown'); // CHECK (currency IN ('USD','unknown','foreign')) — 'foreign' = a confirmed non-USD marker (never automated; §6.3 ⇒ OWNER_MANUAL_PAYMENT), 'unknown' = no/uncertain marker (⇒ price-entry card) — set by the investigator's currency gate (§5); an AUTOMATED reservation exists only for 'USD' — 'foreign' stays a VALID path routed to OWNER_MANUAL_PAYMENT (manual settlement only), 'unknown' parks for price entry; a payment input for revision_payment and every payment hash/snapshot
 t.jsonb('merchant_binding');                      // CANONICAL, revisioned (part of revision_payment): { checkout_origin, processor: { host, merchant_account_id }, issuer_merchant_descriptor } as observed by the investigator on the checkout chain; nullable: a paid path MAY qualify without a valid binding — it then can only ever be decided payment=OWNER_MANUAL_PAYMENT (§6.3) and never reaches an automated reservation (fail-closed there); when present, the reservation copies THIS field into the purchase's immutable merchant_binding — never the descriptive `investigation` blob — integer cents, parsed ONCE by the investigator from the quoted price text (kept verbatim in `investigation`); never decimal, never re-parsed downstream
 t.boolean('account_required').notNullable(); t.boolean('email_verification').notNullable(); t.boolean('payment_required').notNullable();
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
@@ -274,7 +274,7 @@ alone, nor send on an outreach approval alone.
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // CHECK (provider IN ('deterministic_runner','openai_cua','claude_cu','stagehand','grok','hermes','human')) — `hermes` = the legacy shared HERMES_SERVICE_TOKEN identity (§12): investigation/draft reports only, no payment/credential capability
-t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and RESUMES it (persisted session + the row's state) instead of repeating the external call; a crashed mutation is therefore recovered, never duplicated
+t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and — because a DB row cannot prove whether the external call took effect — treats it as **`mutation_ambiguous`** (outcome, added to the enum): the runner first RECONCILES per action before anything is re-sent (`create_account`: probe the login/‘email already registered’ path or the inbox for the welcome mail; verification activation: reload the account and read its verified state; `submit`: the existing profile/listing probe the Judge uses) and only retries the external call when reconciliation PROVES the first one did not take effect; an unprovable state stays `mutation_ambiguous` for the owner card — a crashed mutation is therefore never repeated blindly
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
@@ -282,7 +282,7 @@ t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
-                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','price_entered','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
+                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','price_entered','mutation_ambiguous','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
 t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
@@ -1435,8 +1435,18 @@ unset its gate; budget kill = the issuer program's limit.
 
 ## 13. Guardrails (must ship with each step)
 
-- **SSRF** — every fetch through `contact-finder.fetchPage()`; providers run in their own
-  sandbox and receive URLs, never portal network access.
+- **SSRF** — every server-side fetch through `contact-finder.fetchPage()`; providers run in
+  their own sandbox and receive URLs, never portal network access — AND every LIVE browser
+  navigation and subrequest (deterministic runner, credential/payment brokers and every
+  model-observed provider alike) runs under **browser-level request interception with per-hop
+  validation**: each request — top-level navigations, every redirect hop, subresources,
+  fetch/XHR, websockets — is resolved before it is allowed and refused unless the scheme is
+  http(s), the resolved IP (all A/AAAA answers, re-resolved per hop so DNS rebinding cannot
+  swap it) is public unicast (no loopback, RFC1918, link-local, CGNAT, multicast, metadata
+  169.254.169.254, sandbox-internal ranges) and the host is not on the deny list; a blocked
+  request fails the step (`outcome='blocked'`, evidence recorded) rather than being silently
+  dropped. The same interception layer carries the §12 mutating-request policy; a provider
+  that cannot run under it (no CDP/route hook) is not eligible for live steps at all.
 - **Comms** — outreach targets are businesses. Today `link-prospect-outreach` only validates
   recipient *syntax*; step 4 adds a **fail-closed customer-recipient exclusion** before any
   auto-send: the recipient email (and its domain, when the domain is a customer's own) is
