@@ -402,7 +402,7 @@ class CollectionsConversation {
         caseVersion: caseRow.case_version,
         customer,
         balance,
-        // register / holdActive / consequenceDueAt / payLinkCoversAccount —
+        // register / holdActive / consequenceDueAt —
         // refreshed again at disclosure time (see _accountState).
         ...(await this._accountState(customer.id, eligibleInvoices)),
         // The number this call was DIALED to (gh prb-r16): verification and
@@ -742,37 +742,7 @@ class CollectionsConversation {
     // set deadline. Nothing else authorizes a consequence sentence.
     const { holdAppliedAt, consequenceDueAt } = await readDunningState(customerId);
     const holdActive = Boolean(holdAppliedAt);
-    // The pay link is /pay/:token of the OLDEST-DUE open invoice. Under
-    // GATE_PAY_INCLUDE_BALANCE that page bundles the customer's other open
-    // self-pay invoices into ONE combined charge (pay-combined.js, owner
-    // ruling 2026-08-16) — but its selection can degrade (gate off, payer
-    // anchor, incomplete sibling read, live PI on a sibling, over-cap,
-    // dunning-stopped rows). Ask the SAME selector /pay uses (hook r2 P1):
-    // what she promises and what the ledger records is what the link would
-    // actually collect. Any failure degrades to the anchor alone.
-    const anchor = linkAnchorOf(invoices);
-    let payLinkInvoiceIds = anchor ? [String(anchor.id)] : [];
-    if (anchor && invoices.length > 1) {
-      try {
-        const PayCombined = require('../../pay-combined');
-        const siblings = await PayCombined.combinedEligibleSiblings(
-          { ...anchor, customer_id: customerId }, // open-balance rows carry no customer_id
-          { reusePaymentIntentId: anchor.stripe_payment_intent_id || null },
-        );
-        // Intersect with the refreshed snapshot (hook r4): the probe is a
-        // second live read — an invoice joining between the two must not be
-        // recorded or promised while the spoken itemization omits it.
-        const snapshot = new Set(invoices.map((inv) => String(inv.id)));
-        if (Array.isArray(siblings)) {
-          payLinkInvoiceIds.push(...siblings.map((inv) => String(inv.id)).filter((id) => snapshot.has(id) && !payLinkInvoiceIds.includes(id)));
-        }
-      } catch (err) {
-        logger.warn(`[collections-voice] combined pay-link scope probe failed callSid=${this.callSid}: ${err.message} — anchor invoice only`);
-      }
-    }
-    const covered = new Set(payLinkInvoiceIds);
-    const payLinkCoversAccount = invoices.length > 0 && invoices.every((inv) => covered.has(String(inv.id)));
-    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt, payLinkInvoiceIds, payLinkCoversAccount };
+    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt };
   }
 
   // The FRESH eligible set → balance, link anchor, register/hold/deadline
@@ -1247,19 +1217,12 @@ class CollectionsConversation {
     } else if (ctx.register === 'firm' || ctx.register === 'final') {
       consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
     }
-    // What the link would ACTUALLY collect (pay-combined's own selection):
-    // the whole account, a named partial bundle, or the oldest invoice alone.
-    const linkIds = new Set((ctx.payLinkInvoiceIds || []).map(String));
-    const linked = ordered.filter((inv) => linkIds.has(String(inv.id)));
-    let linkScope;
-    if (ctx.payLinkCoversAccount) {
-      linkScope = 'offer to text the secure payment link — it opens the full account balance for one payment.';
-    } else if (linked.length > 1) {
-      const linkedTotal = linked.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-      linkScope = `offer to text the secure payment link — it collects ${linked.map(nameOf).join(' and ')} ($${linkedTotal.toFixed(2)} of the total), not the whole balance; say the office will send the rest separately — never promise one link for the full balance.`;
-    } else {
-      linkScope = 'offer to text the secure payment link for the OLDEST invoice only; say the office will send the rest separately — never promise one link for the full balance.';
-    }
+    // The link is /pay/:token of the OLDEST-DUE sendable invoice. That page
+    // re-runs its own sibling selection when the customer OPENS it (under
+    // GATE_PAY_INCLUDE_BALANCE it bundles the open invoices it can into one
+    // payment), so no send-time snapshot of "which invoices" is durable
+    // (hook r10): she describes the page's behaviour and promises no set.
+    const linkScope = 'offer to text the secure payment link — it opens our secure payment page, which lists the open invoices it can take together and lets them pay in one go; do not promise which invoices it will bundle — anything it cannot take, the office will send separately.';
     return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; ${linkScope}${consequence}`;
   }
 
@@ -1597,9 +1560,9 @@ class CollectionsConversation {
         customerId: this._ctx.customer.id,
         channel: 'sms',
         purpose: 'late_payment',
-        // Every invoice the link would actually collect (pay-combined's own
-        // selection at disclosure time), never more.
-        invoiceIds: (this._ctx.payLinkInvoiceIds && this._ctx.payLinkInvoiceIds.length) ? this._ctx.payLinkInvoiceIds : [invoiceId],
+        // The invoice the link CARRIES. /pay/:token bundles siblings by its
+        // own live selection at open time — never recorded here as contacted.
+        invoiceIds: [invoiceId],
         source: 'collections_voice_paylink',
         metadata: {
           callLogId: this._ctx.callLogId,
@@ -1667,14 +1630,7 @@ class CollectionsConversation {
       }
       if (result && (result.sent || result.ok)) {
         this._captures.payLinkSent = true;
-        const linkedCount = (this._ctx.payLinkInvoiceIds || []).length;
-        if (this._ctx.payLinkCoversAccount) {
-          return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page with the full account balance.';
-        }
-        if (linkedCount > 1) {
-          return `The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page for ${linkedCount} of the open invoices; the office will send the rest.`;
-        }
-        return 'The payment link for the oldest invoice was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page; the office will send the rest.';
+        return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page, where they can pay the open invoices it lists together; anything it cannot take, the office will send separately.';
       }
       this.payLinkSent = false; // provider REPORTED non-delivery — retry is safe
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });
