@@ -16,7 +16,7 @@ function makeDbMock({ post = null, updateResult = 1 } = {}) {
   const dbMock = jest.fn((table) => {
     const chain = {};
     for (const m of ['where', 'whereIn', 'orderBy', 'limit', 'select', 'whereNotNull', 'whereRaw', 'whereNot', 'whereNull', 'orWhere', 'orWhereNot', 'orWhereNotIn']) chain[m] = jest.fn(() => chain);
-    chain.first = jest.fn().mockResolvedValue(table === 'blog_posts' ? post : null);
+    chain.first = jest.fn().mockImplementation(() => Promise.resolve(table === 'blog_posts' ? (typeof post === 'function' ? post() : post) : null));
     chain.insert = jest.fn((row) => { inserts.push(row); return Promise.resolve([1]); });
     chain.update = jest.fn((patch) => { updates.push({ table, patch }); return Promise.resolve(updateResult); });
     chain.then = (resolve) => resolve([]);
@@ -110,6 +110,16 @@ describe('blog-writer generatePost — every persisted row is gated before write
     const patch = dbMock._updates.find((u) => u.table === 'blog_posts')?.patch;
     expect(patch.status).toBe('idea');
     expect(patch.astro_publish_error).toMatch(/^BLOG_TOPIC_TARGETING_BLOCKED: P0 TOPIC_CANNIBALIZES_EXISTING/);
+  });
+
+  test('the de-queue is fenced on the targeting columns: a row an operator edited while the corpus loaded is left alone (409, distinct message)', async () => {
+    let reads = 0;
+    const post = () => (reads++ === 0 ? TAEXX_ROW : { ...TAEXX_ROW, title: 'Ghost Ants in Sarasota Kitchens', keyword: 'ghost ants sarasota' });
+    const { writer, dbMock } = load({ post, updateResult: 0 });
+    await expect(writer.generatePost('post_1')).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/targeting was edited while the topic gate ran/) });
+    // The fenced CAS was attempted once (0 rows); nothing else was written.
+    expect(dbMock._updates).toHaveLength(1);
+    expect(dbMock._updates[0].patch.status).toBe('idea');
   });
 
   test('the de-queue is a CAS: a row that entered the publish pipeline while the corpus loaded is left alone (409)', async () => {

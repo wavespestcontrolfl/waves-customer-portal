@@ -170,6 +170,20 @@ function faqFormatInstruction(serviceFields) {
 // publisher already captured the row's content; overwriting now would ship a
 // PR whose source differs from the database. Used as the CAS predicate on
 // every generator write (generated content, topic-gate de-queue).
+// The columns the topic gate reads from a row. The block de-queue is fenced
+// on them: an operator fix that lands while the live corpus loads must not be
+// reset to idea with a verdict about the OLD targeting.
+const TARGETING_COLUMNS = ['title', 'keyword', 'slug', 'tag', 'category', 'city'];
+function whereTargetingUnchanged(query, snapshot) {
+  for (const col of TARGETING_COLUMNS) {
+    query = snapshot[col] === null || snapshot[col] === undefined ? query.whereNull(col) : query.where(col, snapshot[col]);
+  }
+  return query;
+}
+function targetingChanged(before, after) {
+  return TARGETING_COLUMNS.some((col) => (before[col] ?? null) !== (after[col] ?? null));
+}
+
 function whereOutsideAstroPipeline(query) {
   return query
     .whereNot('status', 'published')
@@ -208,16 +222,21 @@ class BlogWriter {
     const topic = await topicGate.evaluateBlogPostRow(post, { category: categoryForRow(post) });
     if (!topic.ok) {
       const summary = topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ');
-      // Same CAS as the generated-content write below: the corpus load was
-      // async, and a row that entered the publish pipeline meanwhile must not
-      // be yanked back to idea.
-      const dequeued = await whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)).update({
+      // Same CAS as the generated-content write below (the corpus load was
+      // async): a row that entered the publish pipeline meanwhile must not be
+      // yanked back to idea, and a row whose targeting an operator fixed
+      // meanwhile must not be stamped with a verdict about the old fields.
+      const dequeued = await whereTargetingUnchanged(whereOutsideAstroPipeline(db('blog_posts').where('id', blogPostId)), post).update({
         status: 'idea',
         astro_publish_error: `BLOG_TOPIC_TARGETING_BLOCKED: ${summary}`.slice(0, 1000),
         updated_at: new Date(),
       });
       if (!dequeued) {
-        const err = new Error('Post was published or entered the Astro pipeline while the topic gate ran — nothing was changed');
+        const now = await db('blog_posts').where('id', blogPostId).first();
+        const edited = now && targetingChanged(post, now);
+        const err = new Error(edited
+          ? 'Post targeting was edited while the topic gate ran — nothing was changed; re-run generation on the edited row'
+          : 'Post was published or entered the Astro pipeline while the topic gate ran — nothing was changed');
         err.isOperational = true;
         err.statusCode = 409;
         throw err;

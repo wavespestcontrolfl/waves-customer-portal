@@ -2331,6 +2331,7 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       if (hold.pending) throw new Error(`PR #${pr.number} cannot merge: ${hold.reason}`);
     }
     await assertCodexReviewClear(pr.number, { headSha: pr.head?.sha });
+    if (!isUnpublish) await assertTopicTargetingStillClear(post, pr);
 
     const result = await gh.mergePr(post.astro_pr_number, {
       method: 'squash',
@@ -2353,6 +2354,32 @@ async function mergeAstro(postId, { expectHeadSha = null } = {}) {
       astro_publish_error: err.message.slice(0, 1000),
       updated_at: new Date(),
     });
+    throw err;
+  }
+}
+
+// Owner rulings 2026-08-27: the topic-targeting gate ran when the PR was
+// opened, but a PR can sit under review while another post claiming the same
+// entity goes live, or its branch targeting can change during remediation.
+// Re-run the gate on the BRANCH frontmatter against a fresh corpus right
+// before merge. Refreshes (rows already live) are exempt; an unreadable
+// branch file or corpus fails closed (the next tick retries).
+async function assertTopicTargetingStillClear(post, pr) {
+  const topicGate = require('../content/topic-targeting-gate');
+  if (topicGate.isLiveRow(post)) return;
+  const ref = post.astro_branch_name || pr?.head?.ref;
+  const slug = post.slug || slugify(post.title);
+  const resolved = await resolveExistingAstroFileAtRef(`${ASTRO_BLOG_DIR}/${slug}`, ref);
+  if (!resolved) {
+    throw new Error(`Astro PR #${pr.number} branch file could not be read for the topic-targeting recheck; republish the post before merge`);
+  }
+  const data = fm.parse(resolved.file.content)?.data || {};
+  const index = await topicGate.loadLiveIndex();
+  const topic = topicGate.evaluateDraftTargeting({ frontmatter: data }, { index, category: normalizeCategory(data.category || post.category, post.tag) || null });
+  if (!topic.ok) {
+    const err = new Error(`PR #${pr.number} cannot merge — topic-targeting gate is no longer clear against the live corpus: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
+    err.code = 'BLOG_TOPIC_TARGETING_BLOCKED';
+    err.details = topic.findings;
     throw err;
   }
 }

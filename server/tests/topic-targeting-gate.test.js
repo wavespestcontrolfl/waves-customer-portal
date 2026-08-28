@@ -500,3 +500,45 @@ describe('PR codex r3 (86e165cc1)', () => {
     expect(r.findings.some((f) => f.code === gate.CODES.CANNIBALIZES_EXISTING)).toBe(true);
   });
 });
+
+describe('PR codex r4 (2b1bcc9cb)', () => {
+  test('place-first service phrases are geographic; Mobile/Sunrise stay ordinary words', () => {
+    for (const t of ['Boston pest control', 'Austin exterminator', 'homestead termite treatment', 'phoenix lawn care cost']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    for (const t of ['mobile pest control service', 'sunrise mosquito activity', 'plantation shutters and pests']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('ambiguous abbreviations count after a geo preposition at phrase end, or between a word and a service; English words never', () => {
+    expect(gate.classifyGeoScope('pest control in va').out_of_area).toContain('VA');
+    expect(gate.classifyGeoScope('termites in la?').out_of_area).toContain('LA');
+    expect(gate.classifyGeoScope('boulder co pest control').out_of_area).toContain('CO');
+    expect(gate.classifyGeoScope('birmingham al exterminator').out_of_area).toContain('AL');
+    for (const t of ['ants in or around the house', 'wdo inspection va loan', 'pest control or exterminator', 'is pest control ok for pets', 'what pests live in me and my walls']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
+  test('Florida vernacular ("palmetto bugs", "laurel oaks") is not a footprint anchor, so statewide framing still blocks', () => {
+    expect(gate.classifyGeoScope('Palmetto Bugs in Florida').scope).toBe('statewide');
+    expect(gate.classifyGeoScope('Florida Laurel Oak Problems').scope).toBe('statewide');
+    expect(gate.evaluateDraftFraming({ frontmatter: { title: 'Palmetto Bugs in Florida: What They Are', slug: '/pest-control/palmetto-bugs-florida/' } }).ok).toBe(false);
+    expect(gate.classifyGeoScope('pest control palmetto').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('saw palmetto beds in sarasota').scope).toBe('footprint');
+  });
+  test('an owner whose prose only uses the possessive ("Acme\u2019s") still owns the entity', () => {
+    const corpus = [{ url: '/termite/acme-bait/', body: "---\ntitle: Acme Bait Stations Explained\nslug: /termite/acme-bait/\nprimary_keyword: acme bait stations\nmeta_description: How Acme stations work.\ncategory: termite\n---\n\nTechnicians place Acme\u2019s stations along the slab. Most of Acme\u2019s baits last a season, and Acme\u2019s monitors tell you when.\n" }];
+    const r = gate.evaluate({ actionType: 'new_supporting_blog', query: 'acme bait review', title: 'Is Acme Bait Worth It?', slug: '/termite/acme-bait-review/', category: 'termite' }, { corpus });
+    expect(r.ok).toBe(false);
+    expect(r.findings[0]).toMatchObject({ code: gate.CODES.CANNIBALIZES_EXISTING, entities: ['acme'] });
+  });
+  test('a persisted row\u2019s city is targeting: generic fields + city=Tampa is out-of-area; city=Sarasota is fine', async () => {
+    const index = gate.indexCorpus(CORPUS);
+    const generic = { title: 'How Often Should Pest Control Come?', keyword: 'pest control frequency', slug: 'pest-control-frequency', status: 'draft' };
+    const tampa = await gate.evaluateBlogPostRow({ ...generic, city: 'Tampa' }, { index });
+    expect(tampa.ok).toBe(false);
+    expect(tampa.findings[0]).toMatchObject({ code: gate.CODES.GEO_OUT_OF_AREA, cities: ['Tampa'] });
+    expect(tampa.findings[0].message).toMatch(/Row city/);
+    expect((await gate.evaluateBlogPostRow({ ...generic, city: 'Sarasota' }, { index })).ok).toBe(true);
+  });
+});

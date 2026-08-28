@@ -2807,7 +2807,8 @@ describe('post-merge internal-link planning', () => {
   });
 
   test('a planner failure is swallowed (never fails the merge)', async () => {
-    jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockRejectedValue(new Error('github down'));
+    // Once: mergeAstro's topic-targeting recheck loads this corpus in later tests.
+    jest.spyOn(planner, 'loadAstroCorpusFromGitHub').mockRejectedValueOnce(new Error('github down'));
 
     queueInternalLinkPlanning(post);
     await new Promise((resolve) => setImmediate(resolve));
@@ -3053,6 +3054,53 @@ describe('mergeAstro head pinning (audit regression — merge was not sha-pinned
     await expect(AstroPublisher.mergeAstro('post-pin-1', { expectHeadSha: '1111111111111111111111111111111111111111' }))
       .rejects.toThrow(/no longer matches the verified build commit/);
     expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+});
+
+describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter (PR #3549 codex r4)', () => {
+  const HEAD_SHA = 'abcdef1234567890abcdef1234567890abcdef12';
+  function prOpenPost(over = {}) {
+    return { id: 'post-gate-1', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton', astro_status: 'pr_open', astro_pr_number: 43, astro_branch_name: 'content/blog-ant-trails', ...over };
+  }
+  function mockBranchFile(title) {
+    gh.getFile.mockImplementation(async (path, ref) => (
+      path === 'src/content/blog/ant-trails-bradenton.md' && ref === 'content/blog-ant-trails'
+        ? { content: ['---', `title: ${title}`, 'slug: /ant-trails-bradenton/', 'domains:', '  - wavespestcontrol.com', '---', 'Body.'].join('\n') }
+        : null));
+  }
+  function cleanReview() {
+    gh.getPr.mockResolvedValue({ number: 43, state: 'open', merged: false, head: { ref: 'content/blog-ant-trails', sha: HEAD_SHA } });
+    gh.listIssueComments.mockResolvedValue([{ user: { login: 'wavespestcontrolfl' }, body: `@codex review\n\nReady on head \`${HEAD_SHA}\`.`, created_at: '2026-07-02T12:00:00Z' }]);
+    gh.listPrReviews.mockResolvedValue([{ user: { login: 'chatgpt-codex-connector' }, body: "Codex Review: Didn't find any major issues.", state: 'COMMENTED', commit_id: HEAD_SHA, submitted_at: '2026-07-02T12:05:00Z' }]);
+    gh.mergePr.mockResolvedValue({ merged: true, sha: 'merge-commit-sha' });
+  }
+  beforeEach(() => { jest.clearAllMocks(); process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE = 'false'; });
+  afterEach(() => { delete process.env.INTERNAL_LINK_PLAN_ON_BLOG_MERGE; });
+
+  test('branch targeting that drifted out of footprint during review cannot merge, even with a clean Codex round', async () => {
+    const queries = [chain({ first: jest.fn().mockResolvedValue(prOpenPost()) })];
+    db.mockImplementation(() => queries.shift() || chain());
+    cleanReview();
+    mockBranchFile('Ant Trails in Tampa');
+    await expect(AstroPublisher.mergeAstro('post-gate-1')).rejects.toMatchObject({ code: 'BLOG_TOPIC_TARGETING_BLOCKED', message: expect.stringMatching(/TOPIC_GEO_OUT_OF_AREA/) });
+    expect(gh.mergePr).not.toHaveBeenCalled();
+  });
+
+  test('a clear recheck merges; a refresh of a live post skips the recheck', async () => {
+    const queries = [chain({ first: jest.fn().mockResolvedValue(prOpenPost()) })];
+    db.mockImplementation(() => queries.shift() || chain());
+    cleanReview();
+    mockBranchFile('Ant Trails in Bradenton');
+    expect((await AstroPublisher.mergeAstro('post-gate-1')).merged).toBe(true);
+
+    jest.clearAllMocks();
+    const planner = require('../services/content/internal-link-planner');
+    planner.loadAstroCorpusFromGitHub.mockRejectedValueOnce(new Error('github_down'));
+    const q2 = [chain({ first: jest.fn().mockResolvedValue(prOpenPost({ astro_live_url: 'https://www.wavespestcontrol.com/ant-trails-bradenton/' })) })];
+    db.mockImplementation(() => q2.shift() || chain());
+    cleanReview();
+    mockBranchFile('Ant Trails in Tampa');
+    expect((await AstroPublisher.mergeAstro('post-gate-1')).merged).toBe(true);
   });
 });
 

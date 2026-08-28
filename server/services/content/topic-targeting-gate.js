@@ -120,10 +120,21 @@ const STATE_ABBR_AMBIGUOUS = 'al|ar|co|de|hi|id|in|la|ma|md|me|mi|mo|ms|ne|oh|ok
 // "mt" is also "Mount" ("mt dora", "mt pleasant"), so it is Montana only
 // when it ends the phrase ("billings mt") or follows a comma ("Billings, MT").
 const STATE_ABBR_TRAILING = 'mt';
+// Service-intent words: "<place> pest control" / "<abbr> exterminator" is a
+// geographic search phrase even without a preposition or a state suffix.
+const SERVICE_INTENT = 'pest control|pest|pests|exterminator|exterminators|termite|termites|lawn care|lawn|mosquito|mosquitoes|rodent|rodents|wdo|fumigation|bed bugs?';
+// Ambiguous abbreviations that are NOT English words: they also count in
+// "<word> <abbr> <service>" ("boulder co pest control"). The pure English
+// words (hi, in, me, oh, ok, or) never do — "pest control or exterminator".
+const STATE_ABBR_SEMI = 'al|ar|co|de|id|la|ma|md|mi|mo|ms|ne|pa|va';
 const STATE_ABBR_RE = new RegExp(
   `(?:^\\s*|\\b[a-z]+,?\\s+)(${STATE_ABBR_SAFE})\\b(?![a-z])`
   + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
-  + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`,
+  + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`
+  // "pest control in va" — an ambiguous abbreviation right after a geo
+  // preposition, at the end of the phrase ("ants in or around" is not).
+  + `|\\b(?:in|near|around|serving|across)\\s+(${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
+  + `|\\b[a-z]+\\s+(${STATE_ABBR_SEMI})\\s+(?:${SERVICE_INTENT})\\b`,
   'i'
 );
 // Hillsborough County is split: its south end (SOUTH_HILLSBOROUGH_CITIES in
@@ -133,6 +144,7 @@ const STATE_ABBR_RE = new RegExp(
 // County") does not. That is why the county stays OUT of the shared prose
 // blocklist: "Ruskin, in south Hillsborough County" is a true claim.
 const SPLIT_COUNTY_RE = /\bhillsborough county\b/i;
+const FOOTPRINT_VERNACULAR_RE = /\b(?:saw\s+palmetto|palmetto\s+bugs?|laurel\s+oaks?|cherry\s+laurel|laurel\s+wilt)\b/gi;
 let southHillsboroughCache;
 function southHillsboroughRe() {
   if (southHillsboroughCache !== undefined) return southHillsboroughCache;
@@ -173,9 +185,14 @@ const STATE_NAME_SOURCE = OUT_OF_STATE_RE.source.slice(2, -2); // "(alabama|…)
 // branch: "pest control in mobile homes" is a housing type, not Mobile, AL.
 const AUDIENCE_SUFFIX = 'homes|homeowners|households|residents|neighborhoods|neighbourhoods|communities|properties|yards|lawns|families|businesses|area';
 const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
+// "<Name> pest control" / "<Name> exterminator" — the place-first search
+// form. Mobile ("mobile pest control service") and Sunrise ("sunrise mosquito
+// activity") are excluded: both read as ordinary words before a service.
+const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile' && n !== 'Sunrise');
 const CONTEXT_PLACE_RE = new RegExp(
   `\\b(?:in|near|around|serving|across)\\s+(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s*(?:$|[,:;|–—-]|\\?|\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b))`
   + `|\\b(?:in|near|around|serving|across)\\s+(${AUDIENCE_PLACE_NAMES.map(escapeRe).join('|')})(?=\\s+(?:${AUDIENCE_SUFFIX})\\b)`
+  + `|\\b(${PLACE_FIRST_NAMES.map(escapeRe).join('|')})\\s+(?:${SERVICE_INTENT})\\b`
   + `|\\b(${CONTEXT_PLACE_NAMES.map(escapeRe).join('|')}),?\\s+(?:fl|florida|${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING}|${STATE_NAME_SOURCE})\\b(?![a-z])`,
   'i'
 );
@@ -257,7 +274,9 @@ function findAll(re, text) {
  */
 function classifyGeoScope(text) {
   const t = String(text || '');
-  const footprint = findAll(cityRe(footprintCities()), t);
+  // Florida vernacular that contains a served-city name (the same scrub the
+  // publisher's inferServiceAreas applies): not a footprint anchor.
+  const footprint = findAll(cityRe(footprintCities()), t.replace(FOOTPRINT_VERNACULAR_RE, ' '));
   const out_of_area = [
     ...findAll(cityRe(outOfAreaCityList()), t),
     ...findAll(OUT_OF_STATE_RE, t),
@@ -386,7 +405,7 @@ async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLi
   if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
   return evaluate(
-    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', category },
+    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category },
     { index: index || await loadIndex(), requireCorpus: true }
   );
 }
@@ -511,7 +530,7 @@ function accumulateProperNounStats(prose, stats) {
     const word = m[2];
     const sentenceStart = pre === '' || /[.!?]\s+$/.test(pre) || /\n\s*$/.test(pre) || /[-*]\s$/.test(pre);
     if (sentenceStart) continue;
-    const tok = word.toLowerCase().replace(/[’']/g, '');
+    const tok = word.toLowerCase().replace(/[’']s$/, '').replace(/[’']/g, ''); // same possessive rule as tokenize()
     const s = stats.get(tok) || { cap: 0, low: 0 };
     if (/^[A-Z]/.test(word)) s.cap++; else s.low++;
     stats.set(tok, s);
@@ -581,7 +600,10 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   const query = String(candidate.query || '').trim();
   const title = String(candidate.title || '').trim();
   const slug = String(candidate.slug || '').trim();
-  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' '));
+  // A persisted row's city is handed to the writer verbatim ("City: Tampa"),
+  // so it is targeting even when title/keyword/slug are generic.
+  const city = String(candidate.city || '').trim();
+  const geo = classifyGeoScope([query, title, slug.replace(/[-/]+/g, ' '), city].filter(Boolean).join(' '));
   // Pre-draft, statewide is judged only on PINNED framing (an operator
   // working title or slug), each on its own. A bare query is demand — the
   // writer localizes it and evaluateDraftFraming judges the result.
@@ -589,6 +611,7 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     { text: query, where: 'Primary keyword', framing: false },
     { text: title, where: 'Pinned title', framing: true },
     { text: slug.replace(/[-/]+/g, ' '), where: 'Pinned slug', framing: true },
+    { text: city, where: 'Row city', framing: false },
   ]);
   if (findings.length) return { ...base, ok: false, findings, geo };
 
