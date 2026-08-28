@@ -372,9 +372,20 @@ const BEDROOM_COUNT_RE = /\b(\d{1,2}|one|two|three|four|five|six)\s*[-–]?\s*(?
 // "not a studio" / "isn't an efficiency" / "no studio" — the studio word
 // under a negation is not an answer of zero.
 const NEGATED_STUDIO_RE = /\b(?:not|no|isn'?t|ain'?t|wasn'?t|never)\s+(?:a\s+|an\s+|the\s+)?(?:studio|efficiency)\b/i;
-function extractBedroomReply(body) {
+const BARE_BEDROOM_NUMBER_RE = /^\s*(\d{1,2}|one|two|three|four|five|six)\s*(?:\+|or more)?\s*[.!]?\s*$/i;
+function extractBedroomReply(body, { bareNumberOk = false } = {}) {
   const text = String(body || '').trim();
   if (!text) return null;
+  // A bare number answers ONLY a bedroom-only ask (combined asks keep the
+  // stricter rule — "2" could answer anything there).
+  if (bareNumberOk) {
+    const bare = text.match(BARE_BEDROOM_NUMBER_RE);
+    if (bare) {
+      const raw = bare[1].toLowerCase();
+      const n = BEDROOM_WORDS[raw] ?? Number(raw);
+      return Number.isInteger(n) && n >= 0 && n <= 20 ? n : null;
+    }
+  }
   // An explicit count always wins ("not a studio, it's a 2 bedroom").
   const m = text.match(BEDROOM_COUNT_RE);
   if (m) {
@@ -499,7 +510,9 @@ async function handleClarifyReply({ phone, body }) {
     }
     let bedroomCount = null;
     if (missing.includes('bedroom_count')) {
-      bedroomCount = extractBedroomReply(text);
+      // The one-question ask offers "studio, 1, 2, 3 or more" — a bare
+      // bounded number IS the natural answer when nothing else was asked.
+      bedroomCount = extractBedroomReply(text, { bareNumberOk: missing.length === 1 });
       if (bedroomCount !== null) candidates.push('bedroom_count');
     }
     let serviceText = null;
@@ -574,6 +587,7 @@ async function handleClarifyReply({ phone, body }) {
       // reads the answer from the thread. The flag keeps the audit.
       if (recorded.includes('bedroom_count')) freshFlags.bedroom_count_answer = bedroomCount;
 
+      const lockedEstimateId = freshFlags.estimate_id ? String(freshFlags.estimate_id) : null;
       const remaining = freshMissing.filter((item) => !recorded.includes(item));
       const answeredFlagsObj = {
         ...freshFlags,
@@ -608,7 +622,10 @@ async function handleClarifyReply({ phone, body }) {
       } else {
         await trx('message_drafts').where({ id: fresh.id }).update({ flags: answeredFlags });
       }
-      return { recorded };
+      // The LOCKED row's linkage is authoritative — a concurrent
+      // mergePendingClarify may have re-pointed estimate_id since the
+      // unlocked read above.
+      return { recorded, estimateId: lockedEstimateId };
     });
     if (!locked.recorded.length) return { handled: false };
     const recorded = locked.recorded;
@@ -619,8 +636,8 @@ async function handleClarifyReply({ phone, body }) {
     // (red/blocked/skip), not by throwing, and the answer is already
     // recorded above — without this stamp a failed re-draft would leave
     // the fallback-priced draft standing with nothing pointing at it.
-    const repriceTarget = recorded.includes('bedroom_count') && flags.estimate_id
-      ? String(flags.estimate_id)
+    const repriceTarget = recorded.includes('bedroom_count') && locked.estimateId
+      ? locked.estimateId
       : null;
     if (repriceTarget) {
       await stampClarifyFlags(digits, awaiting.id, {

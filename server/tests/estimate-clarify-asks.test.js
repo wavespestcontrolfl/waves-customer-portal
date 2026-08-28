@@ -861,6 +861,13 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(extractBedroomReply("It isn't a studio")).toBeNull();
     expect(extractBedroomReply('no studio here')).toBeNull();
     expect(extractBedroomReply('2')).toBeNull();
+    // A bedroom-ONLY ask accepts the natural bare answer, bounded.
+    expect(extractBedroomReply('2', { bareNumberOk: true })).toBe(2);
+    expect(extractBedroomReply(' 3+ ', { bareNumberOk: true })).toBe(3);
+    expect(extractBedroomReply('One.', { bareNumberOk: true })).toBe(1);
+    expect(extractBedroomReply('0', { bareNumberOk: true })).toBe(0);
+    expect(extractBedroomReply('99', { bareNumberOk: true })).toBeNull();
+    expect(extractBedroomReply('2 people', { bareNumberOk: true })).toBeNull();
     expect(extractBedroomReply('ok thanks')).toBeNull();
     expect(extractBedroomReply('')).toBeNull();
   });
@@ -987,6 +994,44 @@ describe('bedroom_count ask (unit-band lane)', () => {
     await handleClarifyReply({ phone: '+19415550142', body: '123 Main St, Sarasota' });
     const args = mockStartSmsThreadDraft.mock.calls[0][0];
     expect(args.supersedeEstimateId).toBeUndefined();
+  });
+
+  test('a bare "2" answers a bedroom-ONLY ask but not a combined ask', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: Promise.resolve({ created: true, estimateId: 'x' }) });
+    mockState.existingDraft = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const only = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(only.handled).toBe(true);
+    await only.repricePromise;
+    mockState.updates.length = 0;
+    mockState.existingDraft = {
+      id: 'sent-2', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['street_address', 'bedroom_count'], lead_id: 'lead-1' }),
+    };
+    const combined = await handleClarifyReply({ phone: '9415550142', body: '2' });
+    expect(combined.handled).toBe(false);
+    expect(mockState.updates).toHaveLength(0);
+  });
+
+  test('the re-price target is the LOCKED row\'s estimate_id, not the pre-lock snapshot (a concurrent merge may have re-pointed it)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const unlocked = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-OLD' }),
+    };
+    const lockedRow = { ...unlocked, flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-FRESH' }) };
+    const estimateRow = { id: 'est-FRESH', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) };
+    mockState.firstQueue = [unlocked, lockedRow, lockedRow, estimateRow, lockedRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-FRESH' }));
+    const stamps = mockState.updates.filter((u) => u.table === 'message_drafts').map((u) => JSON.parse(u.payload.flags));
+    expect(stamps.some((f) => f.reprice_pending?.estimate_id === 'est-FRESH')).toBe(true);
+    expect(stamps.some((f) => f.reprice_pending?.estimate_id === 'est-OLD')).toBe(false);
   });
 
   test('a reply without a bedroom count leaves the ask open', async () => {
