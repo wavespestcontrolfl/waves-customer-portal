@@ -280,34 +280,17 @@ test('supervision for staffed-hours + revalidation comes from call_log metadata,
   expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
 });
 
-test('a legacy call row without the stamp derives supervision from the case ONCE and backfills it', async () => {
-  // Pre-deploy in-flight row (codex #3560 P0): the linked case still carries
-  // its admin approver ⇒ supervised, and the stamp is written onto the row.
-  const backfill = chain();
-  // The real backfill is UPDATE … RETURNING; this chain's update must expose it.
-  backfill.update = jest.fn(() => ({ returning: jest.fn(async () => [{ id: 'cl-1' }]) }));
-  setDb({ extraCallRows: [] });
+test('a legacy stamp-less call row is UNSUPERVISED even when the case carries an admin approver — no inference from mutable case state', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
   const dbm = require('../models/db');
-  const orig = dbm.getMockImplementation();
-  const cases = [chain({ first: LINKED_CASE }), chain({ first: { ...LINKED_CASE, approved_by: 'admin:adam@wavespestcontrol.com' } })];
-  const callLogs = [chain({ first: { ...CALL_ROW, metadata: LEGACY_META } }), backfill, chain(), chain()];
-  dbm.mockImplementation((table) => {
-    if (table === 'collection_cases') return cases.shift() || chain({ first: LINKED_CASE });
-    if (table === 'call_log') return callLogs.shift() || chain();
-    return orig(table);
-  });
-  const res = mockRes();
-  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
-  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
-  expect(backfill.whereRaw).toHaveBeenCalledWith(expect.stringContaining("collectionsSupervised"));
-  expect(backfill.update).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.anything() }));
-});
-
-test('a legacy row whose case has no admin approver is unsupervised (fail closed)', async () => {
   setDb({ callRow: { ...CALL_ROW, metadata: LEGACY_META } });
+  const orig = dbm.getMockImplementation();
+  const cases = [chain({ first: { ...LINKED_CASE, approved_by: 'admin:adam@wavespestcontrol.com' } })];
+  dbm.mockImplementation((table) => (table === 'collection_cases' ? (cases.shift() || chain({ first: LINKED_CASE })) : orig(table)));
   const res = mockRes();
   await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
   expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: false });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
 });
 
 test('press 0 after hours ⇒ callback card + fixed promise, no dial', async () => {
