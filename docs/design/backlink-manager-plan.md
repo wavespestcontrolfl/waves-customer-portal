@@ -126,6 +126,7 @@ t.boolean('account_required').notNullable(); t.boolean('email_verification').not
 t.boolean('legal_attestation').notNullable();     // signed agreement / vendor terms / W-9 etc.
 t.boolean('agent_completable').notNullable();     // investigator's judgement: can the runner finish alone
 t.boolean('baseline').notNullable().defaultTo(false); // existing-backlink import placeholder (§4): descriptive only, never executable
+t.string('provider_override');                    // per-path learned/owner override of policy.preferred_provider (CHECK against the provider enum); written by the benchmark/learning job with reason in `investigation.provider_override_reason`; claim uses COALESCE(path.provider_override, policy.preferred_provider); payment steps ignore it (deterministic_runner only)
 // All authority-relevant flags are NOT NULL: the investigator must answer each explicitly (its JSON schema requires them);
 // §6.3's validity step also asserts they are literal booleans and consistent with the type (paid_listing/membership/
 // association/sponsorship ⇒ payment_required; self_service_free ⇒ NOT payment_required; not_reproducible/unknown ⇒ INVALID).
@@ -149,7 +150,11 @@ t.timestamp('superseded_at');
 // finds a different type/URL does not edit the row in place — it inserts the new path and, in the SAME transaction,
 // marks the old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
 // repoints its placements (path_id → new, authority cleared → the bridge job re-decides), and voids any `reserved`
-// purchase on it. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
+// purchase on it — UNLESS a placement has a post-exposure purchase open (`submitting`/`close_pending`/`ambiguous`):
+// that placement stays PINNED to the old path (supersession of it is parked, `superseded_pending=true` on the old
+// path) until the purchase settles; the settled paid term is written against the old path's snapshot, and only then
+// is the placement repointed. Old terms can therefore never execute AND a settling checkout never lands on a
+// different path. Changes to the other authority-relevant fields edit in place and bump `revision` (§ below).
 // Either way, nothing can execute under the old terms: claim requires a non-superseded path whose revision AND
 // identity match the approval.
 ```
@@ -328,7 +333,10 @@ CSV rows. Steps, all idempotent:
 
 **Legacy board backfill (step 1, runs with the migration, idempotent).** Every existing
 `seo_link_prospects` row — including the 56 June drafts — gets a registry domain (canonical
-host; `source` = the legacy value **mapped to the §3.5 enum** — `manual` → `owner_seed`,
+host; rows are GROUPED by canonical host and the registry's first-touch `source` is taken
+deterministically from the legacy row with the earliest `created_at` (id as tie-break),
+every other row's provenance going to `seo_link_domain_sources`; `source` = that row's legacy
+value **mapped to the §3.5 enum** — `manual` → `owner_seed`,
 `strategy_agent` → `strategy_agent`, `lost_recovery` → `lost_recovery`,
 `local_opportunity_<date>` → `local_opportunity`, `deep_harvest_<date>` → `competitor_gap`,
 `signup_agent`/anything else → `existing_backlink`; the verbatim legacy value is kept in
@@ -432,7 +440,7 @@ auto_free_acquisition        = false     (false ⇒ AUTO_FREE never granted; fre
 auto_account_creation        = false
 auto_outreach_min_score      = null      (null ⇒ AUTO_OUTREACH never granted)
 auto_outreach_daily_cap      = 0         (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
-auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day, counted together with completed submissions — and released/converted by the report or the lease sweep; re-checked before submit; 0 ⇒ no automated submissions)
+auto_submission_daily_cap    = 0         (form/profile submissions per ET day across ALL providers; a submission SLOT is reserved atomically inside the locked claim — a `seo_link_attempts` row with outcome='slot_reserved' for the ET day — and the cap counts slot_reserved + submitting + submit_ambiguous + completed submissions (in-flight and unresolved work holds its slot until a terminal, reconciled outcome); re-checked before submit; 0 ⇒ no automated submissions)
 owner_price_tolerance_cents  = 0
 monthly_paid_budget_cents    = 0         (AUTO spend only; 0 ⇒ AUTO_PAID_WITHIN_POLICY never granted; every money field is integer cents, end to end)
 owner_monthly_budget_cents   = null      (OWNER-approved spend; null ⇒ no software cap beyond each approval's max_payable_cents and the issuer program limit; set to cap total approved spend per ET month)
@@ -444,9 +452,10 @@ membership_requires_owner    = true
 legal_attestation_requires_owner = true
 min_path_confidence          = 0.6
 max_spam_score               = 10
+preferred_provider           = 'deterministic_runner'   (CHECK against the provider enum; the benchmark winner is written here by an audited owner edit)
 
 # Suggested first working values (owner sets them; recorded here only as the proposal):
-#   auto_free_acquisition=true · auto_account_creation=true · auto_outreach_min_score=80 · auto_outreach_daily_cap=10 ·
+#   auto_free_acquisition=true · auto_account_creation=true · auto_submission_daily_cap=10 (required — 0 blocks every runner submission) · auto_outreach_min_score=80 · auto_outreach_daily_cap=10 ·
 #   monthly_paid_budget_cents=50000 · max_auto_purchase_cents=5000 · auto_paid_min_score=80 ·
 #   auto_paid_min_d30_confidence=0.6
 ```
@@ -520,10 +529,12 @@ for that **(domain, page, location_key)** — the same triple `findPlacementRow`
 unique key enforces, so a second GBP location is never suppressed by the first — runs the
 §6.3 decision, stamps `authority` on the **placement**
 (the path only receives the informational `authority_last_decided`, which does not bump its
-revision — so approval never invalidates itself), and advances the registry: `AUTO_*` → `agent_state='ready_to_acquire'` (the row is
-now leasable); `OWNER_*` → `awaiting_owner` (registry stays `qualified` until approval, which
-runs the same stamping and advances it); `DENY` → `agent_state='rejected'` with reasons
-shown (owner override re-enters here); `INVALID` → back to `investigating`. The job is
+revision — so approval never invalidates itself), and then **recomputes the registry aggregate across ALL of the domain's placements** (§3.1):
+`ready_to_acquire` if any placement is authorized and pending; `acquiring`/`acquired` per the
+aggregate rules; `rejected` ONLY when no placement is authorized, pending, awaiting the owner
+or acquired (a single `DENY` beside an approved sibling never rejects the domain); `INVALID`
+on every placement → back to `investigating`. Per-placement outcomes are stored on the
+placement (`OWNER_*` → `awaiting_owner` + card; `DENY` → reasons + override affordance). The job is
 idempotent and re-runs the decision whenever ANY §6.3 input changes — policy, path
 revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
 evidence, month spend. **A stamp is never trusted on its own:** the claim predicate and the
@@ -669,7 +680,10 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
   under the same lock/budget/idempotency rules — or lets the listing lapse
-  (`agent_state='watching'`) if the policy no longer authorizes it. A renewal is leased
+  (`agent_state='watching'`) if the policy no longer authorizes it. A merchant that cannot sell
+  a one-off renewal stays on the refusal path above (`auto_renew_unavoidable`): the renewal job
+  never mints for it, owner-approved or not; the owner renews manually outside the system and
+  records a `human` attempt with the new paid-through date. A renewal is leased
   through a **renewal-specific predicate** (`claim(?mode=renewal)`), keyed to the open,
   unleased `renewal` reservation rather than to the placement lifecycle: the placement stays
   `placed`/`live`/`indexed` and the registry stays `acquired` (their verified state is never
@@ -677,7 +691,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   eligible provider, and the usual authority/approval/gate re-checks run on the reservation.
   The paid term written on `charged`/`reconciled_charged` advances `renews_at`. A renewal never charges
   without its own reservation and, where the merchant does not support one-off renewal, its
-  own owner approval.
+  own reservation; there is no owner-approval exception for auto-renew-only merchants.
 - **A reservation is charged against the month it is submitted in.** The
   `reserved → submitting` transition (under the budget lock) first compares the row's
   `budget_month` with the current ET month; if the month has rolled over since reservation,
@@ -803,7 +817,9 @@ together:
   `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` row needs
   the payments gate, not the auto-paid gate); no `submitting`/`close_pending`/
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
-  (an unleased `renewal` reservation is claimable by the runner, §6.3); and the provider requesting
+  (an unleased `renewal` reservation is claimable by the runner, §6.3 — and the claim's re-run of
+  the §6.3 decision computes `month_spend_cents` EXCLUDING the reservation being claimed, exactly
+  as the pre-mint check does, so a renewal that fills the remaining budget is not double-counted); and the provider requesting
   the lease is permitted for the step (payment steps → `deterministic_runner` only). A row
   the policy has not authorized cannot be leased by any caller.
 - **Draft leases are separate from send authority (no claim-before-draft deadlock).** The
@@ -873,15 +889,19 @@ Implementations, in order:
 1. **`deterministic_runner`** — the existing `signup-runner.js` (Playwright + form filler),
    extended for `account_required`, `email_verification` (IMAP verifier), `payment_required`
    (via the payment broker only, under `AUTO_PAID_WITHIN_POLICY` or after owner approval), and
-   **resumable sessions** (persisted browser state per `domain_id`).
+   **resumable sessions** (persisted browser state keyed by `(domain_id, path_id,
+   location_key)` — never by domain alone, so two locations or two account paths on one
+   site can't resume each other's cookies or half-filled form; a shared-account site that
+   hosts several location profiles is modelled as one session key with the profile selected
+   explicitly per placement, serialized by the domain lock).
 2. **`openai_cua` / `claude_cu` / `stagehand` / `grok`** — same interface, run in the
    benchmark (§10), **non-payment steps only** (payment boundary above). A provider never
    receives credentials it does not need and never receives the Waves identity beyond the
    canonical NAP packet the contract already sends.
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
-Provider selection per attempt is a policy field (`preferred_provider`, plus per-path override
-learned from attempt outcomes). Outreach: `OutreachProvider` = drafter + `link-prospect-outreach`.
+Provider selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
+(§3.2 / §6.2 — both durable columns; payment steps always resolve to `deterministic_runner`). Outreach: `OutreachProvider` = drafter + `link-prospect-outreach`.
 
 ---
 
