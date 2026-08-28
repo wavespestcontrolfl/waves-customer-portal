@@ -585,6 +585,18 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockDraft).toHaveBeenCalledTimes(2); // 1 = the original draft, 2 = redraft (stale account facts)
   });
 
+  test('applySyncReplyFields is conditioned on the publish claim at WRITE time (claim acquired after the sync read)', async () => {
+    // Snapshot said "no claim", but a publisher claimed + persisted before the write.
+    state.rows = [row({ review_reply: 'Just posted by the publisher', publish_claimed_until: '2099-01-01T00:00:00Z', auto_reply_status: 'posted' })];
+    const n = await Runner.applySyncReplyFields('rev-1', { review_reply: null, reply_updated_at: null });
+    expect(n).toBe(0);
+    expect(state.rows[0].review_reply).toBe('Just posted by the publisher');
+    state.rows[0].publish_claimed_until = null;
+    expect(await Runner.applySyncReplyFields('rev-1', { review_reply: 'from feed', reply_updated_at: 'x' })).toBe(1);
+    expect(state.rows[0].review_reply).toBe('from feed');
+    expect(await Runner.applySyncReplyFields('rev-1', {})).toBe(0);
+  });
+
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

@@ -691,6 +691,22 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
 }
 
 /**
+ * Apply sync-derived reply fields to an EXISTING row as a SEPARATE statement
+ * conditioned on the publish claim AT WRITE TIME: syncReplyFields judged a
+ * snapshot, and a publisher can acquire its claim (and persist a reply)
+ * between that read and this write — a stale empty-feed snapshot must not
+ * overwrite it. Returns the affected-row count.
+ */
+async function applySyncReplyFields(reviewId, fields, { conn = db, now = new Date() } = {}) {
+  if (!fields || !Object.keys(fields).length) return 0;
+  const n = await conn('google_reviews')
+    .where({ id: reviewId })
+    .whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()])
+    .update(fields);
+  return Array.isArray(n) ? n.length : n;
+}
+
+/**
  * Merged into the GBP sync's UPDATE of an existing row: a row that parked on
  * `no_gbp_resource` (first seen via the Places fallback) re-enters the queue
  * the moment the authoritative sync attaches its GBP identity.
@@ -764,6 +780,7 @@ module.exports = {
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
   syncReplyFields,
+  applySyncReplyFields,
   reviewFingerprint,
   autoReplyStatus,
   classifyReplyMode,

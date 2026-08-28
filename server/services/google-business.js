@@ -779,9 +779,13 @@ class GoogleBusinessService {
     // Reply fields from the feed snapshot — deferred under a live publish
     // claim, replacing a local draft when Google has an owner reply, and
     // preserving a draft against an empty feed (services/review-reply/runner).
-    const { syncReplyFields } = require('./review-reply/runner');
+    const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
+    // Existing rows: reply fields are written by applySyncReplyFields as a
+    // separate statement conditioned on the publish claim at write time.
+    // New rows carry them in the insert (no claim can exist yet).
+    const existingReplyFields = existing ? syncReplyFields(existing, normalized, { fnNow: db.fn.now() }) : null;
     const replyFields = existing
-      ? syncReplyFields(existing, normalized, { fnNow: db.fn.now() })
+      ? {}
       : {
           review_reply: normalized.owner_reply,
           reply_updated_at: normalized.owner_reply ? normalized.owner_reply_updated_at || db.fn.now() : null,
@@ -825,6 +829,7 @@ class GoogleBusinessService {
       // the auto-reply queue once this authoritative sync attaches the name.
       const { requeueFieldsOnIdentity } = require('./review-reply/runner');
       await db('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt, ...requeueFieldsOnIdentity(existing, normalized) });
+      await applySyncReplyFields(existing.id, existingReplyFields);
       result = { id: existing.id, inserted: false };
     } else {
       try {
@@ -865,8 +870,8 @@ class GoogleBusinessService {
           synced_at: monotonicSyncedAt,
           // Same existing-link-first rule as the row build above.
           customer_id: winner.customer_id || customerId || null,
-          ...winnerReplyFields,
         });
+        await applySyncReplyFields(winner.id, winnerReplyFields);
         result = { id: winner.id, inserted: false };
       }
     }
@@ -1063,11 +1068,11 @@ class GoogleBusinessService {
         if (identityCorroborated) {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
-        if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
-          const { syncReplyFields } = require('./review-reply/runner');
-          Object.assign(upd, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }));
-        }
         await db('google_reviews').where({ id: existing.id }).update(upd);
+        if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
+          const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
+          await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }));
+        }
         // Reinstatement clear, mirroring _upsertGbpReview: the main update
         // never touches missing_since; the clear is a separate conditional
         // UPDATE against the CURRENT column value with the ordering token,
