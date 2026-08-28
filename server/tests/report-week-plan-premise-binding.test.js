@@ -42,3 +42,27 @@ describe('planBindsToService', () => {
     expect(planBindsToService({ decisionInputs: {} }, { address_line1: '9 Beach Rd' })).toBe(true); // no home recorded → legacy snapshot, no binding
   });
 });
+
+describe('visitInPlanWeek (codex gh-r14: no historical watering-in credit)', () => {
+  const { visitInPlanWeek } = require('../services/irrigation-week-plan');
+  const snap = { weekEnding: '2026-08-23', decisionInputs: { planWeekEnd: '2026-08-30' } };
+  test('a visit inside the plan week (Mon..Sun after week_ending) counts', () => {
+    expect(visitInPlanWeek(snap, '2026-08-24')).toBe(true);
+    expect(visitInPlanWeek(snap, new Date('2026-08-30T15:00:00Z'))).toBe(true);
+  });
+  test('the completed week, an older visit, and a visit past planWeekEnd do not', () => {
+    expect(visitInPlanWeek(snap, '2026-08-23')).toBe(false);
+    expect(visitInPlanWeek(snap, '2026-07-10')).toBe(false);
+    expect(visitInPlanWeek(snap, '2026-08-31')).toBe(false);
+  });
+  test('falls back to week_ending + 7 without planWeekEnd; missing dates never credit', () => {
+    expect(visitInPlanWeek({ weekEnding: '2026-08-23', decisionInputs: {} }, '2026-08-30')).toBe(true);
+    expect(visitInPlanWeek({ weekEnding: '2026-08-23', decisionInputs: {} }, '2026-08-31')).toBe(false);
+    expect(visitInPlanWeek({ weekEnding: null }, '2026-08-24')).toBe(false);
+    expect(visitInPlanWeek(snap, null)).toBe(false);
+  });
+  test('report-data stamps the rendered plan with visitInPlanWeek for the assessment date', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
+    expect(src).toMatch(/visitInPlanWeek: visitInPlanWeek\(snapshot, assessment\.service_date\)/);
+  });
+});

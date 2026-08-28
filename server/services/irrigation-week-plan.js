@@ -558,6 +558,21 @@ async function discardUnsentWeekPlan({ customerId, weekEnding, claimToken = null
   }
 }
 
+/**
+ * Whether a visit on `serviceDate` falls inside the snapshot's PLAN week —
+ * the days the Monday decision covers: after `weekEnding` (the completed
+ * week's Sunday) through the decision's `planWeekEnd` (else +7). Report
+ * links are long-lived: a historical visit's watering-in must never be
+ * credited against the CURRENT week's run count (codex gh-r14).
+ */
+function visitInPlanWeek(snapshot, serviceDate) {
+  const weekEnding = etDateStringPlusDays(snapshot?.weekEnding, 0);
+  const visit = etDateStringPlusDays(serviceDate, 0);
+  if (!weekEnding || !visit) return false;
+  const planWeekEnd = etDateStringPlusDays(snapshot?.decisionInputs?.planWeekEnd, 0) || etDateStringPlusDays(weekEnding, 7);
+  return visit > weekEnding && visit <= planWeekEnd;
+}
+
 function etDateStringPlusDays(ymd, days) {
   const iso = ymd instanceof Date ? ymd.toISOString().slice(0, 10) : String(ymd || '').slice(0, 10);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
@@ -632,6 +647,7 @@ module.exports = {
   decideWeekPlan,
   renderWeekPlanEmail,
   renderWeekPlanReport,
+  visitInPlanWeek,
   persistWeekPlan,
   markWeekPlanSent,
   hasSentWeekPlan,

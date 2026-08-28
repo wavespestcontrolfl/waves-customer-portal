@@ -694,6 +694,12 @@ const UNIQUE_COLLISION_HANDLERS = {
   // same property) — keep the winner's ledger row, drop the loser's copy
   // (codex #3390: absent here, a shared alert aborted the whole merge).
   customer_alerts: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id, week_ending): both duplicate profiles holding a
+  // Monday watering-plan snapshot for the same week — the winner's sent
+  // snapshot stays authoritative (it is what their report renders); the
+  // loser's colliding copy drops instead of aborting the merge (codex
+  // #3565 gh-r14).
+  irrigation_week_plans: repointRowwiseDropCollisions,
   collections_flags: repointFlagsReleaseCollisions,
 };
 

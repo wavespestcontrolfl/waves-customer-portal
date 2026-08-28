@@ -833,6 +833,11 @@ describe('executeMerge', () => {
     expect(UNIQUE_COLLISION_HANDLERS.customer_alerts).toBe(repointRowwiseDropCollisions);
   });
 
+  it('registers irrigation_week_plans with the rowwise drop-collisions handler (same-week snapshots fold, never abort — codex #3565 gh-r14)', () => {
+    const { UNIQUE_COLLISION_HANDLERS, repointRowwiseDropCollisions } = dedupe._test;
+    expect(UNIQUE_COLLISION_HANDLERS.irrigation_week_plans).toBe(repointRowwiseDropCollisions);
+  });
+
   it('moves non-colliding CRM tags and drops duplicate tags instead of aborting', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };

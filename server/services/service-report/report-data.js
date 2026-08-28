@@ -47,7 +47,7 @@ const {
 } = require('../../utils/technician-name');
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
-const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek } = require('../irrigation-week-plan');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2613,7 +2613,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     const servicedElsewhere = !!snapshot && !planBindsToService(snapshot, service);
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
-      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+      const rendered = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
+      // The card credits a REQUIRED watering-in against the plan only when
+      // this visit sits inside the plan week — a reopened older report
+      // loads the current week's snapshot and must not count a treatment
+      // watered in weeks ago as one of this week's runs.
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date) } : null;
     }
   }
 

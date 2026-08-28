@@ -182,3 +182,21 @@ describe('GaugePrimitives honesty guards', () => {
     expect(screen.getByRole('img', { name: /score not yet available/i })).toBeInTheDocument();
   });
 });
+
+describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
+  const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true } };
+  it('credits the treatment watering only for a label-REQUIRED watering-in inside the plan week', () => {
+    render(<WaterIntakeBar water={water} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    expect(screen.getByTestId('lawn-week-plan-aftercare-note')).toHaveTextContent(/counts as one of this week/);
+  });
+  it('never credits the neutral "keep your normal schedule" fallback as a run', () => {
+    render(<WaterIntakeBar water={water} aftercare={{ watering: 'No special watering is needed because of today’s treatment — keep your normal schedule.', waterInRequired: false }} />);
+    expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
+    expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+  });
+  it('never credits a historical visit\'s watering-in against the current week', () => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
+    expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+  });
+});
