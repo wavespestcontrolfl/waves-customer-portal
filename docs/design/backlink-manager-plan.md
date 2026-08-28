@@ -315,7 +315,8 @@ max_spam_score               = 10
 #    A row that fails a floor is DENY regardless of who would have acted; owner override is
 #    the explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE, never DENY→AUTO.
 #    MISSING is failing: every required signal must be a finite number (not null/NaN/undefined).
-if not all finite(domain.spam_score, score, path.confidence, amount_cents if path.payment_required) → DENY
+if not all finite(domain.spam_score, score, path.confidence) → DENY
+if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → DENY   # negative/zero/fractional money never reaches the ledger
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score
@@ -353,8 +354,8 @@ t.string('purchase_kind').notNullable().defaultTo('initial'); // initial | renew
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
 t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${purchase_kind}:${renewal_period_key || '-'}:${generation}` — NOT month-scoped: a placement's initial purchase is unique for all time
-t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal)
-t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting
+t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
+t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
 t.string('authority').notNullable();
 t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
@@ -383,7 +384,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
 - **Final total is validated before `submitting`.** The provider must read the checkout's
   final total (price + tax + fees + renewal terms as displayed) and report it as
-  `final_cents` BEFORE the card is exposed. The `reserved → submitting` transition runs under
+  `final_cents` — a safe non-negative integer, else the transition is refused — BEFORE the
+  card is exposed. The `reserved → submitting` transition runs under
   the same `link_budget:<budget_month>` advisory lock and: refuses (→ `voided`,
   `outcome='price_changed'`) if `final_cents > max_auto_purchase_cents` for a row whose stamped
   authority is exactly `AUTO_PAID_WITHIN_POLICY` (regression test: a checkout total raised above
