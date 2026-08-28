@@ -333,6 +333,14 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
         'An existing customer asked about pricing on a call and the voice agent could not give a number.',
         'The caller was told a written estimate will be sent — this card is that obligation.',
         service ? `Service asked about: ${service}.` : null,
+        // The details collected ON THIS CALL are the fulfilment details (hook
+        // P1): the account's email/address may be stale or a different
+        // property. Nothing here mutates the customer — staff decide.
+        extracted.email ? `Email given on the call: ${extracted.email}` : null,
+        extracted.address_line1
+          ? `Service address given on the call: ${[extracted.address_line1, extracted.city, extracted.zip].filter(Boolean).join(', ')}`
+          : null,
+        opts.phone ? `Callback number: ${opts.phone}` : null,
         extracted.call_summary ? `Call summary: ${String(extracted.call_summary).slice(0, 400)}` : null,
       ].filter(Boolean).join('\n'),
       {
@@ -348,6 +356,14 @@ async function surfaceEstimateRequestForCustomer(customerId, extracted = {}, opt
           kind: 'estimate_request',
           callSid: opts.callSid || null,
           requested_service: service,
+          // fulfilment details as captured (never applied to the customer here)
+          first_name: extracted.first_name || null,
+          last_name: extracted.last_name || null,
+          email: extracted.email || null,
+          address_line1: extracted.address_line1 || null,
+          city: extracted.city || null,
+          zip: extracted.zip || null,
+          phone: opts.phone || null,
         },
       },
     );
@@ -727,11 +743,13 @@ async function createLeadFromExtraction(extracted = {}, opts = {}) {
     merged.preferred_date_time = extracted.preferred_date_time || priorExtracted.preferred_date_time || null;
     merged.source = 'voice_agent';
     merged.language = language || priorExtracted.language || null;
-    // A promised written estimate is STICKY-ON on the lead artifact (codex
-    // #3569): staff working the lead must see that a caller was told an
-    // estimate is coming, and a later capture that does not mention it must
-    // not erase the obligation.
-    if (extracted.estimate_requested === true) merged.estimate_requested = true;
+    // A written-estimate request/promise is STICKY-ON on the lead artifact
+    // (codex #3569), in the shape the Leads UI already renders
+    // (quote_requested → "Quote requested on call", quote_promised → "Quote
+    // promised to caller"): staff working the lead must see the obligation,
+    // and a later capture that does not mention it must not erase it.
+    if (extracted.quote_requested === true) merged.quote_requested = true;
+    if (extracted.quote_promised === true) merged.quote_promised = true;
     const contactPreference = contactPreferenceFields(extracted);
     if (contactPreference) {
       if (contactPreference.contact_preference) merged.contact_preference = contactPreference.contact_preference;

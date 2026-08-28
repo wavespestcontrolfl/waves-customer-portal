@@ -313,8 +313,8 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     test('existing customer + card persisted ⇒ promise authorized, WHEN from CLOCK DATA', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
-      const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito' }, { from: '+19415551234', callSid: 'CA-est' });
-      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito' }), { callSid: 'CA-est' });
+      const out = await executeTool('capture_lead', { call_summary: 'wants a price for mosquito', estimate_requested: true, requested_service: 'mosquito', first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est' });
+      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ requested_service: 'mosquito', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.objectContaining({ callSid: 'CA-est' }));
       expect(out).toMatch(/estimate request IS on the office queue/);
       expect(out).toMatch(/no new lead was created/i);
       expect(out).not.toMatch(/do not say a new request/); // no self-contradiction when queued
@@ -323,16 +323,16 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
     test('existing customer + card NOT persisted ⇒ promise withdrawn', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: false, suppressed: true });
-      const out = await executeTool('capture_lead', { call_summary: 'wants a price', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est2' });
+      const out = await executeTool('capture_lead', { call_summary: 'wants a price', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est2' });
       expect(out).toMatch(/could NOT be queued — do NOT promise a written estimate/);
     });
     test('new lead ⇒ the lead is the artifact; no card', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-9', created: true });
       surfaceEstimateRequestForCustomer.mockClear();
-      const out = await executeTool('capture_lead', { call_summary: 'new caller wants a price', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est3' });
+      const out = await executeTool('capture_lead', { call_summary: 'new caller wants a price', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est3' });
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
-      // the flag rides the lead artifact (extracted_data, sticky-on)
-      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ estimate_requested: true }), expect.anything());
+      // the obligation rides the lead artifact in the shape the Leads UI renders (sticky-on)
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_requested: true, quote_promised: true }), expect.anything());
       expect(out).toMatch(/Lead saved/);
       expect(out).toMatch(/estimate request IS on the office queue/);
     });
@@ -340,8 +340,24 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       // (a FAILED capture returns its own "could not be saved" result before any promise; this is the
       // no-lead / no-customer outcome that reaches the estimate branch)
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: null, created: false });
-      const out = await executeTool('capture_lead', { call_summary: 'x', estimate_requested: true }, { from: '+19415551234', callSid: 'CA-est4' });
+      const out = await executeTool('capture_lead', { call_summary: 'x', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }, { from: '+19415551234', callSid: 'CA-est4' });
       expect(out).toMatch(/could NOT be queued/);
+    });
+    test('an INCOMPLETE capture never queues (hook P1): the result names the missing fields, no card, no promise', async () => {
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+      surfaceEstimateRequestForCustomer.mockClear();
+      const out = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat' }, { from: '+19415551234', callSid: 'CA-est6' });
+      expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+      expect(out).toMatch(/NOT queued yet — still missing: last_name, email, address_line1/);
+      expect(out).toMatch(/Do NOT promise a written estimate yet/);
+      expect(out).not.toMatch(/IS on the office queue/);
+      // a NEW lead is not an estimate artifact either when the capture is incomplete
+      createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-2', created: true });
+      const out2 = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, email: 'x@y.z' }, { from: '+19415551234', callSid: 'CA-est7' });
+      expect(out2).toMatch(/still missing: first_name, last_name, address_line1/);
+      expect(out2).not.toMatch(/IS on the office queue/);
+      // requested but NOT promised — the lead shows "Quote requested on call" only
+      expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_requested: true, quote_promised: false }), expect.anything());
     });
     test('not requested ⇒ result unchanged (no estimate note either way)', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });

@@ -90,9 +90,10 @@ const TOOLS = [
         },
         estimate_requested: {
           type: 'boolean',
-          description: 'True when the caller asked about pricing and you could not give them a number on this call, '
-            + 'so a written estimate was promised. The office fulfils it — the tool result tells you whether the '
-            + 'request was actually queued.',
+          description: 'True when the caller asked about pricing and you could not give them a number on this call '
+            + 'and they want a written estimate. Do NOT promise one before calling this: the office needs first_name, '
+            + 'last_name, email and address_line1 to send it, and the tool result says whether the request was '
+            + 'queued or which of those is still missing.',
         },
         do_not_contact_request: {
           type: 'boolean',
@@ -825,10 +826,26 @@ async function executeTool(name, input = {}, ctx = {}) {
         contact_preference: input.contact_preference || null,
         preferred_contact_method: input.preferred_contact_method || null,
         do_not_contact_request: input.do_not_contact_request === true,
-        // A promised written estimate rides the lead artifact (extracted_data,
-        // sticky-on) so staff working a NEW lead see the obligation.
-        estimate_requested: input.estimate_requested === true,
       };
+      // ⭐ THE QUEUE ONLY ACCEPTS A DELIVERABLE REQUEST (hook P1). Prompts are
+      // not an enforcement boundary: without a name, an email and a service
+      // address the office cannot send anything, so an incomplete capture never
+      // authorizes the promise — the result names what is missing so the model
+      // collects it and calls again. Decided BEFORE the lead write so the lead
+      // artifact carries the truth in the shape the Leads UI already renders
+      // (extracted_data.quote_requested → "Quote requested on call",
+      // quote_promised → "Quote promised to caller").
+      const estimateRequested = input.estimate_requested === true;
+      const estimateMissing = estimateRequested
+        ? [
+          ['first_name', extracted.first_name], ['last_name', extracted.last_name],
+          ['email', extracted.email], ['address_line1', extracted.address_line1],
+        ].filter(([, v]) => !v).map(([k]) => k)
+        : [];
+      if (estimateRequested) {
+        extracted.quote_requested = true;
+        extracted.quote_promised = estimateMissing.length === 0;
+      }
       // ⭐ AN EXPLICIT VERBAL OPT-OUT IS HONOURED, NOT JUST FILED.
       //
       // This used to land only in `leads.extracted_data` for a human to read.
@@ -1302,13 +1319,15 @@ async function executeTool(name, input = {}, ctx = {}) {
       // about — file the estimate-request card, and let the result below tell
       // the model whether the promise may be spoken.
       let estimateQueued = null; // null = not requested; true/false = requested and (not) persisted
-      if (input.estimate_requested === true) {
+      if (estimateRequested && estimateMissing.length) {
+        estimateQueued = false;
+      } else if (estimateRequested) {
         if (leadCreated) {
           estimateQueued = true;
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, extracted, { callSid: ctx.callSid || null })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, extracted, { callSid: ctx.callSid || null, phone: callerPhone || null })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {
@@ -1319,8 +1338,12 @@ async function executeTool(name, input = {}, ctx = {}) {
         ? ' The estimate request IS on the office queue: you may tell the caller a written estimate will be '
           + 'sent — set WHEN from the latest CLOCK DATA, never a time you cannot know.'
         : (estimateQueued === false
-          ? ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
-            + 'Waves team member will follow up, nothing stronger.'
+          ? (estimateMissing.length
+            ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
+              + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
+              + 'estimate_requested: true.'
+            : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
+              + 'Waves team member will follow up, nothing stronger.')
           : '');
       logger.info(
         `[voice-relay] capture_lead ${leadCreated ? 'saved' : 'recorded with NO lead (existing customer)'} `
