@@ -5,9 +5,11 @@
  * Runs from the same 2-minute post-call hook as recording recovery, so a
  * voicemail has had time to land: a call WITH a recording is the voicemail
  * lane's (customer_voicemail_callback) and never rings here. Rings at most
- * once per call — an atomic claim on call_log.metadata.missed_call_notified_at
- * — and only for an inbound call from a customer on file that no human or
- * AI agent answered.
+ * once per call, only for an inbound call from a customer on file that no
+ * human or AI agent answered. Delivery state lives in call_log.metadata:
+ *   missed_call_notified_at — a LEASE (fence token; reclaimable once stale,
+ *                             so a crash mid-delivery never loses the alert)
+ *   missed_call_settled_at  — terminal: delivered (or superseded)
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -19,6 +21,9 @@ const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
 // `completed` call with no outcome may have been handled by the flow — it
 // never rings (codex r4).
 const UNANSWERED_STATUSES = new Set(['no-answer', 'busy', 'canceled']);
+// Lease length: covers customer lookup + delivery with margin; a stale lease
+// is reclaimed by the 2-minute sweep.
+const LEASE_MS = 10 * 60 * 1000;
 
 function outcomeUnanswered(row) {
   if (row.answered_by) return UNANSWERED.has(row.answered_by);
@@ -26,16 +31,26 @@ function outcomeUnanswered(row) {
 }
 
 /** Pure eligibility — exported for tests. */
-function missedCallEligible(row) {
+function missedCallEligible(row, now = Date.now()) {
   if (!row || row.direction !== 'inbound' || !row.customer_id) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
   if (row.voicemail_callback_alerted_at) return false;                // voicemail lane already rang
   if (row.call_outcome === 'ai_handled') return false;
   if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
-  let meta = row.metadata;
-  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-  if (meta && meta.missed_call_notified_at) return false;
+  const meta = parseMeta(row.metadata);
+  if (meta.missed_call_settled_at) return false;                      // delivered / superseded
+  if (meta.missed_call_notified_at && !leaseStale(meta.missed_call_notified_at, now)) return false; // live lease
   return true;
+}
+
+function parseMeta(meta) {
+  if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
+  return meta && typeof meta === 'object' ? meta : {};
+}
+
+function leaseStale(token, now = Date.now()) {
+  const t = new Date(token).getTime();
+  return !Number.isFinite(t) || now - t > LEASE_MS;
 }
 
 async function ringMissedCallIfUnanswered(callSid) {
@@ -47,16 +62,30 @@ async function ringMissedCallIfUnanswered(callSid) {
     // eligibility predicates are re-checked IN the claim so a voicemail
     // recording or an answered outcome that landed between the read above
     // and this write loses the race (codex r4).
+    const token = new Date().toISOString();
+    const reclaimed = Boolean(parseMeta(row.metadata).missed_call_notified_at);
     const claimed = await db('call_log')
       .where({ id: row.id })
-      .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
+      .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+      .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
       .whereNull('recording_sid')
       .whereNull('recording_url')
       .whereNull('voicemail_callback_alerted_at')
       .whereRaw("COALESCE(call_outcome,'') <> 'ai_handled'")
       .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-      .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [new Date().toISOString()]) });
+      .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [token]) });
     if (!claimed) return false;
+    // Every later write is fenced on the token: a stale owner waking up
+    // late can't settle or release a lease someone else now holds.
+    const fenced = () => db('call_log').where({ id: row.id }).whereRaw("metadata->>'missed_call_notified_at' = ?", [token]);
+    const settle = () => fenced().update({ metadata: db.raw("metadata || jsonb_build_object('missed_call_settled_at', ?::text)", [new Date().toISOString()]) });
+    // Reclaimed a stale lease: the previous owner may have died after the
+    // bell was written. A bell row for this call means it delivered.
+    if (reclaimed) {
+      const prior = await db('notifications').where({ recipient_type: 'admin', category: 'missed_call' })
+        .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(row.id)]).first('id');
+      if (prior) { await settle(); return false; }
+    }
     const customer = await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone');
     const { triggerNotification } = require('./notification-triggers');
     // Is this call still the missed-call lane's? False once a recording
@@ -82,9 +111,10 @@ async function ringMissedCallIfUnanswered(callSid) {
     } finally {
       const delivered = Boolean(stats && !stats.error
         && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
-      if (!delivered) {
-        await db('call_log').where({ id: row.id })
-          .update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
+      if (delivered) {
+        await settle().catch(() => {});
+      } else {
+        await fenced().update({ metadata: db.raw("metadata - 'missed_call_notified_at'") }).catch(() => {});
       }
     }
     // Post-check (hook P1): a recording that persisted between the claim
@@ -106,7 +136,7 @@ const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed
 
 /**
  * Durable retry (runs on the 2-minute scheduler): re-offer unanswered,
- * unclaimed customer calls from the last 24h that ended ≥3 minutes ago (so
+ * unsettled (unclaimed or stale-leased) customer calls from the last 24h that ended ≥3 minutes ago (so
  * the voicemail recording has had its chance to land). Idempotent — the
  * atomic claim inside ringMissedCallIfUnanswered makes a re-offer a no-op.
  */
@@ -117,7 +147,9 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
     .whereIn('status', TERMINAL_STATUSES)
     .whereNull('recording_sid')
     .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
-    .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
+    .whereRaw("COALESCE(metadata->>'missed_call_settled_at','') = ''")
+    // Unclaimed, or a lease that went stale (crash mid-delivery) — hook P1.
+    .whereRaw("(COALESCE(metadata->>'missed_call_notified_at','') = '' OR (metadata->>'missed_call_notified_at')::timestamptz < ?)", [new Date(Date.now() - LEASE_MS)])
     .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
     .where('created_at', '<', new Date(Date.now() - 3 * 60 * 1000))
     .orderBy('created_at', 'asc')

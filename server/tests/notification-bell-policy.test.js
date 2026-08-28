@@ -696,8 +696,12 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, call_outcome: 'ai_handled' })).toBe(false);
     expect(missedCallEligible({ ...base, direction: 'outbound' })).toBe(false);
     expect(missedCallEligible({ ...base, customer_id: null })).toBe(false);
-    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T00:00:00Z' } })).toBe(false);
-    expect(missedCallEligible({ ...base, metadata: JSON.stringify({ missed_call_notified_at: 'x' }) })).toBe(false);
+    const now = Date.parse('2026-08-28T12:00:00Z');
+    expect(missedCallEligible({ ...base, metadata: { missed_call_settled_at: '2026-08-28T00:00:00Z' } }, now)).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: JSON.stringify({ missed_call_settled_at: '2026-08-28T00:00:00Z' }) }, now)).toBe(false);
+    // A LIVE lease (taken <10 min ago) blocks; a STALE one (owner died) is reclaimable.
+    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T11:55:00Z' } }, now)).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T11:40:00Z' } }, now)).toBe(true);
   });
 });
 
@@ -706,7 +710,7 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
   const { classifyEmail } = require('../services/email/email-classifier');
   const fresh = new Date().toISOString();
   const aligned = 'dkim=pass header.d=customer-domain.com';
-  test('unauthenticated and control rows are claimed without a bell so they cannot occupy the oldest-50 page', async () => {
+  test('unauthenticated and control rows are SETTLED without a bell so they cannot occupy the oldest-50 page', async () => {
     const rows = [
       { id: 'e-spoof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'hi', label_ids: ['INBOX'], received_at: fresh, authentication_results: 'dkim=fail', classification: null, is_archived: false },
       { id: 'e-proof', customer_id: 'c1', from_address: 'jane@customer-domain.com', subject: 'Re: ACT: [PROOF-ab12cd34] Lineup', label_ids: ['INBOX'], received_at: fresh, authentication_results: aligned, classification: null, is_archived: false },
@@ -717,8 +721,9 @@ describe('customer-email bell retry sweep — terminal rows are stamped, control
     const rung = await sweepUnclaimedCustomerEmailBells();
     expect(rung).toBe(0);
     expect(classifyEmail).not.toHaveBeenCalled();
-    const stamps = emails.update.mock.calls.filter(([arg]) => arg && arg.customer_bell_claimed_at instanceof Date);
+    const stamps = emails.update.mock.calls.filter(([arg]) => arg && arg.customer_bell_settled_at instanceof Date);
     expect(stamps).toHaveLength(2);
+    expect(emails.update.mock.calls.some(([arg]) => arg && arg.customer_bell_claimed_at)).toBe(false);
     const stampedIds = emails.where.mock.calls.filter(([arg]) => arg && typeof arg === 'object' && arg.id).map(([arg]) => arg.id);
     expect(stampedIds).toEqual(expect.arrayContaining(['e-spoof', 'e-proof']));
   });

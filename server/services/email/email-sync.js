@@ -348,7 +348,7 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // First-connect history is pre-claimed at insert so the retry sweep can
   // never re-offer it (hook P1). Column guard: the migration runs prebuild,
   // but a sync racing an older pod must not fail the insert.
-  if (backfill && await bellClaimColumnExists()) emailData.customer_bell_claimed_at = new Date();
+  if (backfill && await bellClaimColumnExists()) emailData.customer_bell_settled_at = new Date();
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
   if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
   // A new inbound email from someone on the customer list rings the admin
@@ -419,8 +419,7 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   // the sweep skips them (hook P1). Best-effort: a miss here is caught by
   // the sweep's own control check.
   if ((proofHandled || approvalControl) && await bellClaimColumnExists()) {
-    await db('emails').where({ id: email.id }).whereNull('customer_bell_claimed_at')
-      .update({ customer_bell_claimed_at: new Date() }).catch(() => {});
+    await settleCustomerEmailBell(email.id).catch(() => {});
   }
 
   // Classify in background (don't block sync)
@@ -435,9 +434,12 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       // The per-email claim is taken BEFORE classification so a recovery
       // sweep on another pod can't classify (and auto-act on) the same row
       // concurrently — whoever owns the claim classifies + rings (hook P1).
-      if (await claimCustomerEmailBell(email.id)) {
+      // Column guard: before migration 20260828000042 runs the lease
+      // columns don't exist — fall back to the plain background classify.
+      const lease = (await bellClaimColumnExists()) ? await claimCustomerEmailBell(email.id) : null;
+      if (lease) {
         const classified = await classifyOwned(email);
-        await ringCustomerEmailBell(email, { customerId, parsed, classified, owned: true });
+        await ringCustomerEmailBell(email, { customerId, parsed, classified, lease });
       }
     } else {
       setImmediate(() => {
@@ -462,7 +464,7 @@ const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 let bellClaimColumnKnown = false;
 async function bellClaimColumnExists() {
   if (!bellClaimColumnKnown) {
-    bellClaimColumnKnown = await db.schema.hasColumn('emails', 'customer_bell_claimed_at').catch(() => false) === true;
+    bellClaimColumnKnown = (await db.schema.hasColumn('emails', 'customer_bell_settled_at').catch(() => false)) === true;
   }
   return bellClaimColumnKnown;
 }
@@ -470,7 +472,10 @@ async function bellClaimColumnExists() {
 async function sweepUnclaimedCustomerEmailBells() {
   if (!(await bellClaimColumnExists())) return 0;
   const rows = await db('emails')
-    .whereNull('customer_bell_claimed_at')
+    .whereNull('customer_bell_settled_at')
+    // Unclaimed, or a lease that went stale (process died mid-delivery) —
+    // reclaimable, never permanently lost (hook P1).
+    .whereRaw('(customer_bell_claimed_at IS NULL OR customer_bell_claimed_at < ?)', [new Date(Date.now() - BELL_LEASE_MS)])
     .whereNotNull('customer_id')
     .where('received_at', '>', new Date(Date.now() - CUSTOMER_EMAIL_BELL_MAX_AGE_MS))
     .where({ is_archived: false })
@@ -490,8 +495,7 @@ async function sweepUnclaimedCustomerEmailBells() {
       // message): mark handled so it stops occupying the oldest-50 page and
       // can't starve newer eligible rows (hook P1). Only the sweep stamps —
       // the history-replay caller leaves the row for a later replay.
-      await db('emails').where({ id: row.id }).whereNull('customer_bell_claimed_at')
-        .update({ customer_bell_claimed_at: new Date() }).catch(() => {});
+      await settleCustomerEmailBell(row.id).catch(() => {});
     } else if (outcome === 'offered') {
       rung += 1;
     }
@@ -544,22 +548,48 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
   // Own the row BEFORE any classifier auto-action can run (hook P1): the
   // claim is the cross-pod lock — a concurrent sweep or the insert path on
   // another pod loses it and does nothing.
-  if (!(await claimCustomerEmailBell(existing.id))) return 'claimed';
+  const lease = await claimCustomerEmailBell(existing.id);
+  if (!lease) return 'claimed';
   // A row the crash left UNCLASSIFIED (insert landed, classifier never
   // wrote) gets the same awaited classification the insert path gives a
   // bell candidate — otherwise spam without a List-Unsubscribe header could
   // ring through the recovery lane (codex r4). Classifier failure keeps the
   // insert path's fallback: ring (classified:false).
   const classified = existing.classification ? true : await classifyOwned(existing);
-  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified, owned: true });
+  await ringCustomerEmailBell(existing, {
+    customerId: existing.customer_id || customerId, parsed, classified, lease,
+    // A stale lease we took over may have died AFTER its bell was written.
+    reclaimed: Boolean(existing.customer_bell_claimed_at),
+  });
   return 'offered';
 }
 
-/** Atomic per-email ownership (emails.customer_bell_claimed_at). */
+// Lease length for the per-email claim: long enough to cover the awaited
+// classifier + delivery, short enough that a crash is recovered by the next
+// few sweeps (2-minute cadence).
+const BELL_LEASE_MS = 10 * 60 * 1000;
+
+/**
+ * Take the per-email lease (emails.customer_bell_claimed_at): succeeds when
+ * the row is unsettled and either unclaimed or its lease went stale. The
+ * returned Date is the fence token — settle/release only apply while the
+ * row still carries it, so a later reclaimer can't be undone by a stale
+ * owner. Null = someone else holds it.
+ */
 async function claimCustomerEmailBell(emailId) {
-  const claimed = await db('emails').where({ id: emailId }).whereNull('customer_bell_claimed_at')
-    .update({ customer_bell_claimed_at: new Date() });
-  return Boolean(claimed);
+  const token = new Date();
+  const claimed = await db('emails').where({ id: emailId })
+    .whereNull('customer_bell_settled_at')
+    .whereRaw('(customer_bell_claimed_at IS NULL OR customer_bell_claimed_at < ?)', [new Date(token.getTime() - BELL_LEASE_MS)])
+    .update({ customer_bell_claimed_at: token });
+  return claimed ? token : null;
+}
+
+/** Terminal: delivered or never-to-ring. Fenced when a token is given. */
+async function settleCustomerEmailBell(emailId, token = null) {
+  let q = db('emails').where({ id: emailId }).whereNull('customer_bell_settled_at');
+  if (token) q = q.where('customer_bell_claimed_at', token);
+  return q.update({ customer_bell_settled_at: new Date() });
 }
 
 /** Classify a row this process owns. Returns whether classification wrote. */
@@ -582,19 +612,24 @@ async function classifyOwned(email) {
  * than a rare unwanted bell. An archived row (auto-trashed / bulk) never
  * rings. Fail-soft: the bell can never fail the sync.
  */
-async function ringCustomerEmailBell(email, { customerId, parsed, classified, owned = false }) {
+async function ringCustomerEmailBell(email, { customerId, parsed, classified, lease, reclaimed = false }) {
   try {
+    if (!lease) return; // callers always ring under their own lease
     const row = await db('emails').where('id', email.id).first('classification', 'is_archived');
-    // Archived / bulk after classification: terminal — an owned claim stays
-    // (nothing to deliver, nothing to retry).
-    if (!row || row.is_archived) return;
-    if (classified && row.classification && NEVER_RING_CLASSES.has(row.classification)) return;
-    // Atomic per-email claim (emails.customer_bell_claimed_at): at most one
-    // delivery across insert path, crash recovery, label/history replays and
-    // concurrent pods — and independent of a bell row (push-only admins get
-    // none). Callers that classified under their own claim pass owned:true.
-    // A failed trigger releases the claim so a retry can ring.
-    if (!owned && !(await claimCustomerEmailBell(email.id))) return;
+    // Archived / bulk after classification: terminal — settle under the
+    // lease (nothing to deliver, nothing to retry).
+    if (!row || row.is_archived || (classified && row.classification && NEVER_RING_CLASSES.has(row.classification))) {
+      await settleCustomerEmailBell(email.id, lease);
+      return;
+    }
+    // Reclaimed a stale lease: the previous owner may have died between
+    // writing the bell and settling. A bell row carrying this emailId means
+    // it delivered — settle, don't ring twice.
+    if (reclaimed) {
+      const prior = await db('notifications').where({ recipient_type: 'admin', category: 'inbound_email' })
+        .whereRaw("metadata->'payload'->>'emailId' = ?", [String(email.id)]).first('id');
+      if (prior) { await settleCustomerEmailBell(email.id, lease); return; }
+    }
     const { triggerNotification } = require('../notification-triggers');
     let stats = null;
     try {
@@ -605,14 +640,19 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified, ow
         customerId,
       });
     } finally {
-      // Keep the claim only for a real outcome: a bell written, a push sent,
-      // or a deliberate suppression (prefs/policy). Any other no-delivery
-      // (prefs lookup failed, empty recipients, insert/push failure) releases
-      // it so a later replay can recover the alert (hook P1).
+      // Settle only on a real outcome: a bell written, a push sent, or a
+      // deliberate suppression (prefs/policy). Any other no-delivery (prefs
+      // lookup failed, empty recipients, insert/push failure) releases the
+      // lease so the sweep can retry (hook P1). Both writes are fenced on
+      // the lease token. A crash here leaves the lease to go stale — the
+      // sweep reclaims it and the bell-row check above prevents a repeat.
       const delivered = Boolean(stats && !stats.error
         && (stats.bellWritten || Number(stats.push?.sent || 0) > 0 || stats.suppressed || stats.policySilenced));
-      if (!delivered) {
-        await db('emails').where({ id: email.id }).update({ customer_bell_claimed_at: null }).catch(() => {});
+      if (delivered) {
+        await settleCustomerEmailBell(email.id, lease).catch(() => {});
+      } else {
+        await db('emails').where({ id: email.id, customer_bell_claimed_at: lease })
+          .update({ customer_bell_claimed_at: null }).catch(() => {});
       }
     }
   } catch (e) { logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`); }
