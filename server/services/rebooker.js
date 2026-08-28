@@ -1554,8 +1554,18 @@ class SmartRebooker {
         const projectedDates = [];
         for (let i = startIdx; i < siblings.length; i++) {
           const sib = siblings[i];
-          if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
           const oi = i - startIdx;
+          if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) {
+            // A skipped/live row is not written, but it still OWNS its
+            // cadence position: reserve its slot so the slot map does not
+            // depend on which rows happen to be movable — otherwise, under
+            // weekend avoidance, a skipped Saturday never claims Monday and
+            // the movable Sunday behind it collapses onto the same Monday
+            // (codex r9 P1). Same rule the cadence-math comment above
+            // states for counting.
+            cadenceSlotDate(oi);
+            continue;
+          }
           projectedDates.push(projectOccurrenceDate(oi, sib));
         }
         if (projectedDates.length) {
@@ -1604,6 +1614,23 @@ class SmartRebooker {
           siblings = locked;
           assertAnchorMovable(siblings);
           assertAnchorPin(siblings[droppedIdx]);
+          // The projector was built from the parent's recurrence config
+          // read BEFORE the lock; a cadence edit (update-details holds this
+          // same lock) that committed while this move waited is invisible
+          // to the sibling fingerprint. Re-read the config under the lock
+          // and abort the same way when it moved — the projection (and the
+          // dates locked for it) belong to the old cadence (codex r9 P1).
+          const lockedParent = await trx('scheduled_services').where({ id: parentId })
+            .first('recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday', 'skip_weekends', 'weekend_shift');
+          const cadenceConfig = (row) => ['recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday', 'skip_weekends', 'weekend_shift']
+            .map((col) => String(row?.[col] ?? '')).join('|');
+          if (!lockedParent || cadenceConfig(lockedParent) !== cadenceConfig(parent)) {
+            throw Object.assign(new Error('Cannot reschedule — the recurring plan changed concurrently; reload and try again'), {
+              statusCode: 409,
+              isOperational: true,
+              code: 'SERIES_CHANGED',
+            });
+          }
 
           // First ROW lock of the series path — taken here, AFTER the rung-1
           // date advisory locks, never before (see the NOTE at the top of the

@@ -434,7 +434,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -495,7 +495,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -562,7 +562,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const reminderRead = chain({ first: jest.fn().mockResolvedValue({ id: 'ar-2', customer_id: 'cust-1', appointment_time: new Date('2026-12-01T13:00:00Z') }) });
     const reminderUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
     const reminderQueue = [reminderRead, reminderUpdate];
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -642,7 +642,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -699,7 +699,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
 
     // Month-based order: siblings SELECT, parent UPDATE, seriesClash probe,
     // anchor UPDATE.
-    const scheduledQueue = [siblingsQuery, siblingsQuery, parentUpdate, seriesClashProbe, anchorUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, parentUpdate, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return chain();

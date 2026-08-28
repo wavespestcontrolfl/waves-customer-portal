@@ -226,7 +226,7 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
       overlapAdvisory: true,
       // The anchor state this route's window resolution read, pinned through
       // the series writer's existing expectAnchor fence.
-      expectAnchor: { window_start: '09:00:00' },
+      expectAnchor: { window_start: '09:00:00', window_end: '11:00:00', estimated_duration_minutes: null },
     },
   );
 });

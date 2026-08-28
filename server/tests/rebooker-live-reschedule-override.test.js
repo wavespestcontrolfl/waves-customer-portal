@@ -357,7 +357,7 @@ describe('live-status reschedule override (allowLive)', () => {
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, ...updates];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, ...updates];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -714,7 +714,7 @@ describe('live-status reschedule override (allowLive)', () => {
     const historyInsert = chain();
     const logInsert = chain();
 
-    const scheduledQueue = [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const scheduledQueue = [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
@@ -784,8 +784,8 @@ describe('live-status reschedule override (allowLive)', () => {
     // Under the kill switch the tech guard skips, so its probe query never
     // consumes a slot in the trx queue.
     const scheduledQueue = techGuardRuns
-      ? [siblingsQuery, siblingsQuery, seriesClashProbe, techOverlapProbe, anchorUpdate]
-      : [siblingsQuery, siblingsQuery, seriesClashProbe, anchorUpdate];
+      ? [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, techOverlapProbe, anchorUpdate]
+      : [siblingsQuery, siblingsQuery, parentLookup, seriesClashProbe, anchorUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;

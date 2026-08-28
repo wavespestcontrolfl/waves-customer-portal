@@ -14286,7 +14286,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           });
           if (!notificationSent) {
             notificationError = 'customer was not notified (no eligible recipient, opted out, or the text was blocked)';
-            definitiveNonSend = sendOutcome.lastDeferred !== true;
+            // Only a definitive non-send concludes the effect: a quiet-hours
+            // deferral OR a retryable provider failure (Twilio 429/5xx —
+            // the sender sets sendOutcome.retryable) leaves notified_at
+            // unstamped so the reconciler retries the text (codex r9 P1).
+            definitiveNonSend = sendOutcome.lastDeferred !== true && sendOutcome.retryable !== true;
           }
           if (notificationSent) {
             // Guarded close: each reminder row is closed only if it still
@@ -14301,8 +14305,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
               : null;
             // Only the occurrences still on this move's slot close — an id
             // absent from the guard map closes UNGUARDED, so a stale one
-            // must leave the list, not just the map.
-            await markRescheduleReminderNotified(ownedOccurrences().map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});
+            // must leave the list, not just the map — and when a snapshot
+            // exists at all, only ids IN it close: a per-occurrence snapshot
+            // failure (partial map) must not turn into an unguarded close of
+            // that occurrence over a newer reschedule (codex r9 P2). An
+            // occurrence with no reminder row has nothing to close anyway.
+            const closeIds = ownedOccurrences()
+              .map((occurrence) => occurrence.id)
+              .filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));
+            await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});
             await stampMarker('notified_at', { customer_notified: true });
           }
         } catch (err) {
@@ -14458,15 +14469,14 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
         // Same staleness fence via the series writer's own expectAnchor
-        // mechanism: the anchor whose window this route just validated must
-        // still be the anchor the trx moves.
-        ...(observedAnchor.read
-          ? {
-            expectAnchor: {
-              ...(observedAnchor.scheduled_date ? { scheduled_date: observedAnchor.scheduled_date } : {}),
-              window_start: observedAnchor.window_start ?? null,
-            },
-          }
+        // mechanism, on the FULL pin the resolution read (date, start, end,
+        // duration — rescheduleExpectPredicate, the shape the non-series
+        // branch already passes): a start-only/date-only move derived its
+        // window from window_end / estimated_duration_minutes, so an edit
+        // to either between the resolution and the series trx must fail the
+        // fence, not commit the stale derived window over it (codex r9 P1).
+        ...(rescheduleExpectPredicate(observedAnchor)
+          ? { expectAnchor: rescheduleExpectPredicate(observedAnchor) }
           : {}),
       });
       const effects = await applySeriesMoveEffects({

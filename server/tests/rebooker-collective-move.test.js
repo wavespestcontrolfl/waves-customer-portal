@@ -103,11 +103,13 @@ function anchorRow(overrides = {}) {
 // sibling SELECT, the same SELECT again under the locks (lockedSiblings =
 // what that read returns; defaults to the same rows), same-series clash
 // probe, then one UPDATE chain per sibling in order.
-function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null, lockedSiblings = null } = {}) {
+function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null, lockedSiblings = null, lockedParent = null } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
   const siblingsReread = chain({ select: jest.fn().mockResolvedValue(lockedSiblings || siblings) });
+  // The parent's recurrence config, re-read under the maintenance lock.
+  const parentReread = chain({ first: jest.fn().mockResolvedValue(lockedParent || anchor) });
   const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
   const updates = siblings.map((_, i) => chain({
     update: jest.fn().mockResolvedValue(updateResults ? updateResults[i] : [{ updated_at: `stamp-${i}` }]),
@@ -116,7 +118,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
   const logInsert = chain();
   const seriesMovesInsert = chain();
 
-  const scheduledQueue = [siblingsQuery, siblingsReread, seriesClashProbe, ...updates];
+  const scheduledQueue = [siblingsQuery, siblingsReread, parentReread, seriesClashProbe, ...updates];
   const trx = jest.fn((table) => {
     if (table === 'scheduled_services') return scheduledQueue.shift();
     if (table === 'job_status_history') return historyInsert;
@@ -144,7 +146,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup, siblingsQuery, siblingsReread, trx };
+  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup, siblingsQuery, siblingsReread, parentReread, trx };
 }
 
 const ADMIN_OPTS = { allowLive: true, adminWindowRules: true, overlapAdvisory: true, sourceSurface: 'dispatch_board' };
@@ -690,6 +692,33 @@ describe('rescheduleSeries — one recorded operation', () => {
     expect(updates[0].update).not.toHaveBeenCalled();
   });
 
+  test('a cadence edit that committed while the move waited on the lock (pattern/interval/ordinal/weekend config) is a changed series — 409 SERIES_CHANGED', async () => {
+    const { updates, parentReread } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
+      lockedParent: anchorRow({ recurring_pattern: 'biweekly' }),
+    });
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_CHANGED' });
+    expect(parentReread.first).toHaveBeenCalledWith('recurring_pattern', 'recurring_interval_days', 'recurring_nth', 'recurring_weekday', 'skip_weekends', 'weekend_shift');
+    expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test('a skipped sibling still reserves its cadence slot: the movable row behind it lands on the NEXT slot, not the one the skipped row owns', async () => {
+    // Daily custom cadence, weekends skipped; Wednesday W → Friday F. Index 1
+    // (Sat → Mon) is skipped and is not written, but Monday is its slot; the
+    // movable index 2 (Sun → Mon) therefore lands on Tuesday.
+    let W = dayOffset(10);
+    while (etParts(parseETDateTime(`${W}T12:00`)).dayOfWeek !== 3) W = etDateString(addETDays(parseETDateTime(`${W}T12:00`), 1));
+    const day = (n) => etDateString(addETDays(parseETDateTime(`${W}T12:00`), n));
+    const { updates } = wireSeriesMocks([
+      sib('svc-1', W),
+      sib('svc-2', day(1), { status: 'skipped' }),
+      sib('svc-3', day(2)),
+    ], { anchor: anchorRow({ scheduled_date: W, recurring_pattern: 'custom', recurring_interval_days: 1, skip_weekends: true }) });
+    const result = await SmartRebooker.rescheduleSeries('svc-1', day(2), { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result.skippedCount).toBe(1);
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ scheduled_date: day(6) }); // Tue — Monday is the skipped row's slot
+  });
+
   test('the sweep writes from the LOCKED read: a window that changed between the reads is what the sibling keeps', async () => {
     const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
       lockedSiblings: [sib('svc-1', BASE), sib('svc-2', SIB1, { window_start: '13:00:00', window_end: '15:00:00' })],
@@ -849,7 +878,7 @@ describe('caller wiring (source)', () => {
     const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(body).toContain("if (synced === 'stale') {");
     expect(body).toContain('seriesReminderGuards.push(...ownedGuards(occurrenceGuards));');
-    expect(body).toContain('await markRescheduleReminderNotified(ownedOccurrences().map((occurrence) => occurrence.id), guardsByServiceId ? { guardsByServiceId } : {});');
+    expect(body).toContain('const closeIds = ownedOccurrences()');
     expect(body).toContain('await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({');
     // A retry pass re-arms guarded on a fresh, owned snapshot — not unguarded over every occurrence.
     expect(body).toContain('const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));');
@@ -862,6 +891,18 @@ describe('caller wiring (source)', () => {
     expect(body).toContain('window_end: row.window_end ?? null,');
     expect(body).toContain('estimated_duration_minutes: postEditDuration,');
     expect(body).toContain("const postEditDuration = (req.body.estimatedDuration !== undefined && req.body.estimatedDuration !== '')");
+  });
+
+  test('the dispatch explicit series path fences on the FULL pin the resolution read; a retryable provider failure keeps the series text pending; a partial guard map never closes an uncovered id', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const seriesBranch = disp.slice(disp.indexOf("if (scope === 'series') {"), disp.indexOf("const effects = await applySeriesMoveEffects({", disp.indexOf("if (scope === 'series') {")));
+    expect(seriesBranch).toContain('{ expectAnchor: rescheduleExpectPredicate(observedAnchor) }');
+    expect(seriesBranch).not.toContain('window_start: observedAnchor.window_start ?? null');
+    const fn = disp.indexOf('async function applySeriesMoveEffects(');
+    const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(body).toContain('definitiveNonSend = sendOutcome.lastDeferred !== true && sendOutcome.retryable !== true;');
+    expect(body).toContain('.filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));');
+    expect(body).toContain('await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});');
   });
 
   test('auto-dispatch hard-codes seriesPolicy single on its own move — never a caller convention', () => {
