@@ -167,16 +167,25 @@ t.timestamps(true, true);
 prefilter and the contactability gate, never the score; the row shows its reasons and an
 *Acquire anyway* override. Bulk lists are `list_import` + `source_detail` — never `owner_seed`.
 
-### 3.6 Credentials — `seo_link_credentials`
+### 3.6 Credentials — `seo_link_credentials` (+ `seo_link_sessions`)
 
-`self_service_account` paths create accounts. Credentials are stored encrypted at rest
-(column-level, key derived from the existing app secret — confirm the in-repo helper at build;
-do not add a dependency for this), scoped per `domain_id`, readable only by the runner's resume
-path, and **never** written to `seo_link_attempts.detail`, logs, evidence, or LLM prompts.
+`self_service_account` paths create accounts. Credentials — and resumable browser state
+(cookies/tokens, §7) — are stored encrypted at rest with a **dedicated, stable, versioned key**
+(`LINK_CREDENTIALS_KEY_V1`, `…_V2` …; each row carries `key_version`; rotation = add the next key,
+re-encrypt lazily on read, retire the old key when no rows reference it). Never derived from
+`JWT_SECRET` or any session/app secret — rotating those must not brick stored logins, and no
+other code path should hold this key. Rows are scoped per `domain_id`, readable only by the
+runner's create/resume path, and **never** written to `seo_link_attempts.detail`, logs,
+evidence, or LLM prompts.
 The dedicated inbox is `HERMES_SIGNUP_EMAIL` (exists); its IMAP verifier
 (`backlink-agent/email-verifier.js`) is reused for `email_verification=true` paths.
 
-### 3.7 Policy — `seo_link_policy` (single row, admin-editable, env-overridable)
+### 3.7 Purchases — `seo_link_purchases`
+
+The spend ledger with atomic monthly reservation and ambiguity-safe states; defined with the
+money mechanics in §6.3.
+
+### 3.8 Policy — `seo_link_policy` (single row, admin-editable, env-overridable)
 
 See §6.2. Defaults ship conservative (everything owner-gated) and are loosened by Adam in the
 Policy panel, not by code.
@@ -292,11 +301,35 @@ expected rel, D30 confidence, and **Approve** / **Reject** / **Watch**. Approval
 click (never email-reply — repo rule: email approval is never extended to money movement).
 On approve the runner resumes the same path with the stored session.
 
-**Money mechanics:** `AUTO_PAID_WITHIN_POLICY` uses one dedicated **virtual card with a hard
-monthly limit** as the only payment instrument the runner can use; the bank enforces the
-ceiling independently of our code. `monthly_paid_budget` is a soft cap tracked in
-`seo_link_attempts.cost`. Owner-approved purchases above `max_auto_purchase` use the same
-card after the click.
+**Money mechanics — `seo_link_purchases` (the spend ledger; budget is reserved, never
+inferred).** Every paid step, auto or owner-approved, is a row:
+
+```js
+t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').notNullable();
+t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${YYYY-MM}` — one purchase per placement per month
+t.decimal('amount', 10, 2).notNullable(); t.string('authority').notNullable();
+t.string('state').notNullable();                    // reserved → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
+t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
+```
+
+- **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
+  attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
+  → `month_spend = SUM(amount) WHERE state IN (reserved, charged, ambiguous, reconciled_charged)`
+  → if `month_spend + amount ≤ monthly_paid_budget` insert the `reserved` row (the unique
+  `idempotency_key` makes a concurrent duplicate a no-op) → commit. Only a committed
+  reservation unlocks the card details to the provider. Two workers can never both pass the
+  check; the lock is per budget month.
+- **Ambiguity is a state, not a retry.** A timeout/disconnect after the merchant may have
+  taken the card → `ambiguous`. The worker reports `outcome='payment_ambiguous'`; the row is
+  never retried by any provider until `reconcile` (card-issuer transaction lookup, or the owner
+  card) moves it to `reconciled_charged` / `reconciled_not_charged`. A `reserved` row whose
+  attempt fails *before* submission is `voided` in the same report.
+- **Lease safety.** `report` for a paid step is conditional on the lease AND on the purchase
+  row's `state='reserved'`; a stale lease cannot flip a purchase.
+- **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
+  method the runner can use; the bank's limit is a second, independent ceiling — it is not the
+  policy. Owner-approved purchases above `max_auto_purchase` go through the same reservation
+  after the click. `seo_link_attempts.cost` mirrors `amount` for reporting only.
 
 ### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
 
@@ -375,12 +408,15 @@ qualified × acquired × indexed × live-D30 × median DR × cost per D30 domain
 
 ## 9. Recursive discovery
 
-After a domain reaches `acquired` (or is ingested as `existing_backlink`) with
-`acquisition_type` in (directory, membership, association, vendor_registration): read its
-co-listed businesses from the placement page (`fetchPage`), take the strongest N (DataForSEO
-bulk rank), run domain-intersection on them, and feed common referring domains into intake as
-`source='recursive'`, `source_ref = originating domain`. Capped per week; behind
-`GATE_SEO_INTELLIGENCE`. The lineage lets the Source table show which seeds *generated*
+After a domain reaches `acquired` (or is ingested as `existing_backlink`) with a best path
+of `acquisition_type` in (`self_service_free`, `self_service_account`, `paid_listing`,
+`business_claim`, `membership`, `association`, `vendor_registration`) — i.e. any
+listing-style placement where other businesses are visible: read its co-listed businesses from
+the placement page (`fetchPage`), take the strongest N (DataForSEO bulk rank), run
+domain-intersection on them, and feed common referring domains into intake as
+`source='recursive'`, `source_ref = originating seo_link_domains.id` (UUID, per §3.1),
+`source_detail = originating domain` (display). Capped per week; behind
+`GATE_LINK_RECURSIVE_DISCOVERY` and `GATE_SEO_INTELLIGENCE`. The lineage lets the Source table show which seeds *generated*
 durable links, not just which produced one.
 
 ---
@@ -464,8 +500,12 @@ budget kill = the virtual card's limit.
 8. **Recursive discovery** — `GATE_LINK_RECURSIVE_DISCOVERY`.
 9. **Budget optimization** — queue ordering by Acquisition Efficiency; monthly report.
 
-Each step is dark-shipped behind its gate, reversible, and independently useful; steps 1–3
-are pure read/compute and can run in prod immediately after review.
+Each step is dark-shipped behind its gate, reversible, and independently useful. Steps 1–3
+move no money and send no communications, but they are not free: step 1 runs migrations at
+deploy (additive, reversible); step 2 writes registry rows and spends DataForSEO credits
+(`GATE_SEO_INTELLIGENCE`; intake ships with a `dryRun` that reports what it would upsert);
+step 3 spends fetches + LLM calls (`GATE_LINK_INVESTIGATOR`, batch-capped, `dryRun` first).
+Production enablement is explicit per gate, in that order, after each step's review.
 
 ---
 
@@ -485,8 +525,8 @@ cutover (replaced by the provider race), v1 open decisions 2–3.
 
 ## 16. Open decisions
 
-1. Which encrypted-secret helper backs `seo_link_credentials` (existing in repo vs. new
-   column-level cipher) — decide in step 1's review.
+1. Reconciliation source for `ambiguous` purchases: card-issuer transaction API vs. owner
+   card only — decide at step 5 (issuer choice in 2 below determines it).
 2. Virtual card issuer for the acquisition budget — Adam.
 3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
    `LINK_OUTREACH_DAILY_CAP=12`) — Adam, at step 4.
