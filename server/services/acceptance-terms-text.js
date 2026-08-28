@@ -53,10 +53,45 @@ function acceptanceTermsPayload() {
   };
 }
 
+/**
+ * Customer-facing IP for the acceptance record: first two IPv4 octets
+ * (IPv4-mapped IPv6 `::ffff:a.b.c.d` is normalized first — pre-push Codex
+ * P1) or the first two IPv6 groups. Null when unparseable.
+ */
+function maskIpForCustomer(ip) {
+  if (!ip || typeof ip !== 'string') return null;
+  const v4 = ip.match(/^(?:::ffff:)?(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/i);
+  if (v4) return `${v4[1]}.${v4[2]}.x.x`;
+  if (ip.includes(':')) {
+    const g = ip.split(':').filter(Boolean);
+    return g.length >= 2 ? `${g[0]}:${g[1]}:…` : null;
+  }
+  return null;
+}
+
+/** Coarse device label for the acceptance record ("iPhone · Safari"). */
+function deviceLabelFromUserAgent(ua) {
+  if (!ua || typeof ua !== 'string') return null;
+  const device = /iPhone/i.test(ua) ? 'iPhone'
+    : /iPad/i.test(ua) ? 'iPad'
+      : /Android/i.test(ua) ? 'Android'
+        : /Macintosh/i.test(ua) ? 'Mac'
+          : /Windows/i.test(ua) ? 'Windows'
+            : 'Device';
+  const browser = /Edg\//i.test(ua) ? 'Edge'
+    : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'
+      : /Firefox\//i.test(ua) ? 'Firefox'
+        : /Safari\//i.test(ua) ? 'Safari'
+          : 'Browser';
+  return `${device} · ${browser}`;
+}
+
 module.exports = {
   ACCEPTANCE_TERMS_VERSION,
   ACCEPTANCE_LINE,
   ACCEPTANCE_TERMS,
   acceptanceTermsSnapshot,
   acceptanceTermsPayload,
+  maskIpForCustomer,
+  deviceLabelFromUserAgent,
 };

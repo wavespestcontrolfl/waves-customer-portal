@@ -254,34 +254,6 @@ async function registerAcceptedEstimateAppointmentReminder({
 // same gate; a filtered preview must not make the estimate look customer-opened.
 const { isBotUserAgent } = require('../utils/bot-ua');
 
-/** Customer-facing IP: first two octets only (IPv6: first two groups). */
-function maskIpForCustomer(ip) {
-  if (!ip || typeof ip !== 'string') return null;
-  if (ip.includes(':')) {
-    const g = ip.split(':').filter(Boolean);
-    return g.length >= 2 ? `${g[0]}:${g[1]}:…` : null;
-  }
-  const o = ip.split('.');
-  return o.length === 4 ? `${o[0]}.${o[1]}.x.x` : null;
-}
-
-/** Coarse device label for the acceptance record ("iPhone · Safari"). */
-function deviceLabelFromUserAgent(ua) {
-  if (!ua || typeof ua !== 'string') return null;
-  const device = /iPhone/i.test(ua) ? 'iPhone'
-    : /iPad/i.test(ua) ? 'iPad'
-      : /Android/i.test(ua) ? 'Android'
-        : /Macintosh/i.test(ua) ? 'Mac'
-          : /Windows/i.test(ua) ? 'Windows'
-            : 'Device';
-  const browser = /Edg\//i.test(ua) ? 'Edge'
-    : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'
-      : /Firefox\//i.test(ua) ? 'Firefox'
-        : /Safari\//i.test(ua) ? 'Safari'
-          : 'Browser';
-  return `${device} · ${browser}`;
-}
-
 function clientIp(req) {
   return (req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '')
     .toString().split(',')[0].trim().slice(0, 64);
@@ -8736,24 +8708,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
 
     // Acceptance-terms attestation (GATE_ESTIMATE_ACCEPTANCE_TERMS). The
     // client sends the version it RENDERED above the Accept button (same
-    // render-bound pattern as cardHoldDisclosureVersion). A version that no
-    // longer matches the copy this server serves means the tab is stale —
-    // refuse before any mutation so the customer reloads and sees the
-    // current line. An ABSENT version (older bundle mid-deploy, or gate off)
-    // records nothing: nothing was shown, so nothing is claimed.
+    // render-bound pattern as cardHoldDisclosureVersion). With the gate on,
+    // the attestation is REQUIRED: a missing or non-current version (a tab
+    // that loaded older copy, an older bundle mid-deploy, a hand-rolled
+    // client) is refused before any mutation with a reload prompt, so an
+    // estimate can never be accepted under the gate without its record
+    // (pre-push Codex P1). Gate off ⇒ the field is ignored and nothing is
+    // recorded: nothing was shown, so nothing is claimed.
     const acceptedTermsVersion = req.body && typeof req.body.termsVersion === 'string'
       ? req.body.termsVersion.trim().slice(0, 40)
       : '';
-    const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms');
-    if (acceptanceTermsActive && acceptedTermsVersion
-      && acceptedTermsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
+    const recordAcceptanceTerms = featureGates.isEnabled('estimateAcceptanceTerms');
+    if (recordAcceptanceTerms && acceptedTermsVersion !== acceptanceTerms.ACCEPTANCE_TERMS_VERSION) {
       return res.status(409).json({
         error: 'This estimate was refreshed. Please reload the page and review the updated terms before accepting.',
         code: 'TERMS_VERSION_STALE',
       });
     }
-    const recordAcceptanceTerms = acceptanceTermsActive
-      && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
 
     // Slot commit inputs. Validate early so we can reject before opening
     // a transaction if the payload is malformed.
@@ -23508,8 +23479,8 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
             termsVersion: row.terms_version,
             termsText: row.terms_text,
             acceptedAt: row.accepted_at,
-            ipMasked: maskIpForCustomer(row.ip),
-            device: deviceLabelFromUserAgent(row.user_agent),
+            ipMasked: acceptanceTerms.maskIpForCustomer(row.ip),
+            device: acceptanceTerms.deviceLabelFromUserAgent(row.user_agent),
           };
         }
       } catch (e) {

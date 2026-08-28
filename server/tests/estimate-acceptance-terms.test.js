@@ -52,6 +52,23 @@ describe('acceptance terms text', () => {
   });
 });
 
+describe('acceptance record customer-facing shape', () => {
+  test('IP is masked to two octets, including IPv4-mapped IPv6', () => {
+    expect(serverText.maskIpForCustomer('203.0.113.9')).toBe('203.0.x.x');
+    expect(serverText.maskIpForCustomer('::ffff:203.0.113.9')).toBe('203.0.x.x');
+    expect(serverText.maskIpForCustomer('2001:db8:85a3::8a2e:370:7334')).toBe('2001:db8:…');
+    expect(serverText.maskIpForCustomer('::1')).toBeNull();
+    expect(serverText.maskIpForCustomer('')).toBeNull();
+    expect(serverText.maskIpForCustomer('not-an-ip')).toBeNull();
+  });
+
+  test('user agent reduces to a device · browser family', () => {
+    expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')).toBe('iPhone · Safari');
+    expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0')).toBe('Windows · Edge');
+    expect(serverText.deviceLabelFromUserAgent(null)).toBeNull();
+  });
+});
+
 describe('GATE_ESTIMATE_ACCEPTANCE_TERMS', () => {
   const ORIGINAL = process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS;
   afterEach(() => {

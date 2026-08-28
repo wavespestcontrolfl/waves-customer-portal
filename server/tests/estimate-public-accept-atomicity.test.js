@@ -44,9 +44,10 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
  * 12. Gate on + the client attests the served version → ONE estimate_acceptances
  *    row (verbatim snapshot, ip, ua, accepted_at) written in the accept
  *    transaction, estimates.terms_version + customers.accepted_terms_version
- *    stamped; a rolled-back accept leaves no record. A stale version 409s
- *    TERMS_VERSION_STALE before any mutation. An absent version (older
- *    bundle) or a gate-off server records nothing.
+ *    stamped; a rolled-back accept leaves no record. A stale OR absent
+ *    version 409s TERMS_VERSION_STALE before any mutation (the attestation is
+ *    required under the gate). A gate-off server ignores the field and
+ *    records nothing.
  */
 
 // ── In-memory fake knex ────────────────────────────────────────────────────
@@ -1219,14 +1220,15 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
-  test('absent version (gate on) records nothing; attested version with the gate OFF records nothing', async () => {
+  test('absent version (gate on) is refused; attested version with the gate OFF records nothing', async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
-    conversionOk();
     const noVersion = await putAccept('tok-terms-4-x0123456789', {});
-    expect(noVersion.status).toBe(200);
+    expect(noVersion.status).toBe(409);
+    expect(noVersion.data.code).toBe('TERMS_VERSION_STALE');
+    expect(storedEstimate().status).toBe('sent');
+    expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
-    expect(storedEstimate().terms_version == null).toBe(true);
 
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
