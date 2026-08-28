@@ -291,6 +291,10 @@ const CONFLICT_COLUMNS = [
   'id', 'customer_id', 'technician_id', 'scheduled_date',
   'window_start', 'window_end', 'status', 'service_type',
   'estimated_duration_minutes', 'reservation_expires_at', 'source_estimate_id',
+  // Seeded-placeholder identity (recurring child, still pending, never
+  // customer-confirmed) — the rebooker's beyond-horizon series check reads
+  // these to tell a disposable seeded row from a real booking.
+  'is_recurring', 'recurring_parent_id', 'customer_confirmed',
 ];
 
 /**

@@ -81,6 +81,22 @@ function siblingClashWithinHorizon(dateStr) {
   return String(dateStr).split('T')[0] <= horizonEnd;
 }
 
+// A conflicting row is a SEEDED PLACEHOLDER — disposable for the
+// beyond-horizon rule — only when it is positively identified as one: a
+// recurring child the seeder wrote (is_recurring + recurring_parent_id)
+// that is still `pending` and was never customer-confirmed, and is not a
+// live estimate hold. Anything else on the window (a one-off booking, a
+// confirmed/dispatched occurrence, a hold) is a real appointment and the
+// series sweep must still abort on it regardless of horizon.
+function isSeededPlaceholderRow(row) {
+  return Boolean(row)
+    && row.is_recurring === true
+    && !!row.recurring_parent_id
+    && row.status === 'pending'
+    && !row.customer_confirmed
+    && !row.reservation_expires_at;
+}
+
 // Patterns whose dates are month-anchored (nth-weekday semantics): a series
 // re-anchor must recompute and persist recurring_nth/recurring_weekday from
 // the new anchor date, or moving the anchor to a new weekday would keep
@@ -1382,9 +1398,11 @@ class SmartRebooker {
               // Staff-advisory mode (admin dispatch): overlaps never block a
               // save — collect the date for the warnings[] the route returns.
               overlapWarnDates.add(String(date).split('T')[0]);
-            } else if (siblingClashWithinHorizon(date)) {
+            } else if (siblingClashWithinHorizon(date) || !occClash.every(isSeededPlaceholderRow)) {
               // A near-term projection onto an occupied window is a real
-              // double-booking — abort all-or-none. subcode lets customer
+              // double-booking — and so is a far-out one whose occupant is
+              // anything but a seeded placeholder (isSeededPlaceholderRow).
+              // Abort all-or-none. subcode lets customer
               // surfaces explain that the DAY doesn't fit the plan, instead
               // of the misleading "that time was just taken" retry loop
               // (code stays SLOT_TAKEN — rain-out and admin callers branch

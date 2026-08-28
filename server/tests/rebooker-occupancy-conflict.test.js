@@ -568,7 +568,10 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     // occupied placeholder window.
     findConflictingVisits
       .mockResolvedValueOnce([])                     // anchor occupancy check
-      .mockResolvedValueOnce([{ id: 'other-plan-placeholder' }]); // far sibling
+      .mockResolvedValueOnce([{
+        id: 'other-plan-placeholder', is_recurring: true, recurring_parent_id: 'plan-2',
+        status: 'pending', customer_confirmed: false, reservation_expires_at: null,
+      }]); // far sibling: a seeded placeholder
 
     const result = await SmartRebooker.rescheduleSeries(
       'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
@@ -584,6 +587,63 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(occurrences).toHaveLength(2);
     expect(occurrences[0].conflicted).toBe(false); // anchor
     expect(occurrences[1].conflicted).toBe(true);  // far sibling
+  });
+
+  test('sibling clash BEYOND the horizon with a REAL booking (not a seeded placeholder) still aborts', async () => {
+    // Same ~90-day projection, but the occupant is a confirmed one-off
+    // booking — placeholder-land leniency must not commit a double-booking
+    // on top of a real appointment (pre-push audit P1).
+    const anchor = {
+      id: 'svc-1', customer_id: 'cust-1', technician_id: null,
+      scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00',
+      status: 'confirmed',
+      recurring_parent_id: null, is_recurring: true, recurring_pattern: 'custom',
+      recurring_nth: null, recurring_weekday: null, recurring_interval_days: 90,
+    };
+    const siblings = [
+      { id: 'svc-1', status: 'confirmed', scheduled_date: BASE, window_start: '09:00:00', window_end: '11:00:00', technician_id: null },
+      { id: 'svc-2', status: 'confirmed', scheduled_date: dayOffset(100), window_start: '12:00:00', window_end: '13:00:00', technician_id: 'tech-9' },
+    ];
+    const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
+    const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
+    const seriesClashProbe = chain({ first: jest.fn().mockResolvedValue(undefined) });
+    const anchorUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const sibUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const historyInsert = chain();
+    const logInsert = chain();
+
+    const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
+    const trx = jest.fn((table) => {
+      if (table === 'scheduled_services') return scheduledQueue.shift();
+      if (table === 'job_status_history') return historyInsert;
+      if (table === 'reschedule_log') return logInsert;
+      throw new Error(`Unexpected trx table ${table}`);
+    });
+    trx.raw = rawFactory('trx.raw');
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction = jest.fn(async (callback) => callback(trx));
+    const dbQueries = [anchorLookup, parentLookup];
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') return dbQueries.shift();
+      if (table === 'reschedule_log') return chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
+      throw new Error(`Unexpected db table ${table}`);
+    });
+
+    // Anchor clear; the ~90-days-out sibling projection lands on an
+    // occupied placeholder window.
+    findConflictingVisits
+      .mockResolvedValueOnce([])                     // anchor occupancy check
+      .mockResolvedValueOnce([{
+        id: 'real-one-off', is_recurring: false, recurring_parent_id: null,
+        status: 'confirmed', customer_confirmed: true, reservation_expires_at: null,
+      }]); // far sibling: a genuine booking
+
+    await expect(SmartRebooker.rescheduleSeries(
+      'svc-1', TARGET, { start: '09:00', end: '11:00' }, 'customer_request', 'customer_self_serve',
+    )).rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', subcode: 'SERIES_PROJECTION' });
+    // Nothing overlapping commits — the whole trx rolls back.
+    expect(sibUpdate.update).not.toHaveBeenCalled();
   });
 
   test('month-based series takes the date advisory locks BEFORE the parent row UPDATE', async () => {
