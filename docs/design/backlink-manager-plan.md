@@ -245,7 +245,7 @@ t.string('action').notNullable();     // investigate | create_account | complete
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','submitting','submit_ambiguous',            -- submission lifecycle (§13)
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
-                                      //   'needs_owner','human_step_done','ready_for_payment',
+                                      //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
                                       //   'payment_ambiguous','mint_not_started','sandbox_replay' )) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
@@ -555,8 +555,14 @@ if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
-#     is the owner's explicit "Acquire anyway" click, which stamps authority=OWNER_OVERRIDE
-#     and records which floor(s) were overridden; DENY never becomes AUTO_*.
+#     is the owner's explicit "Acquire anyway" click, which does NOT stamp an authority: it
+#     writes an immutable FLOOR WAIVER (`seo_link_floor_waivers`: domain/path, the exact
+#     floors waived with their values, inputs hash, approved_by/at; invalidated when those
+#     inputs change). With a valid waiver the floors are treated as passed and the NORMAL
+#     per-dimension decision below runs, so every dimension still gets its own AUTO_*/OWNER_*
+#     level and its own action-matching approval; a waived row can still never become AUTO_*
+#     for a dimension whose AUTO switch is off. OWNER_OVERRIDE remains only as the level
+#     recorded on dimensions that were granted solely because of a waiver.
 if domain.spam_score > policy.max_spam_score
    or path.confidence < policy.min_path_confidence
    or score < policy.min_score → DENY
@@ -618,12 +624,12 @@ revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidenc
 evidence, month spend. **A stamp is never trusted on its own:** the claim predicate and the
 budget reservation both re-run the pure §6.3 decision on the *current* inputs inside their
 locked transaction and refuse (409, row re-parked) unless it still supports the stamp:
-for `AUTO_*` and `OWNER_*` stamps the current result must equal the stamp; for
-`OWNER_OVERRIDE` the current result must still be exactly `DENY` (not `INVALID`, not a
-different level) AND the approval's `overridden_floors[]` and `decision_inputs_hash` must
-match the current floors/inputs — so a row whose confidence dropped or whose domain's spam
-rose after stamping cannot send or spend, and an override is honoured only for the exact
-failure the owner looked at. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
+for `AUTO_*` and `OWNER_*` stamps the current result must equal the stamp; for a
+dimension granted under a floor waiver the waiver must still be valid (its
+`overridden_floors[]` and inputs hash match the current floors/inputs — an override is
+honoured only for the exact failure the owner looked at) AND the dimension's own approval
+must be valid as for any `OWNER_*` — so a row whose confidence dropped or whose domain's spam
+rose after stamping cannot send or spend. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
@@ -970,6 +976,15 @@ interface BrowserAgentProvider {
 interface OutreachProvider { draft(prospect, research): Draft; send(draft): SendResult; followUp(prospect): Draft }
 ```
 
+**Credential boundary (same rule as payment).** Passwords, verification tokens, and
+authenticated session state are secrets: every credentialed step — account creation, login,
+IMAP verification-link click, session resume — is executed only by the `deterministic_runner`
+through a **credential broker** (fills login/verification fields via Playwright locators in
+an observation-free context, exactly like the payment broker; no LLM, no screenshot, no
+trace). A model-observed provider may run only non-credentialed steps (investigation,
+pre-login form discovery, filling public fields with the canonical NAP) and hands off with
+`outcome='ready_for_credentials'`; it is never resumed inside an authenticated session.
+
 **Payment boundary (P0 — PAN/CVV never cross into a model context).** Only the
 `deterministic_runner` may execute a `submit()` that involves payment, and even it does not
 see card data: a **payment broker** — a small trusted module in the runner process with no
@@ -1009,7 +1024,8 @@ Implementations, in order:
    hosts several location profiles is modelled as one session key with the profile selected
    explicitly per placement, serialized by the domain lock).
 2. **`openai_cua` / `claude_cu` / `stagehand` / `grok`** — same interface, run in the
-   benchmark (§10), **non-payment steps only** (payment boundary above). A provider never
+   benchmark (§10), **non-payment, non-credentialed steps only** (credential + payment
+   boundaries above). A provider never
    receives credentials it does not need and never receives the Waves identity beyond the
    canonical NAP packet the contract already sends.
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
