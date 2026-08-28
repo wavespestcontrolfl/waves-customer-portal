@@ -91,8 +91,18 @@ describe('POST /opportunities/bulk (intake skeleton)', () => {
     await call(post, { body: { text: 'a.example', source: 'owner_seed', source_detail: '  Adam seed list  ' } });
     expect(intake).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ source: 'owner_seed', sourceDetail: 'Adam seed list', dryRun: false }));
   });
-  test('the route is mounted under the admin guard (router-level auth) and the GET /registry read exists', () => {
+  test('the route is mounted under the admin guard (router-level auth) and the GET /registry read exists, owner seeds first', () => {
     expect(router.stack.some((l) => !l.route && l.name === 'adminAuthenticate')).toBe(true);
     expect(() => handler('get', '/registry')).not.toThrow();
+    const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
+    expect(s).toMatch(/CASE discovery_priority WHEN 'owner_seed' THEN 0 ELSE 1 END/);
+  });
+  test('the board catch-up is durable: boot + periodic, both backfills, under the cron lock', () => {
+    const s = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+    const block = s.slice(s.indexOf('const linkRegistryCatchup'), s.indexOf('setInterval(linkRegistryCatchup'));
+    expect(block).toMatch(/runExclusive\('link-registry-catchup'/);
+    expect(block.indexOf('backfillLegacyBoard(db')).toBeLessThan(block.indexOf('backfillLegacyAttempts(db'));
+    expect(s).toMatch(/setTimeout\(linkRegistryCatchup, 90 \* 1000\)\.unref\(\)/);
+    expect(s).toMatch(/setInterval\(linkRegistryCatchup, 6 \* 60 \* 60 \* 1000\)\.unref\(\)/);
   });
 });

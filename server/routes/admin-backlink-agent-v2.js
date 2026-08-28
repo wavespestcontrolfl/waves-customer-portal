@@ -246,7 +246,9 @@ router.get('/registry', async (req, res, next) => {
     if (q) query = query.whereILike('domain', `%${q}%`);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
     const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * lim;
-    const items = await query.clone().orderBy('discovery_priority', 'asc').orderBy('created_at', 'desc').limit(lim).offset(offset);
+    const items = await query.clone()
+      .orderByRaw("CASE discovery_priority WHEN 'owner_seed' THEN 0 ELSE 1 END") // owner seeds first (§3.5: investigate-first)
+      .orderBy('created_at', 'desc').limit(lim).offset(offset);
     res.json({ items });
   } catch (err) { next(err); }
 });
