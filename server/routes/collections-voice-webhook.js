@@ -101,13 +101,16 @@ async function loadCollectionsCall(req) {
   // closed.
   const linkedCase = await db('collection_cases')
     .where({ id: meta.collectionCaseId })
-    .first('id', 'customer_id', 'approved_by')
+    .first('id', 'customer_id')
     .catch(() => null);
   if (!linkedCase || String(linkedCase.customer_id) !== String(row.customer_id)) return null;
-  // Supervised (admin-approved) cases may ride the owner call-window
+  // Supervised (admin-approved) calls may ride the owner call-window
   // override at answer/press-1 revalidation and for staffed-hours;
-  // autodial cases never do (codex P1 on #3555).
-  const supervised = require('../services/collections/contact-policy').isSupervisedApprover(linkedCase.approved_by);
+  // autodial calls never do (codex P1 on #3555). Read from the IMMUTABLE
+  // call_log stamp origination wrote — never from the case, whose
+  // approved_by is cleared once an outcome persists (codex #3560 P2:
+  // a Twilio retry must classify the call exactly as the first attempt).
+  const supervised = meta.collectionsSupervised === true;
   const customer = await db('customers')
     .where({ id: row.customer_id })
     .first('id', 'first_name');

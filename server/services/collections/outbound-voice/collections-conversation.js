@@ -286,10 +286,12 @@ class CollectionsConversation {
       ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })()
       : (row.metadata || {});
     if (!meta.collectionCaseId) return this._refuse('no_case_linkage');
+    // Admin-approved calls may ride the owner call-window override for the
+    // staffed-hours (transfer vs callback) branch; autodial calls never do.
+    // Immutable call_log stamp from origination (codex #3560 P2) — the
+    // case's approved_by is mutable and cleared at outcome time.
+    this._supervised = meta.collectionsSupervised === true;
     const caseRow = await db('collection_cases').where({ id: meta.collectionCaseId }).first();
-    // Admin-approved cases may ride the owner call-window override for the
-    // staffed-hours (transfer vs callback) branch; autodial cases never do.
-    this._supervised = require('../contact-policy').isSupervisedApprover(caseRow?.approved_by);
     const customer = caseRow
       ? await db('customers').where({ id: caseRow.customer_id }).whereNull('deleted_at')
         .first('id', 'first_name', 'last_name', 'phone', 'address_line1', 'zip')

@@ -265,6 +265,24 @@ test('press 0 staffed hours ⇒ warm transfer <Dial> to the admin bridge phone',
   expect(writeCallOutcome).toHaveBeenCalledWith('cl-1', expect.objectContaining({ outcome: 'vestibule_office' }));
 });
 
+// codex #3560 P2: supervision rides the IMMUTABLE call_log stamp, never the
+// case's mutable approved_by (cleared at outcome time) — a Twilio retry of
+// the same webhook must classify the call exactly as the first attempt.
+test('supervision for staffed-hours + revalidation comes from call_log metadata, not the case', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: true }) } });
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
+});
+
+test('a call row without the supervision stamp is unsupervised (fail closed)', async () => {
+  const res = mockRes();
+  await handlerFor('/collections-vestibule-key')(req({ body: { Digits: '0' } }), res);
+  expect(isStaffedHours).toHaveBeenCalledWith(expect.any(Date), { supervised: false });
+});
+
 test('press 0 after hours ⇒ callback card + fixed promise, no dial', async () => {
   isStaffedHours.mockReturnValue(false);
   const res = mockRes();

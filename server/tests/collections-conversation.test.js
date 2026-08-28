@@ -309,6 +309,17 @@ test('human escape phrase during staffed hours ⇒ transfer handoff to the actio
   expect(mockStreamCalls).toHaveLength(0); // code-level escape, not model-mediated
 });
 
+// codex #3560 P2: the relay leg reads supervision from the immutable
+// call_log stamp and passes it to the staffed-hours predicate.
+test('human escape passes the call row supervision stamp to the staffed-hours predicate', async () => {
+  const ContactPolicy = require('../services/collections/contact-policy');
+  setDb({ callRow: { ...CALL_ROW, metadata: JSON.stringify({ collectionCaseId: 'case-1', caseVersion: 3, ledgerId: 'ledger-1', collectionsSupervised: true }) } });
+  const { convo } = makeConvo({ now: AFTER_HOURS_NOW });
+  await turn(convo, 'human please');
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(AFTER_HOURS_NOW, { supervised: true });
+  expect(ContactPolicy.isSupervisedApprover).not.toHaveBeenCalled();
+});
+
 test('human escape after hours ⇒ callback card + fixed promise', async () => {
   const NotificationService = require('../services/notification-service');
   const { convo, handoffs, spoken } = makeConvo({ now: AFTER_HOURS_NOW });

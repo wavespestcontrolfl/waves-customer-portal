@@ -223,6 +223,24 @@ test('happy path: ledger → call_log insert → calls.create, in that order', a
   const meta = JSON.parse(insertChain._inserted.metadata);
   expect(meta.collectionsIdempotencyKey).toBe(CASE.idempotency_key);
   expect(insertChain._inserted.source).toBe('collections_voice');
+  // Supervision is stamped IMMUTABLY on the call row (codex #3560 P2) —
+  // no approved_by on this fixture ⇒ unsupervised.
+  expect(meta.collectionsSupervised).toBe(false);
+});
+
+test('an admin-approved case stamps collectionsSupervised:true on the call_log row', async () => {
+  const insertChain = chain('call_log', { returningRows: [{ id: 'cl-1' }] });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE, approved_by: 'admin:adam@wavespestcontrol.com' } }), chain('collection_cases', { result: 1 }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
+    call_log: [chain('call_log', { first: undefined }), insertChain, chain('call_log')],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.dialed).toBe(true);
+  expect(JSON.parse(insertChain._inserted.metadata).collectionsSupervised).toBe(true);
+  expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ supervisedDial: true }));
+  expect(ContactPolicy.isWithinCallWindow).toHaveBeenCalledWith(expect.any(Date), { supervised: true });
 });
 
 test('idempotency: prior dial under the same key refuses', async () => {

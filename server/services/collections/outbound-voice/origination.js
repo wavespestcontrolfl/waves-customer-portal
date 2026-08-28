@@ -265,6 +265,11 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
         caseVersion: caseRow.case_version,
         collectionsIdempotencyKey: idempotencyKey,
         ledgerId: ledgerEntry.id,
+        // Supervision is IMMUTABLE call metadata (codex #3560 P2): the
+        // case's approved_by is cleared by writeCallOutcome, so a webhook
+        // retry re-deriving it from the case would flip a supervised call
+        // to unsupervised mid-flow. Every in-call reader uses this stamp.
+        collectionsSupervised: supervised === true,
       }),
     })
     .returning(['id']);
