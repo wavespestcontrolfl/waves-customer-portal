@@ -372,7 +372,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -441,7 +441,8 @@ if path.payment_required:
 if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
     → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
-                      else OWNER_* per reason (no draft yet ⇒ the row simply awaits a draft lease; not an owner card)
+                      else OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
+                      action='outreach_send', bound to the draft hash) — no draft yet ⇒ the row simply awaits a draft lease, no card
 if path.account_required → AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
 else → AUTO_FREE if auto_free_acquisition === true else OWNER_FREE
 ```
