@@ -672,6 +672,13 @@ describe('missed-call bell eligibility (customer communication, owner ruling 202
     expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: null })).toBe(true); // hung up at the prompt
     expect(missedCallEligible({ ...base, answered_by: 'unknown' })).toBe(true);
   });
+  test('no recorded outcome (Studio status_callback fallback rows): only an unanswered Twilio status counts as missed (codex r4)', () => {
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'no-answer' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'busy' })).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'completed' })).toBe(false); // may have been handled by the flow
+    expect(missedCallEligible({ ...base, answered_by: null, status: 'failed' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: undefined, status: undefined })).toBe(false);
+  });
   test('answered, voicemail-left, AI-handled, outbound, unknown-caller or already-notified calls never ring', () => {
     expect(missedCallEligible({ ...base, answered_by: 'human' })).toBe(false);
     expect(missedCallEligible({ ...base, answered_by: 'ai_agent' })).toBe(false);

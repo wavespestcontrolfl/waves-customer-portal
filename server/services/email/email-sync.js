@@ -499,7 +499,22 @@ async function recoverLostCustomerEmailBell(existing, { customerId, parsed, back
     backfill,
   })) return;
   if (existing.is_archived) return;
-  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified: Boolean(existing.classification) });
+  // A row the crash left UNCLASSIFIED (insert landed, classifier never
+  // wrote) gets the same awaited classification the insert path gives a
+  // bell candidate — otherwise spam without a List-Unsubscribe header could
+  // ring through the recovery lane (codex r4). Classifier failure keeps the
+  // insert path's fallback: ring (classified:false).
+  let classified = Boolean(existing.classification);
+  if (!classified) {
+    const { classifyEmail } = require('./email-classifier');
+    try {
+      await classifyEmail(existing);
+      classified = true;
+    } catch (err) {
+      logger.error(`[email-sync] Recovery classification failed for ${existing.id}: ${err?.message || err}`);
+    }
+  }
+  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified });
 }
 
 /**

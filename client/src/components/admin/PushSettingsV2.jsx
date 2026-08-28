@@ -61,7 +61,7 @@ const PRIORITY_CLASS = {
 // GET /admin/push/preferences → bellCategories; unknown keys fall back to
 // a title-cased version of the raw category).
 const BELL_CATEGORY_LABELS = {
-  payment: "Payment failures & receipts",
+  payment: "Payment failures",
   billing: "Billing follow-ups",
   dispute: "Payment disputes",
   estimate_converted: "Estimate conversion follow-ups",

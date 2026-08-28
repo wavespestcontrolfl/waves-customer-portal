@@ -13,13 +13,24 @@ const db = require('../models/db');
 const logger = require('./logger');
 
 const UNANSWERED = new Set(['missed', 'voicemail', 'unknown']);
+// A row with NO answered_by (the Studio-flow status_callback fallback in
+// twilio-voice-webhook.js inserts terminal calls without an outcome) counts
+// as missed only when Twilio's own status says nobody picked up. A
+// `completed` call with no outcome may have been handled by the flow — it
+// never rings (codex r4).
+const UNANSWERED_STATUSES = new Set(['no-answer', 'busy', 'canceled']);
+
+function outcomeUnanswered(row) {
+  if (row.answered_by) return UNANSWERED.has(row.answered_by);
+  return UNANSWERED_STATUSES.has(row.status);
+}
 
 /** Pure eligibility — exported for tests. */
 function missedCallEligible(row) {
   if (!row || row.direction !== 'inbound' || !row.customer_id) return false;
   if (row.recording_sid || row.recording_url) return false;          // voicemail lane owns it
   if (row.call_outcome === 'ai_handled') return false;
-  if (row.answered_by && !UNANSWERED.has(row.answered_by)) return false; // human / ai_agent answered
+  if (!outcomeUnanswered(row)) return false;                          // human / ai_agent / unknown-outcome
   let meta = row.metadata;
   if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
   if (meta && meta.missed_call_notified_at) return false;
@@ -31,10 +42,17 @@ async function ringMissedCallIfUnanswered(callSid) {
   try {
     const row = await db('call_log').where('twilio_call_sid', callSid).first();
     if (!missedCallEligible(row)) return false;
-    // Atomic claim: first writer wins across retries / pods.
+    // Atomic claim: first writer wins across retries / pods. The mutable
+    // eligibility predicates are re-checked IN the claim so a voicemail
+    // recording or an answered outcome that landed between the read above
+    // and this write loses the race (codex r4).
     const claimed = await db('call_log')
       .where({ id: row.id })
       .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
+      .whereNull('recording_sid')
+      .whereNull('recording_url')
+      .whereRaw("COALESCE(call_outcome,'') <> 'ai_handled'")
+      .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
       .update({ metadata: db.raw("COALESCE(metadata,'{}'::jsonb) || jsonb_build_object('missed_call_notified_at', ?::text)", [new Date().toISOString()]) });
     if (!claimed) return false;
     const customer = await db('customers').where('id', row.customer_id).first('first_name', 'last_name', 'phone');
@@ -77,6 +95,7 @@ async function sweepMissedCalls({ limit = 50 } = {}) {
     .whereNotNull('customer_id')
     .whereIn('status', TERMINAL_STATUSES)
     .whereNull('recording_sid')
+    .whereRaw('(answered_by IN (?, ?, ?) OR (answered_by IS NULL AND status IN (?, ?, ?)))', [...UNANSWERED, ...UNANSWERED_STATUSES])
     .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
     .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
     .where('created_at', '<', new Date(Date.now() - 3 * 60 * 1000))
