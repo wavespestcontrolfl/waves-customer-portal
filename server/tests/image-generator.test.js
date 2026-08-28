@@ -91,6 +91,18 @@ describe('buildPrompt', () => {
     expect(withLead).toMatch(/Subject: What to expect\. Context from the article: The technician sweeps eaves/);
     // Hero prompts are unchanged.
     expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).toMatch(/Subject: k\./);
+    expect(buildPrompt({ title: 'Post', keyword: 'k', topic: 't', mode: 'blog-hero' })).not.toMatch(/Framing:/);
+  });
+  test('blog-body framing rotates by shot and names the hero subject it must differ from (variation, not three of the same picture)', () => {
+    const closeUp = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'close-up', avoid: 'drywood termite frass' });
+    const action = buildPrompt({ keyword: 'Reading the pellets', topic: 'lead', mode: 'blog-body', shot: 'action', avoid: 'drywood termite frass' });
+    expect(closeUp).toMatch(/Framing: a close-up/);
+    expect(action).toMatch(/Framing: a person .* actively doing/);
+    expect(closeUp).not.toBe(action);
+    expect(closeUp).toMatch(/must look clearly different from the article's hero image \(a wide establishing shot of: drywood termite frass\)/);
+    // Unknown shot falls back to close-up; no avoid → no distinct clause.
+    expect(buildPrompt({ keyword: 'k', mode: 'blog-body', shot: 'nope' })).toMatch(/Framing: a close-up/);
+    expect(buildPrompt({ keyword: 'k', mode: 'blog-body' })).not.toMatch(/must look clearly different/);
   });
   test('social-square wording differs', () => {
     expect(buildPrompt({ title: 'X', mode: 'social-square' })).toMatch(/social media tile/);

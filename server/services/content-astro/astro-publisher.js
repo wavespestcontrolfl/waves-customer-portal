@@ -1638,6 +1638,32 @@ async function resolveAutonomousHero({ frontmatter, slug, existingFile }) {
 // Dark-shipped behind GATE_BLOG_BODY_IMAGES (feature-gates.blogBodyImages).
 const BODY_IMAGE_MIN = 2;
 const BODY_IMAGE_WIDTH = 1200;
+// Framing rotates per slot (the hero is the wide shot) so the three pictures
+// differ in kind, not just subject.
+const BODY_IMAGE_SHOTS = ['close-up', 'action', 'environment'];
+// dHash distance (of 64 bits) at or below which two images are the same
+// picture for a reader — regenerate once with the next framing, then park.
+const NEAR_DUPLICATE_MAX_DISTANCE = 12;
+
+// 64-bit difference hash: grayscale 9×8, each bit = left pixel darker than
+// its right neighbour. Robust to resize/recompress, blind to palette.
+async function imageDHash(buffer) {
+  const sharp = require('sharp');
+  const { data } = await sharp(buffer).grayscale().resize(9, 8, { fit: 'fill' }).raw().toBuffer({ resolveWithObject: true });
+  const bits = new Array(64);
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) bits[y * 8 + x] = data[y * 9 + x] < data[y * 9 + x + 1] ? 1 : 0;
+  return bits;
+}
+function hammingDistance(a, b) {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d += 1;
+  return d;
+}
+async function nearDuplicateOf(buffer, siblings) {
+  const hash = await imageDHash(buffer);
+  for (const sib of siblings) if (hammingDistance(hash, sib.hash) <= NEAR_DUPLICATE_MAX_DISTANCE) return { label: sib.label, hash };
+  return { label: null, hash };
+}
 const MARKDOWN_IMAGE_RE = /!\[[^\]]*\]\([^)]*\)/g;
 const BODY_IMAGE_SKIP_HEADING_RE = /\b(?:faq|faqs|frequently asked|questions|sources|references|summary|bottom line|key takeaways|next steps)\b/i;
 
@@ -1842,7 +1868,9 @@ async function validateBodyImageRefs({ body, heroSrc = '', getFile }) {
   return { ok: true, reason: null, distinct: new Set(refs.map((r) => r.src)).size };
 }
 
-async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {} }) {
+// `siblings` = already-resolved images with bytes (the freshly generated
+// hero) that every body image must differ from.
+async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief = {}, siblings = [] }) {
   const none = { body, files: [], images: [], newAlts: [] };
   if (!bodyImagesEnabled()) return none;
   const draftRefs = bodyImageRefs(body);
@@ -1870,6 +1898,11 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const newAlts = [];
   const placements = [];
   const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
+  const heroSubject = String(frontmatter?.primary_keyword || frontmatter?.title || '').trim();
+  const seen = [];
+  for (const sib of siblings) {
+    if (Buffer.isBuffer(sib?.buffer) && sib.buffer.length) seen.push({ label: sib.label || 'hero', hash: await imageDHash(sib.buffer) });
+  }
   // body-N names are allocated past anything the draft already references
   // (a draft carrying body-2.webp must not have it overwritten by a new
   // generation that would then be linked twice).
@@ -1895,25 +1928,44 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
 
     let gen;
     let buffer;
-    try {
-      const imageGenerator = require('../content/image-generator');
-      gen = await imageGenerator.generate({
-        title: frontmatter.title,
-        topic: slot.lead || frontmatter.meta_description,
-        keyword: slot.heading || frontmatter.primary_keyword,
-        city,
-        mode: 'blog-body',
-      });
-      const img = await fetchImageBuffer(gen.dataUrl);
-      if (!img?.buffer) throw new Error('body image generation produced no usable image');
-      buffer = await compressToWebp(img.buffer, { width: BODY_IMAGE_WIDTH });
-    } catch (err) {
-      if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
-      const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
-      bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
-      bodyErr.cause = err;
-      throw bodyErr;
+    let hash;
+    // Framing rotates with the slot; a near-duplicate of the hero or a
+    // sibling regenerates ONCE with the next framing, then parks — three of
+    // the same picture never ship.
+    for (let attempt = 0; ; attempt++) {
+      const shot = BODY_IMAGE_SHOTS[(k + attempt) % BODY_IMAGE_SHOTS.length];
+      try {
+        const imageGenerator = require('../content/image-generator');
+        gen = await imageGenerator.generate({
+          title: frontmatter.title,
+          topic: slot.lead || frontmatter.meta_description,
+          keyword: slot.heading || frontmatter.primary_keyword,
+          city,
+          mode: 'blog-body',
+          shot,
+          avoid: heroSubject,
+        });
+        const img = await fetchImageBuffer(gen.dataUrl);
+        if (!img?.buffer) throw new Error('body image generation produced no usable image');
+        buffer = await compressToWebp(img.buffer, { width: BODY_IMAGE_WIDTH });
+      } catch (err) {
+        if (!err.attempts && Array.isArray(gen?.attempts)) err.attempts = gen.attempts;
+        const bodyErr = new Error(`autonomous blog body image ${n} generation failed for ${slug} ("${slot.heading}"): ${describeHeroFailure(err)}`);
+        bodyErr.code = 'BLOG_BODY_IMAGES_FAILED';
+        bodyErr.cause = err;
+        throw bodyErr;
+      }
+      const dup = await nearDuplicateOf(buffer, seen);
+      hash = dup.hash;
+      if (!dup.label) break;
+      if (attempt >= 1) {
+        const err = new Error(`autonomous blog body image ${n} for ${slug} ("${slot.heading}") is a near-duplicate of ${dup.label} even after regenerating with a different framing — parked so the post never ships repeated pictures`);
+        err.code = 'BLOG_BODY_IMAGES_FAILED';
+        throw err;
+      }
+      logger.warn(`[astro-publisher] body image ${n} for ${slug} is a near-duplicate of ${dup.label} (${shot}) — regenerating with the next framing`);
     }
+    seen.push({ label: `body-${n}`, hash });
     // Vision-described alt (fail-open) over the prompt-derived one, vetted by
     // the same guardrails as the hero alt; the prompt-derived alt is the
     // fallback — it describes what was asked for, never the writer's text.
@@ -2104,7 +2156,7 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // a hero failure never burns two more generations, and before the branch is
   // cut so a failure can't orphan a PR. Their alts are generated text that
   // the semantic gate never saw: the same narrow second pass as the hero alt.
-  const bodyImages = await resolveBodyImages({ frontmatter, slug, body, existingFile, brief });
+  const bodyImages = await resolveBodyImages({ frontmatter, slug, body, existingFile, brief, siblings: [{ label: 'hero', buffer: hero.buffer }] });
   if (bodyImages.newAlts.length) {
     await assertComplianceClear({
       title: frontmatter.title,
@@ -3558,6 +3610,10 @@ module.exports = {
     bodyImageRefs,
     validateBodyImageRefs,
     scanBodySections,
+    imageDHash,
+    hammingDistance,
+    BODY_IMAGE_SHOTS,
+    NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,
     BODY_IMAGE_MIN,
     fetchImageBuffer,

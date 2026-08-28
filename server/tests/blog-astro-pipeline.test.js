@@ -3387,6 +3387,35 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     '**Is frass dangerous?** No.',
   ].join('\n');
 
+  // Real, visually DISTINCT pictures (the 1×1 HERO_PNG hashes identically to
+  // any other flat image): 32×32 RGB patterns whose gradients differ per seed.
+  const PATTERNS = [];
+  async function patternPng(seed) {
+    const sharp = require('sharp');
+    const w = 32; const h = 32; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 3;
+      const v = seed % 2 === 0 ? ((x * 8 * seed) + (y * 3)) % 256 : ((y * 8 * seed) + ((x * 7 * seed) % 5) * 40) % 256;
+      raw[i] = v; raw[i + 1] = (v * 3 + seed * 40) % 256; raw[i + 2] = (255 - v + seed * 17) % 256;
+    }
+    const png = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    return `data:image/png;base64,${png.toString('base64')}`;
+  }
+  beforeAll(async () => { for (const seed of [1, 2, 3, 4, 5]) PATTERNS.push(await patternPng(seed)); });
+
+  // Default generator: a different picture on every call, prompt-derived alt
+  // for body images. Tests that need specific pictures override it.
+  function mockRotatingGeneration() {
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({
+      dataUrl: PATTERNS[call++ % PATTERNS.length],
+      model: 'test-model',
+      alt: mode === 'blog-body' ? `Prompt alt for ${keyword}` : 'hero alt',
+      attempts: [],
+    }));
+    gh.putBinary.mockResolvedValue({});
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
     jest.spyOn(featureGates, 'isEnabled').mockImplementation((g) => g === 'blogBodyImages');
@@ -3397,6 +3426,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     gh.commitFiles.mockResolvedValue({ commit: { sha: 'file-sha' } });
     gh.createPr.mockResolvedValue({ number: 201, html_url: 'https://github.com/wavespestcontrolfl/wavespestcontrol-astro/pull/201' });
     gh.createIssueComment.mockResolvedValue({});
+    mockRotatingGeneration();
   });
   afterEach(() => featureGates.isEnabled.mockRestore());
 
@@ -3491,12 +3521,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('gate ON, new post: generates BODY_IMAGE_MIN blog-body images from section context, commits them beside the hero in ONE commit, inserts refs with vetted alts', async () => {
     gh.getFile.mockResolvedValue(null);
-    mockHeroGeneration();
-    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({
-      dataUrl: `data:image/png;base64,${HERO_PNG_B64}`,
-      model: 'test-model',
-      alt: mode === 'blog-body' ? `Prompt alt for ${keyword}` : 'hero alt',
-    }));
     heroAltVision.describeHeroForAlt.mockImplementation(async ({ keyword }) => (keyword === 'Reading the pellets' ? 'Hexagonal drywood termite pellets on a white window sill' : null));
 
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog', city: 'Venice' });
@@ -3506,6 +3530,10 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(bodyCalls[0][0]).toEqual(expect.objectContaining({ keyword: 'Reading the pellets', city: 'Venice', title: 'Drywood Termite Frass in Venice' }));
     expect(bodyCalls[0][0].topic).toMatch(/^Drywood frass is hexagonal/);
     expect(bodyCalls[1][0].keyword).toBe('What a quote covers');
+    // Framing rotates per slot and every body prompt names the hero subject to differ from.
+    expect(bodyCalls[0][0].shot).toBe('close-up');
+    expect(bodyCalls[1][0].shot).toBe('action');
+    expect(bodyCalls[0][0].avoid).toBe(draft().frontmatter.primary_keyword || 'Drywood Termite Frass in Venice');
 
     expect(gh.commitFiles).toHaveBeenCalledTimes(1);
     const files = gh.commitFiles.mock.calls[0][0].files;
@@ -3531,7 +3559,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   test('gate OFF: body untouched, no blog-body generation', async () => {
     featureGates.isEnabled.mockImplementation(() => false);
     gh.getFile.mockResolvedValue(null);
-    mockHeroGeneration();
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
     expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(0);
     expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toEqual([
@@ -3552,7 +3579,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: 'x', sha: 'b1' };
       return null;
     });
-    heroImageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm', alt: 'Generated alt two' });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
 
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
 
@@ -3578,7 +3605,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       if (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/')) return { content: 'x', sha: 'h' };
       return null;
     });
-    heroImageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm', alt: 'Fresh alt' });
 
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
 
@@ -3593,7 +3619,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('draft-authored image refs count only when COMMITTED in the repo; fenced `![..]` is not an image', async () => {
     gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/2026/08/') ? { content: 'x', sha: 'i' } : null));
-    mockHeroGeneration();
     const body = `${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n\n\`\`\`md\n![not an image](/images/2026/08/c.webp)\n\`\`\`\n`;
     expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/a.webp', '/images/2026/08/b.webp']);
     await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
@@ -3602,8 +3627,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('distinct sources count, not references; new body-N names skip ones the draft already references (hook r3)', async () => {
     gh.getFile.mockImplementation(async (path) => (path === 'public/images/blog/pest-control/drywood-frass-venice/body-2.webp' ? { content: 'x', sha: 'b2' } : null));
-    mockHeroGeneration();
-    heroImageGenerator.generate.mockResolvedValue({ dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm', alt: 'Gen alt' });
     // Two references to ONE committed file → one image → one more needed, and it must not be body-2.
     const body = `${article}\n\n![same](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n![same again](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`;
     await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
@@ -3656,7 +3679,6 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
 
   test('fail-closed: a draft image ref that is NOT committed (invented path / remote URL) parks instead of shipping a broken image (hook r2)', async () => {
     gh.getFile.mockResolvedValue(null);
-    mockHeroGeneration();
     for (const ref of ['/images/2026/08/made-up.webp', 'https://example.com/pic.jpg']) {
       let thrown;
       try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![x](${ref})\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
@@ -3669,7 +3691,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   test('fail-closed: body image generation failure throws BLOG_BODY_IMAGES_FAILED with the provider chain, before any branch is cut', async () => {
     gh.getFile.mockResolvedValue(null);
     heroImageGenerator.generate.mockImplementation(async ({ mode }) => {
-      if (mode === 'blog-hero') return { dataUrl: `data:image/png;base64,${HERO_PNG_B64}`, model: 'm' };
+      if (mode === 'blog-hero') return { dataUrl: PATTERNS[0], model: 'm' };
       const err = new Error('image-generator: all providers failed');
       err.attempts = [{ provider: 'gpt-image-2', result: { retryable: true, status: 503 } }];
       throw err;
@@ -3683,9 +3705,47 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
+  test('imageDHash: identical pictures hash identically, different patterns are far apart, recompression is tolerated', async () => {
+    const { imageDHash, hammingDistance, NEAR_DUPLICATE_MAX_DISTANCE } = AstroPublisher._internals;
+    const toBuf = (dataUrl) => Buffer.from(dataUrl.split(',')[1], 'base64');
+    const a = await imageDHash(toBuf(PATTERNS[0]));
+    const b = await imageDHash(toBuf(PATTERNS[1]));
+    expect(hammingDistance(a, await imageDHash(toBuf(PATTERNS[0])))).toBe(0);
+    expect(hammingDistance(a, b)).toBeGreaterThan(NEAR_DUPLICATE_MAX_DISTANCE);
+    // Recompression/resizing of a photo-like (smooth) image keeps it a duplicate.
+    const sharp = require('sharp');
+    const w = 96; const h = 64; const raw = Buffer.alloc(w * h * 3);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const i = (y * w + x) * 3; raw[i] = (x * 255) / w; raw[i + 1] = (y * 255) / h; raw[i + 2] = ((x + y) * 128) / (w + h); }
+    const photo = await sharp(raw, { raw: { width: w, height: h, channels: 3 } }).png().toBuffer();
+    const recompressed = await AstroPublisher._internals.compressToWebp(photo, { width: 48 });
+    expect(hammingDistance(await imageDHash(photo), await imageDHash(recompressed))).toBeLessThanOrEqual(NEAR_DUPLICATE_MAX_DISTANCE);
+  });
+
+  test('variation: a body image that is a near-duplicate of the hero is regenerated once with the next framing; a still-duplicate sibling parks', async () => {
+    gh.getFile.mockResolvedValue(null);
+    // hero = P0; body-1 first try = P0 (dup of hero) → regenerate → P1; body-2 = P2.
+    const sequence = [PATTERNS[0], PATTERNS[0], PATTERNS[1], PATTERNS[2]];
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async ({ mode, keyword }) => ({ dataUrl: sequence[call++], model: 'm', alt: mode === 'blog-body' ? `Alt ${keyword}` : 'hero', attempts: [] }));
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+    const bodyCalls = heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body');
+    expect(bodyCalls.map(([a]) => a.shot)).toEqual(['close-up', 'action', 'action']);
+    expect(gh.commitFiles.mock.calls[0][0].files.map((f) => f.path)).toContain('public/images/blog/pest-control/drywood-frass-venice/body-2.webp');
+
+    // Same picture every time → after one regeneration the run parks.
+    jest.clearAllMocks();
+    gh.getFile.mockResolvedValue(null);
+    gh.createPr.mockResolvedValue({ number: 202, html_url: 'x' });
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[3], model: 'm', alt: 'same', attempts: [] }));
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate of hero even after regenerating/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
   test('fail-closed: too few prose sections to place the images parks instead of publishing short', async () => {
     gh.getFile.mockResolvedValue(null);
-    mockHeroGeneration();
     let thrown;
     try { await AstroPublisher.publishOrUpdatePage(draft('![only](/images/x.webp)\n\n- a list\n- only'), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
     expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');

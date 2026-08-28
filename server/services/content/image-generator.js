@@ -94,7 +94,16 @@ function sizeFor(mode, api) {
   return (MODE_SIZES[mode] || MODE_SIZES['blog-hero'])[api];
 }
 
-function buildPrompt({ title, topic, keyword, city, mode }) {
+// Body images must not read as three of the same picture: each slot gets a
+// distinct FRAMING (the hero is the wide establishing shot), and body prompts
+// name the hero subject they must differ from.
+const BODY_IMAGE_FRAMING = {
+  'close-up': 'Framing: a close-up, detail-level view of the subject — the specific thing this section describes filling the frame, shallow depth of field.',
+  action: 'Framing: a person (a technician or homeowner) actively doing what this section describes — hands visible, mid-task, candid documentary feel.',
+  environment: 'Framing: a wide environmental view of where this happens around the home, with the subject clearly placed in it.',
+};
+
+function buildPrompt({ title, topic, keyword, city, mode, shot, avoid }) {
   const kind = mode === 'social-square' ? 'social media tile' : (mode === 'blog-body' ? 'in-article illustration' : 'blog hero image');
   const base = `A high-quality, photorealistic ${kind} for a Southwest Florida pest control & lawn care business named "Waves Pest Control."`;
   // Body images name the SECTION (keyword) and carry its opening prose as
@@ -115,7 +124,11 @@ function buildPrompt({ title, topic, keyword, city, mode }) {
   // Brand palette is Waves Blue #009CDE + Gold #FFD700 (theme-brand.js); the
   // brand brief explicitly forbids teal, so steer the grade, don't paint it.
   const style = `Style: bright, clean, professional. Sunny coastal light with a deep-blue sky and warm golden accents (brand palette: blue #009CDE, gold #FFD700 — no teal color cast). No text, words, watermarks, or logos in the image.`;
-  return [base, focus, local, composition, style].join(' ');
+  const framing = mode === 'blog-body' ? (BODY_IMAGE_FRAMING[shot] || BODY_IMAGE_FRAMING['close-up']) : '';
+  const distinct = (mode === 'blog-body' && avoid)
+    ? `This image must look clearly different from the article's hero image (a wide establishing shot of: ${avoid}) — a different scene, distance and angle, not a variation of it.`
+    : '';
+  return [base, focus, local, framing, composition, style, distinct].filter(Boolean).join(' ');
 }
 
 // Alt text describing the image buildPrompt actually asks for — derived from
@@ -240,8 +253,8 @@ class ImageGenerator {
    *   generated image (null when a customPrompt made the fields unreliable).
    * Throws if every provider in the chain failed.
    */
-  async generate({ title, topic, keyword, city, mode = 'blog-hero', prompt: customPrompt } = {}) {
-    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode });
+  async generate({ title, topic, keyword, city, mode = 'blog-hero', shot, avoid, prompt: customPrompt } = {}) {
+    const prompt = customPrompt || buildPrompt({ title, topic, keyword, city, mode, shot, avoid });
     const alt = customPrompt ? null : buildAltText({ title, topic, keyword, city, mode });
     const attempts = [];
 
@@ -341,6 +354,7 @@ module.exports._internals = {
   MODEL_MAP,
   MODE_SIZES,
   MODE_ASPECTS,
+  BODY_IMAGE_FRAMING,
   parseChain,
   isFatalOpenAIError,
   sizeFor,
