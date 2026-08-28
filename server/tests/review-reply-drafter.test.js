@@ -139,6 +139,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r60: "weathered the treatment well" / "in stride" + by-the-mark / no-later-than intervals.
+    expect(verify(good('Hello there, glad your pets weathered the pest treatment well.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad your pets took the pest treatment in stride.'), gpets)).toBe('banned_phrase');
     // codex r59: "felt normal" + hyphenated / "at the half-hour mark" re-entry.
     const gfn = grounding({ text: 'Great pest treatment. The tech felt professional. We have pets.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hello there, we are glad your pets felt normal after the pest treatment.'), gfn)).toBe('banned_phrase');
@@ -178,6 +181,8 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, glad the yard reopened after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad access resumed after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, glad everyone returned after 30 minutes and the ants are gone.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed by the 30-minute mark after the pest treatment.'), g30)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, glad access resumed no later than 30 minutes after the pest treatment.'), g30)).toBe('banned_phrase');
     // codex r44: "did not trouble your pets".
     expect(verify(good('Hi Dana, we are glad our pest treatment did not trouble your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing fazed the kids.'))).toBe('banned_phrase');
