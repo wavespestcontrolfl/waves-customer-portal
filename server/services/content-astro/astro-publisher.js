@@ -898,12 +898,19 @@ async function retireTopicBlockedPostPr(post) {
   const settle = () => db('blog_posts')
     .where({ id: post.id, astro_retire_pr_number: prNumber })
     .update({ astro_retire_pr_number: null, updated_at: new Date() });
+  // markPrTerminal never throws — it returns { error } — so the result is
+  // checked: the debt is settled only once the terminal bookkeeping landed,
+  // else the next pages-poll tick retries it (a closed PR must not stay
+  // recorded as parked/remediating).
   const terminal = async (state) => {
     try {
       const { markPrTerminal } = require('../content/codex-remediation');
-      await markPrTerminal(prNumber, state);
+      const res = await markPrTerminal(prNumber, state);
+      if (res?.error) throw new Error(res.error);
+      return true;
     } catch (err) {
-      logger.warn(`[astro-publisher] markPrTerminal(${state}) for topic-blocked PR #${prNumber} failed: ${err.message}`);
+      logger.warn(`[astro-publisher] markPrTerminal(${state}) for topic-blocked PR #${prNumber} failed: ${err.message} (retried next pages-poll tick)`);
+      return false;
     }
   };
   try {
@@ -928,14 +935,12 @@ async function retireTopicBlockedPostPr(post) {
       const merged = current && current.astro_pr_number === prNumber
         ? await applyMergeEffect(post.id, current, pr.merged_at ? new Date(pr.merged_at) : new Date(), false, pr.merge_commit_sha || null, { onlyIfPrNumber: prNumber })
         : 0;
-      if (!merged) {
-        logger.warn(`[astro-publisher] post ${post.id} moved on to another PR — merged topic-blocked PR #${prNumber} gets terminal bookkeeping only`);
-        await terminal('merged');
-      }
+      if (!merged) logger.warn(`[astro-publisher] post ${post.id} moved on to another PR — merged topic-blocked PR #${prNumber} gets terminal bookkeeping only`);
+      if (!await terminal('merged')) return { retired: false, merged: true, reason: 'terminal_stamp_failed' };
       await settle();
       return { retired: false, merged: true };
     }
-    await terminal('closed');
+    if (!await terminal('closed')) return { retired: false, reason: 'terminal_stamp_failed' };
     await settle();
     logger.info(`[astro-publisher] retired topic-blocked PR #${prNumber} for post ${post.id}`);
     return { retired: true };

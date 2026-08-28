@@ -917,13 +917,18 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
     const named = findings.flatMap((f) => f.cities || []).map((c) => String(c).toLowerCase());
     findings.push(...semanticCityFindings(cities.filter((c) => !named.some((n) => new RegExp(`(?:^|\\W)${escapeRe(n)}(?:\\W|$)`, 'i').test(c)))));
   }
-  if (findings.length) return { ...base, ok: false, findings, geo };
-
   const idx = index || (corpus ? indexCorpus(corpus) : null);
   if (!idx) {
+    // Pre-spend: a geo verdict needs no corpus and stands on its own.
+    if (findings.length) return { ...base, ok: false, findings, geo };
     if (requireCorpus) throw new Error('topic-targeting-gate: blog corpus required for entity-ownership check');
     return { ...base, geo, skipped: 'no_corpus' };
   }
+  // With a corpus in hand the geo findings do NOT short-circuit: slug
+  // collision and entity ownership are judged too and reported together —
+  // the runner grants one feedback retry, and a redraft that fixes the city
+  // but keeps the owned entity would otherwise spend it on a finding it was
+  // never told about.
   const selfUrl = normalizeSlug(slug);
   const selfLeaf = slugLeaf(selfUrl);
   // Only a LEAF-ONLY slug (no category segment) is written to the flat

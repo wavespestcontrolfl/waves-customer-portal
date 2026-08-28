@@ -49,6 +49,8 @@ jest.mock('../services/content/hero-alt-vision', () => ({
 }));
 
 const db = require('../models/db');
+// codex-remediation's terminal stamp runs db.raw() — a plain success here.
+beforeEach(() => { db.raw = jest.fn().mockResolvedValue({ rowCount: 1 }); });
 const factCheckGate = require('../services/content/fact-check-gate');
 // Topic-gated merges run recheck → merge inside db.transaction under a
 // Postgres advisory lock (topic-targeting-gate.withTopicMergeLock); the bare
@@ -3228,6 +3230,23 @@ describe('mergeAstro re-runs the topic-targeting gate on the branch frontmatter 
       expect(gh.closePr).toHaveBeenCalledWith(43);
       expect(gh.deleteRef).toHaveBeenCalledWith('content/blog-ant-trails');
       expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+    });
+
+    test('a closed PR whose terminal stamp fails keeps the debt (retried next tick) — settled once the stamp lands (codex r24)', async () => {
+      const stamps = [];
+      reconcileDb([owedRow()], stamps);
+      gh.getPr.mockResolvedValue({ number: 43, state: 'closed', merged: false, head: { ref: 'content/blog-ant-trails' } });
+      const rem = require('../services/content/codex-remediation');
+      const spy = jest.spyOn(rem, 'markPrTerminal').mockResolvedValue({ updated: 0, error: 'db down' });
+      try {
+        const r1 = await AstroPublisher.reconcileTopicBlockedPostPrs();
+        expect(r1).toMatchObject({ count: 1, retired: 0 });
+        expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(false);
+        spy.mockResolvedValue({ updated: 1 });
+        const r2 = await AstroPublisher.reconcileTopicBlockedPostPrs();
+        expect(r2).toMatchObject({ count: 1, retired: 1 });
+        expect(stamps.some((p) => p.astro_retire_pr_number === null)).toBe(true);
+      } finally { spy.mockRestore(); }
     });
 
     test('a close GitHub rejects leaves the debt in place (nothing settled, retried next tick)', async () => {
