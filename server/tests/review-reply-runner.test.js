@@ -489,7 +489,7 @@ describe('processDueAutoReplies — state machine', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('already_replied', 'owner replied on Google', { status: 409 }));
-    state.rows = [row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()) }, review_reply: `[DRAFT] ${GOOD_DRAFT.text}` })];
+    state.rows = [row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' }, review_reply: `[DRAFT] ${GOOD_DRAFT.text}` })];
     await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toMatchObject({ code: 'already_replied' });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'already_replied', auto_reply_claimed_until: null });
   });
@@ -627,7 +627,7 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
-  test('publisher REVIEW_CHANGED (live review differs from the synced row) → re-queued for a fresh draft', async () => {
+  test('publisher REVIEW_CHANGED (live review differs from the synced row) → re-queued AFTER the next sync window, not every tick', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('review_changed', 'changed on Google', { status: 409 }));
@@ -635,6 +635,19 @@ describe('processDueAutoReplies — state machine', () => {
     const stats = await Runner.processDueAutoReplies();
     expect(stats).toMatchObject({ retry: 1 });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed' });
+    expect(new Date(state.rows[0].auto_reply_due_at).getTime() - Date.now()).toBeGreaterThan(50 * 60000);
+  });
+
+  test('postNow with a draft whose account facts went stale drafts fresh instead of failing', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [row({ customer_id: 'cust-a', auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: 'old draft', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row({ customer_id: 'cust-a' })), accountFingerprint: 'fp:Venice|new' }, review_reply: '[DRAFT] old draft' })];
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    const { buildReplyGrounding } = require('../services/review-reply/grounding');
+    buildReplyGrounding.mockImplementationOnce(async (r) => ({ version: 'grounding-v1', reviewId: r.id, reviewerName: r.reviewer_name, customerId: r.customer_id, review: { rating: r.star_rating, text: r.review_text || '' }, account: await mockAccountFacts(r.customer_id), provenance: {} }));
+    const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
+    expect(r.outcome).toBe('posted');
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {
@@ -668,7 +681,7 @@ describe('processDueAutoReplies — state machine', () => {
 describe('admin actions', () => {
   test('postNow publishes an existing verified draft immediately (shadow mode, low rating included) as the admin actor', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
-    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row({ star_rating: 2 })) } })];
+    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row({ star_rating: 2 })), accountFingerprint: 'fp:none' } })];
     const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
     expect(r.outcome).toBe('posted');
     expect(mockDraft).not.toHaveBeenCalled();
@@ -687,7 +700,7 @@ describe('admin actions', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');
     mockPublish.mockRejectedValueOnce(new ReviewReplyError('persist_failed', 'live but unrecorded', { status: 500 }));
-    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()) } })];
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' } })];
     await expect(Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' })).rejects.toMatchObject({ code: 'persist_failed' });
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_claimed_until: null });
     // The cron must not pick it up again.

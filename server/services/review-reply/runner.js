@@ -514,8 +514,14 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     }
     if (code === CODES.REVIEW_CHANGED || (code === CODES.STALE && err.message.includes(REVIEW_CHANGED))) {
       // Not lost to a person — the review itself changed. Back to the queue
-      // for a fresh draft against the current rating/text.
-      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: new Date().toISOString(), auto_reply_draft: null, auto_reply_drafted_at: null });
+      // for a fresh draft against the current rating/text. A LIVE-side
+      // change (Google differs from our row) waits for the next hourly sync
+      // to land it locally — redrafting every tick against the stale row
+      // would just repeat the mismatch.
+      const dueAt = code === CODES.REVIEW_CHANGED
+        ? new Date(Date.now() + IDENTITY_BACKOFF_MIN * 60000).toISOString()
+        : new Date().toISOString();
+      await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: dueAt, auto_reply_draft: null, auto_reply_drafted_at: null });
       return { outcome: 'retry', reason: 'review_changed' };
     }
     if (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE) {
@@ -600,11 +606,17 @@ async function postNow(reviewId, actor) {
   }
   // The draft the admin is looking at wins: a human-written "[DRAFT]" first,
   // then the pipeline's own verified draft, else draft fresh.
-  const storedFp = row.auto_reply_grounding && typeof row.auto_reply_grounding === 'object' ? row.auto_reply_grounding.fingerprint : null;
+  const storedGrounding = row.auto_reply_grounding && typeof row.auto_reply_grounding === 'object' ? row.auto_reply_grounding : null;
+  const storedFp = storedGrounding?.fingerprint || null;
+  // A stored draft is only offered as-is when both the review fingerprint
+  // AND the account-fact fingerprint still match; otherwise Post-now drafts
+  // fresh (never a 409 the admin cannot get past).
+  const accountFpNow = accountFingerprint(await loadAccountFacts(row.customer_id).catch(() => null));
   const existing = humanDraftOn(row)
     || (row.auto_reply_draft
       && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status)
       && storedFp === reviewFingerprint(row)
+      && storedGrounding?.accountFingerprint === accountFpNow
       ? row.auto_reply_draft : null);
   if (existing) {
     const publishedAt = new Date().toISOString();
@@ -623,7 +635,7 @@ async function postNow(reviewId, actor) {
         auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
-        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraftOn(row) ? null : storedFp && row.auto_reply_grounding?.accountFingerprint || null }),
+        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraftOn(row) ? null : storedGrounding?.accountFingerprint || null }),
         requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };

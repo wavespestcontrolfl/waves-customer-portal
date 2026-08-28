@@ -196,6 +196,14 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         } catch (e) {
           throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
         }
+        const liveReply = String(live?.reviewReply?.comment || '').trim();
+        if (liveReply) {
+          // Record what Google has so the row leaves the needs-reply queue.
+          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
+            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
+            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+          throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
+        }
         // The LIVE review itself must still be the one the reply was drafted
         // for: a reviewer edit after the last sync (5★ praise → 1★ complaint,
         // rewritten text, renamed account) is invisible locally.
@@ -206,14 +214,6 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           || liveText !== String(fresh.review_text || '').trim()
           || (liveName && liveName !== String(fresh.reviewer_name || '').trim().toLowerCase())) {
           throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed on Google since it was synced — reply not posted.', { status: 409 });
-        }
-        const liveReply = String(live?.reviewReply?.comment || '').trim();
-        if (liveReply) {
-          // Record what Google has so the row leaves the needs-reply queue.
-          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-            .update({ review_reply: liveReply, reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString() })
-            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
-          throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }
         // The live GET is a network round-trip; an admin skip/dismiss can
         // land during it. Re-run the ownership guard on a fresh read
