@@ -34,18 +34,26 @@ function isExpiredCardMethod(method, now = new Date()) {
 // a method "chargeable" that collection refuses at charge time.
 const BLOCKED_PM_ACH_STATUSES = ['pending_verification', 'verification_failed'];
 
-function isChargeableAutopayMethod(method, now = new Date()) {
+// `ignoreCardExpiry` (default false) answers a different question than the
+// charge path's: not "can this card be charged today" but "is this the
+// method a forthcoming charge WOULD reach for". The card-expiry warning
+// surfaces need the walk to land on the expiring card itself — charge()'s
+// expiry fallback would otherwise route the walk past exactly the method
+// the warning exists to replace, and read "no method" (or a different
+// card) as proof the warning is unnecessary. Bank verification and the
+// pointer/default order are unchanged; only the card-expiry test is lifted.
+function isChargeableAutopayMethod(method, now = new Date(), { ignoreCardExpiry = false } = {}) {
   return !!method
     && method.processor === 'stripe'
     && method.is_default === true
     && method.autopay_enabled === true
     && !!method.stripe_payment_method_id
-    && !isExpiredCardMethod(method, now)
+    && (ignoreCardExpiry || !isExpiredCardMethod(method, now))
     && !(isBankMethodType(method.method_type)
       && BLOCKED_PM_ACH_STATUSES.includes(method.ach_status));
 }
 
-async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now = new Date() } = {}) {
+async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now = new Date(), ignoreCardExpiry = false } = {}) {
   if (!customer?.id) return false;
 
   try {
@@ -92,7 +100,7 @@ async function getChargeableAutopayMethod(customer, knex, { rethrow = false, now
       }
     }
     const achBlockedForCustomer = !!(achStatus && achStatus !== 'active');
-    const eligible = (m) => isChargeableAutopayMethod(m, now)
+    const eligible = (m) => isChargeableAutopayMethod(m, now, { ignoreCardExpiry })
       && !(achBlockedForCustomer && isBankMethodType(m.method_type));
     // Pointer first — charge() honors it before the default fallback; an
     // ineligible pointer falls through to the walk, same as charge()'s

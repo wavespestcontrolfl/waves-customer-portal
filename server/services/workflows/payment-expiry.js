@@ -203,14 +203,21 @@ class PaymentExpiry {
     // the horizon is the last day of next month — coverage still active then
     // means no card charge inside the window. Covered customers with a
     // still-collectible pre-term retry stay in (the retry charges the card).
-    let exemptIds = new Set();
+    // PER CARD (#3533 follow-up): a covered customer whose only forthcoming
+    // charge rides an estimate hold's frozen card is exempt for the OTHER
+    // cards — isCardExpiryExemptMethod judges each expiring row.
+    const { emptyCardExpiryExemptions, isCardExpiryExemptMethod } = require('../card-expiry-exemptions');
+    let exemptions = emptyCardExpiryExemptions();
     try {
-      const { getCardExpiryExemptCustomerIds } = require('../annual-prepay-renewals');
+      const { getCardExpiryExemptions } = require('../annual-prepay-renewals');
       const lastOfNextMonth = new Date(Date.UTC(nextYear, nextMonth, 0)).toISOString().slice(0, 10);
-      exemptIds = await getCardExpiryExemptCustomerIds(lastOfNextMonth);
+      exemptions = await getCardExpiryExemptions(lastOfNextMonth);
     } catch (exemptErr) {
       logger.warn(`Payment expiry: prepay exemption lookup failed, exempting nobody: ${exemptErr.message}`);
     }
+    // Stale-alert reconciliation stays CUSTOMER-level: only a customer with
+    // no charge coming on any card has nothing left to act on.
+    const exemptIds = exemptions.customerIds;
     let prepayExempt = 0;
 
     // The skip below only prevents FUTURE alerts — an alert created before
@@ -226,7 +233,7 @@ class PaymentExpiry {
     let notified = 0;
 
     for (const rawCard of expiringCards) {
-      if (exemptIds.has(String(rawCard.customer_id))) { prepayExempt += 1; continue; }
+      if (isCardExpiryExemptMethod(exemptions, rawCard.customer_id, rawCard.id)) { prepayExempt += 1; continue; }
       // Normalize legacy 2-digit years for EVERY downstream consumer — the
       // email path's expiry-stage math runs new Date(year, ...), where a raw
       // '26' reads as 1926 and the card emails as already expired.

@@ -13,7 +13,8 @@ jest.mock('../services/estimate-card-holds', () => ({ isCardHoldEnabled: jest.fn
 
 const db = require('../models/db');
 const { etDateString } = require('../utils/datetime-et');
-const { getCardExpiryExemptCustomerIds, clearCardExpiryExemptCache } = require('../services/annual-prepay-renewals');
+const { getCardExpiryExemptCustomerIds, getCardExpiryExemptions, clearCardExpiryExemptCache } = require('../services/annual-prepay-renewals');
+const { isCardExpiryExemptMethod } = require('../services/card-expiry-exemptions');
 
 const TODAY = etDateString();
 // Pure calendar math on date strings, mirroring the helper's dayAfter.
@@ -836,5 +837,175 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
     route({ terms: coveredAlways(['c-prepaid']), throwOn: 'scheduled_services' });
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+});
+
+// PER-METHOD charge vectors + account-credit coverage (#3533 follow-up: the
+// last two held threads). A covered customer with a charge coming is no
+// longer a blanket "warn on every card": getCardExpiryExemptions maps them
+// to the payment_methods.id each forthcoming charge will use, and the three
+// surfaces warn only about THOSE. A fully credit-covered invoice is not a
+// charge at all.
+describe('getCardExpiryExemptions — per-method charge vectors', () => {
+  const isHoldCardLookup = (own) => own.some((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'stripe_payment_method_id' in c[1]);
+  const armed = (over) => [{ id: 'p-fail', customer_id: 'c-prepaid', description: 'Invoice WPC-1', payment_date: '2026-04-03', metadata: null, ...over }];
+  const isSiblingLookup = (own) => own.some((c) => c[0] === 'whereIn' && c[1] === 'status');
+  const liveHold = (over) => [{ id: 'hold-1', status: 'held', accepted_amount: '120.00', stripe_payment_method_id: 'pm_hold', ...over }];
+  const pausedOneTime = () => baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON });
+
+  test('an Auto Pay lane charge records the walk\'s method (pointer-first, expiring card included) — the customer is no longer customer-level exempt', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})] });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual([]);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1']));
+    // the surfaces' verdict: the charged card warns, any other card of this customer does not
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-1')).toBe(false);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-other')).toBe(true);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', null)).toBe(false);
+    // the customer-level view still says "not exempt" (unchanged contract)
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('the walk lands on the EXPIRING card itself (ignoreCardExpiry) — an expired Auto Pay card is the charge vector, not "no method"', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], paymentMethods: [{ ...CHARGEABLE_CARD, id: 'pm-expired', exp_month: '1', exp_year: '2020' }] });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-expired']));
+  });
+
+  test('no chargeable method at all → the charge is unresolved (null): every card warns', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], paymentMethods: [] });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual([]);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-anything')).toBe(false);
+  });
+
+  test("a live hold charges the card FROZEN on the hold — the Auto Pay card it never touches is exempt", async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [pausedOneTime()],
+      cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ id: 'pm-hold' }] : [CHARGEABLE_CARD]),
+    });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual([]);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-hold']));
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-1')).toBe(true);
+    expect(isCardExpiryExemptMethod(ex, 'c-prepaid', 'pm-hold')).toBe(false);
+  });
+
+  test("a hold whose frozen card has no payment_methods row (or no frozen card) is unresolved → every card warns", async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [pausedOneTime()], cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [] : [CHARGEABLE_CARD]),
+    });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
+    route({ terms: coveredAlways(['c-prepaid']), visits: [pausedOneTime()], cardHolds: liveHold({ stripe_payment_method_id: null }) });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toBeNull();
+  });
+
+  test('a collectible retry records the Auto Pay walk (the sweep charges through StripeService.charge)', async () => {
+    route({ terms: coveredAlways(['c-prepaid', 'c-other']), payments: (own) => (isSiblingLookup(own) ? [] : armed()) });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual(['c-other']);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1']));
+  });
+
+  test('every vector is collected — a retry AND a hold on different cards both warn, nothing else does', async () => {
+    route({
+      terms: coveredAlways(['c-prepaid']),
+      payments: (own) => (isSiblingLookup(own) ? [] : armed()),
+      visits: [pausedOneTime()], cardHolds: liveHold(),
+      paymentMethods: (own) => (isHoldCardLookup(own) ? [{ id: 'pm-hold' }] : [CHARGEABLE_CARD]),
+    });
+    expect((await getCardExpiryExemptions(HORIZON)).chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1', 'pm-hold']));
+  });
+
+  test('a lookup failure fails toward the warning for the per-method view too, and the memo serves copies', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), throwOn: 'payments' });
+    const failed = await getCardExpiryExemptions(HORIZON);
+    expect(failed.customerIds.size).toBe(0);
+    expect(failed.chargeMethodIdsByCustomer.size).toBe(0);
+    expect(failed.lookupFailed).toBeUndefined();
+    const calls = route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})] });
+    const first = await getCardExpiryExemptions(HORIZON);
+    first.chargeMethodIdsByCustomer.get('c-prepaid').add('tampered');
+    const termsAfterFirst = calls.terms.length;
+    const second = await getCardExpiryExemptions(HORIZON);
+    expect(calls.terms.length).toBe(termsAfterFirst); // memo hit
+    expect(second.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1']));
+  });
+});
+
+describe('getCardExpiryExemptions — account credit that fully settles the invoice is not a card charge', () => {
+  const gates = require('../config/feature-gates').gates;
+  const openInvoice = (over) => [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00', total: '120.00', credit_applied: 0, ...over }];
+  const withCredit = (balance) => [{ id: 'c-prepaid', account_credits: balance }];
+  beforeEach(() => { gates.autoApplyAccountCredit = true; });
+  afterEach(() => { delete gates.autoApplyAccountCredit; });
+
+  test('balance covers the reused invoice in full → the route applies credit before any rail → no charge, stays exempt', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice(), customers: withCredit('120.00') });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    // the hold rail finds the invoice prepaid too (invoice_not_collectible)
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON })],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00', stripe_payment_method_id: 'pm_hold' }],
+      invoices: openInvoice(), customers: withCredit('500.00'),
+    });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('partial coverage leaves a residual the card collects → still a charge', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice(), customers: withCredit('50.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // already-applied credit counts: 120 total, 70 applied, 50 balance → covered
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice({ credit_applied: '70.00' }), customers: withCredit('50.00') });
+    expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test("the apply's own refusals keep the charge: gate off, an attached PaymentIntent, an active payment plan, no balance row", async () => {
+    gates.autoApplyAccountCredit = false;
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice(), customers: withCredit('120.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    gates.autoApplyAccountCredit = true;
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice({ stripe_payment_intent_id: 'pi_1' }), customers: withCredit('120.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    // an active plan refuses the credit apply; the extended lane refuses the
+    // charge too (verifyExtendedCompletionAnchor), but the HOLD rail still
+    // charges the frozen card → warning
+    route({
+      terms: coveredAlways(['c-prepaid']), visits: [baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON })],
+      cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00', stripe_payment_method_id: 'pm_hold' }],
+      invoices: openInvoice(), customers: withCredit('120.00'), paymentPlans: [{ id: 'plan-1' }],
+    });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], invoices: openInvoice(), customers: [] });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('a pending MINT is never credit-covered here (final total unknown) → charge', async () => {
+    route({ terms: coveredAlways(['c-prepaid']), visits: [baseVisit({})], customers: withCredit('9999.00') });
+    expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+  });
+
+  test('the balance is consumed visit by visit: the first visit in the window is covered, the second charges the card', async () => {
+    const calls = route({
+      terms: coveredAlways(['c-prepaid']),
+      visits: [baseVisit({ id: 'v1', scheduled_date: TODAY }), baseVisit({ id: 'v2', scheduled_date: TOMORROW })],
+      // each visit's OWN bound invoice (the lookup is the object-form where)
+      invoices: (own) => {
+        const bound = (own.find((c) => c[0] === 'where' && c[1] && typeof c[1] === 'object' && 'scheduled_service_id' in c[1]) || [])[1];
+        return openInvoice({ id: `inv-${bound?.scheduled_service_id || 'v1'}`, scheduled_service_id: bound?.scheduled_service_id || 'v1' });
+      },
+      customers: withCredit('120.00'),
+    });
+    const ex = await getCardExpiryExemptions(HORIZON);
+    expect([...ex.customerIds]).toEqual([]);
+    expect(ex.chargeMethodIdsByCustomer.get('c-prepaid')).toEqual(new Set(['pm-1']));
+    // date order is the projection's completion order
+    expect(calls.visits).toEqual(expect.arrayContaining([
+      ['orderBy', [{ column: 'ss.scheduled_date', order: 'asc' }, { column: 'ss.id', order: 'asc' }]],
+    ]));
   });
 });
