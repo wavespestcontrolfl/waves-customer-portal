@@ -483,6 +483,15 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect(result.eligibleInvoiceIds).toEqual(['inv-1']); // the survivor alone is NOT "the total"
   });
 
+  test('a dunning-stop check error on one invoice marks the read INCOMPLETE (the survivors are not "the total")', async () => {
+    const { isDunningStopped } = require('../services/invoice-followups');
+    armAllowedBaseline({ invoices: [invoiceRow(), invoiceRow({ id: 'inv-2', due_date: '2026-08-01' })] });
+    isDunningStopped.mockImplementationOnce(async () => false).mockImplementationOnce(async () => { throw new Error('followups down'); });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('balance_read_incomplete');
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']);
+  });
+
   test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {
     armAllowedBaseline({ invoices: [invoiceRow({ due_date: '2026-08-08' })] });
     const result = await evalVoice();

@@ -1223,7 +1223,7 @@ describe('prb-r17', () => {
 // consequence lines only on true state.
 describe('account-level disclosure + registers', () => {
   const { loadEligibleInvoices } = require('../services/collections/contact-policy');
-  const { buildSystemPrompt, readConsequenceDueAt } = require('../services/collections/outbound-voice/collections-conversation');
+  const { buildSystemPrompt, readDunningState } = require('../services/collections/outbound-voice/collections-conversation');
 
   test('get_balance_details itemizes every invoice oldest-first with its age and states the total; asks for the full balance', async () => {
     // Read twice: by _init (constructor) and again at disclosure time.
@@ -1410,7 +1410,7 @@ describe('account-level disclosure + registers', () => {
 
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
     const legacy = [
-      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-06-20T12:00:00Z', total: '10.00', credit_applied: 0 }, // 53d — inside the pilot window
+      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: new Date('2026-06-20T03:30:00Z'), total: '10.00', credit_applied: 0 }, // 53d — inside the window; 23:30 ET on 06-19
       { id: 'l2', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-07-01T12:00:00Z', total: '12.00', credit_applied: 0 },
     ];
     loadEligibleInvoices.mockResolvedValueOnce(legacy).mockResolvedValueOnce(legacy);
@@ -1419,7 +1419,7 @@ describe('account-level disclosure + registers', () => {
     await convo._contextReady;
     convo.verified = true;
     const out = await convo._toolGetBalance();
-    expect(out).toMatch(/Pest Control on 2026-06-20: \$10\.00/);
+    expect(out).toMatch(/Pest Control on 2026-06-19: \$10\.00/); // ET calendar day, never String(Date) in UTC
     expect(out).toMatch(/Pest Control on 2026-07-01: \$12\.00/);
   });
 
@@ -1465,11 +1465,11 @@ describe('account-level disclosure + registers', () => {
     let r = await disclose(firmSet);
     expect(r.convo._ctx.register).toBe('firm');
     expect(r.out).toMatch(/No consequence is authorized on this call/);
-    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: '2026-08-01T12:00:00Z' } });
+    r = await disclose(firmSet, { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } }); // A2 actually placed the hold
     expect(r.convo._ctx.holdActive).toBe(true);
     expect(r.out).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
-    // A lingering reason on a RESUMED customer (service_paused_at null) is no hold.
-    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: null } });
+    // customers.service_pause_reason / service_paused_at are NOT a scheduling hold (dues-cron only) — never a consequence.
+    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: '2026-08-01T12:00:00Z' }, dunning: { hold_applied_at: null } });
     expect(r.convo._ctx.holdActive).toBe(false);
     expect(r.out).toMatch(/No consequence is authorized on this call/);
     r = await disclose(finalSet);
@@ -1478,7 +1478,7 @@ describe('account-level disclosure + registers', () => {
     r = await disclose(finalSet, { dunning: { consequence_due_at: '2026-09-15' } });
     expect(r.out).toMatch(/if payment is not received by 2026-09-15, service will be cancelled and the account closed/);
     // A hold on a FRIENDLY account is never spoken (the register gates it too).
-    r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold' } });
+    r = await disclose([{ id: 'inv-y', title: 'Pest Control', due_date: '2026-07-25', total: '10.00', credit_applied: 0 }], { dunning: { hold_applied_at: '2026-08-01T12:00:00Z' } });
     expect(r.convo._ctx.register).toBe('friendly');
     expect(r.out).not.toMatch(/consequence/i);
   });
@@ -1495,10 +1495,10 @@ describe('account-level disclosure + registers', () => {
     expect(buildSystemPrompt({ firstName: 'Pat' })).toMatch(/REGISTER: FRIENDLY/); // default
   });
 
-  test('readConsequenceDueAt is null when the A2 table is absent or unreadable', async () => {
+  test('readDunningState is all-null when the A2 table is absent or unreadable', async () => {
     db.mockImplementationOnce(() => { throw new Error('relation "customer_dunning_sequences" does not exist'); });
-    expect(await readConsequenceDueAt('cust-1')).toBeNull();
-    expect(await readConsequenceDueAt(null)).toBeNull();
+    expect(await readDunningState('cust-1')).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
+    expect(await readDunningState(null)).toEqual({ holdAppliedAt: null, consequenceDueAt: null });
   });
 });
 

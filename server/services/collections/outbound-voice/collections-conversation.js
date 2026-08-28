@@ -52,6 +52,7 @@ const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
 const { invoiceAmountDue } = require('../../invoice-helpers');
+const { etCalendarDayOf } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
@@ -227,17 +228,24 @@ const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|oper
 const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|don'?t contact|do not contact)\b/i;
 const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdon'?t contact\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
 
-// The tier-60 consequence (A2's account dunning sequence, GATE_ACCOUNT_DUNNING)
-// exists ONLY when consequence_due_at is stamped on customer_dunning_sequences.
-// Until that table ships, or when the read fails, the answer is null — and a
-// null means the consequence is never spoken. Read-only, best-effort.
-async function readConsequenceDueAt(customerId) {
-  if (!customerId) return null;
+// The consequences (A2's account dunning sequence, GATE_ACCOUNT_DUNNING)
+// exist ONLY as state on customer_dunning_sequences: hold_applied_at = the
+// service hold A2 actually placed (tier 30); consequence_due_at = the
+// cancellation deadline it actually set (tier 60). customers.service_paused_at
+// is NOT a scheduling hold (it only stops the dues cron — see migration
+// 20260801200000), so it never authorizes "service is paused". Until the
+// table ships, or when the read fails, both are null — and null is never
+// spoken. Read-only, best-effort.
+async function readDunningState(customerId) {
+  if (!customerId) return { holdAppliedAt: null, consequenceDueAt: null };
   try {
-    const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('consequence_due_at');
-    return row && row.consequence_due_at ? row.consequence_due_at : null;
+    const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('hold_applied_at', 'consequence_due_at');
+    return {
+      holdAppliedAt: row && row.hold_applied_at ? row.hold_applied_at : null,
+      consequenceDueAt: row && row.consequence_due_at ? row.consequence_due_at : null,
+    };
   } catch {
-    return null; // table absent (pre-A2) or unreadable ⇒ no consequence
+    return { holdAppliedAt: null, consequenceDueAt: null }; // table absent (pre-A2) or unreadable ⇒ no consequence
   }
 }
 
@@ -730,17 +738,10 @@ class CollectionsConversation {
   // unreadable hold / deadline is NO consequence.
   async _accountState(customerId, invoices) {
     const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), invoices));
-    let holdActive = false;
-    try {
-      // service_paused_at is the pause STATE; the reason alone can linger on
-      // a resumed customer (gh r2) — both must hold before she may say
-      // "future service is paused".
-      const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('service_pause_reason', 'service_paused_at');
-      holdActive = String(row?.service_pause_reason || '') === 'nonpayment_hold' && Boolean(row?.service_paused_at);
-    } catch (err) {
-      logger.warn(`[collections-voice] service-hold read failed callSid=${this.callSid}: ${err.message} — no consequence`);
-    }
-    const consequenceDueAt = await readConsequenceDueAt(customerId);
+    // Consequence state = what A2 actually did (hook r5): a placed hold, a
+    // set deadline. Nothing else authorizes a consequence sentence.
+    const { holdAppliedAt, consequenceDueAt } = await readDunningState(customerId);
+    const holdActive = Boolean(holdAppliedAt);
     // The pay link is /pay/:token of the OLDEST-DUE open invoice. Under
     // GATE_PAY_INCLUDE_BALANCE that page bundles the customer's other open
     // self-pay invoices into ONE combined charge (pay-combined.js, owner
@@ -818,7 +819,6 @@ class CollectionsConversation {
     // never raw new Date() ET math (the timestamptz trap).
     let today = null;
     try {
-      const { etCalendarDayOf } = require('../../../utils/datetime-et');
       const now = this._now();
       const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
       today = `${weekday}, ${etCalendarDayOf(now)}`;
@@ -1193,7 +1193,9 @@ class CollectionsConversation {
     const nameOf = (inv) => {
       const label = inv.title || inv.service_type || 'service';
       const when = inv.service_date || dueValueOf(inv); // due_date, else created_at — the clock's own fallback
-      return `${label}${when ? ` on ${String(when).slice(0, 10)}` : ''}`;
+      // DATE columns pass through; a timestamp fallback renders as its ET
+      // calendar day (hook r5) — never String(Date) in the box's UTC.
+      return `${label}${when ? ` on ${etCalendarDayOf(when)}` : ''}`;
     };
     const lines = ordered.map((inv) => {
       const days = daysOverdueOn(now, dueValueOf(inv));
@@ -1841,7 +1843,7 @@ class CollectionsConversation {
 
 module.exports = {
   buildSystemPrompt,
-  readConsequenceDueAt,
+  readDunningState,
   REGISTER_RULES,
   CollectionsConversation,
   STATE_TOOLS,

@@ -222,7 +222,11 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
     for (const inv of eligible) {
       try {
         if (!(await isDunningStopped(inv.id))) kept.push(inv);
-      } catch { /* excluded — fail closed */ }
+      } catch {
+        // Excluded — fail closed for outreach; and the survivors are no
+        // longer "the total" (hook r5): same incomplete signal.
+        if (onIncomplete) onIncomplete('dunning-stop check failed');
+      }
     }
     eligible.length = 0;
     eligible.push(...kept);
