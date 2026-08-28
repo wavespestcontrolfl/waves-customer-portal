@@ -77,7 +77,7 @@ beforeEach(() => {
     id: 'rev-1', location_id: 'sarasota', reviewer_name: 'Dana W.', star_rating: 5,
     review_text: 'Great', review_reply: null, gbp_review_name: 'accounts/1/locations/2/reviews/9', missing_since: null,
   }];
-  mockLock.mockImplementation(async (id, fn) => { const out = liveLock(); await fn(); return out; });
+  mockLock.mockImplementation(async (id, fn) => { const out = liveLock(); out.result = await fn(); return out; });
 });
 
 describe('publishReviewReply', () => {
@@ -213,7 +213,8 @@ describe('publishReviewReply', () => {
 
   test('a Google PUT that never completes hits the total deadline → GOOGLE_UNCERTAIN, row parked for reconciliation', async () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
-    jest.isolateModules(() => {});
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
     mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
@@ -221,7 +222,10 @@ describe('publishReviewReply', () => {
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
-    // A timed-out PUT may have landed: parked for reconciliation, never retried blindly.
+    // A timed-out PUT may have landed: the claim is ABANDONED (never released
+    // while the request is in flight), the row parks for reconciliation.
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain' });
   });
@@ -371,6 +375,14 @@ describe('retractReviewReply', () => {
     expect(state.rows[0].auto_reply_status).toBe('retracted');
     expect(state.activity[0].action).toBe('review_reply_retracted');
   });
+  test('a row parked because the review was edited after posting can still be retracted', async () => {
+    state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'parked';
+    state.rows[0].auto_reply_reason = 'review_edited_after_post';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
+    const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } });
+    expect(r.googleDeleted).toBe(true);
+  });
   test('nothing to retract on a draft-only or unreplied row', async () => {
     state.rows[0].review_reply = '[DRAFT] not posted';
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
@@ -418,6 +430,24 @@ describe('retractReviewReply', () => {
     expect(out.abandonClaim).toHaveBeenCalled();
     expect(out.releaseClaim).not.toHaveBeenCalled();
     expect(state.activity).toHaveLength(0);
+  });
+  test('a DELETE that never completes → GOOGLE_UNCERTAIN, claim abandoned (not released), reply left recorded', async () => {
+    process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
+    state.rows[0].review_reply = 'Posted reply';
+    state.rows[0].auto_reply_status = 'posted';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
+    mockGbp.deleteReply.mockImplementationOnce(() => new Promise(() => {}));
+    jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+    const p = retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } });
+    const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
+    await jest.advanceTimersByTimeAsync(31000);
+    await assertion;
+    jest.useRealTimers();
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Posted reply');
   });
   test('a stamped review keeps its recorded reply (evidence row)', async () => {
     state.rows[0].review_reply = 'Posted reply';

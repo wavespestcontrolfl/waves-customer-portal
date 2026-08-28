@@ -253,40 +253,18 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       try {
         await withDeadline(gbp.replyToReview(resourceName, replyText, review.location_id), 'GBP replyToReview');
       } catch (e) {
-        if (e.timedOut) {
-          // The write may have landed after the deadline. Neither "posted"
-          // nor "failed" is provable — never retry blindly (a redraft would
-          // replace a live reply). Keep the claim standing (self-expires)
-          // and hand the row to a person; the next sync shows the truth.
-          outcome?.abandonClaim?.();
-          throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });
-        }
+        // A timed-out PUT is still IN FLIGHT and may land later. Throwing
+        // here would make the lock helper release the publish claim (and a
+        // human could publish a replacement the late PUT then overwrites).
+        // Return a disposition instead; the claim is abandoned OUTSIDE the
+        // callback, where `outcome` exists.
+        if (e.timedOut) return { timedOut: true, error: e };
         throw e;
       }
       return true;
     });
   } catch (e) {
-    if (e instanceof ReviewReplyError) {
-      if (e.code === CODES.GOOGLE_UNCERTAIN) {
-        // The lock helper released the claim on throw; take the row out of
-        // the automatic lane ourselves (best effort) so no retry re-PUTs.
-        // Compare-and-set against the state THIS attempt owned: a sync that
-        // already recorded the late reply (skipped/already_replied) or a
-        // human publish that finished meanwhile must not be clobbered.
-        await db('google_reviews').where({ id: reviewId })
-          .whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
-          .where(function ownSlot() {
-            this.whereNull('review_reply');
-            if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
-            if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
-            this.orWhere('review_reply', asDraft(replyText));
-          })
-          .update({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000), auto_reply_claimed_until: null })
-          .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
-        logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, parked for reconciliation`);
-      }
-      throw e;
-    }
+    if (e instanceof ReviewReplyError) throw e;
     googleError = e;
     logger.error(`Google reply failed: ${e.message}`);
   }
@@ -295,6 +273,27 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
   if (outcome.blocked) {
     if (outcome.lockBusy) throw new ReviewReplyError(CODES.LOCK_BUSY, 'Review sync is in progress for this location — try again in a moment.', { status: 409 });
     throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+  }
+  if (outcome.result && outcome.result.timedOut) {
+    // The write may still land. Neither "posted" nor "failed" is provable:
+    // ABANDON the claim (it stands until its TTL, so nothing else can
+    // publish over the in-flight PUT), never retry blindly, and hand the
+    // row to a person — the next sync shows the truth. Compare-and-set
+    // against the state THIS attempt owned.
+    const e = outcome.result.error;
+    outcome.abandonClaim();
+    await db('google_reviews').where({ id: reviewId })
+      .whereNotIn('auto_reply_status', ['posted', 'skipped', 'retracted'])
+      .where(function ownSlot() {
+        this.whereNull('review_reply');
+        if (review.auto_reply_draft) this.orWhere('review_reply', asDraft(review.auto_reply_draft));
+        if (autoFields?.auto_reply_draft) this.orWhere('review_reply', asDraft(autoFields.auto_reply_draft));
+        this.orWhere('review_reply', asDraft(replyText));
+      })
+      .update({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_error: String(e.message).slice(0, 1000) })
+      .catch((e2) => logger.error(`[review-reply] google_uncertain park failed for ${reviewId}: ${e2.message}`));
+    logger.error(`[review-reply] Google PUT timed out for ${reviewId} — outcome unknown, claim abandoned, parked for reconciliation`);
+    throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the reply may be live on Google; reconcile after the next sync.`, { status: 502, cause: e });
   }
 
   let persisted = false;
@@ -361,7 +360,12 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
   // Retract exists for replies the PIPELINE posted. A human's reply (or one
   // the owner edited in Google, which closes the posted state) is edited or
   // deleted through the editor, never through this shortcut.
-  if (review.auto_reply_status !== 'posted') {
+  // Still the pipeline's reply: posted, or parked because the REVIEW was
+  // edited after we posted (the reply itself is untouched and retracting it
+  // is exactly the remedy that bell asks for).
+  const pipelinesReply = review.auto_reply_status === 'posted'
+    || (review.auto_reply_status === 'parked' && review.auto_reply_reason === 'review_edited_after_post');
+  if (!pipelinesReply) {
     throw new ReviewReplyError(CODES.STALE, 'Only an automatically posted reply can be retracted here — this reply is not (or no longer) the pipeline\'s.', { status: 409 });
   }
   if (!gbp.configured || !(await gbp.isLocationConfigured(review.location_id))) {
@@ -405,15 +409,24 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
           ? 'The reply on Google differs from the one shown here (edited in Google) — reload and check the current reply.'
           : 'There is no reply on Google to retract — reload.', { status: 409 });
       }
-      await withDeadline(gbp.deleteReply(resourceName, review.location_id), 'GBP deleteReply');
+      try {
+        await withDeadline(gbp.deleteReply(resourceName, review.location_id), 'GBP deleteReply');
+      } catch (e) {
+        if (e.timedOut) return { timedOut: true, error: e };
+        throw e;
+      }
       return true;
     });
   } catch (e) {
     if (e instanceof ReviewReplyError) throw e;
-    if (e.timedOut) {
-      throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the deletion may have landed; reload after the next sync before retrying.`, { status: 502, cause: e });
-    }
     throw new ReviewReplyError(CODES.GOOGLE_FAILED, e.message || 'Could not delete the reply on Google.', { status: 502, cause: e });
+  }
+  if (!outcome.blocked && outcome.result && outcome.result.timedOut) {
+    // The DELETE may still land: abandon the claim (nothing publishes a
+    // replacement it could later erase) and surface the uncertainty.
+    const e = outcome.result.error;
+    outcome.abandonClaim();
+    throw new ReviewReplyError(CODES.GOOGLE_UNCERTAIN, `${e.message} — the deletion may have landed; reload after the next sync before retrying.`, { status: 502, cause: e });
   }
   if (outcome.blocked) {
     if (outcome.lockBusy) throw new ReviewReplyError(CODES.LOCK_BUSY, 'Review sync is in progress for this location — try again in a moment.', { status: 409 });

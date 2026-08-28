@@ -812,7 +812,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
               >
                 {aiLoading ? "Generating..." : "AI Reply"}
               </button>{" "}
-              {autoReply && autoReply.status === "posted" && (
+              {autoReply && (autoReply.status === "posted" || (autoReply.status === "parked" && autoReply.reason === "review_edited_after_post")) && (
                 <button
                   onClick={() => runAuto("retract")}
                   disabled={autoBusy}
