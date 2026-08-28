@@ -1194,7 +1194,9 @@ function manualReplyCloseFields(conn = db) {
 // reply live on Google; the next sync recognises it only through that parked
 // state. Dismiss must refuse such rows (codex r70) — the dismiss routes add
 // this predicate — and the cancel CASE below never rewrites them either.
-const RECONCILE_PARK_SQL = "(auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed'))";
+// NULL-safe (codex r71): pre-rollout rows keep auto_reply_status NULL, and
+// NOT (NULL = 'parked' AND …) is NULL — COALESCE makes it a plain false.
+const RECONCILE_PARK_SQL = "COALESCE((auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed')), false)";
 function whereNoReconcilePark(qb) {
   qb.whereRaw(`NOT ${RECONCILE_PARK_SQL}`);
 }
