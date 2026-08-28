@@ -28,7 +28,7 @@ function seedRows() {
 const BASE = {
   firstName: 'Dana', grassType: 'st_augustine', weekEnding: '2026-08-23', et0Inches: 1.6,
   irrigationSystem: true, irrigationRunMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], irrigationSystemType: ['spray'],
-  weekPlanEnabled: true, now: NOW,
+  weekPlanEnabled: true, county: 'Sarasota', now: NOW,
 };
 
 describe('irrigation.weekly_plan template', () => {

@@ -17,7 +17,7 @@ const BASE = {
   firstName: 'Sam', grassType: 'st_augustine', weekEnding: '2026-08-23', et0Inches: 1.6,
   rainfallInches7d: 0.6, forecastRainInches: 0.3, irrigationSystem: true, irrigationInchesPerWeek: 2,
   irrigationRunMinutes: 20, wateringDays: ['Mon', 'Wed', 'Fri', 'Sun'], irrigationSystemType: ['spray'],
-  weekPlanEnabled: true, now: NOW,
+  weekPlanEnabled: true, county: 'Manatee', now: NOW,
 };
 
 describe('weekly email decision — plan mode', () => {
@@ -62,6 +62,12 @@ describe('weekly email decision — plan mode', () => {
     expect(d.templateKey).toBe(TEMPLATE_CUT_BACK);
     expect(d.weekPlanUnavailable).toBe('restriction_policy_missing');
     expect(d.weekPlan).toBeUndefined();
+  });
+
+  test('jurisdiction not established (no county) → pre-plan template, never a global legal instruction', () => {
+    const d = buildWeeklyEmailDecision({ ...BASE, county: null });
+    expect(d.templateKey).toBe(TEMPLATE_CUT_BACK);
+    expect(d.weekPlanUnavailable).toBe('restriction_policy_missing');
   });
 
   test('gate off → exactly the pre-plan decision', () => {

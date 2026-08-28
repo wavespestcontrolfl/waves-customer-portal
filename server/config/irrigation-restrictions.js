@@ -27,7 +27,48 @@ const DEFAULT_POLICY = Object.freeze({
   label: 'SWFWMD Modified Phase III water shortage order',
   source: 'https://www.swfwmd.state.fl.us/the-newsroom/2026/district-extends-modified-phase-iii-water-shortage',
   hoursNote: 'on your assigned day, during your area\'s allowed hours',
+  // Jurisdiction. A policy applies only where its coverage can be
+  // ESTABLISHED for the customer: counties listed here in full; a county in
+  // `partial` (the order covers only portions of Charlotte) can't be
+  // resolved from county alone and yields no policy (fail closed) until an
+  // address-level lane exists.
+  coverage: Object.freeze({ counties: ['Manatee', 'Sarasota'], partial: ['Charlotte'] }),
 });
+
+// Service-area cities → county, for customers whose turf profile carries no
+// county. Only cities that sit wholly in one county; a city that straddles
+// counties (e.g. Longboat Key, Englewood) is deliberately absent → unknown.
+const CITY_COUNTY = Object.freeze({
+  bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
+  'lakewood ranch': 'Manatee', 'anna maria': 'Manatee', 'holmes beach': 'Manatee',
+  'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
+  sarasota: 'Sarasota', venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
+  osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
+  'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
+});
+
+/**
+ * The county a customer's watering restriction is judged in: the turf
+ * profile's county (same source the WaveGuard plan engine uses for
+ * fertilizer ordinances), else a whole-county service city, else null
+ * (coverage cannot be established).
+ */
+function resolveRestrictionCounty({ county = null, city = null } = {}) {
+  const c = String(county || '').trim().replace(/\s+county$/i, '');
+  if (c) return c.charAt(0).toUpperCase() + c.slice(1).toLowerCase();
+  const key = String(city || '').trim().toLowerCase();
+  return CITY_COUNTY[key] || null;
+}
+
+function coversCounty(policy, county) {
+  const coverage = policy.coverage;
+  if (!coverage) return true; // an env policy without coverage applies everywhere it is configured
+  if (!county) return false;
+  const norm = (v) => String(v || '').trim().toLowerCase();
+  const inList = (list) => (Array.isArray(list) ? list : []).some((x) => norm(x) === norm(county));
+  if (inList(coverage.partial)) return false;
+  return inList(coverage.counties);
+}
 
 // { configured: false } when the variable is unset (default applies);
 // { configured: true, policy: null } when it is set but unusable (FAIL
@@ -53,10 +94,11 @@ function validPolicy(p) {
 }
 
 /**
- * The policy in force on `now` (ET calendar date), or null when none is
- * configured for that date.
+ * The policy in force on `now` (ET calendar date) FOR `county`, or null when
+ * none is configured for that date or its coverage of the county cannot be
+ * established.
  */
-function currentRestrictionPolicy(now = new Date(), { env = process.env } = {}) {
+function currentRestrictionPolicy(now = new Date(), { env = process.env, county = null } = {}) {
   const today = etDateString(now);
   const envPolicy = parseEnvPolicy(env.IRRIGATION_RESTRICTION_POLICY);
   const candidate = envPolicy.configured ? envPolicy.policy : DEFAULT_POLICY;
@@ -64,6 +106,7 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env } = {}) 
     logger.error('[irrigation-restrictions] restriction policy is malformed — weekly watering plan unavailable');
     return null;
   }
+  if (!coversCounty(candidate, county)) return null;
   if (candidate.effectiveFrom && today < candidate.effectiveFrom) return null;
   if (today > candidate.expiresOn) {
     logger.error(`[irrigation-restrictions] restriction policy "${candidate.label}" expired ${candidate.expiresOn} — set IRRIGATION_RESTRICTION_POLICY; weekly watering plan unavailable until then`);
@@ -76,7 +119,8 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env } = {}) 
     label: String(candidate.label || 'local watering restrictions'),
     source: candidate.source || null,
     hoursNote: candidate.hoursNote || null,
+    county,
   };
 }
 
-module.exports = { currentRestrictionPolicy, DEFAULT_POLICY, _private: { validPolicy, parseEnvPolicy } };
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, parseEnvPolicy, coversCounty, CITY_COUNTY } };

@@ -29,7 +29,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, recoverWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('./irrigation-week-plan');
+const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
@@ -335,6 +336,8 @@ function buildWeeklyEmailDecision({
   forecastRainInches = null,
   // GATE_IRRIGATION_WEEK_PLAN, read by the sweep and passed in so this
   // decision stays pure; `now` pins the restriction policy in tests.
+  // Jurisdiction for the restriction policy (resolveRestrictionCounty).
+  county = null,
   weekPlanEnabled = false,
   now = new Date(),
 } = {}) {
@@ -601,6 +604,7 @@ function buildWeeklyEmailDecision({
       systemType: irrigationSystemType,
       explicitInchesPerWeek: prefsInches,
       rainSensor: rainSensor === true || rainSensor === 't',
+      county,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -864,6 +868,8 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // (report-data.js buildLawnWaterContext); this sweep must agree with it
       // or we email "we don't have your watering schedule" to someone whose
       // own report displays that very number.
+      'c.city',
+      'tp.county as turf_county',
       'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
       'tp.irrigation_type as turf_irrigation_type',
       // LATEST non-null reading, and its value is passed through EVEN IF ZERO
@@ -976,6 +982,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       summary.skipped.capped += 1;
       continue;
     }
+    // Hoisted so the catch can discard a pre-send snapshot when the send throws.
+    let snapshotArgs = null;
     try {
       if (!isEmailLike(customer.email)) {
         summary.skipped.missing_email += 1;
@@ -1005,6 +1013,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
+        county: resolveRestrictionCounty({ county: customer.turf_county, city: customer.city }),
         now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
@@ -1029,7 +1038,6 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         continue;
       }
 
-      let snapshotArgs = null;
       if (decision.weekPlan) {
         const p = decision.weekPlan;
         summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
@@ -1080,9 +1088,10 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           // Pre-send insert may have failed transiently — one more try, then stamp.
           await persistWeekPlan(snapshotArgs);
           await markWeekPlanSent({ customerId: customer.id, weekEnding });
-        } else if (result.deduped) {
-          await recoverWeekPlan(snapshotArgs);
-        } else {
+        } else if (!result.deduped) {
+          // Blocked / not sent: this decision was never delivered. (A deduped
+          // rerun leaves whatever the original send stored — never a
+          // fabricated row from this run.)
           await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
         }
       }
@@ -1112,6 +1121,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         });
       }
     } catch (err) {
+      // A thrown send never delivered this decision — drop the unsent row so
+      // a retry's plan is the one both sent and stored.
+      if (snapshotArgs) await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
       summary.failed += 1;
       const reason = sanitizeFailureReason(err);
       logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);

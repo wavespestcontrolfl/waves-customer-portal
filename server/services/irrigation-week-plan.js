@@ -59,9 +59,10 @@ function decideWeekPlan({
   systemType = null,
   explicitInchesPerWeek = null,
   rainSensor = false,
+  county = null,
   now = new Date(),
 } = {}) {
-  const restriction = currentRestrictionPolicy(now);
+  const restriction = currentRestrictionPolicy(now, { county });
   const plan = buildWeekPlan({
     targetInchesPerWeek: advice?.recommendedInchesPerWeek ?? null,
     lastWeekAppliedInches: advice?.appliedInchesPerWeek ?? null,
@@ -90,13 +91,17 @@ function decideWeekPlan({
     headTypes: runtime.headTypes,
     explicitInchesPerWeek: explicitInchesPerWeek ?? null,
     rainSensor: rainSensor === true,
+    county,
   };
   return { plan, restriction, decisionInputs };
 }
 
 function restrictionNote(restriction) {
   if (!restriction) return '';
-  const days = restriction.maxDaysPerWeek;
+  const days = Number(restriction.maxDaysPerWeek);
+  if (days === 0) {
+    return `${restriction.label}: lawn irrigation is not permitted, through ${restriction.expiresOn}.`;
+  }
   const dayWord = days === 1 ? 'one day' : `${days} days`;
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
   return `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned day only.`;
@@ -233,15 +238,12 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  * decision the SENT email was built from.
  *   persistWeekPlan()      before the send: insert, first write wins
  *   markWeekPlanSent()     after the provider accepts: stamp sent_at
- *   discardUnsentWeekPlan() send failed/blocked: drop the undelivered row so
- *                          the next run's (possibly different) plan is the one
- *                          that gets sent AND stored
- *   recoverWeekPlan()      deduped rerun with NO row (the pre-send insert and
- *                          the post-send retry both failed last time): store
- *                          this run's decision flagged `recovered` — observed
- *                          inputs are identical week-over-week, only the
- *                          forecast can differ; better than a week with no plan
- * None of these throw — a snapshot problem must never block a send.
+ *   discardUnsentWeekPlan() send failed/blocked/threw: drop the undelivered
+ *                          row so the next run's (possibly different) plan is
+ *                          the one that gets sent AND stored
+ * A deduped rerun with no row (both inserts failed on the original run) is
+ * left absent — the report shows no plan rather than one that was never
+ * emailed. None of these throw — a snapshot problem must never block a send.
  */
 async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan, sentAt = null } = {}) {
   if (!customerId || !weekEnding || !plan) return false;
@@ -291,22 +293,6 @@ async function discardUnsentWeekPlan({ customerId, weekEnding } = {}) {
   }
 }
 
-async function hasWeekPlan({ customerId, weekEnding } = {}) {
-  try {
-    const row = await db('irrigation_week_plans').where({ customer_id: customerId, week_ending: weekEnding }).first('id');
-    return !!row;
-  } catch (err) {
-    logger.warn(`[irrigation-week-plan] exists check failed for ${customerId}/${weekEnding}: ${err.message}`);
-    return true; // unknown → do not attempt a recovery write
-  }
-}
-
-async function recoverWeekPlan(args = {}) {
-  if (await hasWeekPlan(args)) return false;
-  logger.warn(`[irrigation-week-plan] no snapshot for ${args.customerId}/${args.weekEnding} after a deduped send — storing this run's decision as recovered`);
-  return persistWeekPlan({ ...args, decisionInputs: { ...(args.decisionInputs || {}), recovered: true }, sentAt: new Date() });
-}
-
 function samePolicy(a, b) {
   if (!a && !b) return true;
   if (!a || !b) return false;
@@ -333,14 +319,15 @@ async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
     if (!row) return null;
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
     const restriction = parse(row.restriction_policy) || null;
-    if (!samePolicy(restriction, currentRestrictionPolicy(now))) return null;
+    const decisionInputs = parse(row.weather_inputs) || {};
+    if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null }))) return null;
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
       sentAt: row.sent_at,
       // The inputs the decision was made from — the report's "N minutes more
       // than you run now" compares against THESE, not today's prefs.
-      decisionInputs: parse(row.weather_inputs) || {},
+      decisionInputs,
       restriction,
       plan: parse(row.week_plan),
     };
@@ -357,7 +344,6 @@ module.exports = {
   persistWeekPlan,
   markWeekPlanSent,
   discardUnsentWeekPlan,
-  recoverWeekPlan,
   loadCurrentWeekPlan,
   _private: { fmtInches, restrictionNote, comparisonClause, samePolicy },
 };

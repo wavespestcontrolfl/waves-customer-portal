@@ -84,6 +84,8 @@ describe('renderWeekPlanEmail', () => {
     const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 0 } });
     expect(copy.week_plan).toContain("Lawn irrigation isn't permitted in your area right now");
     expect(copy.week_plan).not.toMatch(/permitted watering day|run one cycle|blue-gray/);
+    expect(copy.restriction_note).toBe('SWFWMD Modified Phase III water shortage order: lawn irrigation is not permitted, through 2026-10-01.');
+    expect(copy.restriction_note).not.toMatch(/assigned day/);
     const report = renderWeekPlanReport(plan);
     expect(report.title).toBe('This week: no lawn watering');
     expect(report.detail).not.toMatch(/permitted watering day|run one cycle/);
@@ -113,16 +115,23 @@ describe('renderWeekPlanReport', () => {
 describe('decideWeekPlan (server glue)', () => {
   test('feeds the advice engine\'s target/applied into the runtime and pins the policy by `now`', () => {
     const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6, referenceEt0InchesWeek: 1.6 });
-    const { plan, restriction } = decideWeekPlan({ advice, month: 8, forecastRainInches: 0.3, ...SPRAY, now: new Date('2026-08-28T12:00:00Z') });
+    const { plan, restriction, decisionInputs } = decideWeekPlan({ advice, month: 8, forecastRainInches: 0.3, ...SPRAY, county: 'Manatee', now: new Date('2026-08-28T12:00:00Z') });
     expect(restriction.maxDaysPerWeek).toBe(1);
     expect(plan.targetInches).toBe(advice.recommendedInchesPerWeek);
     expect(plan.carryoverInches).toBe(0.5);
     expect(plan.action).toBe('run');
+    expect(decisionInputs.county).toBe('Manatee');
+  });
+
+  test('county unknown → no policy → unavailable (fail closed)', () => {
+    const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 8, irrigationInchesPerWeek: 2, rainfallInches7d: 0.6 });
+    const { plan } = decideWeekPlan({ advice, month: 8, ...SPRAY, county: null, now: new Date('2026-08-28T12:00:00Z') });
+    expect(plan.action).toBe('unavailable');
   });
 
   test('after the order expires with nothing configured → unavailable', () => {
     const advice = buildIrrigationAdvice({ grassType: 'st_augustine', month: 10, irrigationInchesPerWeek: 1, rainfallInches7d: 0.2 });
-    const { plan, restriction } = decideWeekPlan({ advice, month: 10, ...SPRAY, now: new Date('2026-10-05T12:00:00Z') });
+    const { plan, restriction } = decideWeekPlan({ advice, month: 10, ...SPRAY, county: 'Manatee', now: new Date('2026-10-05T12:00:00Z') });
     expect(restriction).toBeNull();
     expect(plan.action).toBe('unavailable');
   });
@@ -136,10 +145,10 @@ describe('decideWeekPlan (server glue)', () => {
 
 describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
-  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, recoverWeekPlan } = require('../services/irrigation-week-plan');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
-  const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order' };
-  const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20 }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
+  const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', county: 'Manatee' };
+  const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
 
   function stubSelect(returned, capture = {}) {
     db.mockImplementation(() => ({
@@ -187,23 +196,5 @@ describe('snapshot lifecycle — exactness contract', () => {
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
     expect(calls.deleted).toBe(true);
     expect(calls.whereNull).toBe('sent_at');
-  });
-
-  test('recover: writes this run\'s decision (flagged) only when NO row exists', async () => {
-    const calls = { inserts: 0 };
-    let existing = { id: 'x' };
-    db.mockImplementation(() => ({
-      where() { return this; },
-      first: async () => existing,
-      insert(r) { calls.inserts += 1; calls.last = r; return this; },
-      onConflict() { return this; },
-      ignore: async () => {},
-    }));
-    expect(await recoverWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'run' }, decisionInputs: { runMinutes: 20 } })).toBe(false);
-    expect(calls.inserts).toBe(0);
-    existing = undefined;
-    expect(await recoverWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'run' }, decisionInputs: { runMinutes: 20 } })).toBe(true);
-    expect(JSON.parse(calls.last.weather_inputs)).toEqual({ runMinutes: 20, recovered: true });
-    expect(calls.last.sent_at).toBeInstanceOf(Date);
   });
 });

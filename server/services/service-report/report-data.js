@@ -48,7 +48,6 @@ const {
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { renderWeekPlanReport, loadCurrentWeekPlan } = require('../irrigation-week-plan');
-const { currentRestrictionPolicy } = require('../../config/irrigation-restrictions');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2039,9 +2038,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
     if (featureGates.isEnabled('irrigationWeekPlan')) {
+      // loadCurrentWeekPlan already returns null once the policy it was
+      // decided under is no longer in force, so its identity is the stamp.
       const snapshot = await loadCurrentWeekPlan(service.customer_id);
-      const policy = currentRestrictionPolicy();
-      irrigationStamp += `:plan=${snapshot?.planAsOf ? new Date(snapshot.planAsOf).toISOString() : 'live'}:${policy ? `${policy.maxDaysPerWeek}@${policy.expiresOn}` : 'nopolicy'}`;
+      irrigationStamp += `:plan=${snapshot?.sentAt ? new Date(snapshot.sentAt).toISOString() : 'none'}`;
     }
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
