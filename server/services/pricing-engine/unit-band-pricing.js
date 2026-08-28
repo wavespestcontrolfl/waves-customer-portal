@@ -112,7 +112,11 @@ function bandFrequencyForIntent(frequency) {
  * it's how a clarify reply "it's a 2 bedroom" reaches pricing). Never
  * derived from sqft, rent, or property type.
  */
-function callerStatedBedroomCount({ extraction, intent } = {}) {
+function callerStatedBedroomCount({ extraction, intent, override } = {}) {
+  // A clarify REPLY is the customer's newest statement and outranks what
+  // the call extraction or the composer captured earlier.
+  const fromReply = positiveInt(override);
+  if (fromReply !== null) return { count: fromReply, source: 'clarify_reply' };
   const fromExtraction = positiveInt(extraction?.property?.bedroom_count);
   if (fromExtraction !== null) return { count: fromExtraction, source: 'call_extraction' };
   const fromIntent = positiveInt(intent?.unit_bedroom_count);
@@ -352,7 +356,7 @@ function unitBandEligibility({ intent, unitScope, propertyFacts } = {}) {
  * ladder + its fallback-footprint review marker take over, exactly as
  * with the gate off.
  */
-async function resolveUnitBandPricing(db, { intent, unitScope, propertyFacts, extraction, asOf = new Date() } = {}) {
+async function resolveUnitBandPricing(db, { intent, unitScope, propertyFacts, extraction, bedroomCountOverride = null, asOf = new Date() } = {}) {
   if (!unitBandPricingEnabled()) return null;
   const verdict = unitBandEligibility({ intent, unitScope, propertyFacts });
   if (!verdict.eligible) return null;
@@ -360,7 +364,7 @@ async function resolveUnitBandPricing(db, { intent, unitScope, propertyFacts, ex
   for (const [key, k] of Object.entries(verdict.keys)) {
     if (!k.eligible) parked[key] = k.reason;
   }
-  const stated = callerStatedBedroomCount({ extraction, intent });
+  const stated = callerStatedBedroomCount({ extraction, intent, override: bedroomCountOverride });
   const base = {
     eligible: true,
     pricingBasis: PRICING_BASIS,

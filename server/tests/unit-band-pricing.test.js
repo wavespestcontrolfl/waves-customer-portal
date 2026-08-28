@@ -167,6 +167,10 @@ describe('band + frequency vocabulary', () => {
       .toEqual({ count: 0, source: 'composer_intent' });
     expect(callerStatedBedroomCount({ extraction: { property: { approximate_living_sqft: 900 } }, intent: {} }))
       .toEqual({ count: null, source: null });
+    // A clarify reply is the newest statement and outranks both.
+    expect(callerStatedBedroomCount({ extraction: extractionWithBedrooms(1), intent: { unit_bedroom_count: 1 }, override: 3 }))
+      .toEqual({ count: 3, source: 'clarify_reply' });
+    expect(callerStatedBedroomCount({ extraction: extractionWithBedrooms(1), override: null }).source).toBe('call_extraction');
   });
 });
 
@@ -276,6 +280,15 @@ describe('resolver (gate ON)', () => {
     expect(out.pest).toBeUndefined();
     expect(out.pricingBand).toBeNull();
     expect(db.calls).toEqual([]);
+  });
+  test('a clarify-reply override prices the band even when the call said something else', async () => {
+    const out = await resolve({
+      db: fakeDb(seedRows()), intent: unitIntent(), unitScope: unitScope(), propertyFacts: unitFacts(),
+      extraction: extractionWithBedrooms(1), bedroomCountOverride: 0,
+    });
+    expect(out.pricingBand).toBe('studio');
+    expect(out.bedroomSource).toBe('clarify_reply');
+    expect(out.pest.recurringPrice).toBe(79);
   });
   test('the composer intent supplies the count on the SMS-thread path (no extraction)', async () => {
     const out = await resolve({

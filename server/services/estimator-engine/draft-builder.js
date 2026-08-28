@@ -1051,6 +1051,19 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
   };
 
   const creationResult = await runSerialized(async (trx) => {
+    // Bedroom clarify reply (GATE_UNIT_BAND_PRICING lane): the reply
+    // RE-DRAFTS (SMS thread, or the original call for voice-origin drafts). The stale fallback-priced draft it
+    // answers is LOCKED here and excluded from the open-estimate listing,
+    // then archived only AFTER the replacement insert (same transaction)
+    // — a duplicate block or any other early return leaves it standing,
+    // never archived-without-successor (codex pre-push P0).
+    const supersedeEstimateId = context?.supersedeEstimateId || null;
+    const supersedeTarget = supersedeEstimateId
+      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId })
+      : null;
+    if (supersedeEstimateId && !supersedeTarget) {
+      logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
+    }
     // Call-scoped in-lock recheck on EVERY serialization path (codex P1,
     // PR #3304 r18): the phone-lock path used to skip it, so a stale and
     // a corrected composer with DIFFERENT lead addresses could both pass
@@ -1066,6 +1079,10 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
         // treating it as one would bounce the corrected rebuild as
         // duplicate_call_draft with no replacement ever produced.
         .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
+        .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'superseded_at', '') = ''")
+        // The draft this re-run supersedes carries the same call — it is
+        // the row being replaced, not a concurrent duplicate.
+        .modify((q) => { if (supersedeTarget) q.whereNot('id', supersedeTarget.id); })
         .first();
       if (existingForCall) {
         return {
@@ -1188,19 +1205,6 @@ async function createDraftEstimate({ intent, engineInput, engineResult, totals, 
     // it answers is retired HERE — same transaction, right before the
     // open-estimate listing — so the replacement passes the guard while a
     // red/skip outcome (no insert) leaves the original draft standing.
-    // Bedroom clarify reply (GATE_UNIT_BAND_PRICING lane): the reply
-    // RE-DRAFTS through the SMS thread. The stale fallback-priced draft it
-    // answers is LOCKED here and excluded from the open-estimate listing,
-    // then archived only AFTER the replacement insert (same transaction)
-    // — a duplicate block or any other early return leaves it standing,
-    // never archived-without-successor (codex pre-push P0).
-    const supersedeEstimateId = context?.supersedeEstimateId || null;
-    const supersedeTarget = supersedeEstimateId
-      ? await lockSupersededDraftInTx(trx, { estimateId: supersedeEstimateId })
-      : null;
-    if (supersedeEstimateId && !supersedeTarget) {
-      logger.info('[estimator-engine] supersede target no longer an unsent draft — left alone', { estimateId: supersedeEstimateId });
-    }
     const allOpen = [];
     const seenEstimateIds = new Set();
     const absorb = (rows) => {

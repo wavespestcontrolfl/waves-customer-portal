@@ -199,7 +199,7 @@ async function runThreadDraft({
   groundedCustomerId = null, groundedConflict = false, groundedScope = null,
   groundedMultiScope = false, groundedOvercap = false,
   groundedUnverifiableLocality = false,
-  supersedeEstimateId = null, supersedeReason = null,
+  supersedeEstimateId = null, supersedeReason = null, bedroomCountOverride = null,
 }) {
   const result = { phone: `…${digits.slice(-4)}`, lane: null, created: false, skipped: null };
   try {
@@ -240,6 +240,7 @@ async function runThreadDraft({
       context.supersedeEstimateId = supersedeEstimateId;
       context.supersedeReason = supersedeReason || null;
     }
+    if (bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
     return await runDraftPipeline({
       context,
       origin,
@@ -269,7 +270,7 @@ async function startSmsThreadDraft({
   scopeCheckOnly = false, precomputedTriage,
   // Clarify-reply re-draft: the unsent automated draft this thread draft
   // replaces (retired inside the dedupe transaction, only on a real insert).
-  supersedeEstimateId = null, supersedeReason = null,
+  supersedeEstimateId = null, supersedeReason = null, bedroomCountOverride = null,
 }) {
   const digits = last10(phone);
   const result = { phone: digits ? `…${digits.slice(-4)}` : null, started: false, skipped: null };
@@ -455,6 +456,7 @@ async function startSmsThreadDraft({
       groundedUnverifiableLocality: triage?.groundedUnverifiableLocality === true,
       supersedeEstimateId,
       supersedeReason,
+      bedroomCountOverride,
     })
       .catch((err) => {
         logger.error(`[estimator-sms] detached draft failed: ${err.message}`);

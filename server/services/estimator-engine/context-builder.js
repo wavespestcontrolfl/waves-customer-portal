@@ -426,6 +426,10 @@ async function existingDraftForCall(callLogId) {
       // engine rebuilds from the corrected context instead of returning
       // it (codex P0, PR #3304 r8).
       .whereRaw("estimate_data->'estimatorEngine'->>'linkage_invalidated_at' IS NULL")
+      // A draft SUPERSEDED by a clarify-reply re-draft was replaced by a
+      // row that carries this call too — the archived original no longer
+      // represents the call.
+      .whereRaw("estimate_data->'estimatorEngine'->>'superseded_at' IS NULL")
       .first();
   } catch (err) {
     logger.warn(`[estimator-engine] existing-draft check failed: ${err.message}`);

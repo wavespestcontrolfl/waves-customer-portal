@@ -1225,7 +1225,14 @@ async function strictExistingDraftForCall(callLogId) {
     .select('id', 'status', 'estimate_data');
 }
 
-async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null }) {
+async function maybeDraftEstimateForCall({
+  callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null,
+  // Clarify-reply re-draft for a VOICE-origin draft: re-run from the
+  // original call context (enriched extraction + transcript — the quote
+  // evidence lives there, not in the SMS thread) with the customer's
+  // answer applied; the stale draft is retired atomically on insert.
+  supersedeEstimateId = null, supersedeReason = null, bedroomCountOverride = null,
+}) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
   // This pass's ordering stamp: markers written after it began belong to
@@ -1240,6 +1247,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // generation is the arm that stays valid after that claim finalizes.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     if (context && ownerProcGeneration != null) context.ownerProcGeneration = ownerProcGeneration;
+    if (context && !context.error && supersedeEstimateId) {
+      context.supersedeEstimateId = String(supersedeEstimateId);
+      context.supersedeReason = supersedeReason || null;
+    }
+    if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {
       await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
@@ -1314,7 +1326,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
 
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
-      if (existing) {
+      // The draft a re-run supersedes IS the existing draft for this call —
+      // it is replaced inside the dedupe transaction, not returned as-is.
+      const supersedesExisting = existing && supersedeEstimateId
+        && String(existing.id) === String(supersedeEstimateId);
+      if (existing && !supersedesExisting) {
         // Stale-linkage reconciliation (codex P1, PR #3304) — shared with
         // the duplicate-guard exit below, where a corrected retry that
         // lost the insert race to a stale detached run lands instead. An
@@ -1771,6 +1787,8 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
           // Cross-property fence, same as the unit-scope model input: the
           // primary extraction's bedroom count describes the ORIGINAL unit.
           extraction: crossPropertyRegather ? null : context.extraction,
+          // A clarify reply's bedroom answer (voice re-run or SMS re-draft).
+          bedroomCountOverride: context.bedroomCountOverride ?? null,
         });
         if (unitBandPricing && propertyFacts.unitScope) {
           const priced = unitBandPricing.pest || unitBandPricing.oneTimePest;

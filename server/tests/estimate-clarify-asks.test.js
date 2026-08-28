@@ -64,6 +64,12 @@ jest.mock('../services/notification-service', () => ({
 
 const mockStartSmsThreadDraft = jest.fn();
 const mockSmsThreadDraftsEnabled = jest.fn();
+const mockMaybeDraftEstimateForCall = jest.fn();
+const mockEstimatorEngineEnabled = jest.fn(() => true);
+jest.mock('../services/estimator-engine', () => ({
+  estimatorEngineEnabled: (...a) => mockEstimatorEngineEnabled(...a),
+  maybeDraftEstimateForCall: (...a) => mockMaybeDraftEstimateForCall(...a),
+}));
 jest.mock('../services/estimator-engine/sms-thread', () => ({
   smsThreadDraftsEnabled: () => mockSmsThreadDraftsEnabled(),
   startSmsThreadDraft: (...args) => mockStartSmsThreadDraft(...args),
@@ -876,8 +882,43 @@ describe('bedroom_count ask (unit-band lane)', () => {
     // The re-draft names the fallback-priced draft it replaces, so the
     // dedupe transaction retires it and the replacement passes the guard.
     expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({
-      skipIntentGate: true, skipCooldown: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply',
+      skipIntentGate: true, skipCooldown: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 2,
     }));
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+  });
+
+  test('a VOICE-origin draft re-runs from its original call with the answer applied (the SMS thread has no quote evidence)', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+    };
+    // first() order: awaiting (unlocked), fresh (locked), then the estimate row.
+    mockState.firstQueue = [awaiting, awaiting, {
+      id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }),
+    }];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: 'one bedroom' });
+    expect(result.handled).toBe(true);
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith({
+      callLogId: 'call-9', quotePromised: true, supersedeEstimateId: 'est-1', supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: 1,
+    });
+    expect(mockStartSmsThreadDraft).not.toHaveBeenCalled();
+  });
+
+  test('an SMS-origin draft (estimator_engine.origin = sms_thread) re-drafts from the thread, not the call', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockStartSmsThreadDraft.mockResolvedValue({ started: true });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-2' }),
+    };
+    mockState.firstQueue = [awaiting, awaiting, {
+      id: 'est-2', estimate_data: JSON.stringify({ estimatorEngine: { origin: 'sms_thread', callLogId: null } }),
+    }];
+    await handleClarifyReply({ phone: '+19415550142', body: 'studio' });
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalled();
+    expect(mockStartSmsThreadDraft).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-2', bedroomCountOverride: 0 }));
   });
 
   test('an address reply (red-path ask, no linked draft) never asks the re-draft to supersede anything', async () => {

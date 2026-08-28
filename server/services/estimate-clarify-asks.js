@@ -308,6 +308,22 @@ async function parkClarifyAsk({
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // is the service answer, not part of the address — bounded vocabulary,
 // deterministic split. Returns { address, serviceTail }.
+// The call a VOICE-origin estimator draft was composed from, or null for
+// SMS-thread drafts / non-engine estimates / a missing row.
+async function voiceOriginCallLogId(estimateId) {
+  try {
+    const row = await db('estimates').where({ id: estimateId }).first('estimate_data');
+    if (!row) return null;
+    const data = typeof row.estimate_data === 'string' ? JSON.parse(row.estimate_data) : (row.estimate_data || {});
+    const engine = data?.estimatorEngine || {};
+    if (engine.origin && engine.origin !== 'call') return null;
+    return engine.callLogId ? String(engine.callLogId) : null;
+  } catch (err) {
+    logger.warn(`[estimate-clarify] draft origin lookup failed: ${err.message}`);
+    return null;
+  }
+}
+
 const SERVICE_TAIL_RE = /[,\s]+((?:quarterly\s+|monthly\s+|recurring\s+|one[-\s]?time\s+)?(?:pest|lawn|mosquito(?:es)?|termites?|bed\s?bugs?|fleas?|ticks?|rodents?|mice|rats?|ants?|roach(?:es)?|wasps?|spiders?)(?:\s+(?:control|care|service|treatment|program|removal))?)\s*$/i;
 function stripServiceTail(address) {
   let out = String(address || '').trim();
@@ -578,19 +594,39 @@ async function handleClarifyReply({ phone, body }) {
       const { smsThreadDraftsEnabled, startSmsThreadDraft } = require('./estimator-engine/sms-thread');
       // A bedroom answer re-prices the draft it was asked FOR: the
       // fallback-priced yellow draft linked on the ask is superseded by
-      // the re-draft (retired atomically with the replacement insert —
-      // a red/skip outcome leaves it standing). Address/service answers
-      // have no linked draft (red-path asks) and resume as before.
+      // a re-draft (retired atomically with the replacement insert — a
+      // red/skip outcome leaves it standing). A VOICE-origin draft re-runs
+      // from its original call (the quote evidence — enriched extraction
+      // + transcript — lives there; the SMS thread holds only the
+      // question and the answer, so its composer would skip); an
+      // SMS-origin draft re-drafts from the thread. Address/service
+      // answers have no linked draft (red-path asks) and resume as before.
       const supersedeEstimateId = recorded.includes('bedroom_count') && flags.estimate_id
         ? String(flags.estimate_id)
         : null;
-      if (smsThreadDraftsEnabled()) {
+      const voiceCallLogId = supersedeEstimateId ? await voiceOriginCallLogId(supersedeEstimateId) : null;
+      if (voiceCallLogId) {
+        const { estimatorEngineEnabled, maybeDraftEstimateForCall } = require('./estimator-engine');
+        if (estimatorEngineEnabled()) {
+          await maybeDraftEstimateForCall({
+            callLogId: voiceCallLogId,
+            quotePromised: true,
+            supersedeEstimateId,
+            supersedeReason: 'clarify_bedroom_reply',
+            bedroomCountOverride: bedroomCount,
+          });
+        } else {
+          logger.warn('[estimate-clarify] bedroom answer recorded but the estimator engine is gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
+        }
+      } else if (smsThreadDraftsEnabled()) {
         await startSmsThreadDraft({
           phone,
           triggerBody: body,
           skipIntentGate: true,
           skipCooldown: true,
-          ...(supersedeEstimateId ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply' } : {}),
+          ...(supersedeEstimateId
+            ? { supersedeEstimateId, supersedeReason: 'clarify_bedroom_reply', bedroomCountOverride: bedroomCount }
+            : {}),
         });
       } else if (supersedeEstimateId) {
         logger.warn('[estimate-clarify] bedroom answer recorded but SMS-thread drafts are gated off — the linked draft keeps its fallback price; re-price it from admin/estimates', { draftId: awaiting.id, estimateId: supersedeEstimateId });
