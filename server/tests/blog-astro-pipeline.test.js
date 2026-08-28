@@ -2309,6 +2309,11 @@ describe('Pages poll auto-merge per-tick cap', () => {
     const park = updates.find((u) => u.updates.publish_status === 'pending_review');
     expect(park).toBeDefined();
     expect(park.filters).toEqual(expect.arrayContaining([[{ id: 'post-tg', publish_status: 'publishing' }]]));
+    // Recoverable: publish_failed (not pr_open) is the state the admin Retry /
+    // publish-astro path may claim; the markers stay for cleanupStaleAstroPr.
+    expect(park.updates.astro_status).toBe('publish_failed');
+    expect(park.updates).not.toHaveProperty('astro_pr_number');
+    expect(park.updates).not.toHaveProperty('astro_branch_name');
   });
 
   test('a post stamped astro_requires_human_merge is parked for admin merge, never auto-merged (audit lane 4b)', async () => {

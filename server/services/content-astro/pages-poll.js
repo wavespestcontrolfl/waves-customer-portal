@@ -258,13 +258,17 @@ async function pollPost(post, { allowMerge = true } = {}) {
           // reload the corpus and fail again, and mergeAstro's failure stamp
           // bumps updated_at so the stale-publishing sweep would never park
           // it. Park the claim at pending_review (claim-guarded, same rule as
-          // the human-merge park above); the PR stays open, the reason is in
-          // astro_publish_error, and an admin edits or merges via merge-astro
-          // (which reruns the same check).
+          // the human-merge park above) AND stamp astro_status publish_failed
+          // (markers kept): pr_open would strand the row — /publish-astro
+          // rejects it and /merge-astro rechecks the unchanged branch — while
+          // publish_failed is the retryable state: the operator edits the
+          // row, and publishAstro closes the stale PR + branch
+          // (cleanupStaleAstroPr) before republishing. The reason is already
+          // in astro_publish_error from mergeAstro's catch.
           if (mergeErr.code === 'BLOG_TOPIC_TARGETING_BLOCKED') {
             await db('blog_posts').where({ id: post.id, publish_status: 'publishing' })
-              .update({ publish_status: 'pending_review', updated_at: new Date() });
-            logger.warn(`[pages-poll] auto-merge PARKED for ${post.slug || post.id} — topic-targeting gate no longer clear; claim moved to pending_review`);
+              .update({ publish_status: 'pending_review', astro_status: 'publish_failed', updated_at: new Date() });
+            logger.warn(`[pages-poll] auto-merge PARKED for ${post.slug || post.id} — topic-targeting gate no longer clear; claim moved to pending_review, row publish_failed (edit + republish)`);
             return { ok: true, url, topicTargetingBlocked: true };
           }
           // Codex left findings on the PR → try to auto-fix them so the post
