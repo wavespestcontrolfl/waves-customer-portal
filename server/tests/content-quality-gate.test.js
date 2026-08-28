@@ -18,6 +18,7 @@ const {
   checkTitleLengthBounds, checkMetaLengthBounds,
   checkPrimaryKeywordInTitle, checkNoDuplicateTitle,
   checkNoRawMarkdownTables,
+  checkBodySyntaxSupported,
 } = require('../services/content/content-quality-gate')._internals;
 
 // ── fixtures ────────────────────────────────────────────────────────
@@ -399,6 +400,11 @@ describe('supporting-blog: hub link / cities / faq / voice', () => {
     const rawTable = 'Intro.\n\n| Method | Cost |\n| --- | --- |\n| DIY | $10 |\n';
     expect(checkNoRawMarkdownTables({ body: rawTable }).ok).toBe(false);
     expect(checkNoRawMarkdownTables({ body: rawTable }).reason).toMatch(/ComparisonTable/);
+    // Owner ruling 2026-08-28: unsupported body syntax parks (weight-0 hard
+    // check), single-sourced with the completion gate.
+    expect(checkBodySyntaxSupported({ body: '<a href="/contact/">Get a Termite Estimate</a>' }).ok).toBe(false);
+    expect(checkBodySyntaxSupported({ body: '<a href="/contact/">x</a>' }).reason).toMatch(/^unsupported_body_syntax:raw_html_anchor/);
+    expect(checkBodySyntaxSupported({ body: 'Plain [Get a Termite Estimate](/contact/) text.' }).ok).toBe(true);
     // Aligned/colon variants of the delimiter row still match.
     expect(checkNoRawMarkdownTables({ body: '| A | B |\n|:---|---:|\n| 1 | 2 |' }).ok).toBe(false);
     // GFM tables WITHOUT outer pipes are still tables.

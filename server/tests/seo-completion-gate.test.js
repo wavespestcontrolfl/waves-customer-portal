@@ -1444,6 +1444,46 @@ describe('seo-completion-gate', () => {
     });
     expect(wrappedDef.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
 
+    // Fail-closed park: a body outside the writer's plain Markdown subset
+    // raises P1_UNSUPPORTED_BODY_SYNTAX (parks) regardless of what the
+    // scanners make of it; a plain body never does.
+    for (const body of [
+      '<div hidden>[Get a Termite Estimate](/contact/)</div> x.',
+      '[Get a `Termite` Estimate](/contact/) x.',
+      '[Get a Termite Estimate](</contact/>"title") x.',
+      'Intro.\r\n\r\n[Get a Termite Estimate](/contact/) x.',
+      '<a href="/contact/"><span hidden>Get a Termite Estimate</span>Click here</a> x.',
+    ]) {
+      const parked = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(parked.findings.some((f) => f.code === 'P1_UNSUPPORTED_BODY_SYNTAX')).toBe(true);
+    }
+    const plainBody = SeoCompletionGate.evaluate({
+      draft: baseDraft({ body: 'Intro.\n\n[Get My Free Termite Estimate](/contact/) today.\n\n<ComparisonTable columns={["A"]} rows={[{ "label": "hidden nest", "values": ["x"] }]} />' }),
+      brief: baseBrief({ service: 'termite-control' }),
+      shadowMode: true,
+    });
+    expect(plainBody.findings.some((f) => f.code === 'P1_UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+
+    // Ask-led estimate CTAs, and CTA modifiers between the keyword and the
+    // service preposition ("Request a Quote Today for Termite Control").
+    for (const body of [
+      '[Ask Us for a Termite Estimate](/contact/) x.',
+      '[Request a Quote Today for Termite Control](/contact/) x.',
+      '[Get Your Estimate Now for Termite Control](/contact/) x.',
+    ]) {
+      const ok = SeoCompletionGate.evaluate({
+        draft: baseDraft({ body }),
+        brief: baseBrief({ service: 'termite-control' }),
+        shadowMode: true,
+      });
+      expect(ok.findings.some((f) => f.code === 'P1_MISSING_CONVERSION_CTA')).toBe(false);
+      expect(ok.findings.some((f) => f.code === 'P1_FORBIDDEN_CTA_WORDING')).toBe(false);
+    }
+
     // Contact-led anchors are actionable CTAs — the same verb set the
     // service-page request-led classifier uses.
     for (const body of [

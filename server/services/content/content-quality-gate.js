@@ -105,6 +105,9 @@ const HARD_CHECKS = [
   // lane must honor it (supporting-blog, city-service, customer-question,
   // refresh); bodyless lanes (metadata) pass trivially on an empty body.
   { name: 'no_raw_markdown_tables', weight: 0, evaluate: checkNoRawMarkdownTables },
+  // Owner ruling 2026-08-28: bodies outside the writer's plain Markdown
+  // subset park for human review instead of being parsed (fail-closed).
+  { name: 'body_syntax_supported', weight: 0, evaluate: checkBodySyntaxSupported },
 ];
 
 const PAGE_TYPE_CHECKS = {
@@ -1035,6 +1038,16 @@ function checkNoRawMarkdownTables(draft, _brief, context = {}) {
   return { ok: false, reason: 'raw_markdown_table_in_body_use_ComparisonTable' };
 }
 
+// Fail-closed park for unsupported body syntax — single-source predicate
+// in content-guardrails (unsupportedBodySyntax); the completion gate raises
+// the matching P1 so both enforcement points agree.
+function checkBodySyntaxSupported(draft) {
+  const { unsupportedBodySyntax } = require('./content-guardrails');
+  const reasons = unsupportedBodySyntax(draft.body);
+  if (!reasons.length) return { ok: true };
+  return { ok: false, reason: `unsupported_body_syntax:${reasons.join(',')}` };
+}
+
 function checkVoiceMatch(draft) {
   const body = String(draft.body || '').toLowerCase();
   // Lightweight voice signals from the canonical waves_default voice
@@ -1227,4 +1240,5 @@ module.exports._internals = {
   checkMetaPhoneTokenPresent, checkCityServiceMetaPhone, checkBlogMetaContract,
   checkBlogMetaSoftCta, checkAuthoredMetaLength,
   checkNoRawMarkdownTables,
+  checkBodySyntaxSupported,
 };

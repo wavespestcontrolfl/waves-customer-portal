@@ -35,6 +35,7 @@ const P1_CODES = new Set([
   'P1_MISSING_ARTICLE_SCHEMA',
   'P1_MISSING_SERVICE_LINK',
   'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC',
+  'P1_UNSUPPORTED_BODY_SYNTAX',
   'P1_MISSING_CONVERSION_CTA',
   'P1_FORBIDDEN_CTA_WORDING',
   'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ',
@@ -121,6 +122,18 @@ function evaluate(input = {}) {
   }
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
     findings.push(finding('P1', 'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC', 'City-focused blog draft is missing a city page link in the body.', 'Add the matching local service page link.'));
+  }
+  // Fail-closed PARK (owner ruling 2026-08-28): the link/CTA scanners are
+  // trusted only on the plain Markdown subset the writer emits. Any other
+  // form (raw HTML anchors/tables, hidden or styled markup, reference-style
+  // or wrapped links, titles, escapes, CRLF, …) parks the draft for a human
+  // instead of being parsed — see content-guardrails.unsupportedBodySyntax.
+  {
+    const g = require('./content-guardrails');
+    const unsupported = typeof g.unsupportedBodySyntax === 'function' ? g.unsupportedBodySyntax(body) : [];
+    if (unsupported.length) {
+      findings.push(finding('P1', 'P1_UNSUPPORTED_BODY_SYNTAX', `Body uses Markdown/HTML syntax outside the supported writer subset (${unsupported.join(', ')}) — parked for human review.`, 'Rewrite the body with plain Markdown: one-line inline links [text](/path/), no raw HTML anchors/tables, no hidden or styled markup, no reference-style links; use ComparisonTable for tabular data.'));
+    }
   }
   // Judged on the RENDERED link set (inline + reference-style + HTML anchors)
   // — the contract's inline-only parser must not park a compliant
@@ -267,7 +280,7 @@ function hasIncludedLinkReason(contract, reason) {
 // Request-action verbs, shared by the coordinated-clause classifier and
 // the forbidden inspection-anchor gate (single source — partial verb lists
 // drifted apart across rounds).
-const REQUEST_VERB_SOURCE = 'request|schedule|book|get|arrange|order|buy|start|claim|reserve|secure';
+const REQUEST_VERB_SOURCE = 'request|ask|schedule|book|get|arrange|order|buy|start|claim|reserve|secure';
 
 // Which service a CTA anchor names, if any — used to reject a wrong-service
 // CTA ("Get a Lawn Care Quote" on a termite post, "Get a Cockroach Quote"
@@ -882,7 +895,9 @@ function conversionCtaLinks(body) {
       // Property-context nouns after a determiner/possessive ("for your
       // lawn", "on the trees") describe WHERE, not a service, so the
       // place-shaped services (lawn, tree-shrub) are dropped in that form.
-      const after = anchor.slice(end).match(/^\s+(?:for|on|to|against)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
+      // CTA modifiers may sit between the keyword and the preposition
+      // ("Request a Quote Today for Termite Control").
+      const after = anchor.slice(end).match(/^(?:\s+(?:today|now|online|fast|free|here))*\s+(?:for|on|to|against)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
       if (after) {
         const phrase = after[1];
         // Place-shaped when a determiner sits directly before the place

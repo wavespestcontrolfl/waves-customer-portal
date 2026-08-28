@@ -2248,7 +2248,10 @@ function extractRawMarkdownTables(text) {
   }));
   const htmlTable = /<table\b[\s\S]*?<\/table\s*>/gi;
   let hm;
-  while ((hm = htmlTable.exec(attrMasked)) !== null) tables.push(hm[0].replace(/\s+/g, ' ').trim());
+  // The captured block is the UNMASKED text (attribute values included)
+  // so the refresh grandfather compares real content — a legacy table
+  // whose colspan changed is a different table.
+  while ((hm = htmlTable.exec(attrMasked)) !== null) tables.push(blanked.slice(hm.index, hm.index + hm[0].length).replace(/\s+/g, ' ').trim());
   for (let i = 1; i < lines.length; i += 1) {
     // Header = a pipe row; GFM allows EMPTY header cells ("| | |"), so no
     // visible-text requirement — the count match below is the signature.
@@ -2293,6 +2296,60 @@ function extractRawMarkdownTables(text) {
     i = end;
   }
   return tables;
+}
+
+// ---------------------------------------------------------------------------
+// UNSUPPORTED BODY SYNTAX — fail-closed park (owner ruling 2026-08-28).
+// The link/table/CTA scanners above are written for the PLAIN subset the
+// writer emits: CommonMark paragraphs, headings, lists, simple blockquotes,
+// inline links `[text](/path/)` on one line, and MDX components with
+// literal props. Every other Markdown/HTML/MDX form — hand-written HTML
+// anchors and tables, hidden or styled markup, reference-style links,
+// wrapped link syntax, titles, autolinks, escapes, entities in
+// destinations, CRLF endings, nested quotes, code spans in labels — is a
+// syntax the writer never produces and a corner a static scanner can be
+// tricked through. Rather than parse those precisely, a body that carries
+// ANY of them PARKS for human review: the autonomous lanes lose nothing
+// (writer output is plain) and the scanners only need to be right on the
+// plain subset. Detection is deliberately over-broad — a false park costs
+// one review, a missed form costs a published post without its CTA.
+// Attribute detection is QUOTE-AWARE: the word "hidden" inside a
+// component prop string ("…hidden ground nest…") is prose, not markup.
+const UNSUPPORTED_BODY_SYNTAX = [
+  ['cr_line_endings', /\r/],
+  ['html_comment', /<!--/],
+  ['raw_html_anchor', /<a(?:[\s/>]|$)/im],
+  ['raw_html_table', /<table(?:[\s/>]|$)/im],
+  ['unsupported_html_container', /<(?:template|script|style|noscript|datalist|dialog|details|pre|iframe|object|embed|form|input|button|textarea|select|svg|math)(?:[\s/>]|$)/im],
+  ['reference_link_definition', /^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?\[(?:\\.|[^\]\\\n])*\]:/m],
+  ['reference_link', /\]\s*\[/],
+  ['wrapped_link_syntax', /\[[^\]]*\n[^\]]*\]\(|\]\([^)]*\n/],
+  ['angle_bracket_destination', /\]\(\s*</],
+  ['link_title', /\]\([^)\s]+\s+["'(]/],
+  ['autolink', /<https?:\/\/[^>\s]+>/i],
+  ['backslash_escape', /\\[\[\]()|!<>`]/],
+  ['entity_or_encoded_destination', /\]\([^)]*(?:&|%|\.\.)/],
+  ['jsx_href_expression', /href\s*=\s*\{/],
+  ['template_literal_prop', /=\s*\{`/],
+  ['nested_blockquote', /^ {0,3}>[ \t]*>/m],
+  ['code_span_in_link_label', /\[[^\]]*`[^\]]*\]\(/],
+];
+const VISIBILITY_ATTR_RE = /\s(?:hidden|aria-hidden|style|class|className)(?:\s*=|\s|\/?>|$)/i;
+function unsupportedBodySyntax(body) {
+  const text = String(body || '');
+  const reasons = [];
+  for (const [name, re] of UNSUPPORTED_BODY_SYNTAX) if (re.test(text)) reasons.push(name);
+  // Lowercase (raw HTML) tags carrying a visibility-affecting attribute.
+  // Quoted / template-literal attribute VALUES are blanked first so their
+  // text never reads as an attribute name; MDX components (uppercase) are
+  // the writer contract and validated by their own gates.
+  const tagScan = /<\/?[a-z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}|[^>"'{])*>/g;
+  let tm;
+  while ((tm = tagScan.exec(text)) !== null) {
+    const bare = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}|\{[^}]*\}/g, '""');
+    if (VISIBILITY_ATTR_RE.test(bare)) { reasons.push('hidden_or_styled_markup'); break; }
+  }
+  return reasons;
 }
 
 function hasRawMarkdownTable(text) {
@@ -4514,6 +4571,8 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  // fail-closed park for bodies outside the writer's plain Markdown subset
+  unsupportedBodySyntax,
   // entity decoder (fail-closed, sentinel for control chars) — consumed by
   // seo-completion-gate so CTA anchors are classified as RENDERED text.
   decodeEntitiesForScan,

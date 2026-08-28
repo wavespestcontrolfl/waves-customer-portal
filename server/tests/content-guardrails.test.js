@@ -2288,6 +2288,53 @@ describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
     expect(guardrails.hasRawMarkdownTable('<span title={`<table><tr><td>x</td></tr></table>`}>x</span>')).toBe(false);
     expect(guardrails.hasRawMarkdownTable('<table title="</table>"><tr><td>x</td></tr></table>')).toBe(true);
     expect(guardrails.extractRawMarkdownTables('<table title="</table>"><tr><td>x</td></tr></table>')[0]).toContain('<td>x</td>');
+    // The grandfather compares REAL content — a legacy table whose
+    // attributes changed is a different table.
+    expect(guardrails.hasUnpreservedRawTable('<table><tr><td colspan="3">x</td></tr></table>', '<table><tr><td colspan="2">x</td></tr></table>')).toBe(true);
+    expect(guardrails.hasUnpreservedRawTable('<table><tr><td colspan="2">x</td></tr></table>', '<table><tr><td colspan="2">x</td></tr></table>')).toBe(false);
+  });
+
+  test('unsupportedBodySyntax parks every form outside the writer subset and passes plain bodies', () => {
+    const plain = [
+      '## Heading\n\nA paragraph with a [Get My Free Termite Estimate](/contact/) link.\n\n- item one\n- item two\n\n> A quoted line.',
+      '<ComparisonTable columns={["A", "B"]} rows={[{ "label": "Yellowjacket — hidden ground nest", "values": ["x", "y"] }]} caption="Nests are hidden; style matters." />',
+      '<PestEvidenceGrid title="Spot it" items={[{"label":"Hidden nest","note":"class of wasp with style"}]} />',
+      'Call **(941) 297-5749** today. Prices like $199 & up.',
+      '![Termite damage](/images/blog/termite/a.webp)',
+    ];
+    for (const body of plain) expect(guardrails.unsupportedBodySyntax(body)).toEqual([]);
+    const cases = [
+      ['Line one\r\nLine two', 'cr_line_endings'],
+      ['<!-- note --> text', 'html_comment'],
+      ['<a href="/contact/">Get a Termite Estimate</a>', 'raw_html_anchor'],
+      ['<table><tr><td>x</td></tr></table>', 'raw_html_table'],
+      ['<details open><summary>x</summary></details>', 'unsupported_html_container'],
+      ['<pre>x</pre>', 'unsupported_html_container'],
+      ['[cta]: /contact/\n\n[Get a Termite Estimate][cta]', 'reference_link_definition'],
+      ['- [cta]: /contact/', 'reference_link_definition'],
+      ['[Get a Termite Estimate][cta]', 'reference_link'],
+      ['[Get a Termite\nEstimate](/contact/)', 'wrapped_link_syntax'],
+      ['[Get a Termite Estimate](\n/contact/)', 'wrapped_link_syntax'],
+      ['[Get a Termite Estimate](</contact/>)', 'angle_bracket_destination'],
+      ['[Get a Termite Estimate](/contact/ "Book now")', 'link_title'],
+      ['<https://www.wavespestcontrol.com/contact/>', 'autolink'],
+      ['\\[not a link](/contact/)', 'backslash_escape'],
+      ['[Get a Termite Estimate](/&#99;ontact/)', 'entity_or_encoded_destination'],
+      ['[Get a Termite Estimate](/x/../contact/)', 'entity_or_encoded_destination'],
+      ['<a href={"/contact/"}>x</a>', 'jsx_href_expression'],
+      ['<span title={`x`}>x</span>', 'template_literal_prop'],
+      ['> > nested', 'nested_blockquote'],
+      ['[Get a `Termite` Estimate](/contact/)', 'code_span_in_link_label'],
+      ['<span hidden>Get a Termite Estimate</span>', 'hidden_or_styled_markup'],
+      ['<div aria-hidden="true">x</div>', 'hidden_or_styled_markup'],
+      ['<span style="display:none">x</span>', 'hidden_or_styled_markup'],
+      ['<span class="cta">x</span>', 'hidden_or_styled_markup'],
+      ['<div className="x">x</div>', 'hidden_or_styled_markup'],
+    ];
+    for (const [body, reason] of cases) expect(guardrails.unsupportedBodySyntax(body)).toContain(reason);
+    // Attribute detection is quote-aware: the word inside a quoted value
+    // is not an attribute.
+    expect(guardrails.unsupportedBodySyntax('<span title="hidden style class">x</span>')).toEqual([]);
     // 4 spaces before ">" is indented code, not a live blockquote table.
     expect(guardrails.hasRawMarkdownTable('Example:\n\n    > | A | B |\n    > | --- | --- |\n')).toBe(false);
     // A backtick "fence" whose info string contains a backtick is not a fence.
