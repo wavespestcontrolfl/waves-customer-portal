@@ -351,6 +351,11 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       expect(out).toMatch(/NOT queued yet — still missing: last_name, email, address_line1/);
       expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true })); // call stays open for the retry
+      expect(out).toMatch(/If the caller declines to give it[\s\S]*WITHOUT estimate_requested/);
+      // the caller declines ⇒ a capture WITHOUT the flag clears the hold so the call can end
+      markCaptured.mockClear();
+      await executeTool('capture_lead', { call_summary: 'price? declined email' }, { from: '+19415551234', callSid: 'CA-est6', markCaptured });
+      expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: false }));
       expect(out).toMatch(/Do NOT promise a written estimate yet/);
       expect(out).not.toMatch(/IS on the office queue/);
       // a NEW lead is not an estimate artifact either when the capture is incomplete

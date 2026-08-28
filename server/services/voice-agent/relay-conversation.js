@@ -105,7 +105,8 @@ const PRICE_LINE_NO_CONTEXT =
   + ' request is queued may you tell them a written estimate will be sent (the office turns these'
   + ' around quickly during business hours; you cannot see the clock on this call, so never say'
   + ' whether the office is open now or promise a delivery time). If the tool says it could not be'
-  + ' queued, say a team member will follow up — nothing stronger.';
+  + ' queued, or the caller declines to give a missing detail, call capture_lead again WITHOUT'
+  + ' estimate_requested, say a team member will follow up — nothing stronger — and end normally.';
 
 const SYSTEM_PROMPT = [
   // The approved company name is "Waves Pest Control" — never an alternate
@@ -169,7 +170,9 @@ const PRICE_LINE_CONTEXT = [
   '  estimate_requested: true. Only if the tool result says the request is queued may you promise',
   '  it: during office hours that is usually about 15 minutes; if CLOCK DATA says the office is',
   '  closed, say it goes out when the office opens and follow the callback rules. If the tool says',
-  '  it could not be queued, do not promise an estimate — say a team member will follow up.',
+  '  it could not be queued, or the caller declines to give a missing detail, call capture_lead',
+  '  again WITHOUT estimate_requested, do not promise an estimate — say a team member will follow',
+  '  up — and end normally.',
 ].join('\n');
 
 function agentDisplayName() {

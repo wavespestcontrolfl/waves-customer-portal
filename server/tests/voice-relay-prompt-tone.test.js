@@ -43,7 +43,8 @@ test('pricing fallback (gate on): the same capture when get_pricing cannot retur
   expect(ctx).toMatch(/capture_lead with\s+estimate_requested: true/);
   expect(ctx).toMatch(/do not\s+promise first/);
   expect(ctx.indexOf('estimate_requested: true')).toBeLessThan(ctx.indexOf('usually about 15 minutes'));
-  expect(ctx).toMatch(/could not be queued, do not promise an estimate/);
+  expect(ctx).toMatch(/declines to give a missing detail, call capture_lead\s+again WITHOUT estimate_requested/);
+  expect(PRICE_LINE_NO_CONTEXT).toMatch(/caller declines to give a missing detail, call capture_lead again WITHOUT\s+estimate_requested/);
   expect(PRICE_LINE_NO_CONTEXT).toMatch(/capture_lead with estimate_requested: true/);
 });
 

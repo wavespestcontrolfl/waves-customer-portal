@@ -1349,7 +1349,9 @@ async function executeTool(name, input = {}, ctx = {}) {
           ? (estimateMissing.length
             ? ` IMPORTANT: the estimate request is NOT queued yet — still missing: ${estimateMissing.join(', ')}. `
               + 'Do NOT promise a written estimate yet; ask for what is missing and call capture_lead again with '
-              + 'estimate_requested: true.'
+              + 'estimate_requested: true. If the caller declines to give it, respect that: call capture_lead again '
+              + 'WITHOUT estimate_requested (the estimate is dropped), tell them a Waves team member will follow up, '
+              + 'and end the call normally.'
             : ' IMPORTANT: the estimate request could NOT be queued — do NOT promise a written estimate. Say a '
               + 'Waves team member will follow up, nothing stronger.')
           : '');
