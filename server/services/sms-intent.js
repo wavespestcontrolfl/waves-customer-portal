@@ -97,6 +97,38 @@ const COURTESY_WITH_NAME_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\
 const ACK_EMOJI_RE = /(?:[\u{1F44D}\u{1F44C}\u{1F64F}\u{1F44F}\u{1F64C}\u{1F91D}\u{1F4AF}\u{1FAF6}\u{1F60A}\u{1F642}\u{1F600}\u{1F601}\u{1F603}\u{1F604}\u{1F917}\u{1F970}\u{1F60D}\u{1F618}\u{1F44B}\u{2705}\u{2714}\u{2764}\u{1F9E1}\u{1F49B}\u{1F49A}\u{1F499}\u{1F49C}\u{1F5A4}\u{1F90D}\u{2665}\u{263A}\u{2728}\u{1F389}\u{1F44A}\u{1F498}\u{1F495}\u{1F496}\u{1F497}\u{1F49E}]\ufe0f?(?:\p{Emoji_Modifier}|\u200d\p{Extended_Pictographic}\ufe0f?)*)+/gu;
 const COURTESY_MAX_CHARS = 60;
 
+// Reaction SENTIMENT: only explicitly affirmative tapbacks can be quiet.
+// "Disliked …", "Questioned …", "Laughed at …" and non-acknowledgement emoji
+// (❓ 🚨) express something and stay loud; removals are undo events (quiet).
+const AFFIRMATIVE_SMS_REACTION_RE = new RegExp(`^(?:liked|loved)\\s+${SMS_REACTION_TARGET_RE}$`, 'i');
+const ACK_EMOJI_SMS_REACTION_RE = new RegExp(`^reacted\\s+(${EMOJI_SEQ_RE})\\s+to\\s+${SMS_REACTION_TARGET_RE}$`, 'iu');
+function isAffirmativeSmsReaction(body) {
+  const text = String(body || '').trim();
+  if (!text) return false;
+  if (AFFIRMATIVE_SMS_REACTION_RE.test(text) || REMOVED_SMS_REACTION_RE.test(text) || REMOVED_EMOJI_SMS_REACTION_RE.test(text)) return true;
+  const m = ACK_EMOJI_SMS_REACTION_RE.exec(text);
+  if (!m) return false;
+  return m[1].replace(ACK_EMOJI_RE, '').replace(/[\ufe0f\u200d]/gu, '').length === 0;
+}
+
+// Does the OUTBOUND a tapback quotes ask a question / give a reply directive?
+// The quoted target is authoritative (a later non-question outbound must not
+// mask it). Unquoted targets ("an image", "a photo") ask nothing.
+const ASKS_RE = /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i;
+function reactionTargetAsksQuestion(body) {
+  const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
+  if (!m) return false;
+  return ASKS_RE.test(m[1]);
+}
+
+/**
+ * A tapback that needs nobody's attention: explicitly affirmative (or an
+ * undo) AND its quoted target asked nothing.
+ */
+function isQuietSmsReaction(body) {
+  return isSmsReaction(body) && isAffirmativeSmsReaction(body) && !reactionTargetAsksQuestion(body);
+}
+
 /**
  * True when the message is a pure conversation closer with nothing to answer.
  *
@@ -323,4 +355,4 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-module.exports = { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent };
+module.exports = { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isAffirmativeSmsReaction, reactionTargetAsksQuestion, isCourtesyOnly, hasRescheduleOrAwayIntent };

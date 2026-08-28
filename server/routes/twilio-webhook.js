@@ -12,7 +12,7 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -252,12 +252,17 @@ router.post('/sms', async (req, res) => {
     if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
       courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
     }
-    // A tapback on a question we asked ("Reacted 👍 to \"Does 9am work?\"") is
-    // the ANSWER, not a closer. The tapback QUOTES its target, so the target
-    // itself is inspected (not merely our latest outbound — hook P1). Loud
-    // reactions take a dedicated path below: persisted unread + bell/push,
-    // never the business automations (reschedule, lead intake, estimator).
-    const quietReaction = smsReaction && !reactionTargetAsksQuestion(Body);
+    // Quiet tapback = explicitly affirmative (Liked/Loved/👍/undo) AND its
+    // quoted target asked nothing. "Reacted 👍 to \"Does 9am work?\"" is the
+    // ANSWER; "Disliked …" / "Questioned …" / ❓ express concern — all loud
+    // (hook P1 ×2). Loud reactions take a dedicated path below: persisted
+    // unread + the same guarded bell a text gets, never the business
+    // automations (reschedule, lead intake, estimator).
+    const quietReaction = smsReaction && isQuietSmsReaction(Body);
+    // Hoisted from the AI-reply section: the reaction path below needs it too.
+    const AI_ASSISTANT_NUMBER = '+18559260203';
+    const toClean = (To || '').replace(/\D/g, '');
+    const isAiNumber = toClean === '18559260203' || toClean === '8559260203' || To === AI_ASSISTANT_NUMBER;
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
@@ -642,20 +647,16 @@ router.post('/sms', async (req, res) => {
       }).catch(() => {});
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
-      if (!quietReaction && customer && (numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking')) {
-        // Loud reaction = an answer to a question we asked. Ring the same
-        // thread bell a text would, then stop — no reschedule/lead/estimator
-        // automation ever sees a tapback (hook P1).
+      if (!quietReaction && customer && !isAiNumber && (numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking')) {
+        // Loud reaction (answer to a question, or a dislike/question mark):
+        // ring the same GUARDED thread bell a text gets (pre-check, beforePush,
+        // SID-scoped post-check), then stop — no reschedule/lead/estimator
+        // automation ever sees a tapback. AI toll-free line excluded (hook P1).
         try {
-          const { triggerNotification } = require('../services/notification-triggers');
-          await triggerNotification('sms_reply', {
-            fromName: `${customer.first_name} ${customer.last_name}`,
-            fromPhone: From,
-            message: Body,
-            threadId: customer.id,
-            twilioSid: MessageSid,
-          });
-        } catch (e) { logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`); }
+          await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
+        } catch (e) {
+          if (!e.alreadyRead) logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+        }
       }
       return res.type('text/xml').send('<Response></Response>');
     }
@@ -1008,36 +1009,7 @@ router.post('/sms', async (req, res) => {
     let knownInboundNotified = rescheduleFlagged;
     if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
-        const { triggerNotification } = require('../services/notification-triggers');
-        // Re-check right before writing the bell: if the thread was opened
-        // (message already read) in the window since the dual-write above,
-        // a bell now would outlive its message (hook P1). Fail open — an
-        // unknown state still rings.
-        const unified = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read').catch(() => null);
-        if (unified?.is_read === true) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
-                const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
-          .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
-        const stats = await triggerNotification('sms_reply', {
-          fromName: `${customer.first_name} ${customer.last_name}`,
-          fromPhone: From,
-          message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
-          threadId: customer.id,
-          twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
-        }, {
-          // Re-checked right before the push leaves (codex P2): a thread
-          // opened while the bell was being written must not also buzz the
-          // phone with a stale badge.
-          beforePush: unifiedStillUnread,
-        });
-        // Post-check closes the remaining window (hook P1): if the thread was
-        // read while the trigger ran, the bell it just wrote would outlive
-        // its message — retire exactly that bell (matched on the message SID,
-        // never every bell of the customer). Fail open on any lookup error.
-        try {
-          if (!(await unifiedStillUnread())) {
-            await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
-          }
-        } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
@@ -1108,9 +1080,6 @@ router.post('/sms', async (req, res) => {
 
     // WAVES AI ASSISTANT — route through conversational AI engine
     // Only active on the dedicated AI assistant number
-    const AI_ASSISTANT_NUMBER = '+18559260203';
-    const toClean = (To || '').replace(/\D/g, '');
-    const isAiNumber = toClean === '18559260203' || toClean === '8559260203' || To === AI_ASSISTANT_NUMBER;
 
     let aiAutoReplyOn = false;
     if (isAiNumber) {
@@ -1829,6 +1798,32 @@ router.post('/status', async (req, res) => {
  * this phone (last 24h) end on a question? Internal alerts are excluded. Fail CLOSED: any error or no
  * recent outbound → true, so a bare "👍" stays loud when in doubt.
  */
+/**
+ * The ONE way an inbound rings the admin thread bell/push, with the
+ * thread-read race guards: skip if the unified message is already read
+ * (throws { alreadyRead }), re-check right before the push leaves, and
+ * retire the SID-scoped bell if the thread was read while it was written.
+ */
+async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
+  const { triggerNotification } = require('../services/notification-triggers');
+  const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+    .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
+  if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
+  const stats = await triggerNotification('sms_reply', {
+    fromName: `${customer.first_name} ${customer.last_name}`,
+    fromPhone: From,
+    message,
+    threadId: customer.id,
+    twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
+  }, { beforePush: unifiedStillUnread });
+  try {
+    if (!(await unifiedStillUnread())) {
+      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
+    }
+  } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
+  return stats;
+}
+
 async function lastOutboundAskedQuestion(toPhone, ourNumber) {
   try {
     // Scoped to the Waves number the customer replied on: a question asked
@@ -1848,17 +1843,6 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
     return true;
   }
-}
-
-/**
- * Does the OUTBOUND a tapback quotes ask a question / give a reply directive?
- * The quoted target is authoritative (a later non-question outbound must not
- * mask it). Unquoted targets ("an image", "a photo") ask nothing.
- */
-function reactionTargetAsksQuestion(body) {
-  const m = /[\u201c"]([\s\S]+)[\u201d"]\s*$/.exec(String(body || '').trim());
-  if (!m) return false;
-  return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(m[1]);
 }
 
 function shouldReserveCorrectionJob(body, smsReaction) {

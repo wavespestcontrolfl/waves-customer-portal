@@ -23,7 +23,7 @@ if (!process.env.DATABASE_PUBLIC_URL) {
 }
 const path = require('path');
 const { Client } = require('pg');
-const { isSmsReaction, isCourtesyOnly } = require(path.join(__dirname, '..', '..', 'server', 'services', 'sms-intent'));
+const { isQuietSmsReaction, isCourtesyOnly } = require(path.join(__dirname, '..', '..', 'server', 'services', 'sms-intent'));
 
 const execute = process.argv.includes('--execute');
 const staleArg = process.argv.find((a) => a.startsWith('--stale-days='));
@@ -59,9 +59,9 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
         AND (l.message_type <> 'internal_alert' OR l.message_type IS NULL) AND l.created_at < m.created_at AND l.created_at > m.created_at - interval '24 hours'
       ORDER BY l.created_at DESC LIMIT 1) o ON true
     WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)`, [ASKS]);
-  // Reactions follow the webhook's quietReaction rule too: a tapback on a
-  // question we asked is the answer, and unknown context stays unread.
-  const closers = unread.rows.filter((r) => (isSmsReaction(r.body) && r.awaiting === false) || (!r.has_media && isCourtesyOnly(r.body, { awaitingAnswer: r.awaiting !== false }))).map((r) => r.id);
+  // Reactions follow the webhook's rule: quiet only when affirmative AND the
+  // QUOTED target asked nothing (target-aware, not latest-outbound).
+  const closers = unread.rows.filter((r) => isQuietSmsReaction(r.body) || (!r.has_media && isCourtesyOnly(r.body, { awaitingAnswer: r.awaiting !== false }))).map((r) => r.id);
   console.log(`unread inbound sms messages: ${unread.rows.length}; reaction/courtesy closers: ${closers.length}`);
 
   // Pass 3 (optional) — stale rows.

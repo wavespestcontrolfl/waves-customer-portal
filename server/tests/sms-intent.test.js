@@ -114,3 +114,17 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
     }
   });
 });
+
+describe('isQuietSmsReaction — only affirmative tapbacks on non-questions are quiet', () => {
+  const { isQuietSmsReaction } = require('../services/sms-intent');
+  test('affirmative tapbacks on statements are quiet', () => {
+    for (const t of ['Liked "See you Thursday between 2 and 4"', 'Loved “Report is in your portal”', 'Reacted 👍 to "All done for today"', 'Reacted ❤️ to an image', 'Removed a like from "ok"', 'Removed ❤️ from "ok"']) {
+      expect([t, isQuietSmsReaction(t)]).toEqual([t, true]);
+    }
+  });
+  test('reactions that answer a question, or express concern, stay loud', () => {
+    for (const t of ['Reacted 👍 to "Does 9am work?"', 'Liked "Reply YES to confirm Thursday"', 'Disliked "We will treat inside"', 'Questioned "Your service is scheduled Thursday"', 'Laughed at "All done"', 'Reacted ❓ to "All done"', 'Reacted 🚨 to "All done"', 'Emphasized "See you Thursday"']) {
+      expect([t, isQuietSmsReaction(t)]).toEqual([t, false]);
+    }
+  });
+});
