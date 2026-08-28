@@ -137,7 +137,7 @@ async function run({
           scored_by: 'local_opportunity',
         }),
         source: tag, owner: 'strategy_agent',
-      }).onConflict(['target_domain', 'target_page', 'location_key']).ignore().returning('id');
+      }).onConflict().ignore().returning('id'); // constraintless: matches the legacy 2-col unique AND the v2 location_key key across the rolling deploy
     });
     if (inserted.length) summary.promoted++; else summary.dupes++;
   }

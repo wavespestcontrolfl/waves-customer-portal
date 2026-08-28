@@ -589,7 +589,7 @@ describe('lost-link recovery', () => {
     expect(r).toEqual(expect.objectContaining({ queued: 1, skipped: 1 }));
     // pg semantics: returning('id') is chained after ignore() so a landed row is never mistaken for a conflict
     const lastInsert = db.mock.results.filter(x => x.value && x.value.insert).at(-1).value;
-    expect(lastInsert.insert.mock.results[0].value.onConflict).toHaveBeenCalledWith(['target_domain', 'target_page', 'location_key']); // v2: the board key includes location_key
+    expect(lastInsert.insert.mock.results[0].value.onConflict).toHaveBeenCalledWith(); // constraintless DO NOTHING: legacy 2-col unique + v2 location_key key both satisfy it across the rolling deploy
     expect(lastInsert.insert.mock.results[0].value.returning).toHaveBeenCalledWith('id');
     expect(r.reasons).toEqual([{ domain: 'race.example', reason: 'already on board (concurrent insert)' }]);
   });

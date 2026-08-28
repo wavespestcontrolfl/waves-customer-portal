@@ -4,8 +4,9 @@
  *
  * Additive and reversible. Creates seo_link_domains, seo_link_acquisition_paths,
  * seo_link_domain_sources, seo_link_placement_authorities, seo_link_attempts;
- * adds the §3.3 columns to seo_link_prospects and widens its unique key to
- * (target_domain, target_page, location_key); copies seo_signup_attempts into
+ * adds the §3.3 columns to seo_link_prospects and ADDS the wider unique key
+ * (target_domain, target_page, location_key) beside the legacy one (expand;
+ * step 2 contracts); copies seo_signup_attempts into
  * seo_link_attempts (idempotent, keyed by legacy_attempt_id) and links every
  * board row to a registry domain + path. seo_signup_attempts stays as read-only
  * history (no writer after this deploy; dropped by a later cleanup migration).
@@ -34,7 +35,6 @@ const quoted = (arr) => arr.map((v) => `'${v}'`).join(', ');
 const check = (table, name, expr) => `ALTER TABLE ${table} ADD CONSTRAINT ${name} CHECK (${expr})`;
 const inSet = (col, arr, { nullable = false } = {}) => (nullable ? `${col} IS NULL OR ${col} IN (${quoted(arr)})` : `${col} IN (${quoted(arr)})`);
 
-const LEGACY_UNIQUE = 'seo_link_prospects_target_domain_target_page_unique';
 const NEW_UNIQUE = 'seo_link_prospects_target_domain_target_page_location_key_unique';
 
 exports.up = async function (knex) {
@@ -148,8 +148,14 @@ exports.up = async function (knex) {
   // the stamped GBP location onto rows that carry one ('default' = not scoped).
   // The old 2-column unique key guarantees no collision under the wider key.
   await knex.raw("UPDATE seo_link_prospects SET location_key = quality_signals->>'location' WHERE location_key = '-' AND COALESCE(quality_signals->>'location', '') NOT IN ('', 'default')");
-  await knex.raw(`ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS ${LEGACY_UNIQUE}`);
-  await knex.raw(`DROP INDEX IF EXISTS ${LEGACY_UNIQUE}`);
+  // EXPAND only: the wider key is added; the legacy 2-column unique
+  // (seo_link_prospects_target_domain_target_page_unique) is deliberately KEPT
+  // through this deploy — old pods still run `ON CONFLICT (target_domain,
+  // target_page)` during the rolling deploy and Postgres rejects that once no
+  // matching constraint exists. The writers on this branch use a constraintless
+  // ON CONFLICT DO NOTHING; step 2's migration CONTRACTS by dropping the legacy
+  // constraint, at which point per-location rows become possible. Nothing in
+  // step 1 creates a second row for the same (domain, page).
   await knex.raw(`CREATE UNIQUE INDEX IF NOT EXISTS ${NEW_UNIQUE} ON seo_link_prospects (target_domain, target_page, location_key)`);
 
   // ---- §3.3b authorities (schema only in step 1; the bridge writes it in step 4)
@@ -216,7 +222,6 @@ exports.down = async function (knex) {
         if (cols[c]) t.dropColumn(c);
       }
     });
-    await knex.raw(`ALTER TABLE seo_link_prospects ADD CONSTRAINT ${LEGACY_UNIQUE} UNIQUE (target_domain, target_page)`);
   }
   await knex.schema.dropTableIfExists('seo_link_domain_sources');
   if (await knex.schema.hasTable('seo_link_domains')) {

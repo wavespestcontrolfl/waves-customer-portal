@@ -259,7 +259,7 @@ async function queueOne(loss, out, scoreMod) {
       source: 'lost_recovery',
       source_ref: loss.backlink_id || null,
       owner: 'backlink_monitor',
-      }).onConflict(['target_domain', 'target_page', 'location_key']).ignore().returning('id');
+      }).onConflict().ignore().returning('id'); // constraintless: matches the legacy 2-col unique AND the v2 location_key key across the rolling deploy
     });
     if (inserted && inserted.raced) {
       out.skipped++;

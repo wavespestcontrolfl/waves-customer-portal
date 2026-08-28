@@ -44,6 +44,12 @@ function parseOpportunities(text) {
   return { candidates: [...seen.values()], unresolved, dropped };
 }
 
+function touchDetail(batchDetail, url) {
+  const base = String(batchDetail || '').trim();
+  if (!url) return base || null;
+  return base ? `${base} ${url}` : url;
+}
+
 /**
  * intake(db, { text, source, sourceDetail, sourceRef, dryRun })
  *   → { inserted, touched, existing, candidates, unresolved, dropped, dryRun }
@@ -69,10 +75,11 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
   const results = await db.transaction(async (trx) => {
     const out = [];
     for (const c of parsed.candidates) {
-      // The url hint rides on the touch (source_detail) only when the paste gave
-      // one — the investigator (step 3) decides whether it is a submission page.
+      // A pasted URL is a submission-url HINT: persisted on the touch's
+      // source_detail (and, for a new host, the first-touch detail) so the
+      // investigator (step 3) can recover it — never on the domain's identity.
       const r = await registry.ensureDomain(trx, {
-        domain: c.domain, source, sourceDetail: sourceDetail || null, sourceRef,
+        domain: c.domain, source, sourceDetail: touchDetail(sourceDetail, c.url), sourceRef,
       });
       out.push({ ...c, id: r.id, existing: !r.created, touched: r.touched });
     }
@@ -85,4 +92,4 @@ async function intake(db, { text, source = 'list_import', sourceDetail = null, s
   return base;
 }
 
-module.exports = { parseOpportunities, intake, _internals: { TOKEN_RE, X_POST_RE, hasPath } };
+module.exports = { parseOpportunities, intake, _internals: { TOKEN_RE, X_POST_RE, hasPath, touchDetail } };

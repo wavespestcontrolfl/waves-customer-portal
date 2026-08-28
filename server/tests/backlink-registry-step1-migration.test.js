@@ -106,7 +106,7 @@ describe('up()', () => {
     expect(knex._created.seo_link_attempts.some((c) => c.method === 'index' && JSON.stringify(c.args[0]) === JSON.stringify(['slot_day', 'outcome']))).toBe(true);
   });
 
-  test('§3.3 placements: additive columns, location_key backfilled from quality_signals BEFORE the key widens; the legacy 2-col unique is dropped', async () => {
+  test('§3.3 placements: additive columns, location_key backfilled from quality_signals BEFORE the wider key is added; the legacy 2-col unique is KEPT (expand only — old pods still ON CONFLICT on it during the rolling deploy)', async () => {
     const knex = fakeKnex();
     await migration.up(knex);
     const added = knex._altered.seo_link_prospects.map((c) => c.args[0]);
@@ -115,11 +115,11 @@ describe('up()', () => {
     expect(locationKey.mods).toEqual(expect.arrayContaining([['notNullable', []], ['defaultTo', ['-']]]));
     const raws = knex._raws;
     const iBackfill = raws.findIndex((r) => /UPDATE seo_link_prospects SET location_key = quality_signals->>'location'/.test(r));
-    const iDropOld = raws.findIndex((r) => r === 'ALTER TABLE seo_link_prospects DROP CONSTRAINT IF EXISTS seo_link_prospects_target_domain_target_page_unique');
     const iNew = raws.findIndex((r) => r === 'CREATE UNIQUE INDEX IF NOT EXISTS seo_link_prospects_target_domain_target_page_location_key_unique ON seo_link_prospects (target_domain, target_page, location_key)');
     expect(iBackfill).toBeGreaterThan(-1);
-    expect(iDropOld).toBeGreaterThan(iBackfill);
-    expect(iNew).toBeGreaterThan(iDropOld);
+    expect(iNew).toBeGreaterThan(iBackfill);
+    expect(raws.some((r) => /seo_link_prospects_target_domain_target_page_unique/.test(r))).toBe(false); // never dropped here
+    expect(src).toMatch(/step 2's migration CONTRACTS by dropping the legacy/);
     // 'default' and '' never become a location_key (they are '-')
     expect(raws[iBackfill]).toMatch(/NOT IN \('', 'default'\)/);
   });
@@ -144,14 +144,14 @@ describe('up()', () => {
 });
 
 describe('down()', () => {
-  test('drops the new tables in FK order, the wide unique, the new columns, and restores the legacy 2-col unique', async () => {
+  test('drops the new tables in FK order, the wide unique, and the new columns (the legacy 2-col unique was never touched)', async () => {
     const knex = fakeKnex({ existing: ['seo_link_prospects', 'seo_link_domains'] });
     knex.mockImplementation(() => ({ columnInfo: async () => ({ domain_id: {}, path_id: {}, location_key: {}, target_domain: {} }) }));
     await migration.down(knex);
     const drops = knex.schema.dropTableIfExists.mock.calls.map((c) => c[0]);
     expect(drops).toEqual(['seo_link_attempts', 'seo_link_placement_authorities', 'seo_link_domain_sources', 'seo_link_acquisition_paths', 'seo_link_domains']);
     expect(knex._raws).toContain('DROP INDEX IF EXISTS seo_link_prospects_target_domain_target_page_location_key_unique');
-    expect(knex._raws).toContain('ALTER TABLE seo_link_prospects ADD CONSTRAINT seo_link_prospects_target_domain_target_page_unique UNIQUE (target_domain, target_page)');
+    expect(knex._raws.some((r) => /ADD CONSTRAINT seo_link_prospects_target_domain_target_page_unique/.test(r))).toBe(false); // it was never dropped
     expect(knex._raws).toContain('ALTER TABLE seo_link_domains DROP CONSTRAINT IF EXISTS seo_link_domains_best_path_id_foreign');
     const dropped = knex._altered.seo_link_prospects.map((c) => c.args[0]);
     expect(dropped).toEqual(['domain_id', 'path_id', 'location_key']); // only columns that exist

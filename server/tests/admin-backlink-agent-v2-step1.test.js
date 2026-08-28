@@ -52,6 +52,23 @@ describe('status contract (plan §3.3)', () => {
   });
 });
 
+describe('rolling-deploy compatibility of the board unique key', () => {
+  test('every board insert with ON CONFLICT is constraintless (matches the legacy 2-col unique AND the v2 location_key key)', () => {
+    const { execSync } = require('child_process');
+    const hits = execSync("grep -rln \"seo_link_prospects').insert\" server scripts --include='*.js' | grep -v /tests/", { cwd: path.join(__dirname, '..', '..'), encoding: 'utf8' }).trim().split('\n');
+    for (const f of hits) {
+      const s = fs.readFileSync(path.join(__dirname, '..', '..', f), 'utf8');
+      expect({ f, explicitTarget: /onConflict\(\[/.test(s) }).toEqual({ f, explicitTarget: false });
+    }
+    expect(hits.length).toBeGreaterThanOrEqual(5);
+  });
+  test('the PATCH page-move dedupes within the row\'s own location scope', () => {
+    const s = fs.readFileSync(path.join(__dirname, '..', 'routes/admin-backlink-agent-v2.js'), 'utf8');
+    expect(s).toMatch(/first\('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key'\)/);
+    expect(s).toMatch(/findPlacementRow\(trx, current\.target_domain, patch\.target_page, \{ excludeId: current\.id, location: current\.location_key \}\)/);
+  });
+});
+
 describe('POST /opportunities/bulk (intake skeleton)', () => {
   const post = handler('post', '/opportunities/bulk');
   beforeEach(() => intake.mockClear());

@@ -113,7 +113,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = src('routes/admin-backlink-agent-v2.js');
     const block = s.slice(s.indexOf("router.patch('/prospects/:id'"), s.indexOf("router.post('/prospects/:id/recheck'"));
     const iTrx = block.indexOf('db.transaction(async (trx)');
-    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type')");
+    const iRead = block.indexOf("trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type', 'location_key')");
     const iGate = block.indexOf("&& !inOutreach(current.status, current.link_type)");
     // a link_type change out of the signup lane (directory/citation/social → outreach type) is an admission too
     expect(block).toMatch(/const inOutreach = \(status, type\) => ACTIVE_OUTREACH_STATUSES\.includes\(status\) && !SIGNUP_TYPES\.includes\(type \|\| ''\);/);
@@ -131,7 +131,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     // a target_page edit is a placement move: domain lock + canonical placement probe (self excluded) → 409, before the update
     const iMove = block.indexOf("'target_page' in patch && patch.target_page !== current.target_page");
     const iMoveLock = block.indexOf('lockProspectDomain(trx, current.target_domain)');
-    const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id })');
+    const iMoveProbe = block.indexOf('findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id, location: current.location_key })');
     expect(iMove).toBeGreaterThan(iRead);
     expect(iMoveLock).toBeGreaterThan(iMove);
     expect(iMoveProbe).toBeGreaterThan(iMoveLock);

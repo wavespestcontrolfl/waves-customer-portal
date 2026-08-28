@@ -262,6 +262,21 @@ describe('intake (dedupe + upsert; dryRun writes nothing)', () => {
     expect(r2).toMatchObject({ inserted: 0, existing: 2, touched: 0 });
     expect(db._store.sources.length).toBe(2);
   });
+  test('a pasted submission URL is persisted as the touch detail (recoverable by the investigator), idempotently', async () => {
+    const db = fakeDb();
+    await intake(db, { text: 'https://dir.example/add-your-business/ plain.example', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
+    expect(db._store.domains.find((d) => d.domain === 'dir.example').source_detail).toBe('paste:2026-08-28 https://dir.example/add-your-business/');
+    expect(db._store.sources.map((s) => [s.source_detail, s.touch_key])).toEqual([
+      ['paste:2026-08-28 https://dir.example/add-your-business/', 'list_import:paste:2026-08-28 https://dir.example/add-your-business/'],
+      ['paste:2026-08-28', 'list_import:paste:2026-08-28'],
+    ]);
+    const again = await intake(db, { text: 'https://dir.example/add-your-business/', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
+    expect(again).toMatchObject({ inserted: 0, existing: 1, touched: 0 });
+    // a NEW url for a known host is a new touch, first-touch detail untouched
+    await intake(db, { text: 'https://dir.example/submit', source: 'list_import', sourceDetail: 'paste:2026-08-28' });
+    expect(db._store.sources.length).toBe(3);
+    expect(db._store.domains.find((d) => d.domain === 'dir.example').source_detail).toBe('paste:2026-08-28 https://dir.example/add-your-business/');
+  });
   test('empty / host-less text is a no-op result; an unknown source is refused before any read', async () => {
     const db = fakeDb();
     expect(await intake(db, { text: 'nothing here' })).toMatchObject({ inserted: 0, existing: 0, candidates: [] });
