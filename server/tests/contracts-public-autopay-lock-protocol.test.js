@@ -34,3 +34,22 @@ test('a vanished method rolls the signing back with a 409 payment_method_removed
   expect(sign).toMatch(/code: 'payment_method_removed'/);
   expect(sign).toMatch(/if \(err\?\.signResponse\) return res\.status\(err\.signResponse\.status\)\.json\(err\.signResponse\.body\)/);
 });
+
+// Admin cancellation writes customers.autopay_* too — same customer-first
+// order (pre-push codex on #3556: contract-first cycled with the method
+// FK's ON DELETE SET NULL during a portal removal).
+test('admin cancel locks the customer row before the contract row', () => {
+  const admin = fs.readFileSync(path.join(__dirname, '../routes/admin-contracts.js'), 'utf8');
+  const start = admin.indexOf("router.post('/:id/cancel'");
+  const end = admin.indexOf('\nrouter.', start + 10);
+  const cancel = admin.slice(start, end === -1 ? admin.length : end);
+  const peek = cancel.indexOf(".first('id', 'customer_id')");
+  const customerLock = cancel.indexOf("trx('customers').where({ id: peek.customer_id }).forUpdate().first('id')");
+  const contractLock = cancel.indexOf(".forUpdate()\n        .first();");
+  const customerWrite = cancel.indexOf("trx('customers').where({ id: contract.customer_id }).update({");
+  expect(peek).toBeGreaterThan(-1);
+  expect(customerLock).toBeGreaterThan(peek);
+  expect(contractLock).toBeGreaterThan(customerLock);
+  expect(customerWrite).toBeGreaterThan(contractLock);
+  expect(cancel).toMatch(/String\(contract\.customer_id \|\| ''\) !== String\(peek\.customer_id \|\| ''\)/);
+});
