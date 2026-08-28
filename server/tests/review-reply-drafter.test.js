@@ -141,6 +141,18 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
     // codex r62: "none the wiser" + euphemistic incentives + indirect solicitations.
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
+    // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
+    expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids never batted an eye at the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, your pets were no worse for wear after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after one-half hour following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the yard was ready within three-quarters of an hour after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad everyone was back inside after 1.5 hours following the pest treatment.'), gpets)).toBe('banned_phrase');
+    const gsvc = grounding({ text: 'Great service.', mentionedTechNames: [], topics: [] });
+    expect(verify(good('Hello there, we are glad the crickets are behind you.'), gsvc)).toBe('unlisted_service_claim');
+    expect(verify(good('Hello there, we are glad the gnats are a thing of the past.'), gsvc)).toBe('unlisted_service_claim');
+    const gcrk = grounding({ text: 'The crickets are finally behind us. Great service.', mentionedTechNames: [], topics: [] });
+    expect(verify(good('Hello there, we are glad the crickets are behind you.'), gcrk)).toBe(null);
     expect(verify(good('Hi Dana, we have a price break waiting for you because of this review. Marcus got the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, this review has earned you a little something. Marcus got the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, we hope to earn five stars from you next time. Marcus got the ants.'))).toBe('banned_phrase');
