@@ -264,7 +264,7 @@ t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
-                                      //   'payment_ambiguous','mint_not_started','terms_changed','sandbox_replay' )) — the ONE complete enum; every state named anywhere in this plan is here
+                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','sandbox_replay' )) -- send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
 t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
