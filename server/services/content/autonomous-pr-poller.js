@@ -293,6 +293,17 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
   const pendingReason = pendingSkipReasonForRun(run);
   const note = `Auto-merge parked by autonomous-pr-poller: topic-targeting gate no longer clear against the live corpus on PR #${pr.number} head ${String(pr.head?.sha || '').slice(0, 7)} — ${reason}. PR #${pr.number} is retired (closed, branch deleted; reconciled each tick until it is); requeue re-drives the lane with a fresh draft, or dismiss.`;
   const lost = (what) => { const e = new Error(`topic-block park lost its ${what} CAS (operator action landed) — nothing changed`); e.code = 'TOPIC_PARK_LOST'; return e; };
+  // Lock order = the review-decision path's (lockCurrentRun: queue row
+  // FIRST, then the run) so an operator requeue/dismiss racing this tick
+  // cannot deadlock against it.
+  if (run.opportunity_id) {
+    const queueRows = await q('opportunity_queue')
+      .where('id', run.opportunity_id)
+      .where('status', 'pending_review')
+      .where('skip_reason', pendingReason)
+      .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
+    if (Number(queueRows) !== 1) throw lost('queue');
+  }
   const fresh = await q('autonomous_runs').where('id', run.id).first('reviewer_notes');
   const runRows = await q('autonomous_runs')
     .where('id', run.id)
@@ -305,14 +316,6 @@ async function parkTopicBlockedRun(run, pr, reason, trx, gh) {
       updated_at: new Date(),
     });
   if (Number(runRows) !== 1) throw lost('run');
-  if (run.opportunity_id) {
-    const queueRows = await q('opportunity_queue')
-      .where('id', run.opportunity_id)
-      .where('status', 'pending_review')
-      .where('skip_reason', pendingReason)
-      .update({ skip_reason: TOPIC_BLOCKED_SKIP_REASON, updated_at: new Date() });
-    if (Number(queueRows) !== 1) throw lost('queue');
-  }
   return true;
 }
 
@@ -412,6 +415,16 @@ async function unparkTopicBlockedRun(run, prNumber) {
   const note = `PR #${prNumber} was merged after the topic-targeting park — returned to the pending lifecycle for merged finalization by autonomous-pr-poller.`;
   try {
     await db.transaction(async (trx) => {
+      // Same lock order as the park and the review-decision path: queue
+      // row first, then the run.
+      if (run.opportunity_id) {
+        const q = await trx('opportunity_queue')
+          .where('id', run.opportunity_id)
+          .where('status', 'pending_review')
+          .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+          .update({ skip_reason: pendingReason, updated_at: new Date() });
+        if (Number(q) !== 1) throw new Error('queue row left the parked state');
+      }
       const fresh = await trx('autonomous_runs').where('id', run.id).first('reviewer_notes');
       const n = await trx('autonomous_runs')
         .where('id', run.id)
@@ -424,14 +437,6 @@ async function unparkTopicBlockedRun(run, prNumber) {
           updated_at: new Date(),
         });
       if (Number(n) !== 1) throw new Error('run left the parked state');
-      if (run.opportunity_id) {
-        const q = await trx('opportunity_queue')
-          .where('id', run.opportunity_id)
-          .where('status', 'pending_review')
-          .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
-          .update({ skip_reason: pendingReason, updated_at: new Date() });
-        if (Number(q) !== 1) throw new Error('queue row left the parked state');
-      }
     });
     logger.warn(`[autonomous-pr-poller] un-parked topic-blocked run ${run.id}: PR #${prNumber} merged by a human — finalizing through the merged lifecycle`);
     return true;
