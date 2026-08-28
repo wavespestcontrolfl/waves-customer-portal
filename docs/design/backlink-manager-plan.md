@@ -188,8 +188,8 @@ t.uuid('id').primary(); t.uuid('prospect_id').notNullable();
 t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','payment','communication'))
 t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
 t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence (approval.action must match the dimension: acquire | renewal ↔ payment/execution, outreach_send/followup ↔ communication)
-t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable();
-t.timestamp('decided_at').notNullable();
+t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs
+t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when the dimension's action completed (e.g. communication after `sent`) — a satisfied dimension is never re-decided
 t.unique(['prospect_id', 'dimension']);
 ```
 The bridge job writes one row per dimension the path touches — the dimensions are
@@ -206,7 +206,12 @@ with a valid, **unconsumed, action-matching** approval — consumed by this step
 outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
 `AUTO_*` or `OWNER_*` with an approval that is valid and not invalidated (consumed is fine —
 the communication approval consumed by the send still satisfies the later mint of the same
-paid outreach placement, and vice versa). Any row at `DENY`/`INVALID`, or a required
+paid outreach placement, and vice versa). **Invalidation is scoped per dimension:** a path
+revision/hash change invalidates only the approvals whose dimension the changed inputs
+belong to (price, renewal, payment/legal flags → payment; recipient/draft → communication;
+type/URL → both). A completed communication attempt (`sent`) is a satisfied prerequisite for
+the rest of that placement's life — a later price change never demands re-approving, let
+alone re-sending, a message that already went out. Any row at `DENY`/`INVALID`, or a required
 dimension with no row, blocks. A paid guest post thus cannot execute on a payment approval
 alone, nor send on an outreach approval alone.
 
@@ -226,7 +231,15 @@ t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNulla
 t.text('evidence_url'); t.jsonb('detail');    // sanitized: never credentials, never full page bodies
 t.timestamps(true, true);
 ```
-`signup-evidence.js` writes here for the deterministic runner (its current ledger folds in).
+`signup-evidence.js` writes here for the deterministic runner. Its current ledger
+(`seo_signup_attempts`, migration `20260622000010`) is **backfilled idempotently in step 1**
+with an explicit outcome mapping before reads/writes cut over — `blocked_account` →
+`needs_owner`, `blocked_payment` → `needs_owner`, `blocked_price_changed` → `price_changed`,
+`blocked_captcha` → `captcha`, `submitted` → `placed`, `failed`/`error` → `failed`, anything
+else → `failed` — with the verbatim legacy outcome kept in `detail.legacy_outcome` and
+`provider='deterministic_runner'`, so historical attempts and costs appear in the Outcomes/
+provider reports and the CHECK enum holds. The legacy table is kept (read-only) until step 5
+retires its writer.
 
 ### 3.4b `seo_link_domain_sources` — every touch, normalized
 
@@ -875,6 +888,14 @@ together:
   `AUTO_OUTREACH` on that draft; only a `mode=send` lease — which requires the stamped
   `AUTO_OUTREACH` (or an approval) — may call the sender. Drafting therefore never needs
   authority, and authority is never granted without a lint-clean draft to grant it for.
+- **Paid outreach after the send: `claim(?mode=payment)`.** Once a paid outreach placement
+  is `contacted`/`negotiating` and the publisher exposes a checkout, the payment step is
+  leased through a payment-specific predicate keyed to the placement's open, unleased
+  `initial` reservation (created by the bridge when the payment dimension is satisfied):
+  placement in (`contacted`, `negotiating`), communication dimension `satisfied_at` set,
+  payment dimension authorized, no `submitting`/`ambiguous` purchase; the initial send is
+  never claimable again through this mode. The `deterministic_runner` is the only eligible
+  provider (payment boundary).
 - **`pending` submissions are kept.** The shipped report path for a moderated directory
   (`outcome='placed'` with `pending:true` and no `live_url` — `link-prospect-worker.js`) is
   retained unchanged: the placement moves to `placed` without a `live_url`, the daily
@@ -951,9 +972,15 @@ Provider selection per attempt = `COALESCE(path.provider_override, policy.prefer
 
 ## 8. Judge — verification, D30, and the learning loop
 
-- **Verification** is unchanged and authoritative: verifier (crawl + DataForSEO, scan-tracked
-  rows only), indexer (`site:` SERP), profile cross-link, `first_live_at`, `is_dofollow` read
-  from live `rel`. A provider report never sets `live`.
+- **Verification** is authoritative: verifier (crawl + DataForSEO, scan-tracked rows only),
+  indexer (`site:` SERP), `first_live_at`, `is_dofollow` read from live `rel`. A provider
+  report never sets `live`. **The inbound-profile cross-link is NOT shipped** (v1 §4.3 listed
+  it, but `backlink-monitor.js` never touches the board and the verifier scans only rows with
+  a `live_url` or `status='placed'`): step 4 adds a post-scan reconciliation that, after each
+  Sunday scan, matches new/active scan-tracked `seo_backlinks` to `contacted`/`negotiating`
+  placements by canonical domain + target-page variants and moves them to `placed` with
+  `live_url`/`backlink_id` (the verifier then promotes to `live`/`indexed`), so a publisher
+  who posts the link without any worker report still lands in D30 and source reporting.
 - **D30 survival** = a **sampled observation at the cutoff**, not an inference from
   neighbours: the daily verifier records an explicit `d30_sample` (and `d90_sample`) check
   for each placement within a bounded window `[cutoff, cutoff + 3 days]`; `d30_live=true`
@@ -1123,7 +1150,8 @@ unset its gate; budget kill = the issuer program's limit.
 3. **Path investigator** — job + schema-validated LLM call + probe list + cost caps;
    `GATE_LINK_INVESTIGATOR`. Run it over the full gap ingestion; ship the Registry view.
 4. **Authority policy** — `seo_link_policy`, decision function + tests, owner cards,
-   Policy panel; `GATE_LINK_AUTHORITY`. Bounded outreach mandate (§6.4) lands here and
+   Policy panel; `GATE_LINK_AUTHORITY`; the post-scan inbound cross-link for outreach
+   placements (§8 — not shipped today) and the `mode=payment` claim (§7). Bounded outreach mandate (§6.4) lands here and
    releases the June drafts through it.
 5. **Runner extension** — account creation + IMAP verification + resumable sessions +
    payment step (virtual card) + `needs_owner` outcome; `GATE_LINK_AUTO_PAID`.
