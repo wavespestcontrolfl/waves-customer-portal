@@ -20,6 +20,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({ sent: true })),
   acceptedOnboardingKey: (estimateId, acceptanceId) => `estimate.accepted_onboarding:${estimateId}:acc:${acceptanceId}`,
+  ACCEPTANCE_COPY_MARKER: 'You accepted electronically',
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
 jest.mock('../services/estimate-converter', () => ({
@@ -83,12 +84,29 @@ test('wedged failed row under the stable key → resend under a day-scoped key',
   expect(sendEstimateAcceptedOnboarding.mock.calls[0][0].idempotencyKey).toMatch(/^estimate\.accepted_onboarding:est-1:acc:acc-1:\d{4}-\d{2}-\d{2}$/);
 });
 
-test('a sent-ish row → fulfilment stamped, never emailed twice', async () => {
-  emailRows.delivered = [{ id: 'm1' }];
+test('a sent-ish row that carries the copy → fulfilment stamped, never emailed twice', async () => {
+  emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat. You accepted electronically on …' }];
   const result = await runAcceptanceCopySweep();
   expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
   expect(sendEstimateAcceptedOnboarding).not.toHaveBeenCalled();
   expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_emailed_at: expect.any(Date) }));
+});
+
+test('a sent-ish row WITHOUT the copy (template lost the block) → escalated now, never stamped as emailed', async () => {
+  emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat, your plan is confirmed.', html_snapshot: '<p>no note</p>' }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 1 });
+  expect(sendEstimateAcceptedOnboarding).not.toHaveBeenCalled();
+  expect(notifyAdmin.mock.calls[0][2]).toContain('{{acceptance_note}}');
+  expect(acceptanceUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ copy_emailed_at: expect.any(Date) }));
+  expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_escalated_at: expect.any(Date) }));
+});
+
+test('a fresh send that rendered without the copy → escalated now, not counted as sent', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValue({ sent: true, copyMissing: true });
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 1 });
+  expect(notifyAdmin).toHaveBeenCalledTimes(1);
 });
 
 test('no usable email: escalated to the office ONCE after 7 days, not before', async () => {

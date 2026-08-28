@@ -97,6 +97,18 @@ function acceptedOnboardingKey(estimateId, acceptanceId) {
 // no usable email exists, {sent:false, outcome:'failed'} on a transient
 // failure, or null when called without an estimate. Callers that fire-and-
 // forget ignore it; the catch-up sweep keys its retry / escalate decision on it.
+// Distinctive lead-in of acceptanceNoteFor(); the rendered email (or the
+// stored snapshot of an earlier send) must contain it for the send to count
+// as the promised copy.
+const ACCEPTANCE_COPY_MARKER = 'You accepted electronically';
+function renderedCarriesAcceptanceCopy(result) {
+  const bodies = [
+    result?.rendered?.text, result?.rendered?.html,
+    result?.message?.text_snapshot, result?.message?.html_snapshot,
+  ].filter((b) => typeof b === 'string');
+  return bodies.some((b) => b.includes(ACCEPTANCE_COPY_MARKER));
+}
+
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey } = {}) {
   try {
     if (!estimateId) return null;
@@ -140,13 +152,21 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
     });
     if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
     else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);
-    // The copy went out (a deduped sent-ish row counts): stamp fulfilment so
-    // the catch-up sweep stops retrying this acceptance.
+    // The copy went out (a deduped sent-ish row counts) — but only stamp
+    // fulfilment when the RENDERED email actually carries the note: an
+    // admin can publish a template version without the optional
+    // {{acceptance_note}} block, and a send without the copy is not the
+    // promised copy (GH Codex r7 P1). The catch-up sweep escalates that.
     if (acceptanceNote && result?.sent) {
-      await db('estimate_acceptances')
-        .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
-        .whereNull('copy_emailed_at')
-        .update({ copy_emailed_at: new Date() });
+      if (renderedCarriesAcceptanceCopy(result)) {
+        await db('estimate_acceptances')
+          .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
+          .whereNull('copy_emailed_at')
+          .update({ copy_emailed_at: new Date() });
+      } else {
+        logger.error(`[estimate-accepted-email] onboarding email for estimate ${estimateId} rendered WITHOUT the acceptance copy — the active estimate.accepted_onboarding version lacks {{acceptance_note}}`);
+        return { ...result, copyMissing: true };
+      }
     }
     return result;
   } catch (err) {
@@ -159,4 +179,4 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
   }
 }
 
-module.exports = { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, _private: { appointmentLineFor, acceptanceNoteFor } };
+module.exports = { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, ACCEPTANCE_COPY_MARKER, _private: { appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy } };

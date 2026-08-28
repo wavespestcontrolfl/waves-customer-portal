@@ -382,19 +382,41 @@ async function runAcceptanceCopySweep() {
     if (seen.has(row.id)) continue;
     seen.add(row.id);
     checked += 1;
-    const { sendEstimateAcceptedOnboarding, acceptedOnboardingKey } = require('./estimate-accepted-email');
+    const { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, ACCEPTANCE_COPY_MARKER } = require('./estimate-accepted-email');
     // Keyed per acceptance EVENT: a re-accept after a revision is its own
     // row with its own copy, never deduped against the earlier one.
     const baseKey = acceptedOnboardingKey(row.estimate_id, row.id);
+    // Surface an exception ONCE (copy_escalated_at), and only when the admin
+    // notification row actually persisted (bell policy can silence the
+    // category; then the next sweep retries).
+    const escalate = async (estimate, body) => {
+      const NotificationService = require('./notification-service');
+      const notification = await NotificationService.notifyAdmin('estimate', `Acceptance copy not delivered: ${estimate?.customer_name || 'customer'}`, body);
+      if (notification?.id) {
+        await db('estimate_acceptances').where({ id: row.id }).update({ copy_escalated_at: new Date() });
+        escalated += 1;
+      } else {
+        logger.warn(`[lifecycle-sweeps] acceptance copy escalation for estimate ${row.estimate_id} not persisted (${notification?.reason || 'suppressed'}); will retry next sweep`);
+      }
+    };
     try {
       const delivered = await db('email_messages')
         .where('idempotency_key', 'like', `${baseKey}%`)
         .whereIn('status', SENT_ISH)
-        .first('id');
+        .first('id', 'text_snapshot', 'html_snapshot');
       if (delivered) {
-        // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
-        await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')
-          .update({ copy_emailed_at: new Date() });
+        const carriesCopy = [delivered.text_snapshot, delivered.html_snapshot]
+          .some((b) => typeof b === 'string' && b.includes(ACCEPTANCE_COPY_MARKER));
+        if (carriesCopy) {
+          // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
+          await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')
+            .update({ copy_emailed_at: new Date() });
+        } else if (!row.copy_escalated_at) {
+          // Sent WITHOUT the copy: the active template version lacks the
+          // {{acceptance_note}} block — an operator fix, surfaced right away.
+          const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_name', 'address');
+          await escalate(estimate, `${estimate?.address || 'no address'} — the onboarding email went out without the accepted-terms copy: the active estimate.accepted_onboarding template version has no {{acceptance_note}} block. Restore the block (Email Templates) and the copy will be re-sent; meanwhile the accepted estimate page / PDF carries the same record.`);
+        }
         continue;
       }
       const wedged = await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
@@ -413,7 +435,14 @@ async function runAcceptanceCopySweep() {
         acceptanceId: row.id,
         idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
       });
-      if (result?.sent) { sent += 1; continue; }
+      if (result?.sent && !result?.copyMissing) { sent += 1; continue; }
+      if (result?.copyMissing) {
+        // Sent WITHOUT the copy (template version lacks the block) — surface now.
+        if (!row.copy_escalated_at) {
+          await escalate(estimate, `${estimate.address || 'no address'} — the onboarding email went out without the accepted-terms copy: the active estimate.accepted_onboarding template version has no {{acceptance_note}} block. Restore the block (Email Templates) and the copy will be re-sent; meanwhile the accepted estimate page / PDF carries the same record.`);
+        }
+        continue;
+      }
       // Outcomes (GH Codex r3 P1): no usable address anywhere, or a
       // suppression block (bounced/unsubscribed — the provider will not
       // deliver) are NOT mail problems a retry can fix → surface once so a
@@ -422,23 +451,7 @@ async function runAcceptanceCopySweep() {
       const undeliverable = result?.outcome === 'no_address' || result?.blocked === true;
       const ageDays = (now - new Date(row.accepted_at).getTime()) / 86400000;
       if (undeliverable && !row.copy_escalated_at && ageDays >= ACCEPTANCE_COPY_ESCALATE_DAYS) {
-        const NotificationService = require('./notification-service');
-        const notification = await NotificationService.notifyAdmin(
-          'estimate',
-          `Acceptance copy not deliverable: ${estimate.customer_name || 'customer'}`,
-          `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)}; ${result?.blocked ? 'their email is suppressed (bounced/unsubscribed)' : 'no usable email on the customer or the estimate'}. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`,
-        );
-        // Stamp ONLY when a row was persisted (GH Codex r3 P1): the admin bell
-        // policy can silence the 'estimate' category (owner-overridable via
-        // category:estimate) and returns {suppressed:true} with no row — a
-        // stamp then would bury the exception forever. Left unstamped, the
-        // next sweep retries and it lands once the category is enabled.
-        if (notification?.id) {
-          await db('estimate_acceptances').where({ id: row.id }).update({ copy_escalated_at: new Date() });
-          escalated += 1;
-        } else {
-          logger.warn(`[lifecycle-sweeps] acceptance copy escalation for estimate ${row.estimate_id} not persisted (${notification?.reason || 'suppressed'}); will retry next sweep`);
-        }
+        await escalate(estimate, `${estimate.address || 'no address'} — accepted ${String(row.accepted_at).slice(0, 10)}; ${result?.blocked ? 'their email is suppressed (bounced/unsubscribed)' : 'no usable email on the customer or the estimate'}. The promised copy of the accepted terms is on the accepted estimate page / PDF; please get it to them another way.`);
       }
     } catch (err) {
       logger.error(`[lifecycle-sweeps] acceptance copy resend failed for estimate ${row.estimate_id}: ${err.message}`);

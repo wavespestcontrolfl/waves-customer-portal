@@ -142,6 +142,42 @@ describe('accepted-onboarding email recipient', () => {
   });
 });
 
+describe('accepted-onboarding email — fulfilment only when the rendered email carries the copy', () => {
+  function rig(sendResult) {
+    jest.resetModules();
+    const updates = [];
+    jest.doMock('../services/email-template-library', () => ({ sendTemplate: jest.fn(async () => sendResult), redactEmailAddresses: (s) => s }));
+    jest.doMock('../models/db', () => (table) => {
+      const b = {};
+      b.where = () => b; b.whereNull = () => b; b.orderBy = () => b;
+      b.update = async (patch) => { updates.push({ table, patch }); return 1; };
+      b.first = async () => {
+        if (table === 'customers') return { id: 'c1', first_name: 'Pat', email: 'pat@example.com' };
+        if (table === 'estimate_acceptances') return { id: 'a1', terms_version: 'v2026-09', terms_text: 'Line.\nMore.', accepted_at: '2026-08-28T19:04:00Z' };
+        return undefined;
+      };
+      return b;
+    });
+    return { updates };
+  }
+
+  test('rendered text contains the note → copy_emailed_at stamped', async () => {
+    const { updates } = rig({ sent: true, rendered: { text: 'Hi Pat. You accepted electronically on Friday …', html: '<p>…</p>' } });
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    const res = await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'e1', acceptanceId: 'a1', serviceLabel: 'x' });
+    expect(res.copyMissing).toBeUndefined();
+    expect(updates).toEqual([{ table: 'estimate_acceptances', patch: expect.objectContaining({ copy_emailed_at: expect.any(Date) }) }]);
+  });
+
+  test('rendered email lacks the note (template version without the block) → NOT stamped, copyMissing', async () => {
+    const { updates } = rig({ sent: true, rendered: { text: 'Hi Pat, your plan is confirmed.', html: '<p>no note</p>' }, message: { text_snapshot: 'Hi Pat, your plan is confirmed.' } });
+    const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
+    const res = await sendEstimateAcceptedOnboarding({ customerId: 'c1', estimateId: 'e1', acceptanceId: 'a1', serviceLabel: 'x' });
+    expect(res).toMatchObject({ sent: true, copyMissing: true });
+    expect(updates).toEqual([]);
+  });
+});
+
 describe('accepted-onboarding email recipient — linked customer without a usable email', () => {
   test('falls back to the estimate contact', async () => {
     jest.resetModules();

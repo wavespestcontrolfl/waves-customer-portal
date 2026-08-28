@@ -3779,8 +3779,19 @@ async function createSelfBooking(payload = {}) {
     if (pendingAcceptanceClaim && txResult && txResult.ok !== false) {
       const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
       const claim = await attachAcceptanceOwnership(db, pendingAcceptanceClaim);
-      if (!claim.attached) {
-        logger[claim.outcome === 'error' ? 'error' : 'warn'](`[booking:confirm] acceptance ownership fan-out ${claim.outcome === 'error' ? 'failed' : 'not claimable'} for estimate ${pendingAcceptanceClaim.estimateId} → customer ${custId}${claim.outcome === 'error' ? '; the daily sweep will reconcile' : ''}`);
+      if (!claim.attached && claim.outcome === 'not_claimable') {
+        // Another booking's customer won the claim: this visit must not keep
+        // correlating to someone else's estimate (GH Codex r7 P2). A replay
+        // for the SAME customer is fine — the link is theirs.
+        const owner = await db('estimates').where({ id: pendingAcceptanceClaim.estimateId }).first('customer_id');
+        if (owner && owner.customer_id && String(owner.customer_id) !== String(custId)) {
+          await db('scheduled_services')
+            .where({ source_estimate_id: pendingAcceptanceClaim.estimateId, customer_id: custId })
+            .update({ source_estimate_id: null });
+          logger.warn(`[booking:confirm] estimate ${pendingAcceptanceClaim.estimateId} was claimed by another customer — unlinked this booking's visit(s)`);
+        }
+      } else if (!claim.attached) {
+        logger.error(`[booking:confirm] acceptance ownership fan-out failed for estimate ${pendingAcceptanceClaim.estimateId} → customer ${custId}; the daily sweep will reconcile`);
       }
     }
 
