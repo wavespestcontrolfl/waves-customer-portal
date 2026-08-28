@@ -347,7 +347,7 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     // A failed attempt never erases an earlier verified draft on the row.
     ...(draft?.text ? {
       auto_reply_draft: draft.text,
-      auto_reply_drafted_at: new Date().toISOString(),
+      auto_reply_drafted_at: (draft.reused && row.auto_reply_drafted_at) || new Date().toISOString(),
       auto_reply_version: draft.version || null,
       auto_reply_mode: draft.mode || null,
     } : {}),
@@ -564,7 +564,9 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         auto_reply_status: STATUS.POSTED,
         auto_reply_reason: null,
         auto_reply_draft: draft.text,
-        auto_reply_drafted_at: publishedAt,
+        // A reused (retry) draft keeps the time it was PRODUCED: the audit
+        // column and firstShadowDraftAt must not slide to the publish time.
+        auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || publishedAt,
         auto_reply_published_at: publishedAt,
         auto_reply_version: draft.version,
         auto_reply_mode: draft.mode,
@@ -643,7 +645,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
     if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
       const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
-      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
+      await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: (draft.reused && merged.auto_reply_drafted_at) || new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
       return { outcome: 'retry', reason: code };
     }

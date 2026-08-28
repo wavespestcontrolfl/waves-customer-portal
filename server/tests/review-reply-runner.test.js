@@ -819,6 +819,26 @@ describe('processDueAutoReplies — state machine', () => {
     expect(state.rows[0].auto_reply_status).toBe('queued');
   });
 
+  test('a reused (retry) draft keeps its original drafted_at through retries and the eventual publish (codex r30)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    const draftedAt = '2026-08-27T13:00:00Z';
+    const stored = { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none', version: 'grounding-v1', review: { rating: 5 } };
+    const base = () => row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_due_at: '2026-08-27T14:00:00Z', auto_reply_draft: GOOD_DRAFT.text, auto_reply_drafted_at: draftedAt, auto_reply_version: GOOD_DRAFT.version, auto_reply_mode: GOOD_DRAFT.mode, auto_reply_grounding: stored });
+    // Retry fails again → still the original timestamp, no redraft.
+    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('google_failed', 'GBP 503', { status: 502 }); });
+    state.rows = [base()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_attempts: 2, auto_reply_drafted_at: draftedAt });
+    expect(mockDraft).not.toHaveBeenCalled();
+    // Retry succeeds → drafted_at preserved, published_at is now.
+    state.rows = [base()];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+    expect(state.rows[0].auto_reply_drafted_at).toBe(draftedAt);
+    expect(state.rows[0].auto_reply_published_at).not.toBe(draftedAt);
+  });
+
   test('terminal parks record the final attempt count (codex r29)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const { ReviewReplyError } = require('../services/review-reply/publisher');

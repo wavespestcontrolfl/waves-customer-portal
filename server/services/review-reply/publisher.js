@@ -174,7 +174,7 @@ function updatedCount(updated) {
  *        string to abort (e.g. the caller's auto claim was lost to a human skip/dismiss)
  * @returns {Promise<{googlePosted:boolean, reviewId:string, localOnly:boolean}>}
  */
-async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined }) {
+async function publishReviewReply({ reviewId, text, actor, allowOverwrite = false, autoFields = null, auditMeta = null, guard = null, requireGoogle = false, expectedReply = undefined, expectedDraft = undefined }) {
   const replyText = String(text || '').trim();
   if (!replyText) throw new ReviewReplyError(CODES.EMPTY, 'Reply text required', { status: 400 });
   if (!actor?.type) throw new Error('publishReviewReply: actor.type required');
@@ -259,6 +259,16 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         const current = hasRealReply(fresh.review_reply) ? String(fresh.review_reply).trim() : '';
         if (observed !== current) {
           throw new ReviewReplyError(CODES.STALE, 'The reply changed since this page was loaded — reload it and try again.', { status: 409 });
+        }
+      }
+      // …and the DRAFT slot it observed (codex r30): a human "[DRAFT]" the
+      // editor was seeded from may have been replaced meanwhile (Agent Ops,
+      // another admin); the stale editor must not post over the newer one.
+      if (expectedDraft !== undefined) {
+        const observedDraft = String(expectedDraft || '').trim();
+        const currentDraft = isDraftReply(fresh.review_reply) ? stripDraftPrefix(fresh.review_reply).trim() : '';
+        if (observedDraft !== currentDraft) {
+          throw new ReviewReplyError(CODES.STALE, 'The saved draft on this review changed since this page was loaded — reload it and try again.', { status: 409 });
         }
       }
       const staleReason = guard ? await guard(fresh) : null;

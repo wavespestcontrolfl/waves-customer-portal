@@ -364,7 +364,7 @@ router.get('/', async (req, res, next) => {
 // publish → persist → audit); a human may replace an existing Google reply.
 router.post('/:id/reply', async (req, res, next) => {
   try {
-    const { replyText, draftToken, groundingToken, expectedReply } = req.body;
+    const { replyText, draftToken, groundingToken, expectedReply, expectedDraft } = req.body;
     if (!replyText) return res.status(400).json({ error: 'Reply text required' });
     const result = await ReplyPublisher.publishReviewReply({
       reviewId: req.params.id,
@@ -384,6 +384,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // What the browser saw in the reply slot when the page loaded (null =
       // no reply). Omitted by older clients → no browser-side check.
       expectedReply: expectedReply === undefined ? undefined : (expectedReply == null ? null : String(expectedReply)),
+      expectedDraft: expectedDraft === undefined ? undefined : (expectedDraft == null ? null : String(expectedDraft)),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

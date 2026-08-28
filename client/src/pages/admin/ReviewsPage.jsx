@@ -389,7 +389,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
     if (!replyText.trim()) return;
     setSubmitting(true);
     try {
-      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null });
+      await onReplySubmit(review.id, replyText.trim(), { draftToken, groundingToken, expectedReply: review.reply || null, expectedDraft: review.draftReply || null });
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
@@ -2132,12 +2132,13 @@ export default function ReviewsPage() {
     await loadData();
   };
 
-  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null } = {}) => {
+  const handleReply = async (reviewId, replyText, { draftToken = null, groundingToken = null, expectedReply = null, expectedDraft = null } = {}) => {
     await adminFetch(`/admin/reviews/${reviewId}/reply`, {
       method: "POST",
       body: JSON.stringify({
         replyText,
         expectedReply,
+        expectedDraft,
         ...(draftToken ? { draftToken } : {}),
         ...(groundingToken ? { groundingToken } : {}),
       }),

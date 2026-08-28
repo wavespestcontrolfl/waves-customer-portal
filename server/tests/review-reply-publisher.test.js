@@ -267,6 +267,17 @@ describe('publishReviewReply', () => {
     expect(r.googlePosted).toBe(true);
   });
 
+  test('the browser-observed DRAFT slot is enforced too (codex r30): a human draft replaced after page load blocks the stale editor', async () => {
+    state.rows[0].review_reply = '[DRAFT] Newer draft from Agent Ops';
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Old editor text.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null, expectedDraft: 'Older draft the editor was seeded from' }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // Observed draft matches → proceeds.
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Newer draft from Agent Ops', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null, expectedDraft: 'Newer draft from Agent Ops' });
+    expect(r.googlePosted).toBe(true);
+  });
+
   test('overwriting callers fail closed when the live review cannot be read', async () => {
     state.rows[0].review_reply = 'Already answered.';
     mockGbp.getReview.mockRejectedValueOnce(new Error('503'));
