@@ -388,13 +388,19 @@ if domain.spam_score > policy.max_spam_score
 if not path.agent_completable → OWNER_HUMAN_STEP      # the investigator judged a human must act; never AUTO_*
 if path.legal_attestation and policy.legal_attestation_requires_owner → OWNER_LEGAL
 if path.acquisition_type in (membership, association, sponsorship) and policy.membership_requires_owner → OWNER_MEMBERSHIP
+# Policy thresholds are compared ONLY when explicitly configured: `configured(x)` = x is a
+# finite number (not null/undefined/NaN). JS compares `5 >= null` as true, so a null
+# threshold must never reach a comparison — an unconfigured AUTO capability is simply absent.
 if path.payment_required:
-    if amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
+    if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents) and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
+       and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
+       and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score and d30_conf ≥ auto_paid_min_d30_confidence
        and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
     else → OWNER_PAYMENT
 if path.acquisition_type in (resource_outreach, editorial_outreach, partnership):
-    → AUTO_OUTREACH if score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
-if path.account_required → AUTO_ACCOUNT if auto_account_creation else awaiting_owner (OWNER_ACCOUNT)
+    → AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
+                      and score ≥ auto_outreach_min_score and draft passes §6.4, else OWNER_* per reason
+if path.account_required → AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT
 else → AUTO_FREE
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
@@ -419,9 +425,13 @@ idempotent and re-runs the decision whenever ANY §6.3 input changes — policy,
 revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
 evidence, month spend. **A stamp is never trusted on its own:** the claim predicate and the
 budget reservation both re-run the pure §6.3 decision on the *current* inputs inside their
-locked transaction and refuse (409, row re-parked) if the result differs from the stamped
-`authority` — so a row whose confidence dropped or whose domain's spam rose after stamping
-cannot send or spend. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
+locked transaction and refuse (409, row re-parked) unless it still supports the stamp:
+for `AUTO_*` and `OWNER_*` stamps the current result must equal the stamp; for
+`OWNER_OVERRIDE` the current result must still be exactly `DENY` (not `INVALID`, not a
+different level) AND the approval's `overridden_floors[]` and `decision_inputs_hash` must
+match the current floors/inputs — so a row whose confidence dropped or whose domain's spam
+rose after stamping cannot send or spend, and an override is honoured only for the exact
+failure the owner looked at. Approvals additionally bind to a `decision_inputs_hash` (§3.6b).
 
 `OWNER_*` → placement `awaiting_owner` + an admin-bell card (existing `NotificationService`,
 `bell: true`) showing domain, path, cost/renewal, DR/traffic/spam, competitors linked,
