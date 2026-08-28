@@ -106,7 +106,7 @@ describe('runBondRenewalSweep blocked-send handling', () => {
       await runBondRenewalSweep();
 
       const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
-      expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/?tab=plan');
+      expect(args.payload.renewal_url).toBe('https://portal.wavespestcontrol.com/?tab=documents');
       expect(args.payload.customer_portal_url).toBe('https://portal.wavespestcontrol.com/login');
     } finally {
       delete process.env.GATE_PORTAL_TERMITE_BOND;

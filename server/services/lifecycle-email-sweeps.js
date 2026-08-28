@@ -282,7 +282,7 @@ async function runBondRenewalSweep() {
           // redirects to /login?next=<this path> and LoginPage navigates
           // back after the SMS code.
           renewal_url: gateEnvValue('GATE_PORTAL_TERMITE_BOND')
-            ? `${FALLBACK_PORTAL_HOME_URL}/?tab=plan`
+            ? `${FALLBACK_PORTAL_HOME_URL}/?tab=documents`
             : `${FALLBACK_PORTAL_HOME_URL}/login`,
           customer_portal_url: `${FALLBACK_PORTAL_HOME_URL}/login`,
           company_phone: WAVES_SUPPORT_PHONE_DISPLAY,

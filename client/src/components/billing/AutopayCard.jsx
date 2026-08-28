@@ -156,7 +156,7 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
 // the existing atomic workflow (choose/add → server repoints Auto Pay in
 // one transaction → old card untouched until then). onOpenRequestHandled
 // lets the parent clear the request so a later remount doesn't replay it.
-export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled }) {
+export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled, embedded = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -507,15 +507,17 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
   ) : null;
 
   return (
-    <div data-glass="card" style={card}>
+    <div id="billing-autopay" {...(embedded ? {} : { 'data-glass': 'card' })} style={embedded ? { marginTop: 16, paddingTop: 16, borderTop: '1px solid #E7E2D7' } : card}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          {/* Embedded in Payment Methods (owner 08-28) the card's own
+              eyebrow is dropped — the parent card already carries one. */}
+          {!embedded && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
               <Icon name="card" size={14} strokeWidth={2} />
               Auto Pay / {theme.label}
             </span>
-          </div>
+          </div>}
           {/* Eyebrow / short title / muted subline — the same header rhythm
               as Plan Charges and Payment Methods. The old 18px title carried
               the whole explanatory sentence (08-28 sub-header pass). */}

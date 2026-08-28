@@ -1111,10 +1111,12 @@ function RecommendationsCard({ data, customer }) {
   const tierLineFor = (card) => {
     // The engine emits lowercase tiers ('silver'); TIER_DISCOUNTS is keyed
     // by display case (pre-push P1 on the first cut).
+    // States the option's tier, never "moves you" — that would compare
+    // against customer.tier, which can be stale (pre-push P1).
     const after = canonTier(card?.option?.waveguardTier);
     const pct = TIER_DISCOUNTS[after];
-    if (!after || !pct || after === canonTier(customer?.tier)) return null;
-    return `Adding this moves you to WaveGuard ${after} — ${Math.round(pct * 100)}% off ${after === 'Silver' ? 'both services' : 'every plan service'}.`;
+    if (!after || !pct) return null;
+    return `With this service your plan prices as WaveGuard ${after} — ${Math.round(pct * 100)}% off ${after === 'Silver' ? 'both services' : 'every plan service'}.`;
   };
   // Advice cards (irrigation nudges etc.) are out (owner 08-28) — this card
   // is for services the customer can ask about.
@@ -5110,6 +5112,11 @@ function BillingTab({ customer, refreshCustomer }) {
   const [typeFilter, setTypeFilter] = useState('All');
   const [billingEmail, setBillingEmail] = useState('');
   const [billingReminderChannel, setBillingReminderChannel] = useState('sms');
+  // Receipt texts have no on/off switch (owner 08-28), but a customer who
+  // opted out earlier keeps a way back on (pre-push P1) — the field is only
+  // sent once they tap it, so unrelated saves never touch the stored value.
+  const [paymentSmsOff, setPaymentSmsOff] = useState(false);
+  const [paymentSmsReenabled, setPaymentSmsReenabled] = useState(false);
   const [paymentConfirmationChannel, setPaymentConfirmationChannel] = useState('sms');
   const [emailPrefEnabled, setEmailPrefEnabled] = useState(true);
   const [billingPrefsSaving, setBillingPrefsSaving] = useState(false);
@@ -5226,6 +5233,8 @@ function BillingTab({ customer, refreshCustomer }) {
         if (prefsData) {
           setBillingEmail(prefsData.billingEmail || '');
           setBillingReminderChannel(prefsData.billingReminderChannel || 'sms');
+          setPaymentSmsOff(prefsData.paymentConfirmationSms === false);
+          setPaymentSmsReenabled(false);
           setPaymentConfirmationChannel(prefsData.paymentConfirmationChannel || 'sms');
           setEmailPrefEnabled(prefsData.emailEnabled !== false);
         }
@@ -5852,10 +5861,7 @@ function BillingTab({ customer, refreshCustomer }) {
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
-      // paymentConfirmationSms is no longer sent: the on/off switch is gone
-      // (owner 08-28 — receipts are for everyone), and a blanket `true` on
-      // every unrelated save would silently flip a stored opt-out (pre-push
-      // P1). The stored value stands until the server side retires the flag.
+      ...(paymentSmsReenabled ? { paymentConfirmationSms: true } : {}),
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
       // SMS-suppressing 'email' choice can't linger with no deliverable
@@ -6043,15 +6049,6 @@ function BillingTab({ customer, refreshCustomer }) {
       </div>
       )}
 
-      <div id="billing-autopay">
-        <AutopayCard
-          key={autopayRefreshKey}
-          onStateChange={setAutopay}
-          openRequest={autopayOpenRequest}
-          onOpenRequestHandled={() => setAutopayOpenRequest(null)}
-        />
-      </div>
-
       <div data-glass="card" style={{
         ...card,
         padding: 20,
@@ -6119,20 +6116,11 @@ function BillingTab({ customer, refreshCustomer }) {
 
       <div id="billing-payment-methods" data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start', marginBottom: 14, flexWrap: 'wrap' }}>
-          <div style={{ minWidth: 0, flex: compact ? '1 1 100%' : '1 1 auto' }}>
+          <div style={{ minWidth: 0, flex: '1 1 100%' }}>
             <div style={sectionTitle}><Icon name="card" size={14} strokeWidth={2} />Payment Methods</div>
             <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Saved methods</div>
             <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Cards and bank accounts on file for Auto Pay and invoices.</div>
           </div>
-          <button
-            type="button"
-            onClick={handleAddCard}
-            disabled={stripeLoading}
-            data-glass-accent=""
-            style={{ ...secondaryButton, opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer', position: 'relative', ...(compact ? { width: '100%' } : {}) }}
-          >
-            {stripeLoading && !showAddCard ? 'Loading...' : 'Add payment'}
-          </button>
         </div>
 
         {cards.map(c => (
@@ -6241,6 +6229,25 @@ function BillingTab({ customer, refreshCustomer }) {
             )}
           </div>
         )}
+        {/* Add payment sits under the saved methods, and Auto Pay status +
+            Manage live in this same card — a separate Auto Pay card above
+            it repeated the same information (owner 08-28). */}
+        <button
+          type="button"
+          onClick={handleAddCard}
+          disabled={stripeLoading}
+          data-glass-accent=""
+          style={{ ...secondaryButton, marginTop: 14, width: '100%', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', opacity: stripeLoading ? 0.6 : 1, cursor: stripeLoading ? 'wait' : 'pointer', position: 'relative' }}
+        >
+          {stripeLoading && !showAddCard ? 'Loading...' : 'Add payment'}
+        </button>
+        <AutopayCard
+          key={autopayRefreshKey}
+          embedded
+          onStateChange={setAutopay}
+          openRequest={autopayOpenRequest}
+          onOpenRequestHandled={() => setAutopayOpenRequest(null)}
+        />
       </div>
 
       {/* ── Set-default Auto Pay consent modal (checkbox required) ── */}
@@ -6423,6 +6430,7 @@ function BillingTab({ customer, refreshCustomer }) {
         <div style={{ fontSize: 14, color: muted, marginTop: 4 }}>
           Across {ytdPayments.length} payment{ytdPayments.length !== 1 ? 's' : ''}
         </div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Everything you have paid this year, plan visits and one-time work.</div>
         <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginTop: 14 }}>
           <div style={{ padding: 12, background: subtle, border: '1px solid #E7E2D7', borderRadius: 8 }}>
             <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>
@@ -6514,7 +6522,7 @@ function BillingTab({ customer, refreshCustomer }) {
                   −{money(p.refundAmount)} refunded
                 </div>
               )}
-              <span style={{
+              <span data-glass-accent={displayStatus(p) === 'paid' ? '' : undefined} style={{
                 display: 'inline-flex',
                 marginTop: 5,
                 fontSize: 14,
@@ -6572,30 +6580,8 @@ function BillingTab({ customer, refreshCustomer }) {
         )}
 
         {!billingPrefsLoadError && <>
-        <div style={{ marginBottom: 14 }}>
-          <label htmlFor="portal-billing-email" style={{ fontSize: 12, fontWeight: 850, color: muted, display: 'block', marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0 }}>
-            Billing recipient email
-          </label>
-          <input
-            id="portal-billing-email"
-            name="billingEmail"
-            type="email"
-            inputMode="email"
-            autoComplete="email"
-            autoCapitalize="none"
-            value={billingEmail}
-            onChange={e => setBillingEmail(e.target.value)}
-            placeholder={customer?.email || 'billing@example.com'}
-            aria-label="Billing email"
-            className="waves-focus-ring"
-            style={{
-              width: '100%', padding: '10px 12px', borderRadius: 8, border: '1px solid #D8D0C0',
-              fontSize: 14, fontFamily: FONTS.body, color: B.glassNavy, background: '#fff',
-              boxSizing: 'border-box',
-            }}
-          />
-          <div style={{ marginTop: 5, color: muted, fontSize: 12 }}>Optional - invoices and receipts can go here instead of the account email.</div>
-        </div>
+        {/* Billing recipient email field removed (owner 08-28) — receipts go
+            to the account email; a stored billing_email stays honoured. */}
 
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -6650,7 +6636,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 // promise here either (codex r5 P2).
                 const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
-                const textLeg = channel !== 'email';
+                const textLeg = channel !== 'email' && !paymentSmsOff;
                 if (textLeg && emailLeg) return 'Payment confirmations';
                 if (emailLeg) return 'Payment confirmation emails';
                 if (textLeg) return 'Payment confirmation texts';
@@ -6665,7 +6651,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 // Same effective-channel rule as the title above (codex r5 P2).
                 const channel = hasBillingEmail ? paymentConfirmationChannel : 'sms';
                 const emailLeg = channel === 'email' || channel === 'both';
-                const textLeg = channel !== 'email';
+                const textLeg = channel !== 'email' && !paymentSmsOff;
                 if (textLeg && emailLeg) return 'Get a text and an email when your payment processes.';
                 if (emailLeg) return 'Get an email when your payment processes.';
                 if (textLeg) return 'Get a text when your payment processes.';
@@ -6695,7 +6681,13 @@ function BillingTab({ customer, refreshCustomer }) {
           })()}
           {/* No on/off switch (owner ruling 2026-08-28): payment
               confirmations are receipts — every customer gets one; only the
-              delivery method is a choice, like billing reminders. */}
+              delivery method is a choice, like billing reminders. A stored
+              opt-out shows a one-tap way back on. */}
+          {paymentSmsOff && (
+            <button type="button" data-glass-accent="" onClick={() => { setPaymentSmsOff(false); setPaymentSmsReenabled(true); }} style={{ ...secondaryButton, minHeight: 40, position: 'relative', flexShrink: 0 }}>
+              Turn on
+            </button>
+          )}
         </div>
 
         {billingPrefsStatus === 'error' && (
@@ -8553,15 +8545,19 @@ function LearnTab({ customer }) {
     return 'bulb';
   };
 
+  // Feed cards carry the pill → title → one sentence header like every
+  // other portal card (owner 08-28); the bare "N items" line is gone.
+  const FEED_HEADS = {
+    'Waves Newsletter': ['Latest issues', 'What we sent customers this month.'],
+    'From the Experts': ['Expert references', 'University and industry guidance we trust.'],
+    'Local Suncoast News': ['Local updates', 'What is happening around the Suncoast.'],
+  };
   const renderFeedSection = (title, icon, posts, emptyText) => (
     <section data-glass="card" style={{ ...card, padding: 20, minWidth: 0 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 14 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-          <div>
-            <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
-            <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{posts.length} item{posts.length === 1 ? '' : 's'}</div>
-          </div>
-        </div>
+      <div style={{ marginBottom: 14 }}>
+        <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />{title}</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{FEED_HEADS[title]?.[0] || 'Latest'}</div>
+        <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>{FEED_HEADS[title]?.[1] || `${posts.length} item${posts.length === 1 ? '' : 's'}.`}</div>
       </div>
       {posts.length ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -8764,7 +8760,8 @@ function LearnTab({ customer }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: compact ? '1 1 100%' : '1 1 auto', minWidth: 0 }}>
             <div>
               <div style={sectionTitle}><Icon name="newspaper" size={14} strokeWidth={2} />Waves Pest Control Blog</div>
-              <div style={{ marginTop: 2, fontSize: 14, color: muted }}>{sortedBlogPosts.length} article{sortedBlogPosts.length === 1 ? '' : 's'} from wavespestcontrol.com</div>
+              <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Latest articles</div>
+              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Seasonal tips and how-tos from the Waves team.</div>
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
@@ -9842,7 +9839,6 @@ function MyPlanTab({ customer, focusService }) {
   const [stationMaps, setStationMaps] = useState(null);
   // Active termite bond(s) (GATE_PORTAL_TERMITE_BOND). Fail-soft: no bond
   // or gate off simply renders no card.
-  const [termiteBonds, setTermiteBonds] = useState(null);
   const [planStatus, setPlanStatus] = useState('loading');
 
   const loadPlan = useCallback(() => {
@@ -9877,9 +9873,6 @@ function MyPlanTab({ customer, focusService }) {
       setResolvedNonMonthly(d?.non_monthly_billing === true);
     }).catch(() => {});
     api.getStationMap().then(d => setStationMaps(d?.available ? d : null)).catch(() => {});
-    api.getTermiteBond().then(d => {
-      setTermiteBonds(d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null);
-    }).catch(() => {});
   }, [loadPlan]);
 
   const serviceMatches = (svcId, service = {}) => {
@@ -10235,17 +10228,17 @@ function MyPlanTab({ customer, focusService }) {
               lineHeight: 1.1,
               letterSpacing: 0,
             }}>
-              Your plan
+              {customer.firstName ? `${customer.firstName}'s plan` : 'Your plan'}
             </h1>
             <div style={{ fontSize: 15, color: B.grayDark, lineHeight: 1.55 }}>
               {/* A rodent-only customer has no WaveGuard plan but DOES have a
                   recurring service on the schedule — "no recurring plan"
                   would contradict the row rendered below (codex P2). */}
               {activeTierName
-                ? `${bundleSummary || 'Recurring service'} - ${numServices} service${numServices > 1 ? 's' : ''} bundled`
+                ? `${bundleSummary || 'Recurring service'} — ${numServices} service${numServices > 1 ? 's' : ''} bundled under WaveGuard ${tierName}.`
                 : displayedServices.length
-                  ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule - no WaveGuard plan`
-                  : 'No recurring plan on file'}
+                  ? `${displayedServices.length} recurring service${displayedServices.length > 1 ? 's' : ''} on your schedule, no WaveGuard plan yet.`
+                  : 'No recurring plan on file yet.'}
             </div>
           </div>
           <div style={{
@@ -10315,7 +10308,7 @@ function MyPlanTab({ customer, focusService }) {
                     : 'No recurring services'}
               </div>
               <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                {activeTierName ? `Covered by WaveGuard ${tierName}.` : displayedServices.length ? 'On your schedule.' : 'Nothing recurring is on file yet.'}
+                {activeTierName ? `Covered by WaveGuard ${tierName} — every visit below is part of your plan.` : displayedServices.length ? 'On your schedule, outside a WaveGuard plan.' : 'Nothing recurring is on file yet.'}
               </div>
             </div>
 
@@ -10640,62 +10633,6 @@ function MyPlanTab({ customer, focusService }) {
             </div>
           </section>
 
-          {/* Termite bond coverage (GATE_PORTAL_TERMITE_BOND). Informational
-              only — renewal is a conversation, not a portal action (owner
-              2026-08-11), and coverage terms stay generic here, the same
-              stance the renewal email holds. The renewal email's "Renew my
-              bond" CTA deep-links to this tab. */}
-          {Array.isArray(termiteBonds) && termiteBonds.length > 0 && (
-            <section data-glass="card" style={{ ...card, padding: 20 }}>
-              <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
-              <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Your bond term and renewal date.</div>
-              {termiteBonds.map((bond, index) => {
-                const renewalDiff = etDayDiff(bond.renewsAt);
-                const renewalPast = renewalDiff != null && renewalDiff < 0;
-                return (
-                  <div
-                    key={`${bond.startedAt}-${index}`}
-                    style={{
-                      display: 'grid',
-                      gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(3, 1fr)',
-                      gap: 10,
-                      marginTop: 14,
-                      paddingTop: index === 0 ? 0 : 14,
-                      borderTop: index === 0 ? 'none' : '1px solid #E7E2D7',
-                    }}
-                  >
-                    {[
-                      { label: 'Term', value: `${bond.termYears}-year` },
-                      { label: 'Started', value: fmtDate(bond.startedAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
-                      { label: renewalPast ? 'Renewal due' : 'Renews', value: fmtDate(bond.renewsAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
-                    ].map((item, idx, arr) => (
-                      <div key={item.label} style={{
-                        border: '1px solid #E7E2D7',
-                        borderRadius: 8,
-                        background: subtle,
-                        padding: 14,
-                        gridColumn: compact && arr.length % 2 === 1 && idx === arr.length - 1 ? '1 / -1' : 'auto',
-                      }}>
-                        <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
-                        <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })}
-              <div style={{ display: 'flex', gap: 9, marginTop: 14, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
-                <Icon name="shield" size={16} strokeWidth={1.8} style={{ color: B.glassNavy, marginTop: 2, flexShrink: 0 }} />
-                <span>
-                  Questions about what your bond covers, or ready to renew? Call or
-                  text us and we’ll walk through your specific terms.
-                </span>
-              </div>
-              <div style={{ display: 'flex', gap: 10, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
-                <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none' }}>Call us</a>
-                <a href="sms:+19412975749?body=Hi Waves, I have a question about my termite bond." data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none' }}>Text us</a>
-              </div>
-            </section>
-          )}
 
           {tier && tierIdx >= 2 && (
             <section data-glass="card" style={{ ...card, padding: 20 }}>
@@ -12407,6 +12344,7 @@ function ReferTab({ customer, onSwitchTab }) {
 
       <section data-glass="card" style={{ ...card, padding: 20 }}>
         <div style={sectionTitle}><Icon name="bulb" size={14} strokeWidth={2} />How It Works</div>
+        <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>Share, they start, you earn</div>
         <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Three steps from share to credit.</div>
         <div style={{ marginTop: 12, display: 'grid', gridTemplateColumns: compact ? '1fr' : `repeat(${rewardPerReferral > 0 ? 3 : 2}, 1fr)`, gap: 10 }}>
           {[
@@ -12447,7 +12385,75 @@ function ReferTab({ customer, onSwitchTab }) {
 // =========================================================================
 // DOCUMENTS TAB
 // =========================================================================
+// Termite bond card — lives on the Documents tab (owner 08-28: a bond is
+// paperwork, not a plan row). GATE_PORTAL_TERMITE_BOND: the endpoint answers
+// available:false when dark. Informational only — renewal is a conversation,
+// not a portal action (owner 2026-08-11), and coverage terms stay generic,
+// the same stance the renewal email holds.
+function TermiteBondCard({ bonds, compact, card, sectionTitle, primaryButton, secondaryButton, muted, subtle }) {
+  if (!Array.isArray(bonds) || bonds.length === 0) return null;
+  const termLabel = bonds.length === 1 ? `${bonds[0].termYears}-year bond` : `${bonds.length} bonds on file`;
+  return (
+    <section data-glass="card" style={{ ...card, padding: 20 }}>
+      <div style={sectionTitle}><Icon name="shield" size={14} strokeWidth={2} />Termite Bond</div>
+      <div style={{ marginTop: 8, fontSize: 20, fontWeight: 850, color: B.glassNavy }}>{termLabel}</div>
+      <div style={{ marginTop: 4, fontSize: 14, color: muted, lineHeight: 1.45 }}>Your bond term and renewal date.</div>
+      {bonds.map((bond, index) => {
+        const renewalDiff = etDayDiff(bond.renewsAt);
+        const renewalPast = renewalDiff != null && renewalDiff < 0;
+        return (
+          <div
+            key={`${bond.startedAt}-${index}`}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: compact ? '1fr 1fr' : 'repeat(3, 1fr)',
+              gap: 10,
+              marginTop: 14,
+              paddingTop: index === 0 ? 0 : 14,
+              borderTop: index === 0 ? 'none' : '1px solid #E7E2D7',
+            }}
+          >
+            {[
+              { label: 'Term', value: `${bond.termYears}-year` },
+              { label: 'Started', value: fmtDate(bond.startedAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
+              { label: renewalPast ? 'Renewal due' : 'Renews', value: fmtDate(bond.renewsAt, { month: 'short', day: 'numeric', year: 'numeric' }) },
+            ].map((item, idx, arr) => (
+              <div key={item.label} style={{
+                border: '1px solid #E7E2D7',
+                borderRadius: 8,
+                background: subtle,
+                padding: 14,
+                gridColumn: compact && arr.length % 2 === 1 && idx === arr.length - 1 ? '1 / -1' : 'auto',
+              }}>
+                <div style={{ fontSize: 12, color: muted, fontWeight: 800 }}>{item.label}</div>
+                <div style={{ marginTop: 6, color: B.glassNavy, fontSize: 18, fontWeight: 850, lineHeight: 1.1 }}>{item.value}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })}
+      <div style={{ display: 'flex', gap: 9, marginTop: 14, color: B.grayDark, fontSize: 14, lineHeight: 1.5 }}>
+        <Icon name="shield" size={16} strokeWidth={1.8} style={{ color: B.glassNavy, marginTop: 2, flexShrink: 0 }} />
+        <span>
+          Questions about what your bond covers, or ready to renew? Call or
+          text us and we’ll walk through your specific terms.
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 12 }}>
+        <a href="tel:+19412975749" data-glass-accent="" style={{ ...secondaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Call us</a>
+        <a href="sms:+19412975749?body=Hi Waves, I have a question about my termite bond." data-glass-accent="" style={{ ...primaryButton, textDecoration: 'none', position: 'relative', minHeight: 44, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>Text us</a>
+      </div>
+    </section>
+  );
+}
+
 function DocumentsTab({ customer, onSwitchTab }) {
+  const [termiteBonds, setTermiteBonds] = useState(null);
+  useEffect(() => {
+    api.getTermiteBond().then(d => {
+      setTermiteBonds(d?.available && Array.isArray(d.bonds) && d.bonds.length ? d.bonds : null);
+    }).catch(() => {});
+  }, []);
   const portalGlass = usePortalGlass();
   const compact = useIsMobile(760);
   const [docs, setDocs] = useState({});
@@ -12958,6 +12964,17 @@ function DocumentsTab({ customer, onSwitchTab }) {
       ))}
 
       {/* Invoices link — redirect to Billing tab */}
+      <TermiteBondCard
+        bonds={termiteBonds}
+        compact={compact}
+        card={card}
+        sectionTitle={sectionTitle}
+        primaryButton={primaryButton}
+        secondaryButton={secondaryButton}
+        muted={muted}
+        subtle={subtle}
+      />
+
       <section data-glass="card" style={{
         ...card,
         padding: 20,
