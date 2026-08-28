@@ -350,6 +350,15 @@ describe('PR codex r1: ambiguous place names need geo context; postal abbreviati
       expect(gate.classifyGeoScope(t).scope).toBe('none');
     }
   });
+  test('hook (PR codex r2 push): a safe abbreviation LEADING the text or slug is out-of-state; ambiguous ones stay context-gated', () => {
+    for (const t of ['TX termite treatment', 'ca pest control laws', 'tx termite control']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.evaluateDraftFraming({ frontmatter: { title: 'Termite Control Basics', slug: '/tx-termite-control/' } }).ok).toBe(false);
+    for (const t of ['in wall pest control', 'me and my ants', 'or exterminator', 'ok pest control for pets']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('none');
+    }
+  });
   test('PR codex r2: "mt" is Montana only trailing or after a comma — "mt dora" / "mt pleasant" are towns', () => {
     for (const t of ['termite control billings mt', 'Billings, MT pest control', 'exterminator missoula mt?']) {
       expect(gate.classifyGeoScope(t).out_of_area).toContain('MT');

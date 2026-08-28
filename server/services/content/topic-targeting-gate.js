@@ -108,7 +108,8 @@ const STATEWIDE_RE = /\bflorida\b|\bfl\b/i;
 // out-of-footprint by construction. "Virginia" and "Washington" are left
 // out — both are common person names (Virginia runs the Waves office).
 // Postal abbreviations. "Safe" ones are not English words and count after
-// any word ("plano tx", "fresno, ca"); ambiguous ones (in, or, me, ok, va —
+// any word or at the start ("plano tx", "fresno, ca", "tx termite treatment",
+// a slug's "/tx-termite-control/" once its dashes are spaces); ambiguous ones (in, or, me, ok, va —
 // "wdo inspection va loan" is a real termite topic) count only after a comma.
 const STATE_ABBR_SAFE = 'ak|az|ca|ct|dc|ga|ia|il|ks|ky|mn|nc|nd|nh|nj|nm|nv|ny|ri|sc|sd|tn|tx|ut|vt|wa|wi|wv|wy';
 const STATE_ABBR_AMBIGUOUS = 'al|ar|co|de|hi|id|in|la|ma|md|me|mi|mo|ms|ne|oh|ok|or|pa|va';
@@ -116,7 +117,7 @@ const STATE_ABBR_AMBIGUOUS = 'al|ar|co|de|hi|id|in|la|ma|md|me|mi|mo|ms|ne|oh|ok
 // when it ends the phrase ("billings mt") or follows a comma ("Billings, MT").
 const STATE_ABBR_TRAILING = 'mt';
 const STATE_ABBR_RE = new RegExp(
-  `\\b[a-z]+,?\\s+(${STATE_ABBR_SAFE})\\b(?![a-z])`
+  `(?:^\\s*|\\b[a-z]+,?\\s+)(${STATE_ABBR_SAFE})\\b(?![a-z])`
   + `|\\b[a-z]+,?\\s+(${STATE_ABBR_TRAILING})(?=\\s*(?:$|[,:;|?!–—-]))`
   + `|,\\s*(${STATE_ABBR_SAFE}|${STATE_ABBR_AMBIGUOUS}|${STATE_ABBR_TRAILING})\\b(?![a-z])`,
   'i'
