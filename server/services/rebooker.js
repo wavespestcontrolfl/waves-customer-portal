@@ -220,12 +220,36 @@ function seriesOperationKey(serviceId, newDate, newWindow, options = {}) {
     return { key: options.operationKey, derived: false };
   }
   const win = parseWindow(newWindow);
-  return { key: `${serviceId}:${dateOnly(newDate)}:${win.start ? String(win.start).slice(0, 5) : '-'}`, derived: true };
+  const hm = (t) => (t ? String(t).slice(0, 5) : '-');
+  // Every request dimension the move writes — date, start AND end (an
+  // end-only correction to a just-moved slot is a different request), plus
+  // an explicit anchor clear — so only a true repeat matches.
+  return {
+    key: `${serviceId}:${dateOnly(newDate)}:${hm(win.start)}:${hm(win.end)}${options.clearAnchorWindow === true ? ':clear' : ''}`,
+    derived: true,
+  };
 }
-async function findPriorSeriesMove(conn, serviceId, { key, derived }) {
+// A DERIVED-key replay additionally requires the anchor to still sit exactly
+// where the committed move left it (date + window from its recorded
+// occurrence); a client-minted key is the caller's own assertion of identity.
+function priorStillCurrent(prior, service, derived) {
+  if (!derived) return true;
+  const occ = (prior.result?.rescheduledOccurrences || []).find((o) => String(o.id) === String(service.id))
+    || (Array.isArray(prior.rows) ? prior.rows.find((r) => String(r.id) === String(service.id)) : null);
+  const after = occ ? { date: occ.date ?? occ.after?.scheduled_date, start: occ.windowStart ?? occ.after?.window_start, end: occ.windowEnd ?? occ.after?.window_end } : null;
+  if (!after) return false;
+  const hm = (t) => (t ? String(t).slice(0, 5) : null);
+  return dateOnly(after.date) === dateOnly(service.scheduled_date)
+    && hm(after.start) === hm(service.window_start)
+    && hm(after.end) === hm(service.window_end);
+}
+async function findPriorSeriesMove(conn, serviceId, { key, derived }, service = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
-  return q.orderBy('created_at', 'desc').first();
+  const prior = await q.orderBy('created_at', 'desc').first();
+  if (!prior) return null;
+  if (service && !priorStillCurrent(prior, service, derived)) return null;
+  return prior;
 }
 
 // What an operation_key replay hands back for a committed move: the result
@@ -748,7 +772,7 @@ class SmartRebooker {
       // retry replays it (and its caller can finish the effects) instead of
       // falling into a same-date single edit.
       const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
-      const prior = await findPriorSeriesMove(db, serviceId, opKey);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
       if (prior) return replaySeriesMoveResult(prior, newDate);
       if (dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
         const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
@@ -1242,7 +1266,7 @@ class SmartRebooker {
     const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
     const operationKey = opKey.key;
     {
-      const prior = await findPriorSeriesMove(db, serviceId, opKey);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service);
       if (prior) return replaySeriesMoveResult(prior, newDate);
     }
     const {
@@ -1496,7 +1520,15 @@ class SmartRebooker {
         // named so the operator fixes that visit's time first instead of the
         // series silently carrying an off-hour start forward.
         let occurrenceWindow;
-        if (isAnchor) {
+        // options.clearAnchorWindow: the caller's explicit "clear both bounds"
+        // rides IN this transaction with the date move (the Edit appointment
+        // modal) — the anchor lands windowless, never half-applied across
+        // two transactions. Occupancy probes skip a windowless anchor, as
+        // they do for any windowless row.
+        const anchorCleared = isAnchor && options.clearAnchorWindow === true;
+        if (anchorCleared) {
+          occurrenceWindow = { start: null, end: null };
+        } else if (isAnchor) {
           occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
         } else {
           try {
@@ -1637,6 +1669,13 @@ class SmartRebooker {
             }
             overlapWarnDates.add(String(date).split('T')[0]);
           }
+        }
+        if (anchorCleared) {
+          // Legacy presentation fields too (same clear the windowless
+          // sibling park applies) — a cleared anchor must not keep promising
+          // the abandoned time through window_display / time_window.
+          updateData.time_window = null;
+          updateData.window_display = null;
         }
         updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(
           trx,
@@ -1796,7 +1835,7 @@ class SmartRebooker {
             code: 'SLOT_TAKEN',
           });
         }
-        if (sibClashBeyondHorizon) {
+        if (sibClashBeyondHorizon || (anchorCleared && sib.window_start)) {
           // The row just went timed → windowless: pre-close its reminder in
           // THIS trx (windows_preclosed marker), or the sync trigger's
           // recompute leaves it armed for the 08:00 placeholder time.

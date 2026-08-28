@@ -14379,6 +14379,29 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     rescheduleOptions.overlapAdvisory = true;
     rescheduleOptions.sourceSurface = 'dispatch_board';
     if (operationKey) rescheduleOptions.operationKey = operationKey;
+    // Disclosure contract (PR2 wires it): the collective choke point would
+    // widen this singular move to the whole series. A surface that sent
+    // `scope: 'this_only'` without `seriesAck: true` has not shown the
+    // operator what moves — refuse with the preview counts so it can, and
+    // re-submit with the ack (or `scope: 'series'`, which is the explicit
+    // "Reschedule series" choice). Gate off: unchanged single-visit move.
+    if (collectiveMoveGateOn() && req.body.seriesAck !== true) {
+      const job = await db('scheduled_services').where({ id: req.params.serviceId }).first('is_recurring', 'scheduled_date');
+      const jobDate = job?.scheduled_date instanceof Date ? job.scheduled_date.toISOString().slice(0, 10) : String(job?.scheduled_date || '').slice(0, 10);
+      if (job?.is_recurring === true && jobDate !== String(newDate).split('T')[0]) {
+        let preview = null;
+        try {
+          preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
+        } catch {
+          preview = null;
+        }
+        return res.status(409).json({
+          error: `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Use Reschedule series, or confirm the series move.`,
+          code: 'COLLECTIVE_MOVE_ACK_REQUIRED',
+          preview: preview || null,
+        });
+      }
+    }
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
     if (result.seriesMoveId) {
       // The collective choke point (GATE_ADMIN_COLLECTIVE_MOVE) turned this

@@ -44,6 +44,8 @@ jest.mock('../services/rebooker', () => ({
   reschedule: jest.fn().mockResolvedValue({ success: true }),
   rescheduleSeries: jest.fn().mockResolvedValue({ success: true, rescheduledOccurrences: [] }),
   applyLiveMovePostCommitEffects: jest.fn(),
+  collectiveMoveGateOn: () => process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
+  previewSeriesMove: jest.fn().mockResolvedValue({ collective: true, movableCount: 4, skippedCount: 0, exceptionCount: 0, conflictCount: 0 }),
 }));
 jest.mock('../services/appointment-reminders', () => ({
   handleReschedule: jest.fn().mockResolvedValue({}),
@@ -79,7 +81,40 @@ async function reschedule(body) {
 
 const TARGET = etDateString(addETDays(new Date(), 7));
 
-beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; });
+beforeEach(() => { jest.clearAllMocks(); mockVisitRow = null; delete process.env.GATE_ADMIN_COLLECTIVE_MOVE; });
+
+describe('collective disclosure contract (GATE_ADMIN_COLLECTIVE_MOVE)', () => {
+  const recurringRow = () => ({ is_recurring: true, scheduled_date: etDateString(addETDays(new Date(), 2)), window_start: '09:00:00', window_end: '10:00:00', estimated_duration_minutes: 60 });
+
+  test('gate on: a this_only date move of a recurring visit without seriesAck is refused with the preview — nothing moves', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status, body } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only' });
+    expect(status).toBe(409);
+    expect(body.code).toBe('COLLECTIVE_MOVE_ACK_REQUIRED');
+    expect(body.preview).toMatchObject({ movableCount: 4 });
+    expect(body.error).toMatch(/3 later visit/);
+    expect(SmartRebooker.reschedule).not.toHaveBeenCalled();
+  });
+
+  test('gate on: the same move WITH seriesAck reaches the rebooker (the choke point widens it server-side)', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = recurringRow();
+    const { status } = await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' }, scope: 'this_only', seriesAck: true });
+    expect(status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  test('gate on: a one-time visit needs no ack; gate off: a recurring visit needs none either', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    mockVisitRow = { ...recurringRow(), is_recurring: false };
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } })).status).toBe(200);
+    delete process.env.GATE_ADMIN_COLLECTIVE_MOVE;
+    mockVisitRow = recurringRow();
+    expect((await reschedule({ newDate: TARGET, newWindow: { start: '09:00', end: '10:00' } })).status).toBe(200);
+    expect(SmartRebooker.reschedule).toHaveBeenCalledTimes(2);
+  });
+});
 
 test('a 06:30 drop is refused with 422 INVALID_APPOINTMENT_WINDOW before the rebooker runs', async () => {
   const { status, body } = await reschedule({ newDate: TARGET, newWindow: '06:30-07:30' });

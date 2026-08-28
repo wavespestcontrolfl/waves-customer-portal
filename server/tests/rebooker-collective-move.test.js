@@ -158,9 +158,16 @@ describe('reschedule() choke point', () => {
   });
   afterEach(() => { SmartRebooker.rescheduleSeries = realSeries; });
 
-  function wireLookup(svc, { priorMove = undefined } = {}) {
+  function wireLookup(svc, { priorMove = undefined, priorKey = null } = {}) {
     db.transaction = jest.fn();
-    const priorLookup = chain({ first: jest.fn().mockResolvedValue(priorMove) });
+    // Key-aware prior lookup: answers the prior only for the operation_key
+    // it was stored under (as the real query would).
+    const priorLookup = chain();
+    priorLookup.where = jest.fn(function where(arg) {
+      if (arg && typeof arg === 'object' && arg.operation_key && priorKey && arg.operation_key !== priorKey) priorLookup._miss = true;
+      return priorLookup;
+    });
+    priorLookup.first = jest.fn(async () => (priorLookup._miss ? undefined : priorMove));
     db.mockImplementation((table) => {
       if (table === 'scheduled_services') return chain({ first: jest.fn().mockResolvedValue(svc) });
       if (table === 'series_moves') return priorLookup;
@@ -183,23 +190,51 @@ describe('reschedule() choke point', () => {
       // The FULL scheduling pin rides along (duration too), and the retry
       // identity is minted here so the series path records it.
       expectAnchor: { scheduled_date: BASE, window_start: '09:00:00', estimated_duration_minutes: 60 },
-      operationKey: `svc-1:${TARGET}:13:00`,
+      operationKey: `svc-1:${TARGET}:13:00:-`,
     });
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
   test('a retry after the first attempt committed (anchor already ON the target) replays the prior move instead of a same-date single edit', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
-    const { priorLookup } = wireLookup(anchorRow({ scheduled_date: TARGET }), {
-      priorMove: { id: 'sm-prior', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 3, rescheduledOccurrences: [] } },
-    });
-    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00' }, 'admin', 'admin', ADMIN_OPTS);
+    const priorMove = {
+      id: 'sm-prior', new_date: TARGET,
+      result: { success: true, newDate: TARGET, occurrencesRescheduled: 3, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] },
+    };
+    const { priorLookup } = wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '15:00:00' }), { priorMove, priorKey: `svc-1:${TARGET}:13:00:15:00` });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', ADMIN_OPTS);
     expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-prior', occurrencesRescheduled: 3 });
     expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
     // Derived keys are honored only within the retry horizon.
-    expect(priorLookup.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:13:00`, status: 'committed' });
+    expect(priorLookup.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:13:00:15:00`, status: 'committed' });
     expect(priorLookup.where).toHaveBeenCalledWith('created_at', '>', expect.any(Date));
+  });
+
+  test('a derived-key replay also requires the anchor to still sit where the committed move left it', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    // Same request key as the committed move, but the anchor's end was edited since → not a retry.
+    wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '16:00:00' }), {
+      priorMove: { id: 'sm-prior', new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
+      priorKey: `svc-1:${TARGET}:13:00:15:00`,
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('single-path-reached'), { single: true }); });
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ single: true });
+  });
+
+  test('an end-only correction right after a series move is a DIFFERENT request — no replay, the single same-date edit proceeds', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    wireLookup(anchorRow({ scheduled_date: TARGET, window_start: '13:00:00', window_end: '15:00:00' }), {
+      priorMove: { id: 'sm-prior', new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
+      priorKey: `svc-1:${TARGET}:13:00:15:00`,
+    });
+    db.transaction = jest.fn(async () => { throw Object.assign(new Error('single-path-reached'), { single: true }); });
+    // Same date + start, new end: key differs (…:13:00:16:00), and even a
+    // matching key would fail the still-current check once the row changed.
+    await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '16:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ single: true });
+    expect(SmartRebooker.rescheduleSeries).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -426,9 +461,21 @@ describe('rescheduleSeries — one recorded operation', () => {
   test('callers that mint no key get the request identity anchor:target:start; an older committed row with that key is superseded first', async () => {
     const { seriesMovesInsert, seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
-    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${TARGET}:09:00` });
-    expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:09:00`, status: 'committed' });
+    expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ operation_key: `svc-1:${TARGET}:09:00:11:00` });
+    expect(seriesMovesDb.where).toHaveBeenCalledWith({ anchor_service_id: 'svc-1', operation_key: `svc-1:${TARGET}:09:00:11:00`, status: 'committed' });
     expect(seriesMovesInsert.update).toHaveBeenCalledWith({ status: 'superseded' });
+  });
+
+  test('clearAnchorWindow lands the anchor windowless IN the series transaction (legacy display fields cleared, reminder pre-closed)', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const preclose = jest.spyOn(AppointmentReminders, 'precloseWindowlessReminderInTx').mockResolvedValue(undefined);
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: null, end: null }, 'admin', 'admin', { ...ADMIN_OPTS, clearAnchorWindow: true });
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ scheduled_date: TARGET, window_start: null, window_end: null, time_window: null, window_display: null });
+    expect(updates[1].update.mock.calls[0][0]).toMatchObject({ window_start: '09:00:00', window_end: '11:00:00' });
+    expect(preclose).toHaveBeenCalledWith(expect.anything(), 'svc-1');
+    expect(result.rescheduledOccurrences[0]).toMatchObject({ id: 'svc-1', windowStart: null, windowEnd: null });
+    preclose.mockRestore();
   });
 
   test('the series anchor pin also fences window_end and duration (a start-only resolution derives its window from them)', async () => {
@@ -552,6 +599,10 @@ describe('caller wiring (source)', () => {
     expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single' }");
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");
+    // Disclosure: without seriesAck the planner refuses up front (nothing saved) with the preview.
+    expect(sched.slice(sched.indexOf('async function planCollectiveEditDateMove'), handler)).toContain("code: 'COLLECTIVE_MOVE_ACK_REQUIRED'");
+    const disp = read('../routes/admin-dispatch.js');
+    expect(disp).toContain("if (collectiveMoveGateOn() && req.body.seriesAck !== true) {");
     const plan = sched.indexOf('const seriesMovePlan = await planCollectiveEditDateMove(req);', handler);
     const destructure = sched.indexOf('} = req.body;', handler);
     const commit = sched.indexOf('seriesMove = await seriesMovePlan.commit();', handler);

@@ -6591,6 +6591,23 @@ async function planCollectiveEditDateMove(req) {
     return null;
   }
   const clearWindow = intake.clearBoth === true;
+  // Disclosure contract (PR2 wires it): a gated collective date move must be
+  // acknowledged by the surface (`seriesAck: true`, sent after it rendered
+  // the preview count). Without it the save is refused up front — nothing
+  // saved, nothing moved — and the response carries the preview so the
+  // surface can show "moves N future visits" and re-submit.
+  if (req.body.seriesAck !== true) {
+    let preview = null;
+    try {
+      preview = await require('../services/rebooker').previewSeriesMove(row.id, target);
+    } catch {
+      preview = null;
+    }
+    throw Object.assign(
+      httpError(409, `This visit is part of a recurring plan — with collective moves on, its ${preview?.movableCount ? preview.movableCount - 1 : 'future'} later visit(s) move with it. Confirm the series move to continue. Nothing was changed.`),
+      { code: 'COLLECTIVE_MOVE_ACK_REQUIRED', preview: preview || null },
+    );
+  }
   let win = { start: null, end: null };
   if (!clearWindow && intake.windowStart) {
     const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
@@ -6611,7 +6628,6 @@ async function planCollectiveEditDateMove(req) {
     ? req.body.operationKey
     : null;
   return {
-    clearWindow,
     async commit() {
       const SmartRebooker = require('../services/rebooker');
       // Same predicate the choke point evaluates (gate + cadence row + date
@@ -6622,14 +6638,13 @@ async function planCollectiveEditDateMove(req) {
         overlapAdvisory: true,
         sourceSurface: 'edit_modal',
         ...(operationKey ? { operationKey } : {}),
+        // An explicit two-bound clear rides IN the series transaction with
+        // the date move — never persisted ahead of it by the per-row edit.
+        ...(clearWindow ? { clearAnchorWindow: true } : {}),
         // Pin the anchor to the row the plan read — a concurrent move makes
         // the delta stale and the series must not shift on it. The per-row
-        // edit above never touches the date; it touches the window only on
-        // an explicit clear (then the pin is the date alone).
-        expect: {
-          scheduled_date: dateOnly(row.scheduled_date),
-          ...(clearWindow ? {} : { window_start: row.window_start ?? null }),
-        },
+        // edit above never touches the date or the window.
+        expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
       });
       const { applySeriesMoveEffects } = require('./admin-dispatch');
       const effects = await applySeriesMoveEffects({
@@ -6660,15 +6675,13 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan) {
-      // The series commit lands the date (and any supplied window) after
-      // the per-row edit below; that edit saves the remaining fields as a
-      // same-slot edit (windowIntakeFromBody reads req.body, so the window
-      // keys go too — except an explicit clear, which stays the handler's).
+      // The series commit lands the date and the window (supplied, kept, or
+      // explicitly cleared) after the per-row edit below; that edit saves
+      // the remaining fields as a same-slot edit (windowIntakeFromBody reads
+      // req.body, so the window keys go too).
       delete req.body.scheduledDate;
-      if (!seriesMovePlan.clearWindow) {
-        delete req.body.windowStart;
-        delete req.body.windowEnd;
-      }
+      delete req.body.windowStart;
+      delete req.body.windowEnd;
     }
     const {
       serviceType, estimatedDuration, scheduledDate,
@@ -9509,7 +9522,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       return res.status(409).json(duplicateSeriesConflictBody(err.duplicateRecurringSeries));
     }
     if (err.status) {
-      return res.status(err.status).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.conflicts ? { conflicts: err.conflicts } : {}) });
+      return res.status(err.status).json({
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+        ...(err.conflicts ? { conflicts: err.conflicts } : {}),
+        ...(err.preview ? { preview: err.preview } : {}),
+      });
     }
     next(err);
   }
