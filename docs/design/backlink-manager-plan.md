@@ -715,9 +715,11 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   validation (the last point at which nothing has been charged) the row is `submitting`
   (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
   exposes the card to the provider. Where the merchant supports it the
-  `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
+  `merchant_idempotency_key` is sent with the checkout. From `submitting` the worker's ONLY
   transitions are `close_pending` (success reported with `merchant_ref`; the card is not yet
-  confirmed closed) or `ambiguous` — **every
+  confirmed closed) or `ambiguous`; the sweep additionally owns `submitting → reserved` (issuer
+  conclusively confirms no card was ever minted) — the **authoritative transition table** is
+  the "Lease safety" bullet below and nothing else in this document adds to it — **every
   unsuccessful or unclear post-exposure result is `ambiguous`**, including a merchant
   "declined"/"error" page (a merchant can authorize and fail at the application layer, then
   capture later). `voided` exists only for failures **before** the card was exposed
@@ -748,6 +750,13 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   the precondition for releasing the budget and allowing a new generation, never a lookup
   that merely found nothing yet. A `reserved` row whose attempt fails *before* `submitting` is
   `voided` in the same report and releases its budget.
+- **Authoritative transition table** (the CHECK enum + these edges are the whole machine):
+  `reserved → voided` (worker/sweep, pre-exposure) · `reserved → submitting` (worker, after
+  pre-mint revalidation) · `submitting → reserved` (sweep only, issuer-confirmed no card) ·
+  `submitting → close_pending` (worker, merchant success) · `submitting → ambiguous` (worker
+  or sweep) · `close_pending → charged` (worker/sweep, issuer-confirmed closure + capture) ·
+  `close_pending → ambiguous` (sweep) · `ambiguous → reconciled_charged | reconciled_not_charged`
+  (reconciler only). No other edge exists; tests enumerate this table.
 - **Lease safety.** Every purchase transition is conditional on the **purchase row's own
   `lease_token`** (set by the claim that took it — placement claim for an initial purchase,
   renewal claim for a renewal — expiring with `lease_expires_at`) AND on the exact prior
