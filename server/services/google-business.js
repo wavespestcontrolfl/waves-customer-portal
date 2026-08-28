@@ -868,6 +868,13 @@ class GoogleBusinessService {
         // transaction snapshot and here; reconciling against the stale
         // snapshot would CAS zero rows and leave a now-stale reply 'posted'.
         const live = (await trx('google_reviews').where({ id: existing.id }).forUpdate().first()) || existing;
+        // An OLDER overlapping runner reaching this row after a newer one
+        // must not write its older snapshot (and must not read the newer
+        // content as a "reviewer edit" and park a valid reply) — codex r47.
+        if (syncStart && live.synced_at && new Date(live.synced_at).getTime() > new Date(syncStart).getTime()) {
+          logger.info(`[gbp] existing row ${existing.id}: older runner yielded to a newer sync token`);
+          return null;
+        }
         await trx('google_reviews').where({ id: existing.id }).update({ ...row, synced_at: monotonicSyncedAt });
         // Conditional on the row STILL being parked for that reason (an admin
         // Skip in the meantime wins).
@@ -1107,9 +1114,15 @@ class GoogleBusinessService {
             // may let this sample mutate the candidate's auto-reply state.
             // An uncorroborated same-name sample is a different account until
             // the authoritative GBP feed says otherwise.
+            // An EDIT moves the Places `time` (documented above), so the
+            // exact-second match cannot corroborate the edited review itself;
+            // the reviewer's profile photo URL is the stable per-account
+            // identity the sample also carries (codex r47).
             const editPlacesSec = review.time ? Math.floor(review.time) : null;
             const editCandidateSec = candidate.review_created_at ? Math.floor(new Date(candidate.review_created_at).getTime() / 1000) : null;
-            const editCorroborated = editPlacesSec != null && editCandidateSec != null && editPlacesSec === editCandidateSec;
+            const editPhoto = String(review.profile_photo_url || '').trim();
+            const editCorroborated = (editPlacesSec != null && editCandidateSec != null && editPlacesSec === editCandidateSec)
+              || (!!editPhoto && editPhoto === String(candidate.reviewer_photo_url || '').trim());
             if (editCorroborated && !candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
               await this._reconcileReviewEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
             }

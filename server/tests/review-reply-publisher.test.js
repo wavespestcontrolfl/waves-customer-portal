@@ -331,6 +331,15 @@ describe('publishReviewReply', () => {
     expect(state.rows[0]).toMatchObject({ review_reply: 'Thanks Dana.', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_published_at: '2026-08-27T15:00:00Z' });
     expect(mockNotify).toHaveBeenCalledTimes(1);
     expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', needsAction: true });
+    // codex r47: the bell goes through the retrying notifier — a null result is retried and then stamped for the sweep.
+    mockNotify.mockClear(); mockNotify.mockResolvedValue(null);
+    state.rows[0] = { ...state.rows[0], review_reply: null, auto_reply_status: 'queued', auto_reply_reason: null, review_text: 'Great', star_rating: 5 };
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows[0].review_text = 'Rewritten complaint'; return {}; });
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' }, autoFields: { auto_reply_status: 'posted' } });
+    expect(mockNotify).toHaveBeenCalledTimes(3);
+    expect(state.rows[0].auto_reply_error).toMatch(/^bell_failed:review_edited_after_post:/);
+    mockNotify.mockReset().mockResolvedValue({});
     // codex r38: account-derived facts changed while the PUT was in flight
     // (review fingerprint unchanged) → parked for a person, never clean posted.
     mockNotify.mockClear();

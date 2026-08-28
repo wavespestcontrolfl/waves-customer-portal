@@ -268,6 +268,7 @@ async function draftReviewReply(reviewId) {
 
 
 async function submitReviewReply(reviewId, replyText, groundingToken) {
+  const { parseGroundingToken } = require('../review-reply/runner');
   // Posts to Google through the canonical publisher (liveness lock + audit).
   // This tool used to write review_reply locally and claim the reply would
   // "sync to Google" — it never did. Now it either reaches Google or errors.
@@ -291,10 +292,10 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
     // row says at submission time: a reviewer rewrite the sync recorded in
     // between must refuse a draft written for the old review. Same shared
     // guard as the editor's AI drafts, validated inside the publish claim.
-    if (typeof groundingToken !== 'string' || !groundingToken.includes('|')) {
-      return { error: 'Draft it first with draft_review_reply and pass its grounding_token back — the token binds the reply to the review it was written for.', code: 'grounding_token_required' };
-    }
     const { pipelineDraftGuard } = require('../review-reply/runner');
+    if (!parseGroundingToken(groundingToken)) {
+      return { error: 'Draft it first with draft_review_reply and pass its grounding_token back unchanged — the token binds the reply to the review it was written for.', code: 'grounding_token_required' };
+    }
     submitGuard = pipelineDraftGuard(replyText, { groundingToken });
   } catch (err) {
     if (err instanceof ReviewReplyError) return { error: err.message, code: err.code };
@@ -312,7 +313,7 @@ async function submitReviewReply(reviewId, replyText, groundingToken) {
       allowOverwrite: false,
       autoFields: require('../review-reply/runner').manualReplyCloseFields(db),
       guard: submitGuard,
-      expectedAccountFingerprint: groundingToken.slice(groundingToken.indexOf('|') + 1),
+      expectedAccountFingerprint: parseGroundingToken(groundingToken).account,
     });
     const review = await db('google_reviews').where('id', reviewId).first();
     logger.info(`[intelligence-bar:reviews] Posted reply to review ${reviewId}`);

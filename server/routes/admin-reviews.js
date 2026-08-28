@@ -403,7 +403,7 @@ router.post('/:id/reply', async (req, res, next) => {
       // The account half of an editor AI draft's grounding token: the
       // post-PUT check parks a reply whose facts changed while Google's PUT
       // was in flight, human path included (codex r40).
-      expectedAccountFingerprint: typeof groundingToken === 'string' && groundingToken.includes('|') ? groundingToken.slice(groundingToken.indexOf('|') + 1) : undefined,
+      expectedAccountFingerprint: AutoReply.parseGroundingToken(groundingToken)?.account || undefined,
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

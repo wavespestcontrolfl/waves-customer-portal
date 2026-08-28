@@ -1139,12 +1139,15 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
   const token = draftToken ? String(draftToken) : null;
   // An editor AI draft (/ai-reply) is never stored on the row; its token
   // carries the review + account fingerprints it was grounded on.
-  // Split at the FIRST separator only: the account fingerprint is opaque.
-  const gSep = groundingToken ? String(groundingToken).indexOf('|') : -1;
-  const gReview = gSep > 0 ? String(groundingToken).slice(0, gSep) : null;
-  const gAccount = gSep > 0 ? String(groundingToken).slice(gSep + 1) : null;
+  // A token that is present but malformed is NOT an unguarded submission
+  // (codex r47): both halves must be well-formed fingerprints.
+  const parsedToken = parseGroundingToken(groundingToken);
+  const tokenInvalid = groundingToken != null && groundingToken !== '' && !parsedToken;
+  const gReview = parsedToken?.review || null;
+  const gAccount = parsedToken?.account || null;
   return async (fresh) => {
     if (!fresh) return null;
+    if (tokenInvalid) return 'the grounding token is malformed — draft again';
     const human = humanDraftOn(fresh);
     if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
       return 'this draft was written before the review changed — read the current review and edit the draft first';
@@ -1289,6 +1292,23 @@ async function validatePromotionAccountFacts(existing, fields, { conn = db } = {
   return { ...fields, auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
 }
 
+/**
+ * Parse a grounding token ("<review sha1>|<account sha1>"). Returns
+ * { review, account } or null when either half is missing / malformed.
+ */
+const FINGERPRINT_RE = /^[0-9a-f]{40}$/i;
+function parseGroundingToken(token) {
+  if (typeof token !== 'string') return null;
+  const i = token.indexOf('|');
+  if (i <= 0) return null;
+  const review = token.slice(0, i);
+  const account = token.slice(i + 1);
+  // The review half is a canonical sha1 (reviewFingerprint); the account
+  // half is opaque (accountFingerprint) but must be present.
+  if (!FINGERPRINT_RE.test(review) || !account.trim()) return null;
+  return { review, account };
+}
+
 /** Token for an editor AI draft: the review + account fingerprints it saw. */
 function groundingToken(review, grounding) {
   return `${reviewFingerprint(review)}|${accountFingerprint(grounding?.account || null)}`;
@@ -1364,6 +1384,7 @@ module.exports = {
   autoReplyStatus,
   pipelineDraftGuard,
   groundingToken,
+  parseGroundingToken,
   humanDraftSavedFields,
   agentDraftSavedFields,
   HUMAN_DRAFT_STALE,

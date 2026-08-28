@@ -574,14 +574,11 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     persisted = true;
     await audit({ googlePosted: true, editedDuringPut });
     if (editedDuringPut) {
-      const locName = (WAVES_LOCATIONS.find((l) => l.id === review.location_id) || {}).name || review.location_id;
-      const NotificationService = require('../notification-service');
-      await NotificationService.notifyAdmin('review', 'Review edited while the reply posted', `${current.star_rating}★ review on ${locName} was edited by the reviewer while our reply was being posted — check whether the reply still fits (edit or retract).`, {
-        link: `/admin/reviews?responded=all&review=${encodeURIComponent(reviewId)}`,
-        bell: true,
-        dedupeKey: `review-auto-reply:${reviewId}:review_edited_after_post`,
-        metadata: { reason: 'review_edited_after_post', reviewId, locationId: review.location_id, needsAction: true },
-      }).catch((e) => logger.warn(`[review-reply] edited-during-put bell failed for ${reviewId}: ${e.message}`));
+      // The retrying notifier (codex r47): a null notifyAdmin result is a
+      // failure, retried, then stamped for the cron sweep — the stale public
+      // reply must never go unnoticed.
+      const { notifyReviewEditedAfterPost } = require('./runner');
+      await notifyReviewEditedAfterPost({ id: reviewId }, { location_id: review.location_id, star_rating: current?.star_rating ?? review.star_rating, cause: accountStale ? 'attribution' : 'edit' });
     }
     return { googlePosted: true, localOnly: false, reviewId, editedDuringPut };
   } catch (err) {

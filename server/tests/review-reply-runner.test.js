@@ -1275,6 +1275,18 @@ describe('admin actions', () => {
     expect(af.auto_reply_drafted_at).not.toBe('2026-08-20T00:00:00Z');
   });
 
+  test('a malformed grounding token is never an unguarded submission (codex r47)', async () => {
+    const fp = Runner.reviewFingerprint(row());
+    expect(Runner.parseGroundingToken(`${fp}|${'a'.repeat(40)}`)).toEqual({ review: fp, account: 'a'.repeat(40) });
+    expect(Runner.parseGroundingToken(`|${'a'.repeat(40)}`)).toBeNull();
+    expect(Runner.parseGroundingToken('|')).toBeNull();
+    expect(Runner.parseGroundingToken(`${fp}|`)).toBeNull();
+    expect(Runner.parseGroundingToken('not-a-token')).toBeNull();
+    for (const bad of [`|${'a'.repeat(40)}`, '|', 'garbage']) {
+      expect(await Runner.pipelineDraftGuard('AI text', { groundingToken: bad })(row())).toMatch(/malformed/);
+    }
+  });
+
   test('postNow does not re-verify a human [DRAFT] (the admin\'s own text is the payload)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     const human = 'Hi Dana,\n\nThe owner wrote this.\n\nThe 🌊 Waves Pest Control Sarasota Team';
