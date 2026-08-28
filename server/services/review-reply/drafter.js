@@ -108,6 +108,9 @@ const BANNED_RE = new RegExp([
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
   '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\bsuitab\\w*\\b',
+  // "Benign / innocuous / inert / gentle / mild / non-harmful" — the same
+  // pesticide-safety assertion in softer clothes (codex r28).
+  '\\bbenign\\b', '\\binnocuous\\b', '\\binert\\b', '\\bgentle\\b', '\\bmild\\b', '\\bnon[- ]?(?:harmful|lethal|hazardous|irritating|aggressive|invasive|toxic|poisonous)\\b', '\\blow[- ](?:risk|impact|toxicity|odou?r)\\b',
   // Suitability / tolerance framing in any wrapper ("suitable around pets",
   // "appropriate for use near children", "no problem with your dogs"), and
   // ANY "around <pets/kids/…>" — a thank-you reply has no other use for it.

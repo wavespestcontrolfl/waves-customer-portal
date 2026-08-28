@@ -266,13 +266,16 @@ function claimGuard(row, { publishingText = null, accountFingerprint: expectedAc
     // the draft was in flight — same customer_id — makes it stale too.
     if (expectedAccountFp) {
       let current;
-      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
+      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return ACCOUNT_READ_FAILED; }
       if (current !== expectedAccountFp) return REVIEW_CHANGED;
     }
     return null;
   };
 }
 const REVIEW_CHANGED = 'review changed while drafting';
+// A transient DB failure re-reading account facts inside the claim: retryable,
+// never a reason to drop the row as "lost to a person".
+const ACCOUNT_READ_FAILED = 'account facts could not be re-read';
 const HUMAN_DRAFT = 'a human draft was saved while drafting';
 
 // A "[DRAFT]" on review_reply that the pipeline did NOT write (Agent Ops
@@ -456,7 +459,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // provider_down with a perfectly good reply on the row). Only rows that
   // never produced a draft, or whose stored draft came from a different
   // prompt version, go back to the model.
-  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'unexpected', 'runner_error']);
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, CODES.NO_RESOURCE, 'gbp_not_configured', 'account_read_failed', 'unexpected', 'runner_error']);
   const storedGrounding = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
   const reusable = merged.auto_reply_status === STATUS.FAILED
     && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
@@ -585,7 +588,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     });
     return { outcome: 'posted', mode: draft.mode };
   } catch (err) {
-    const code = err instanceof ReviewReplyError ? err.code : 'unexpected';
+    let code = err instanceof ReviewReplyError ? err.code : 'unexpected';
     if (code === CODES.PERSIST_FAILED) {
       await parkPersistFailed(merged, draft, err);
       return { outcome: 'parked', reason: 'persist_failed' };
@@ -621,12 +624,16 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       await releaseClaim(row, { auto_reply_status: STATUS.QUEUED, auto_reply_reason: 'review_changed', auto_reply_due_at: dueAt, auto_reply_draft: null, auto_reply_drafted_at: null });
       return { outcome: 'retry', reason: 'review_changed' };
     }
-    if (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE) {
+    // A transient account-facts read failure inside the claim is not a
+    // person's action: retry it like a Google failure (codex r28).
+    const transientStale = code === CODES.STALE && err.message.includes(ACCOUNT_READ_FAILED);
+    if (!transientStale && (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE)) {
       // Not ours any more (a human replied / skipped / dismissed, or Google
       // removed it) — record and stop; never retry over a person's action.
       await releaseClaim(row, { auto_reply_status: STATUS.SKIPPED, auto_reply_reason: code, auto_reply_error: err.message });
       return { outcome: 'skipped', reason: code };
     }
+    if (transientStale) code = 'account_read_failed';
     const attempts = (merged.auto_reply_attempts || 0) + 1;
     // Every transient class (lock contention, Google failure, unexpected)
     // shares ONE retry ceiling; after it the row parks for a person.
@@ -634,7 +641,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // next healthy sync will attach — retry on a longer backoff (and the
     // sync re-queues a parked row the moment it attaches the name).
     const backoffMin = code === CODES.NO_RESOURCE ? IDENTITY_BACKOFF_MIN : RETRY_BACKOFF_MIN;
-    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
+    if ((code === CODES.LOCK_BUSY || code === CODES.GOOGLE_FAILED || code === CODES.NO_RESOURCE || code === 'account_read_failed' || code === 'unexpected') && attempts < MAX_ATTEMPTS) {
       const due = new Date(Date.now() + backoffMin * attempts * 60000).toISOString();
       await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: code, auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: err.message, auto_reply_draft: draft.text, auto_reply_drafted_at: new Date().toISOString(), auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_grounding: JSON.stringify(snapshot) });
       logger.warn(`[review-auto-reply] publish deferred for ${merged.id}: ${code} (${err.message})`);
@@ -643,7 +650,8 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     const parkReason = code === CODES.NOT_CONFIGURED ? 'gbp_not_configured'
       : code === CODES.NO_RESOURCE ? 'no_gbp_resource'
         : code === CODES.LOCK_BUSY ? 'lock_busy'
-          : 'google_failed';
+          : code === 'account_read_failed' ? 'account_read_failed'
+            : 'google_failed';
     if (!(await storeDraft(merged, draft, STATUS.PARKED, parkReason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — Google did not accept the reply (${err.message}). The draft is saved on the review.`, reason: 'google_failed', action: true });
     logger.error(`[review-auto-reply] publish failed for ${merged.id}: ${code} (${err.message})`);
@@ -919,6 +927,15 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
         auto_reply_error: null,
         auto_reply_claimed_until: null,
       };
+    }
+    // A posted reply parked for a person after a reviewer edit: while Google
+    // still shows OUR reply the park (and Retract) must survive every later
+    // sync; only an owner edit on Google hands it over (edited_on_google).
+    if (existing?.auto_reply_status === STATUS.PARKED
+      && existing.auto_reply_reason === 'review_edited_after_post'
+      && hasRealReply(existing.review_reply)) {
+      if (ownerReply === String(existing.review_reply).trim()) return fields;
+      return { ...fields, auto_reply_status: STATUS.SKIPPED, auto_reply_reason: 'edited_on_google' };
     }
     const pending = [STATUS.QUEUED, STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED];
     if (existing && pending.includes(existing.auto_reply_status)) {

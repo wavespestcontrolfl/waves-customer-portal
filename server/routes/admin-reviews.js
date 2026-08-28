@@ -396,8 +396,10 @@ router.post('/:id/auto-reply/post-now', requireAdmin, async (req, res, next) => 
     if (result.outcome !== 'posted') {
       // A 1-3★ / unrated review with no surfaced draft: the draft was just
       // created and parked; the person reads it, then posts it.
+      // Success-shaped (200) so the page reloads the card and RENDERS the
+      // draft before another Post now is possible (codex r28).
       if (result.drafted) {
-        return res.status(409).json({ error: 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.', outcome: result.outcome, reason: result.reason || null, drafted: true });
+        return res.json({ success: false, drafted: true, outcome: result.outcome, reason: result.reason || null, message: 'This review needs a person: a draft was just created and is on the review — read it, then Post now again.' });
       }
       return res.status(409).json({ error: `Could not post: ${result.reason || result.outcome}`, outcome: result.outcome, reason: result.reason || null });
     }

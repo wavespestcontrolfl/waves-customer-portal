@@ -50,7 +50,10 @@ function whereHasRealReply(qb, column = 'review_reply') {
  */
 function removedOwnerReplyFields(existing) {
   if (isDraftReply(existing?.review_reply)) return {};
-  if (existing?.auto_reply_status === 'posted' && hasRealReply(existing.review_reply)) {
+  // Ours = posted, or posted-then-parked for a person after a reviewer edit.
+  const ours = existing?.auto_reply_status === 'posted'
+    || (existing?.auto_reply_status === 'parked' && existing?.auto_reply_reason === 'review_edited_after_post');
+  if (ours && hasRealReply(existing.review_reply)) {
     return { review_reply: null, reply_updated_at: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' };
   }
   return { review_reply: null, reply_updated_at: null };

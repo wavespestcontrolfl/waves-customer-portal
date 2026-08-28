@@ -694,6 +694,14 @@ describe('processDueAutoReplies — state machine', () => {
       .toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });
   });
 
+  test('syncReplyFields keeps a review_edited_after_post park while Google still shows OUR reply; an owner edit hands it over (codex r28)', () => {
+    const now = new Date('2026-08-27T15:00:00Z');
+    const parked = { review_reply: 'Our auto reply', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_draft: 'Our auto reply', publish_claimed_until: null };
+    expect(Runner.syncReplyFields(parked, { owner_reply: 'Our auto reply' }, { now })).toEqual({ review_reply: 'Our auto reply', reply_updated_at: now.toISOString() });
+    expect(Runner.syncReplyFields(parked, { owner_reply: 'Owner rewrote it' }, { now })).toMatchObject({ review_reply: 'Owner rewrote it', auto_reply_status: 'skipped', auto_reply_reason: 'edited_on_google' });
+    expect(Runner.syncReplyFields(parked, { owner_reply: null }, { now })).toMatchObject({ review_reply: null, auto_reply_status: 'retracted', auto_reply_reason: 'removed_on_google' });
+  });
+
   test('syncReplyFields on a POSTED row: an owner edit in Google closes auto state; a deletion marks it retracted', () => {
     const now = new Date('2026-08-27T15:00:00Z');
     const posted = { review_reply: 'Our auto reply', auto_reply_status: 'posted', publish_claimed_until: null };
@@ -809,6 +817,21 @@ describe('processDueAutoReplies — state machine', () => {
     await expect(Runner.postNow('rev-1', { type: 'admin' })).rejects.toThrow('token store down');
     expect(state.rows[0].auto_reply_claimed_until).toBeNull();
     expect(state.rows[0].auto_reply_status).toBe('queued');
+  });
+
+  test('a transient account-facts read failure inside the claim retries (never skipped as lost to a person) — codex r28', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('stale_claim', 'Reply not posted: account facts could not be re-read', { status: 409 }); });
+    state.rows = [row()];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.retry).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'failed', auto_reply_reason: 'account_read_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text });
+    // A genuine STALE (a person acted) is still terminal.
+    mockPublish.mockImplementationOnce(async () => { throw new ReviewReplyError('stale_claim', 'Reply not posted: auto-reply claim was lost', { status: 409 }); });
+    state.rows = [row({ id: 'g' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'stale_claim' });
   });
 
   test('GOOGLE_UNCERTAIN (PUT timed out, may be live) → parked with an action bell, never retried', async () => {

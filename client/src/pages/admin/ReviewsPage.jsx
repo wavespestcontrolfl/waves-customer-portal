@@ -2119,7 +2119,10 @@ export default function ReviewsPage() {
     const path = action === "retract"
       ? `/admin/reviews/${reviewId}/retract-reply`
       : `/admin/reviews/${reviewId}/auto-reply/${action}`;
-    await adminFetch(path, { method: "POST" });
+    const result = await adminFetch(path, { method: "POST" });
+    // Post now on a 1-3★ / unrated review with no surfaced draft: the server
+    // drafted + parked instead of posting; reload so the draft is rendered.
+    if (result && result.drafted && result.message) alert(result.message);
     loadData();
   };
 
