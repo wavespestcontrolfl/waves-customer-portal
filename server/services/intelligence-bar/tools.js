@@ -1942,6 +1942,9 @@ async function rescheduleAppointment(input) {
           // destination day's ordered run; the CAS above already makes a
           // stale-snapshot write miss). Same-day window changes keep it.
           ...(dateStr !== observedDate ? { route_order: null } : {}),
+          // A this-visit-only DATE move of a cadence row is a deliberate
+          // exception to its series (rebooker.dateExceptionStamp).
+          ...(dateStr !== observedDate ? require('../rebooker').dateExceptionStamp(appt, 'admin_ib') : {}),
           notes: reason ? `${appt.notes || ''}\nRescheduled: ${reason}`.trim() : appt.notes,
           // Public track links live until the day after the visit — refresh onto
           // the new date, same as schedule-tools' movers. Built off the root

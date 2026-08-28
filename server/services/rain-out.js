@@ -1812,15 +1812,21 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           allowLive: true,
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
-          // This path governs series scope itself (the atomic shift was tried
-          // above): the fallback is the visit moving ALONE by design, so the
-          // collective choke point must not re-enter the series.
-          seriesPolicy: 'single',
+          // After an explicit series attempt the fallback is the visit
+          // moving ALONE by design (the collective choke point must not
+          // re-enter the series). Without one — the older series gate off —
+          // the rebooker's choke point decides, so Quick Move honors
+          // GATE_ADMIN_COLLECTIVE_MOVE like every other staff surface.
           ...(wantsSeriesShift
-            ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
+            ? { seriesPolicy: 'single', expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
             : {}),
         });
         if (Array.isArray(moveResult?.warnings)) memberWarnings.push(...moveResult.warnings);
+        if (moveResult?.seriesMoveId && Array.isArray(moveResult.rescheduledOccurrences)) {
+          // The choke point turned this into a series move — the shifted
+          // siblings get the same silent re-arm + conflict parking below.
+          shiftedOccurrences = moveResult.rescheduledOccurrences;
+        }
         if (wantsSeriesShift) {
           // The visit moved but the series could not shift atomically —
           // park it for the office instead of failing the rain-out.

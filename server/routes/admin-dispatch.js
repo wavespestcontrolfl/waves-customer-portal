@@ -13545,7 +13545,7 @@ function rescheduleReminderTime(date, window) {
   return `${String(date).split('T')[0]}T${normalizeHHMM(win.start) || '08:00'}`;
 }
 
-async function syncRescheduleReminder(serviceId, date, window, { willNotify = false } = {}) {
+async function syncRescheduleReminder(serviceId, date, window, { willNotify = false, expectSchedule = null } = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
     await AppointmentReminders.handleReschedule(
@@ -13557,7 +13557,7 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
       // until our SMS settles + markRescheduleNoticeSent runs, so the 15-min
       // cron can't fire a duplicate reminder in the gap. A non-notifying move
       // leaves the 24h reminder pending so the cron still reminds the customer.
-      { sendNotification: false, coverDueWindows: willNotify },
+      { sendNotification: false, coverDueWindows: willNotify, ...(expectSchedule ? { expectSchedule } : {}) },
     );
   } catch (err) {
     logger.warn(`[dispatch] Reschedule committed for ${serviceId}, but reminder sync failed: ${err.message}`);
@@ -14093,11 +14093,21 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     const remindersThisPass = !markers.reminders_synced_at;
     if (remindersThisPass) {
       for (const occurrence of occurrences) {
+        // expectSchedule: the reminder moves only if the visit still sits on
+        // the slot THIS move recorded — a replayed/retried pass whose
+        // occurrence was rescheduled again in between must not drag its
+        // reminder back to the superseded slot.
         await syncRescheduleReminder(
           occurrence.id,
           occurrence.date,
           { start: occurrence.windowStart, end: occurrence.windowEnd },
-          { willNotify: notify },
+          {
+            willNotify: notify,
+            expectSchedule: {
+              date: String(occurrence.date).split('T')[0],
+              windowStart: occurrence.windowStart ? String(occurrence.windowStart).slice(0, 5) : null,
+            },
+          },
         );
         const occurrenceGuards = await captureReminderGuards(occurrence.id);
         if (Array.isArray(occurrenceGuards)) {
@@ -14133,6 +14143,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
         .first();
       if (!svc?.phone) {
         notificationError = 'Customer phone unavailable';
+      } else if (String(svc.scheduled_date instanceof Date ? svc.scheduled_date.toISOString() : svc.scheduled_date || '').slice(0, 10) !== String(newDate).split('T')[0]) {
+        // A replayed/retried pass: the anchor was moved again after this
+        // series move committed — the recorded text would announce a
+        // superseded date. The later move's own notice covers the customer.
+        notificationError = 'anchor_changed';
       } else {
         const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
           .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
@@ -14180,10 +14195,15 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
           logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
         }
       }
-      if (!notificationSent && remindersThisPass) {
-        // Fallback scope for a failed guard snapshot: each occurrence's NEW
-        // time, recomputed exactly as syncRescheduleReminder stamped it above.
-        const guardsForRearm = seriesGuardSnapshotFailed
+      if (!notificationSent) {
+        // Nothing went out, so the due windows the sync covered above (this
+        // pass, or an earlier pass that died before texting) must be handed
+        // back to the reminder cron. Fallback scope — a failed guard
+        // snapshot, or a retry pass that holds no snapshot of the earlier
+        // pass's sync — is each occurrence's NEW time, recomputed exactly as
+        // syncRescheduleReminder stamped it; a possible duplicate beats a
+        // customer with neither a confirmation nor a reminder.
+        const guardsForRearm = (seriesGuardSnapshotFailed || !remindersThisPass)
           ? { failed: true, guards: seriesReminderGuards }
           : seriesReminderGuards;
         await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({

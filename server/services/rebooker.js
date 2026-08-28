@@ -145,6 +145,14 @@ function dateOnly(v) {
 
 // Whole calendar days between two YYYY-MM-DD strings (UTC-anchored so DST
 // never yields a fractional day) — the delta a date exception shifts by.
+// A cadence row's position in its series: the cadence date it deviated
+// from when it is a date exception, else its own date.
+function seriesPosition(row) {
+  return dateOnly(row.date_exception === true && row.date_exception_cadence_date
+    ? row.date_exception_cadence_date
+    : row.scheduled_date);
+}
+
 function calendarDaysBetween(fromStr, toStr) {
   const [fy, fm, fd] = String(fromStr).split('-').map(Number);
   const [ty, tm, td] = String(toStr).split('-').map(Number);
@@ -157,8 +165,29 @@ function calendarDaysBetween(fromStr, toStr) {
 const SERIES_MOVE_SNAPSHOT_COLUMNS = [
   'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id',
   'route_order', 'time_window', 'window_display', 'track_token_expires_at',
-  'date_exception', 'date_exception_source', 'date_exception_at', 'updated_at',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date', 'updated_at',
 ];
+
+// The columns a this-visit-only DATE move of a cadence row stamps (staff,
+// customer, SMS reply, IB tool, bulk board move — every raw mover uses this
+// same stamp): the row is a deliberate exception to its series, and its
+// cadence POSITION is the date it deviated from — kept across repeated
+// single moves so the sweep still orders it by where it belongs in the
+// series. Auto-dispatch nudges are placement, not intent: no stamp.
+function dateExceptionStamp(row, source) {
+  if (!row || row.is_recurring !== true || source === 'auto_dispatch') return {};
+  return {
+    date_exception: true,
+    date_exception_source: source,
+    date_exception_at: new Date(),
+    date_exception_cadence_date: row.date_exception === true && row.date_exception_cadence_date
+      ? dateOnly(row.date_exception_cadence_date)
+      : dateOnly(row.scheduled_date),
+  };
+}
+const DATE_EXCEPTION_CLEAR = {
+  date_exception: false, date_exception_source: null, date_exception_at: null, date_exception_cadence_date: null,
+};
 function snapshotRow(row) {
   const out = {};
   for (const col of SERIES_MOVE_SNAPSHOT_COLUMNS) {
@@ -793,13 +822,8 @@ class SmartRebooker {
       status: 'confirmed',
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
       // A this-visit-only DATE move of a cadence visit is a deliberate
-      // exception to the series (staff, customer, SMS reply): stamp it so a
-      // later collective move shifts this row by the delta instead of
-      // regenerating it from cadence. Auto-dispatch nudges are placement,
-      // not intent — they never stamp, so they keep re-deriving.
-      ...(service.is_recurring === true && !sameDayTarget && initiatedBy !== 'auto_dispatch'
-        ? { date_exception: true, date_exception_source: initiatedBy, date_exception_at: new Date() }
-        : {}),
+      // exception to the series — see dateExceptionStamp.
+      ...(!sameDayTarget ? dateExceptionStamp(service, initiatedBy) : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -1230,17 +1254,22 @@ class SmartRebooker {
       // but carry is_recurring=false and hold no recurrence index — sweeping
       // them would both move the boosters and push genuine children an
       // extra interval, destroying the configured booster schedule.
+      // Siblings are selected and ordered by SERIES POSITION — a date
+      // exception's cadence date, else its own date — never by the
+      // deliberately exceptional date: a later occurrence pulled before the
+      // anchor is still a later occurrence, and two rows never swap index
+      // because one of them was moved across the other.
       const siblings = await trx('scheduled_services')
         .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
         .where('customer_id', service.customer_id)
-        .where('scheduled_date', '>=', service.scheduled_date)
+        .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
         .whereNotIn('status', TERMINAL)
-        .orderBy('scheduled_date', 'asc')
+        .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
           // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
           'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'updated_at',
-          'date_exception', 'date_exception_source', 'date_exception_at',
+          'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
           // Feeds the duration-aware occupancy fallbacks below.
           'estimated_duration_minutes',
           // Rewind evidence for needsLifecycleRewind below — a pending
@@ -1434,13 +1463,21 @@ class SmartRebooker {
         // an explicit rejoin operation exists).
         const rejoinsCadence = !isAnchor && sib.date_exception === true
           && String(date).split('T')[0] === pureCadenceDate(occurrenceIndex);
+        // Exception bookkeeping: the anchor now DEFINES the cadence (any
+        // exception it carried is spent); a kept exception's series position
+        // moves to its new cadence slot; a rejoined row is plain cadence again.
+        const exceptionUpdate = isAnchor
+          ? (sib.date_exception === true ? DATE_EXCEPTION_CLEAR : {})
+          : (rejoinsCadence
+            ? DATE_EXCEPTION_CLEAR
+            : (sib.date_exception === true ? { date_exception_cadence_date: pureCadenceDate(occurrenceIndex) } : {}));
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
           status: isAnchor ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
-          ...(rejoinsCadence ? { date_exception: false, date_exception_source: null, date_exception_at: null } : {}),
+          ...exceptionUpdate,
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
@@ -1916,10 +1953,10 @@ class SmartRebooker {
     const siblings = await db('scheduled_services')
       .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
       .where('customer_id', service.customer_id)
-      .where('scheduled_date', '>=', service.scheduled_date)
+      .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
-      .orderBy('scheduled_date', 'asc')
-      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception');
+      .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
+      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     const { deltaDays, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
@@ -2052,4 +2089,5 @@ module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;

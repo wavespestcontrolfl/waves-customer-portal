@@ -8,7 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
-const { collectiveMoveGateOn } = require('../services/rebooker');
+const { collectiveMoveGateOn, dateExceptionStamp } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
@@ -5964,7 +5964,12 @@ router.post('/bulk-action', requireAdmin, async (req, res, next) => {
               }
               // Persist the NORMALIZED date — the raw payload may carry a
               // 'T…' suffix that only the validator strips.
-              const updates = { scheduled_date: bulkTargetDate };
+              const updates = {
+                scheduled_date: bulkTargetDate,
+                // Bulk board move of a cadence row = a this-visit-only date
+                // exception (rebooker.dateExceptionStamp) when the date changes.
+                ...(dateOnly(svc.scheduled_date) !== bulkTargetDate ? dateExceptionStamp(svc, 'admin_bulk') : {}),
+              };
               // Same validate-then-persist-the-normalized-value rule as the
               // date above: an unnormalized time Postgres happens to accept
               // ("2:00 PM") would store 14:00 while the reminderSyncTime below
@@ -6558,15 +6563,44 @@ async function planCollectiveEditDateMove(req) {
   const target = validScheduleDate(scheduledDate);
   if (!target) return null;
   const row = await db('scheduled_services').where({ id: req.params.id })
-    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start');
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start', 'window_end', 'estimated_duration_minutes');
   if (!row || row.is_recurring !== true) return null;
   if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
   if (target === dateOnly(row.scheduled_date)) return null;
-  const win = { start: normalizeHHMM(windowStart) || null, end: normalizeHHMM(windowEnd) || null };
+  // Canonical window intake — the same presence/clear/malformed semantics
+  // the handler applies: a half-cleared window is left for the handler's own
+  // 422 (nothing moves); an explicit clear of BOTH bounds stays the
+  // handler's write (its body keys are kept) and the series then moves the
+  // windowless anchor; a supplied start is validated NOW, before anything
+  // saves, exactly as the handler would.
+  let intake;
+  try {
+    intake = windowIntakeFromBody(req.body);
+  } catch {
+    return null;
+  }
+  const clearWindow = intake.clearBoth === true;
+  let win = { start: null, end: null };
+  if (!clearWindow && intake.windowStart) {
+    const submittedDuration = parseInt(req.body.estimatedDuration, 10) > 0 ? parseInt(req.body.estimatedDuration, 10) : null;
+    const normalized = assertAdminAppointmentWindow({
+      windowStart: intake.windowStart,
+      windowEnd: intake.windowEnd || null,
+      durationMinutes: submittedDuration
+        || windowDurationMinutes(row.window_start, row.window_end, row.estimated_duration_minutes),
+    });
+    win = { start: normalized.window_start, end: normalized.window_end };
+  } else if (!clearWindow && intake.windowEnd) {
+    throw Object.assign(
+      httpError(422, 'Appointment end was supplied without a start — set a start time (HH:MM, on the hour) as well'),
+      { code: 'INVALID_APPOINTMENT_WINDOW' },
+    );
+  }
   const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
     ? req.body.operationKey
     : null;
   return {
+    clearWindow,
     async commit() {
       const SmartRebooker = require('../services/rebooker');
       // Same predicate the choke point evaluates (gate + cadence row + date
@@ -6579,9 +6613,12 @@ async function planCollectiveEditDateMove(req) {
         ...(operationKey ? { operationKey } : {}),
         // Pin the anchor to the row the plan read — a concurrent move makes
         // the delta stale and the series must not shift on it. The per-row
-        // edit above never touches date/window (the body keys were stripped),
-        // so the pin still holds after it.
-        expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
+        // edit above never touches the date; it touches the window only on
+        // an explicit clear (then the pin is the date alone).
+        expect: {
+          scheduled_date: dateOnly(row.scheduled_date),
+          ...(clearWindow ? {} : { window_start: row.window_start ?? null }),
+        },
       });
       const { applySeriesMoveEffects } = require('./admin-dispatch');
       const effects = await applySeriesMoveEffects({
@@ -6612,12 +6649,15 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
     const seriesMovePlan = await planCollectiveEditDateMove(req);
     if (seriesMovePlan) {
-      // The series commit lands the date/window after the per-row edit
-      // below; that edit saves the remaining fields as a same-slot edit
-      // (windowIntakeFromBody reads req.body, so the body keys go too).
+      // The series commit lands the date (and any supplied window) after
+      // the per-row edit below; that edit saves the remaining fields as a
+      // same-slot edit (windowIntakeFromBody reads req.body, so the window
+      // keys go too — except an explicit clear, which stays the handler's).
       delete req.body.scheduledDate;
-      delete req.body.windowStart;
-      delete req.body.windowEnd;
+      if (!seriesMovePlan.clearWindow) {
+        delete req.body.windowStart;
+        delete req.body.windowEnd;
+      }
     }
     const {
       serviceType, estimatedDuration, scheduledDate,
@@ -7903,6 +7943,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         let liveEditWasLive = false;
         if (dateActuallyMoves) {
           const { LIVE_LIFECYCLE_RESET, needsLifecycleRewind } = require('../services/rebooker');
+          // A this-visit-only DATE move of a cadence row from the modal is a
+          // deliberate exception to its series — stamped here too (this path
+          // runs while the collective gate is dark, or for rows the planner
+          // left to it), so the first collective move shifts it instead of
+          // regenerating it from cadence.
+          Object.assign(updates, dateExceptionStamp(preTupleRow, 'admin'));
           liveEditWasLive = ['en_route', 'on_site'].includes(String(preTupleRow.status));
           if (liveEditWasLive) {
             Object.assign(updates, LIVE_LIFECYCLE_RESET, { status: 'confirmed' });

@@ -22,6 +22,19 @@
  * traveling" survives "Sep 10 → Sep 15". Clears when a collective move lands
  * the row back on its cadence-derived date. Provenance columns explain why a
  * row is exceptional without reschedule_log archaeology.
+ * date_exception_cadence_date is the row's SERIES POSITION — the cadence
+ * date it deviated from — so a collective sweep orders and selects siblings
+ * by position, not by the deliberately exceptional date (an exception pulled
+ * before the anchor is still a later occurrence).
+ *
+ * BACKFILL (existing rows must keep working — AGENTS.md): every live cadence
+ * visit that the rebooker moved on its own before this lane (reschedule_log
+ * rows for a single-visit date move by staff, the customer, an SMS reply or
+ * a rain-out — never auto-dispatch, never a `_series` anchor log) is stamped
+ * as an exception with its earliest logged original_date as its cadence
+ * position, so the first collective move shifts it instead of regenerating
+ * it. Moves made from the Edit appointment modal before this lane wrote no
+ * reschedule_log row and cannot be recovered here (stated in the PR).
  */
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('series_moves'))) {
@@ -82,7 +95,34 @@ exports.up = async function up(knex) {
       t.boolean('date_exception').notNullable().defaultTo(false);
       t.string('date_exception_source', 30);
       t.timestamp('date_exception_at', { useTz: true });
+      t.date('date_exception_cadence_date');
     });
+    const backfilled = await knex.raw(`
+      UPDATE scheduled_services s
+         SET date_exception = true,
+             date_exception_source = 'backfill',
+             date_exception_at = l.last_moved_at,
+             date_exception_cadence_date = l.first_original_date
+        FROM (
+          SELECT scheduled_service_id,
+                 MIN(original_date) AS first_original_date,
+                 MAX(created_at)    AS last_moved_at
+            FROM reschedule_log
+           WHERE original_date IS NOT NULL
+             AND new_date IS NOT NULL
+             AND original_date <> new_date
+             AND COALESCE(initiated_by, '') <> 'auto_dispatch'
+             AND COALESCE(reason_code, '') NOT LIKE '%\\_series'
+           GROUP BY scheduled_service_id
+        ) l
+       WHERE s.id = l.scheduled_service_id
+         AND s.is_recurring = true
+         AND s.status NOT IN ('completed', 'cancelled')
+         AND s.scheduled_date >= CURRENT_DATE
+         AND s.date_exception = false
+    `);
+     
+    console.log(`[20260828000030] backfilled ${backfilled.rowCount ?? '?'} pre-existing manual date exception(s) from reschedule_log`);
   }
 };
 
@@ -93,6 +133,7 @@ exports.down = async function down(knex) {
       t.dropColumn('date_exception');
       t.dropColumn('date_exception_source');
       t.dropColumn('date_exception_at');
+      t.dropColumn('date_exception_cadence_date');
     });
   }
   await knex.raw('DROP INDEX IF EXISTS idx_reschedule_log_series_move_id');

@@ -45,6 +45,7 @@ function chain(overrides = {}) {
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
 }

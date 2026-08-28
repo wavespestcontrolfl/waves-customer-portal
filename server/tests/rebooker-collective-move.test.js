@@ -67,6 +67,7 @@ function chain(overrides = {}) {
     insert: jest.fn().mockResolvedValue(),
     count: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(),
+    orderByRaw: jest.fn().mockReturnThis(),
     catch: jest.fn().mockReturnThis(),
   });
   return Object.assign(builder, overrides);
@@ -137,7 +138,7 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
     throw new Error(`Unexpected db table ${table}`);
   });
 
-  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup };
+  return { updates, historyInsert, logInsert, seriesMovesInsert, seriesMovesDb, priorLookup, siblingsQuery };
 }
 
 const ADMIN_OPTS = { allowLive: true, adminWindowRules: true, overlapAdvisory: true, sourceSurface: 'dispatch_board' };
@@ -228,7 +229,17 @@ describe('single-path date exceptions', () => {
       date_exception: true,
       date_exception_source: initiatedBy,
       date_exception_at: expect.any(Date),
+      // Series position = the cadence date it deviated from.
+      date_exception_cadence_date: BASE,
     });
+  });
+
+  test('a repeated single move keeps the ORIGINAL cadence position', async () => {
+    const { trxScheduled } = wireSingleMocks(anchorRow({
+      id: 'svc-2', recurring_parent_id: 'svc-1', scheduled_date: SIB1, date_exception: true, date_exception_cadence_date: BASE,
+    }));
+    await SmartRebooker.reschedule('svc-2', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', { seriesPolicy: 'single' });
+    expect(trxScheduled.update.mock.calls[0][0]).toMatchObject({ date_exception_cadence_date: BASE });
   });
 
   test('an auto-dispatch nudge never stamps an exception (placement, not intent)', async () => {
@@ -283,8 +294,34 @@ describe('rescheduleSeries — date-only sweep', () => {
     expect(updates[3].update.mock.calls[0][0]).toMatchObject({
       scheduled_date: dayOffset(33), date_exception: false, date_exception_source: null, date_exception_at: null,
     });
+    // A kept exception's series position moves to its new cadence slot.
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ date_exception_cadence_date: dayOffset(26) });
     expect(result.exceptionCount).toBe(1);
     expect(seriesMoveRow(seriesMovesInsert)).toMatchObject({ exception_count: 1, delta_days: 2 });
+  });
+
+  test('siblings are selected and ordered by SERIES POSITION, so an exception pulled before the anchor still moves with it', async () => {
+    // svc-3 is the index-2 occurrence (cadence SIB2) the customer pulled to
+    // dayOffset(8) — BEFORE the anchor's date. Position, not date, keeps it
+    // in the sweep; the +2 delta lands it on dayOffset(10).
+    const { updates, siblingsQuery } = wireSeriesMocks([
+      sib('svc-1', BASE),
+      sib('svc-2', SIB1),
+      sib('svc-3', dayOffset(8), { date_exception: true, date_exception_cadence_date: SIB2 }),
+    ]);
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(siblingsQuery.whereRaw).toHaveBeenCalledWith('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [BASE]);
+    expect(siblingsQuery.orderByRaw).toHaveBeenCalledWith('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc');
+    expect(updates[2].update.mock.calls[0][0]).toMatchObject({ scheduled_date: dayOffset(10), date_exception_cadence_date: dayOffset(26) });
+  });
+
+  test('an anchor that was itself an exception defines the cadence again — its exception is cleared', async () => {
+    const { updates } = wireSeriesMocks(
+      [sib('svc-1', BASE, { date_exception: true, date_exception_cadence_date: dayOffset(9) }), sib('svc-2', SIB1)],
+      { anchor: anchorRow({ date_exception: true, date_exception_cadence_date: dayOffset(9) }) },
+    );
+    await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(updates[0].update.mock.calls[0][0]).toMatchObject({ date_exception: false, date_exception_cadence_date: null });
   });
 
   test('an immovable (skipped) sibling never becomes the anchor — later siblings follow the collective move', async () => {
@@ -463,7 +500,9 @@ describe('caller wiring (source)', () => {
   });
 
   test('rain-out fallback and the customer web single branch opt out; the edit modal intercepts BEFORE its per-row edit', () => {
-    expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,400}seriesPolicy: 'single'/);
+    // Quick Move's single call opts out ONLY after an explicit series attempt
+    // (wantsSeriesShift) — with the older series gate off, the choke point decides.
+    expect(read('../services/rain-out.js')).toMatch(/excludeServiceIds: \[job\.id\],[\s\S]{0,900}\.\.\.\(wantsSeriesShift\s*\?\s*\{ seriesPolicy: 'single'/);
     expect(read('../routes/reschedule-public.js')).toContain("{ technicianId: slot.technician_id, seriesPolicy: 'single' }");
     const sched = read('../routes/admin-schedule.js');
     const handler = sched.indexOf("router.put('/:id/update-details'");
