@@ -41,12 +41,17 @@ async function fullSync(state) {
       : null;
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
+    // fullSync serves two cases: first connect (empty table → mailbox
+    // HISTORY, never notify) and expired-history-cursor recovery (table
+    // populated → genuinely new arrivals are among these, so the 24h age
+    // guard decides, exactly as for an incremental sync) — hook P1.
+    const initialConnect = !(await db('emails').first('id'));
 
     let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
-        const inserted = await upsertEmail(parsed, { backfill: true }); // first-connect history: never notifies
+        const inserted = await upsertEmail(parsed, { backfill: initialConnect });
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
@@ -248,6 +253,9 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
   };
 
   if (existing) {
+    // Crash-recovery: a row inserted by a sync that died before its bell
+    // fired is re-seen here. Ring at most once (idempotent on emailId).
+    await recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }).catch(() => {});
     const labelIds = parsed.label_ids || [];
     // Update read/starred/archive label status
     await db('emails').where('id', existing.id).update({
@@ -374,24 +382,48 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
 
   // Classify in background (don't block sync)
   if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
-    setImmediate(() => {
-      (async () => {
-        const { classifyEmail } = require('./email-classifier');
-        let classified = false;
-        try {
-          await classifyEmail(email);
-          classified = true;
-        } catch (err) {
-          logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
-        }
-        if (bellCandidate) await ringCustomerEmailBell(email, { customerId, parsed, classified });
-      })().catch((err) => {
-        logger.error(`[email-sync] post-insert handling failed for ${email.id}: ${err?.message || err}`);
-      });
-    });
+    // Awaited (was setImmediate): the sync cursor must not advance past a
+    // message whose classification + bell have not happened — a process
+    // exit in that window would leave a row future syncs treat as existing,
+    // silently losing the bell (hook P1). The existing-row path below
+    // re-checks a never-notified candidate for the same reason.
+    const { classifyEmail } = require('./email-classifier');
+    let classified = false;
+    try {
+      await classifyEmail(email);
+      classified = true;
+    } catch (err) {
+      logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+    }
+    if (bellCandidate) await ringCustomerEmailBell(email, { customerId, parsed, classified });
   }
 
   return true; // new email
+}
+
+/**
+ * A row that exists but was never notified (sync died between insert and
+ * bell): if it is still an eligible candidate and no bell carries its id,
+ * ring now. Idempotent — the bell payload stores emailId.
+ */
+async function recoverLostCustomerEmailBell(existing, { customerId, parsed, backfill }) {
+  if (!customerEmailBellEligible({
+    customerId: existing.customer_id || customerId,
+    classification: existing.classification,
+    listUnsubscribe: existing.list_unsubscribe,
+    labelIds: parsed.label_ids,
+    authenticationResults: existing.authentication_results,
+    fromAddress: existing.from_address,
+    receivedAt: existing.received_at,
+    backfill,
+  })) return;
+  if (existing.is_archived) return;
+  const already = await db('notifications')
+    .where({ category: 'inbound_email' })
+    .whereRaw("metadata->'payload'->>'emailId' = ?", [String(existing.id)])
+    .first('id');
+  if (already) return;
+  await ringCustomerEmailBell(existing, { customerId: existing.customer_id || customerId, parsed, classified: Boolean(existing.classification) });
 }
 
 // Bulk/spam classes the classifier may assign after insert — never ring.
