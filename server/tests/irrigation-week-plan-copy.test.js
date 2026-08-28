@@ -68,9 +68,11 @@ describe('renderWeekPlanEmail', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
     expect(plan.events).toBe(2);
     const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
-    expect(copy.week_plan).toContain('On each of your 2 permitted watering days: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run one cycle of about 25 minutes per turf zone');
+    // Each run judged on rain since the previous run — one early soaking
+    // cancels one run, not the whole week's water.
+    expect(copy.week_plan).toContain('On each of your 2 permitted watering days: if ½" or more has fallen since your previous run (or since the start of the week, for the first), skip that run; if less than ½" has, run one cycle of about 25 minutes per turf zone');
     const report = renderWeekPlanReport(plan);
-    expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if');
+    expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous run');
   });
 
   test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
@@ -168,7 +170,7 @@ describe('decideWeekPlan (server glue)', () => {
 
 describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
-  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('../services/irrigation-week-plan');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, markAnyUnsentWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
   const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', county: 'Manatee' };
   const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
@@ -225,6 +227,34 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(calls.update.sent_at).toBeInstanceOf(Date);
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
     expect(calls.deleted).toBe(true);
+    expect(calls.whereNull).toBe('sent_at');
+  });
+});
+
+describe('weekPlanDeliveryState — the durable record decides', () => {
+  const db = require('../models/db');
+  const { weekPlanDeliveryState, markAnyUnsentWeekPlanSent } = require('../services/irrigation-week-plan');
+  const withStatus = (status) => db.mockImplementation(() => ({ where() { return this; }, first: async () => (status === undefined ? undefined : { status }) }));
+
+  test.each([
+    ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
+    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'], [undefined, null],
+  ])('status %s → %s', async (status, expected) => {
+    withStatus(status);
+    expect(await weekPlanDeliveryState('k')).toBe(expected);
+  });
+
+  test('lookup failure → pending (never replace, never delete); no key → null', async () => {
+    db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
+    expect(await weekPlanDeliveryState('k')).toBe('pending');
+    expect(await weekPlanDeliveryState(null)).toBeNull();
+  });
+
+  test('markAnyUnsentWeekPlanSent stamps only the unsent row for the week', async () => {
+    const calls = {};
+    db.mockImplementation(() => ({ where(w) { calls.where = w; return this; }, whereNull(c) { calls.whereNull = c; return this; }, update: async (p) => { calls.update = p; return 1; } }));
+    expect(await markAnyUnsentWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
     expect(calls.whereNull).toBe('sent_at');
   });
 });

@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, markAnyUnsentWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState } = require('./irrigation-week-plan');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -1039,25 +1039,34 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         continue;
       }
 
-      if (decision.weekPlan) {
-        const p = decision.weekPlan;
-        summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
-        // Exactness: the row is written from THIS decision before the send
-        // (first write wins) and stamped sent only if the provider accepts;
-        // a failed/blocked send discards it so the next run's plan is the
-        // one both sent and stored.
-        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p };
-        snapshotArgs.decisionHash = await persistWeekPlan(snapshotArgs);
-      } else if (decision.weekPlanUnavailable) {
-        summary.plan.unavailable += 1;
-      }
-
       // Same bounded per-recipient token as appointment-email so the key fits
       // email_messages.idempotency_key even for long addresses.
       const recipientToken = crypto.createHash('sha256')
         .update(String(customer.email).trim().toLowerCase())
         .digest('hex')
         .slice(0, 16);
+      const idempotencyKey = `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`;
+
+      if (decision.weekPlan) {
+        const p = decision.weekPlan;
+        summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
+        // Exactness, decided from the durable email record, never from a
+        // return shape: if a prior run already delivered this week's email,
+        // the unsent row (that run's pre-send write) is the plan the customer
+        // has — stamp it and never replace it. In flight/unknown → touch
+        // nothing. Otherwise write THIS decision (replacing only an unsent
+        // row) and stamp it after the provider accepts.
+        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey };
+        const priorDelivery = await weekPlanDeliveryState(idempotencyKey);
+        if (priorDelivery === 'sent') {
+          await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
+          snapshotArgs.reconciled = true;
+        } else if (priorDelivery !== 'pending') {
+          snapshotArgs.decisionHash = await persistWeekPlan(snapshotArgs);
+        }
+      } else if (decision.weekPlanUnavailable) {
+        summary.plan.unavailable += 1;
+      }
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
       summary.attempted += 1;
@@ -1068,7 +1077,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         recipientType: 'customer',
         recipientId: customer.id,
         triggerEventId: `irrigation.weekly:${customer.id}:${weekEnding}`,
-        idempotencyKey: `irrigation.weekly:${customer.id}:${weekEnding}:${recipientToken}`,
+        idempotencyKey,
         categories: ['irrigation', 'irrigation_weekly', decision.reason],
         suppressionGroupKey: SUPPRESSION_GROUP,
         // sendOne must not log the raw SendGrid body (it can echo the
@@ -1084,17 +1093,20 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // deduped (webhook/supersede races), as does a thrown error.
       if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
 
-      if (snapshotArgs) {
-        // The email built from THIS decision reached the provider — including
-        // the accepted-then-superseded race the library reports as
-        // sent+deduped+providerAttempted. A pure pre-send dedupe (nothing
-        // reached the provider) leaves the original send's row alone.
+      if (snapshotArgs && !snapshotArgs.reconciled) {
         if (result.sent && (!result.deduped || result.providerAttempted)) {
-          // Pre-send write may have failed transiently — one more try, then
-          // stamp the row whose hash is this decision's.
+          // The email built from THIS decision reached the provider (including
+          // the accepted-then-superseded race reported as
+          // sent+deduped+providerAttempted). Pre-send write may have failed
+          // transiently — one more try, then stamp by this decision's hash.
           const hash = snapshotArgs.decisionHash || await persistWeekPlan(snapshotArgs);
           await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
-        } else if (!result.deduped) {
+        } else if (result.deduped) {
+          // Deduped without a provider attempt: the durable record decides.
+          if ((await weekPlanDeliveryState(idempotencyKey)) === 'sent') {
+            await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
+          }
+        } else {
           // Blocked / not sent: this decision was never delivered.
           await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
         }
@@ -1125,9 +1137,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         });
       }
     } catch (err) {
-      // A thrown send never delivered this decision — drop the unsent row so
-      // a retry's plan is the one both sent and stored.
-      if (snapshotArgs) await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+      // A throw is AMBIGUOUS (sendTemplate can throw after the provider
+      // accepted). Reconcile from the durable record: delivered → stamp;
+      // definitely not delivered → drop the unsent row so a retry's plan is
+      // the one both sent and stored; in flight/unknown → leave it for the
+      // next run to reconcile.
+      if (snapshotArgs && !snapshotArgs.reconciled) {
+        const state = await weekPlanDeliveryState(snapshotArgs.idempotencyKey);
+        if (state === 'sent') await markAnyUnsentWeekPlanSent({ customerId: customer.id, weekEnding });
+        else if (state === null || state === 'failed' || state === 'blocked') await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+      }
       summary.failed += 1;
       const reason = sanitizeFailureReason(err);
       logger.error(`[irrigation-weekly-email] send failed for customer ${customer.id}: ${reason}`);
