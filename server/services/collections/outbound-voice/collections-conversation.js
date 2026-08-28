@@ -55,14 +55,14 @@ const { invoiceAmountDue } = require('../../invoice-helpers');
 const { anchorInvoiceOf, orderByDue, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
-// CLAIMS these statuses (SEND_CLAIMABLE_STATUSES in services/invoice.js —
-// module-private). The eligible set also admits legacy 'unpaid' rows, which
-// the send path would refuse after the customer already agreed (gh r1) —
-// the link rides the oldest-due SENDABLE invoice instead; the dunning clock
-// still anchors on the oldest-due invoice of any status.
-const LINK_SENDABLE_STATUSES = new Set(['draft', 'scheduled', 'sent', 'viewed', 'overdue']);
+// CLAIMS its SEND_CLAIMABLE_STATUSES (the one sendability authority). The
+// eligible set also admits legacy 'unpaid' rows, which the send path would
+// refuse after the customer already agreed (gh r1) — the link rides the
+// oldest-due SENDABLE invoice instead; the dunning clock still anchors on
+// the oldest-due invoice of any status.
 function linkAnchorOf(invoices = []) {
-  return orderByDue(invoices).find((inv) => LINK_SENDABLE_STATUSES.has(String(inv.status || ''))) || null;
+  const { SEND_CLAIMABLE_STATUSES } = require('../../invoice');
+  return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
 }
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
@@ -772,11 +772,14 @@ class CollectionsConversation {
   // and pay-link scope, in one place (disclosure, send time, credit-cover
   // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
   // is updated — the caller discloses/sends nothing on a partial account.
+  // `callable` = the refreshed account clock still clears the policy's
+  // 14-day floor (gh r3): the overdue anchor paid/reassigned mid-call can
+  // leave only not-yet-callable invoices — those are never dunned.
   async _refreshBalance() {
-    const { loadEligibleInvoices } = require('../contact-policy');
+    const { loadEligibleInvoices, PILOT_MIN_DAYS_OVERDUE } = require('../contact-policy');
     let incomplete = null;
     const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
-    if (incomplete) return { incomplete, fresh };
+    if (incomplete) return { incomplete, fresh, callable: false };
     this._ctx.balance = {
       total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
       count: fresh.length,
@@ -784,7 +787,8 @@ class CollectionsConversation {
     };
     this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
     Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
-    return { incomplete: null, fresh };
+    const callable = fresh.length > 0 && accountDaysOverdue(this._now(), fresh) >= PILOT_MIN_DAYS_OVERDUE;
+    return { incomplete: null, fresh, callable };
   }
 
   _ensureSystemBlocks() {
@@ -1111,10 +1115,16 @@ class CollectionsConversation {
     try {
       // A read that DROPPED an unprovable row or hit the bound understates
       // the account (gh r1): never present the survivors as "the total".
-      const { incomplete } = await this._refreshBalance();
+      const { incomplete, fresh, callable } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
         return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
+      }
+      if (fresh.length && !callable) {
+        // The overdue anchor cleared since dialing; what remains is not yet
+        // callable under the policy — never dunned, no figure spoken.
+        this.state = 'RESOLUTION';
+        return 'The past-due balance this call was about has been taken care of since we dialed, and nothing else on the account is past due. Thank the customer, say there is nothing overdue today, do NOT state any figure, do NOT ask for payment or offer a link, and end politely.';
       }
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
@@ -1476,10 +1486,13 @@ class CollectionsConversation {
     // claimed by a live PaymentIntent since disclosure must be neither
     // promised nor recorded as contacted. Fail closed on an unreadable set.
     try {
-      const { incomplete } = await this._refreshBalance();
+      const { incomplete, fresh, callable } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] send-time balance read incomplete callSid=${this.callSid}: ${incomplete} — not sending`);
         return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
+      }
+      if (fresh.length && !callable) {
+        return 'Do not send the link: the past-due balance has been taken care of since we dialed and nothing else is past due yet. Tell the customer there is nothing overdue today and end politely.';
       }
     } catch (err) {
       logger.error(`[collections-voice] send-time balance read failed callSid=${this.callSid}: ${err.message}`);
@@ -1582,6 +1595,9 @@ class CollectionsConversation {
         const remaining = refreshed.fresh;
         if (!remaining.length) {
           return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
+        }
+        if (!refreshed.callable) {
+          return 'No text was needed: account credit covered the past-due invoice in full, and what remains on the account is not yet due. Tell the customer nothing is overdue today; do NOT state a figure or offer a link.';
         }
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;

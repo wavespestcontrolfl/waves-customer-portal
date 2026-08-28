@@ -33,6 +33,14 @@ function maskPhone(phone) {
   return digits ? `***-***-${digits.slice(-4)}` : 'unknown';
 }
 
+// jsonb {id: cents} (object or string) → sorted [[id, cents]] for compare.
+function normalizedCents(value) {
+  let map = value;
+  if (typeof map === 'string') { try { map = JSON.parse(map); } catch { map = null; } }
+  if (!map || typeof map !== 'object' || Array.isArray(map)) return [];
+  return Object.entries(map).map(([id, c]) => [String(id), Number(c)]).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+}
+
 function normalizedIdSet(value) {
   const arr = Array.isArray(value)
     ? value
@@ -258,6 +266,11 @@ async function runShadowSweep({ now = new Date() } = {}) {
         && existing.current_state === 'shadow'
         && Number(existing.eligible_balance_snapshot) === verdict.eligibleBalanceCents
         && JSON.stringify(normalizedIdSet(existing.eligible_invoice_ids)) === JSON.stringify(invoiceIds)
+        // The LINE ITEMS are the proposal (gh r3): offsetting per-invoice
+        // changes keep the aggregate but the operator would approve stale
+        // amounts origination then cancels on. (A pre-column shadow case
+        // rotates once to gain its snapshot.)
+        && JSON.stringify(normalizedCents(existing.eligible_invoice_cents)) === JSON.stringify(normalizedCents(verdict.eligibleInvoiceCents))
         // Tier is part of the proposal (codex r3): an unpaid invoice
         // crossing 14→30→60 must rotate the version/key and re-file.
         && String(existing.idempotency_key || '').endsWith(`:${tier}`);

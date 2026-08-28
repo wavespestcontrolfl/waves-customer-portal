@@ -52,6 +52,7 @@ jest.mock('../services/collections/contact-policy', () => ({
     return et.dayOfWeek >= 1 && et.dayOfWeek <= 5 && et.hour >= 9 && et.hour < 18;
   }),
   isSupervisedApprover: jest.fn((a) => typeof a === 'string' && a.startsWith('admin:')),
+  PILOT_MIN_DAYS_OVERDUE: 14,
 }));
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   revokeAutomatedVoiceConsent: jest.fn(async () => ({ ok: true, created: true })),
@@ -76,6 +77,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
 }));
 jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(async () => ({ sent: true, ok: true })),
+  SEND_CLAIMABLE_STATUSES: ['draft', 'scheduled', 'sent', 'viewed', 'overdue'],
 }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: jest.fn(async () => ({ id: 'n1' })),
@@ -1356,6 +1358,35 @@ describe('account-level disclosure + registers', () => {
     expect(c2.payLinkSent).toBe(false);
   });
 
+  test('the overdue anchor clearing mid-call leaves a not-yet-callable set — nothing is dunned at disclosure or send time', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const old = { id: 'inv-old', title: 'Lawn Care', status: 'overdue', due_date: '2026-07-01', total: '44.55', credit_applied: 0 }; // 42d
+    const young = { id: 'inv-new', title: 'Pest Control', status: 'sent', due_date: '2026-08-05', total: '105.30', credit_applied: 0 }; // 7d — under the 14-day floor
+    // Disclosure: the anchor was paid between dial and verification.
+    loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/nothing overdue today/);
+    expect(out).toMatch(/do NOT state any figure, do NOT ask for payment or offer a link/);
+    expect(out).not.toMatch(/105\.30/);
+    expect(convo.disclosed).toBe(false);
+    // Send time: disclosed on the full set, then the anchor cleared.
+    loadEligibleInvoices.mockResolvedValueOnce([old, young]).mockResolvedValueOnce([old, young]).mockResolvedValueOnce([young]);
+    setDb();
+    const { convo: c2 } = makeConvo();
+    await c2._contextReady;
+    c2.verified = true;
+    await c2._toolGetBalance();
+    c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockClear();
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/Do not send the link: the past-due balance has been taken care of/);
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+  });
+
   test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
     const legacy = [
       { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-06-10T12:00:00Z', total: '10.00', credit_applied: 0 },
@@ -1485,7 +1516,7 @@ describe('prb-r18', () => {
     const { convo } = makeConvo();
     await verifyAndDisclose(convo);
     convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
-    const rest = [{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-08-01', total: '30.00', credit_applied: 0, status: 'overdue' }];
+    const rest = [{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-07-20', total: '30.00', credit_applied: 0, status: 'overdue' }]; // 23d — still callable
     // Each attempt reads twice: the send-time re-proof, then the post-credit remainder.
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
     loadEligibleInvoices.mockResolvedValueOnce([...rest, { id: 'inv-1', title: 'Pest', due_date: '2026-07-20', total: '258.00', credit_applied: 0, status: 'overdue' }]).mockResolvedValueOnce(rest);

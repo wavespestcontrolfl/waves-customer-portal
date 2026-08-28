@@ -470,6 +470,19 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect((await evalVoice()).denialReasons).not.toContain('balance_read_incomplete');
   });
 
+  test('a legacy unpaid row dropped on a payer-resolve failure marks the read INCOMPLETE too', async () => {
+    const { rowIsSelfPayDue } = require('../services/open-balance');
+    armAllowedBaseline();
+    const prev = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'invoices'
+      ? chain({ result: [invoiceRow({ id: 'inv-legacy', status: 'unpaid', due_date: '2026-06-01' })] })
+      : prev(table)));
+    rowIsSelfPayDue.mockImplementationOnce(async (cid, row, opts) => { opts.onResolveFailure(new Error('payer lookup down')); return false; });
+    const result = await evalVoice();
+    expect(result.denialReasons).toContain('balance_read_incomplete');
+    expect(result.eligibleInvoiceIds).toEqual(['inv-1']); // the survivor alone is NOT "the total"
+  });
+
   test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {
     armAllowedBaseline({ invoices: [invoiceRow({ due_date: '2026-08-08' })] });
     const result = await evalVoice();

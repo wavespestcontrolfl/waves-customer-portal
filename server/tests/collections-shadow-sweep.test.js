@@ -160,6 +160,28 @@ describe('case + card creation', () => {
     expect(result).toEqual({ skipped: false, considered: 1, casesCreated: 1, casesUpdated: 0, cardsFiled: 1, casesLapsed: 0 });
   });
 
+  test('offsetting per-invoice changes with an unchanged aggregate still rotate the shadow case (the line items are the proposal)', async () => {
+    const second = { id: 'inv-2', invoice_number: 'WPC-2026-1101', title: 'Lawn Care', total: '44.55', credit_applied: 0, due_date: '2026-08-05', created_at: '2026-07-20T12:00:00.000Z' };
+    ContactPolicy.evaluate.mockResolvedValueOnce({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 17255, eligibleInvoiceCents: { 'inv-1': 7800, 'inv-2': 9455 } }); // $50 moved between the two
+    const existing = {
+      id: 'case-1', customer_id: 'cust-1', current_state: 'shadow', case_version: 1,
+      eligible_invoice_ids: JSON.stringify(['inv-1', 'inv-2']),
+      eligible_invoice_cents: JSON.stringify({ 'inv-1': 12800, 'inv-2': 4455 }),
+      eligible_balance_snapshot: 17255,
+      idempotency_key: 'collections:cust-1:1:14',
+    };
+    const rotate = chain({ returning: [{ ...existing, case_version: 2, idempotency_key: 'collections:cust-1:2:14', eligible_balance_snapshot: 17255 }] });
+    setDbQueues({
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [INVOICE, second] })],
+      customers: [chain({ first: CUSTOMER })],
+      collection_cases: [chain({ result: [{ id: 'case-1', idempotency_key: 'collections:cust-1:1:14', current_state: 'shadow' }] }), chain({ first: existing }), chain({ first: { customer_id: 'cust-1' } }), chain({ result: [] }), rotate, chain({ result: [] })],
+      notifications: [chain({ result: 1 }), chain({ result: 1 }), chain({ first: null })],
+    });
+    const result = await ShadowSweep.runShadowSweep({ now: NOW });
+    expect(result.casesUpdated).toBe(1);
+    expect(rotate.update).toHaveBeenCalledWith(expect.objectContaining({ case_version: 2, eligible_invoice_cents: JSON.stringify({ 'inv-1': 7800, 'inv-2': 9455 }) }));
+  });
+
   test('a multi-invoice account files ONE card that itemizes every invoice behind the total, oldest-due first', async () => {
     const second = { id: 'inv-2', invoice_number: 'WPC-2026-1101', title: 'Lawn Care', total: '44.55', credit_applied: 0, due_date: '2026-08-05', created_at: '2026-07-20T12:00:00.000Z' };
     const future = { id: 'inv-3', invoice_number: 'WPC-2026-1102', title: 'Mosquito', total: '20.00', credit_applied: 0, due_date: '2026-08-20', created_at: '2026-08-06T12:00:00.000Z' }; // not yet due on Aug 12

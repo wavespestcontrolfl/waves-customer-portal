@@ -211,7 +211,9 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
     const seenIds = new Set(eligible.map((inv) => String(inv.id)));
     for (const row of legacyUnpaid) {
       if (seenIds.has(String(row.id))) continue;
-      if (await rowIsSelfPayDue(customerId, row)) eligible.push(row);
+      // Same incomplete signal as open-balance (gh r3): a dropped legacy
+      // row on a resolve failure must not leave the survivors as "the total".
+      if (await rowIsSelfPayDue(customerId, row, { onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); } })) eligible.push(row);
     }
   }
   if (eligible.length) {
