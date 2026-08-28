@@ -44,6 +44,7 @@ const CODES = {
   RACE: 'removed_during_publish',
   EMPTY: 'empty_text',
   STALE: 'stale_claim',
+  PERSIST_FAILED: 'persist_failed',
 };
 
 const MISSING_MSG = 'This review has been removed from Google — replies are disabled.';
@@ -180,6 +181,8 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
   }
 
+  let persisted = false;
+  let abandoned = false;
   try {
     const updated = await db('google_reviews')
       .where({ id: reviewId })
@@ -193,10 +196,21 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
       // Defensive only — unreachable while the claim defers stamping.
       throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });
     }
+    persisted = true;
     await audit({ googlePosted: true });
     return { googlePosted: true, localOnly: false, reviewId };
+  } catch (err) {
+    if (persisted || err instanceof ReviewReplyError) throw err;
+    // Google ACCEPTED the reply but the local record failed. Releasing the
+    // claim here would let an automatic retry redraft and PUT a different
+    // reply over the live one. Abandon instead: the claim stands until its
+    // TTL expires, and the caller parks the row for a person to reconcile.
+    outcome.abandonClaim();
+    abandoned = true;
+    logger.error(`[review-reply] Google accepted the reply for ${reviewId} but local persistence failed: ${err.message}`);
+    throw new ReviewReplyError(CODES.PERSIST_FAILED, `Reply is live on Google but was not recorded locally (${err.message}) — reconcile by hand.`, { status: 500, cause: err });
   } finally {
-    await outcome.releaseClaim();
+    if (!abandoned) await outcome.releaseClaim();
   }
 }
 
@@ -218,10 +232,19 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
   let outcome;
   try {
     outcome = await publishWithReviewLivenessLock(reviewId, async () => {
+      // Re-read inside the claim: another admin may have posted an edited
+      // replacement first. Only the reply the retracting admin actually saw
+      // may be deleted.
+      const fresh = await db('google_reviews').where({ id: reviewId }).first();
+      if (!fresh || fresh.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
+      if (String(fresh.review_reply || '') !== String(review.review_reply || '')) {
+        throw new ReviewReplyError(CODES.STALE, 'The reply changed while you were retracting — reload and check the current reply.', { status: 409 });
+      }
       await gbp.deleteReply(resourceName, review.location_id);
       return true;
     });
   } catch (e) {
+    if (e instanceof ReviewReplyError) throw e;
     throw new ReviewReplyError(CODES.GOOGLE_FAILED, e.message || 'Could not delete the reply on Google.', { status: 502, cause: e });
   }
   if (outcome.blocked) {

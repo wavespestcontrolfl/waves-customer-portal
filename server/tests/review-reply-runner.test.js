@@ -20,6 +20,7 @@ jest.mock('../services/review-reply/drafter', () => ({
   draftReviewReply: (...a) => mockDraft(...a),
   loadRecentPostedReplies: jest.fn(async () => []),
   classifyReplyMode: jest.fn(() => 'service_quality'),
+  REPLY_VERSION: 'reply-v1',
 }));
 jest.mock('../services/review-reply/publisher', () => {
   class ReviewReplyError extends Error {
@@ -28,7 +29,7 @@ jest.mock('../services/review-reply/publisher', () => {
   return {
     publishReviewReply: (...a) => mockPublish(...a),
     ReviewReplyError,
-    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim' },
+    CODES: { HAS_REPLY: 'already_replied', MISSING: 'review_missing', RACE: 'removed_during_publish', LOCK_BUSY: 'lock_busy', GOOGLE_FAILED: 'google_failed', NOT_CONFIGURED: 'gbp_not_configured', NO_RESOURCE: 'no_gbp_resource', STALE: 'stale_claim', PERSIST_FAILED: 'persist_failed' },
   };
 });
 jest.mock('../models/db', () => {
@@ -66,10 +67,13 @@ jest.mock('../models/db', () => {
   dbFn.raw = async (sql, params) => {
     state.raws.push(sql);
     const force = /AND id = \?/.test(sql);
+    const hasLoc = /lower\(location_id\) = ANY\(\?\)/.test(sql);
     const [token, ...rest] = params;
     const now = new Date(force ? rest[1] : rest[0]);
+    const locs = hasLoc ? rest[1] : null;
     const limit = rest[rest.length - 1];
     const hits = state.rows.filter((r) => r.reviewer_name !== '_stats' && r.missing_since == null && !r.dismissed
+      && (!locs || locs.includes(String(r.location_id).toLowerCase()))
       && (force ? r.id === rest[0] : (['queued', 'failed'].includes(r.auto_reply_status) && new Date(r.auto_reply_due_at) <= now))
       && (r.auto_reply_claimed_until == null || new Date(r.auto_reply_claimed_until) < now)).slice(0, limit);
     hits.forEach((r) => { r.auto_reply_claimed_until = token; });
@@ -284,7 +288,8 @@ describe('processDueAutoReplies — state machine', () => {
     mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['forbidden_name', 'url'], mode: 'service_quality', version: 'reply-v1' });
     state.rows = [row()];
     await Runner.processDueAutoReplies();
-    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject', auto_reply_draft: null });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'verifier_reject' });
+    expect(state.rows[0].auto_reply_draft).toBeFalsy();
     expect(state.rows[0].review_reply).toBeNull();
     expect(JSON.parse(state.rows[0].auto_reply_error).rejections).toEqual(['forbidden_name', 'url']);
   });
@@ -328,6 +333,79 @@ describe('processDueAutoReplies — state machine', () => {
     await Runner.processDueAutoReplies();
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'lock_busy' });
     expect(mockNotify.mock.calls.at(-1)[3].metadata.needsAction).toBe(true);
+  });
+
+  test('a publish retry reuses the stored verified draft instead of calling the model again', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: GOOD_DRAFT.text, auto_reply_version: 'reply-v1', auto_reply_mode: 'service_quality' })];
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+    // A stale prompt version goes back to the model.
+    state.rows = [row({ id: 'v0', auto_reply_status: 'failed', auto_reply_reason: 'google_failed', auto_reply_attempts: 1, auto_reply_draft: 'old', auto_reply_version: 'reply-v0' })];
+    await Runner.processDueAutoReplies();
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+  });
+
+  test('a provider outage after a Google failure does not erase the stored draft', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockDraft.mockResolvedValue({ ok: false, reason: 'provider_unavailable', error: 'down', mode: 'service_quality', version: 'reply-v1' });
+    state.rows = [row({ auto_reply_status: 'failed', auto_reply_reason: 'provider_unavailable', auto_reply_attempts: Runner.MAX_ATTEMPTS - 1, auto_reply_draft: 'kept', auto_reply_version: 'reply-v1' })];
+    await Runner.processDueAutoReplies();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'provider_down', auto_reply_draft: 'kept' });
+  });
+
+  test('PERSIST_FAILED (Google accepted, local write failed) parks for reconciliation and never republishes', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    const { ReviewReplyError } = require('../services/review-reply/publisher');
+    mockPublish.mockRejectedValueOnce(new ReviewReplyError('persist_failed', 'live but unrecorded', { status: 500 }));
+    state.rows = [row()];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.parked).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'persist_failed', auto_reply_draft: GOOD_DRAFT.text });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'persist_failed', needsAction: true });
+    // Parked rows are not re-claimed.
+    await Runner.processDueAutoReplies();
+    expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
+  test('a draft write that loses the race to a human reply sends no bell and reports skipped', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [row()];
+    mockDraft.mockImplementationOnce(async () => { state.rows[0].review_reply = 'Human replied while drafting'; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ skipped: 1, drafted: 0 });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'changed_during_draft', review_reply: 'Human replied while drafting' });
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
+  test('narrowing REVIEW_AUTO_REPLY_LOCATIONS stops already-queued rows at claim and at processing', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'sarasota';
+    state.rows = [row({ id: 'v', location_id: 'venice' }), row({ id: 's', location_id: 'sarasota' })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ claimed: 1, posted: 1 });
+    expect(state.rows[0].auto_reply_status).toBe('queued');
+    expect(state.raws[0]).toContain('lower(location_id) = ANY(?)');
+    // Processing-time belt: a claimed row whose location was removed parks.
+    delete process.env.REVIEW_AUTO_REPLY_LOCATIONS;
+    state.rows = [row({ id: 'v2', location_id: 'venice' })];
+    const [claimed] = await Runner.claimDueRows({ limit: 1 });
+    process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'sarasota';
+    const r = await Runner.processClaimedRow(claimed, { cfg: Runner.config() });
+    expect(r).toEqual({ outcome: 'parked', reason: 'location_disabled' });
+  });
+
+  test('an unhandled runner exception parks with a bell after MAX_ATTEMPTS', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    mockGbp.isLocationConfigured.mockRejectedValue(new Error('boom'));
+    state.rows = [row({ auto_reply_attempts: Runner.MAX_ATTEMPTS - 1 })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.errors).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'runner_error', auto_reply_attempts: Runner.MAX_ATTEMPTS });
+    expect(mockNotify.mock.calls.at(-1)[3].metadata).toMatchObject({ reason: 'runner_error', needsAction: true });
+    mockGbp.isLocationConfigured.mockResolvedValue(true);
   });
 
   test('publisher HAS_REPLY (race with a human) → skipped, not retried', async () => {

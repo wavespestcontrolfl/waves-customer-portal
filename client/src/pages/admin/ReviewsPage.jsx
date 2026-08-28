@@ -514,7 +514,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                 <span
                   title={autoReplyTitle(autoReply)}
                   style={{
-                    fontSize: 11,
+                    fontSize: 14,
                     fontFamily: "Roboto, Arial, sans-serif",
                     fontWeight: 500,
                     color: D.white,
@@ -654,7 +654,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     border: `1px solid ${D.teal}`,
                     color: "#fff",
                     borderRadius: 6,
-                    fontSize: 12,
+                    fontSize: 14,
                     fontFamily: "Roboto, Arial, sans-serif",
                     cursor: "pointer",
                     opacity: autoBusy ? 0.5 : 1,
@@ -674,7 +674,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
                     border: `1px solid ${D.border}`,
                     color: D.muted,
                     borderRadius: 6,
-                    fontSize: 12,
+                    fontSize: 14,
                     fontFamily: "Roboto, Arial, sans-serif",
                     cursor: "pointer",
                   }}
@@ -688,7 +688,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
         {!review.missingSince && autoReply && autoReply.status === "queued" && !review.draftReply && !review.reply && (
           <div
             style={{
-              fontSize: 12,
+              fontSize: 14,
               color: D.muted,
               fontFamily: "Roboto, Arial, sans-serif",
               marginBottom: 8,
@@ -696,9 +696,18 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
           >
             Auto-reply scheduled{autoReply.dueAt ? ` for ${new Date(autoReply.dueAt).toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", minute: "2-digit", month: "short", day: "numeric" })} ET` : ""}.{" "}
             <button
+              onClick={() => runAuto("post-now")}
+              disabled={autoBusy}
+              title="Draft and post to Google now (skips the delay and shadow mode)"
+              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif", fontWeight: 500 }}
+            >
+              {autoBusy ? "Working..." : "Post now"}
+            </button>{" "}
+            ·{" "}
+            <button
               onClick={() => runAuto("skip")}
               disabled={autoBusy}
-              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 12, padding: 0, fontFamily: "Roboto, Arial, sans-serif" }}
+              style={{ background: "none", border: "none", color: D.teal, cursor: "pointer", fontSize: 14, padding: 0, fontFamily: "Roboto, Arial, sans-serif" }}
             >
               Skip auto
             </button>

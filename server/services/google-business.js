@@ -1070,6 +1070,12 @@ class GoogleBusinessService {
           }
         }
       } else {
+        // Same atomic auto-reply queueing as the GBP insert: a review first
+        // seen through the Places fallback is matched by identity once GBP
+        // recovers and takes the update path, so this insert is its only
+        // chance to enter the pipeline.
+        const { autoReplyInsertFields } = require('./review-reply/runner');
+        const placesCreatedAt = new Date(review.time * 1000).toISOString();
         await db('google_reviews').insert({
           google_review_id: googleId,
           location_id: loc.id,
@@ -1079,9 +1085,10 @@ class GoogleBusinessService {
           review_text: review.text || null,
           review_reply: ownerReply,
           reply_updated_at: ownerReply ? new Date() : null,
-          review_created_at: new Date(review.time * 1000).toISOString(),
+          review_created_at: placesCreatedAt,
           customer_id: customerId,
           synced_at: sampleSyncStart.toISOString(),
+          ...autoReplyInsertFields({ location_id: loc.id, reviewer_name: reviewerName, owner_reply: ownerReply, review_created_at: placesCreatedAt }),
         }).returning('id');
         newCount++;
       }

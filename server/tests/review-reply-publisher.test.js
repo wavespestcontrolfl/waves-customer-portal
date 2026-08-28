@@ -11,7 +11,7 @@ const mockGbp = {
   deleteReply: jest.fn(async () => true),
 };
 const mockLock = jest.fn();
-const state = { rows: [], activity: [] };
+const state = { rows: [], activity: [], failNextUpdate: false };
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/google-business', () => mockGbp);
@@ -27,6 +27,7 @@ jest.mock('../models/db', () => {
       whereNull(col) { filters.push((r) => r[col] == null); return api; },
       async first() { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
       async update(patch) {
+        if (state.failNextUpdate) { state.failNextUpdate = false; throw new Error('connection reset'); }
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
@@ -187,6 +188,30 @@ describe('publishReviewReply', () => {
   });
 });
 
+describe('publishReviewReply — post-publish persistence failure', () => {
+  test('Google accepted but the local write threw → PERSIST_FAILED, claim abandoned (not released), no audit', async () => {
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.failNextUpdate = true; return {}; });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.PERSIST_FAILED });
+    expect(mockGbp.replyToReview).toHaveBeenCalledTimes(1);
+    expect(out.abandonClaim).toHaveBeenCalled();
+    expect(out.releaseClaim).not.toHaveBeenCalled();
+    expect(state.activity).toHaveLength(0);
+    expect(state.rows[0].review_reply).toBeNull();
+  });
+  test('a typed post-publish error (RACE) still releases the claim normally', async () => {
+    const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
+    mockLock.mockImplementationOnce(async (id, fn) => { await fn(); return out; });
+    mockGbp.replyToReview.mockImplementationOnce(async () => { state.rows = [{ ...state.rows[0], missing_since: '2026-08-27T00:00:00Z' }]; return {}; });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'auto' } }))
+      .rejects.toMatchObject({ code: CODES.RACE });
+    expect(out.releaseClaim).toHaveBeenCalled();
+    expect(out.abandonClaim).not.toHaveBeenCalled();
+  });
+});
+
 describe('retractReviewReply', () => {
   test('deletes on Google under the lock, clears locally, audits', async () => {
     state.rows[0].review_reply = 'Posted reply';
@@ -201,6 +226,19 @@ describe('retractReviewReply', () => {
     state.rows[0].review_reply = '[DRAFT] not posted';
     await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.HAS_REPLY });
     expect(mockGbp.deleteReply).not.toHaveBeenCalled();
+  });
+  test('a reply edited by someone else between confirm and lock is not deleted', async () => {
+    state.rows[0].review_reply = 'Posted reply';
+    mockLock.mockImplementationOnce(async (id, fn) => {
+      // A fresh row object (the real DB returns a new row per read).
+      state.rows = [{ ...state.rows[0], review_reply: 'Edited replacement posted first' }];
+      const out = liveLock();
+      await fn();
+      return out;
+    });
+    await expect(retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' } })).rejects.toMatchObject({ code: CODES.STALE });
+    expect(mockGbp.deleteReply).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Edited replacement posted first');
   });
   test('a stamped review keeps its recorded reply (evidence row)', async () => {
     state.rows[0].review_reply = 'Posted reply';

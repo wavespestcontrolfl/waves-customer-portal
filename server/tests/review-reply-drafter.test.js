@@ -136,6 +136,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     const g = grounding({ text: 'Marcus took care of the German roaches fast.' });
     expect(verify(good('Hi Dana, glad Marcus got the German roaches handled so fast.'), g)).toBeNull();
   });
+  test('provenance: sentence-initial names need provenance too; common starters are exempt', () => {
+    expect(verify(good('Hi Dana,\n\nKevin was glad to help with the ants. Marcus says thanks.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Anytime you need us, reach out.'))).toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Thanks for having us out.'))).toBeNull();
+  });
   test('drying / curing / wait-before language is banned even when the number came from the review', () => {
     const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
     expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');

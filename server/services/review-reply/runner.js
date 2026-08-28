@@ -30,7 +30,7 @@ const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames } = require('./grounding');
-const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode } = require('./drafter');
+const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
 const STATUS = {
@@ -130,7 +130,12 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
   const token = new Date(now.getTime() + CLAIM_MS).toISOString();
   const nowIso = now.toISOString();
   const forceClause = force ? 'AND id = ?' : `AND auto_reply_status IN ('queued','failed') AND auto_reply_due_at <= ?`;
-  const params = force ? [token, force, nowIso, limit] : [token, nowIso, nowIso, limit];
+  // Rollout scope is re-applied at claim time (not only at enqueue) so
+  // narrowing REVIEW_AUTO_REPLY_LOCATIONS immediately stops already-queued
+  // rows outside it. Post-now (force) is an explicit admin action and ignores it.
+  const cfg = config();
+  const locClause = !force && cfg.locations.length ? 'AND lower(location_id) = ANY(?)' : '';
+  const params = force ? [token, force, nowIso, limit] : [token, nowIso, ...(locClause ? [cfg.locations] : []), nowIso, limit];
   const res = await db.raw(
     `UPDATE google_reviews SET auto_reply_claimed_until = ?
      WHERE id IN (
@@ -139,6 +144,7 @@ async function claimDueRows({ limit = DEFAULT_BATCH, now = new Date(), force = n
          AND missing_since IS NULL
          AND COALESCE(dismissed, false) = false
          ${forceClause}
+         ${locClause}
          AND (auto_reply_claimed_until IS NULL OR auto_reply_claimed_until < ?)
        ORDER BY auto_reply_due_at ASC NULLS LAST
        LIMIT ?
@@ -207,10 +213,13 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
   const patch = {
     auto_reply_status: status,
     auto_reply_reason: reason || null,
-    auto_reply_draft: draft?.text || null,
-    auto_reply_drafted_at: draft?.text ? new Date().toISOString() : null,
-    auto_reply_version: draft?.version || null,
-    auto_reply_mode: draft?.mode || null,
+    // A failed attempt never erases an earlier verified draft on the row.
+    ...(draft?.text ? {
+      auto_reply_draft: draft.text,
+      auto_reply_drafted_at: new Date().toISOString(),
+      auto_reply_version: draft.version || null,
+      auto_reply_mode: draft.mode || null,
+    } : {}),
     auto_reply_error: draft?.ok === false ? JSON.stringify({ reason: draft.reason, rejections: draft.rejections, error: draft.error }) : null,
     auto_reply_grounding: JSON.stringify(extra.grounding || null),
     auto_reply_claimed_until: null,
@@ -265,6 +274,10 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   }
   const merged = { ...fresh, _claimToken: row._claimToken };
 
+  if (intent !== 'post_now' && !locationAllowed(merged.location_id, cfg)) {
+    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'location_disabled' });
+    return { outcome: 'parked', reason: 'location_disabled' };
+  }
   if (!(await gbp.isLocationConfigured(merged.location_id))) {
     await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'gbp_not_configured' });
     return { outcome: 'parked', reason: 'gbp_not_configured' };
@@ -274,11 +287,28 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
   // Hard invariant, independent of config: unrated and 1-3★ never auto-post.
   const humanOnly = rating === 0 || rating <= 3 || rating < cfg.minStars;
 
-  // Draft (grounding is public-safe by construction).
-  const grounding = await buildReplyGrounding(merged, { techFirstNames });
-  const recentReplies = await loadRecentPostedReplies(merged.location_id);
-  const draft = await draftReviewReply({ grounding, recentReplies });
-  const snapshot = groundingSnapshot(grounding);
+  // A publish retry reuses the verifier-approved draft it already produced —
+  // redrafting would burn attempts on the model (and could park as
+  // provider_down with a perfectly good reply on the row). Only rows that
+  // never produced a draft, or whose stored draft came from a different
+  // prompt version, go back to the model.
+  const PUBLISH_RETRY_REASONS = new Set([CODES.GOOGLE_FAILED, CODES.LOCK_BUSY, 'unexpected', 'runner_error']);
+  const reusable = merged.auto_reply_status === STATUS.FAILED
+    && PUBLISH_RETRY_REASONS.has(merged.auto_reply_reason)
+    && merged.auto_reply_draft
+    && merged.auto_reply_version === REPLY_VERSION;
+  let draft;
+  let snapshot;
+  if (reusable) {
+    draft = { ok: true, text: merged.auto_reply_draft, mode: merged.auto_reply_mode || 'service_quality', version: merged.auto_reply_version, attempts: 0, rejections: [], reused: true };
+    snapshot = merged.auto_reply_grounding && typeof merged.auto_reply_grounding === 'object' ? merged.auto_reply_grounding : null;
+  } else {
+    // Draft (grounding is public-safe by construction).
+    const grounding = await buildReplyGrounding(merged, { techFirstNames });
+    const recentReplies = await loadRecentPostedReplies(merged.location_id);
+    draft = await draftReviewReply({ grounding, recentReplies });
+    snapshot = groundingSnapshot(grounding);
+  }
 
   if (!draft.ok) {
     if (draft.reason === 'provider_unavailable') {
@@ -288,24 +318,24 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
         await releaseClaim(row, { auto_reply_status: STATUS.FAILED, auto_reply_reason: 'provider_unavailable', auto_reply_attempts: attempts, auto_reply_due_at: due, auto_reply_error: String(draft.error || '') });
         return { outcome: 'retry', reason: 'provider_unavailable' };
       }
-      await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot });
+      if (!(await storeDraft(merged, draft, STATUS.PARKED, 'provider_down', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
       await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — reply providers were down ${attempts} times. Draft one by hand.`, reason: 'provider_down', action: true });
       return { outcome: 'parked', reason: 'provider_down' };
     }
-    await storeDraft(merged, draft, STATUS.PARKED, 'verifier_reject', { grounding: snapshot });
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, 'verifier_reject', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Review reply needs you', body: `${summarize(merged)} — no draft passed the safety checks (${(draft.rejections || []).join(', ')}).`, reason: 'verifier_reject', action: true });
     return { outcome: 'parked', reason: 'verifier_reject' };
   }
 
   if (humanOnly && intent !== 'post_now') {
     const reason = rating === 0 ? 'unrated' : 'low_rating';
-    await storeDraft(merged, draft, STATUS.PARKED, reason, { grounding: snapshot });
+    if (!(await storeDraft(merged, draft, STATUS.PARKED, reason, { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: `${rating === 0 ? 'Unrated' : `${rating}-star`} review — draft ready`, body: `${summarize(merged)} — a reply is drafted and waiting for your review. Nothing was posted.`, reason, action: true });
     return { outcome: 'parked', reason, mode: draft.mode };
   }
 
   if (cfg.mode !== 'auto' && intent !== 'post_now') {
-    await storeDraft(merged, draft, STATUS.DRAFTED, 'shadow', { grounding: snapshot });
+    if (!(await storeDraft(merged, draft, STATUS.DRAFTED, 'shadow', { grounding: snapshot }))) return { outcome: 'skipped', reason: 'changed_during_draft' };
     await bell(merged, { title: 'Shadow reply drafted', body: `${summarize(merged)} — auto-reply is in shadow mode; the draft is on the review, nothing was posted.`, reason: 'shadow', action: false, extra: { mode: draft.mode } });
     return { outcome: 'drafted', reason: 'shadow', mode: draft.mode };
   }
@@ -345,6 +375,17 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'posted', mode: draft.mode };
   } catch (err) {
     const code = err instanceof ReviewReplyError ? err.code : 'unexpected';
+    if (code === CODES.PERSIST_FAILED) {
+      // Google has the reply; only the local record is missing. Never
+      // republish — park for a person to reconcile (the publish claim was
+      // abandoned and self-expires, blocking competitors meanwhile).
+      await db('google_reviews').where({ id: merged.id }).update({
+        auto_reply_status: STATUS.PARKED, auto_reply_reason: 'persist_failed', auto_reply_error: err.message,
+        auto_reply_draft: draft.text, auto_reply_version: draft.version, auto_reply_mode: draft.mode, auto_reply_claimed_until: null,
+      }).catch((e2) => logger.error(`[review-auto-reply] persist_failed bookkeeping also failed for ${merged.id}: ${e2.message}`));
+      await bell(merged, { title: 'Review reply needs reconciling', body: `${summarize(merged)} — the reply is LIVE on Google but was not recorded here. Open Reviews and confirm it.`, reason: 'persist_failed', action: true });
+      return { outcome: 'parked', reason: 'persist_failed' };
+    }
     if (code === CODES.HAS_REPLY || code === CODES.MISSING || code === CODES.RACE || code === CODES.STALE) {
       // Not ours any more (a human replied / skipped / dismissed, or Google
       // removed it) — record and stop; never retry over a person's action.
@@ -390,14 +431,19 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
     } catch (err) {
       stats.errors++;
       logger.error(`[review-auto-reply] row ${row.id} failed: ${err.message}`);
-
+      // Same retry ceiling as the handled paths: park + action bell after it.
+      const attempts = (row.auto_reply_attempts || 0) + 1;
+      const exhausted = attempts >= MAX_ATTEMPTS;
       await releaseClaim(row, {
-        auto_reply_status: STATUS.FAILED,
+        auto_reply_status: exhausted ? STATUS.PARKED : STATUS.FAILED,
         auto_reply_reason: 'runner_error',
-        auto_reply_attempts: (row.auto_reply_attempts || 0) + 1,
-        auto_reply_due_at: new Date(Date.now() + RETRY_BACKOFF_MIN * 60000).toISOString(),
+        auto_reply_attempts: attempts,
+        ...(exhausted ? {} : { auto_reply_due_at: new Date(Date.now() + RETRY_BACKOFF_MIN * attempts * 60000).toISOString() }),
         auto_reply_error: String(err.message || err).slice(0, 1000),
       }).catch(() => {});
+      if (exhausted) {
+        await bell(row, { title: 'Review reply needs you', body: `${summarize(row)} — the auto-reply runner failed ${attempts} times (${String(err.message || err).slice(0, 120)}). Reply by hand.`, reason: 'runner_error', action: true });
+      }
     }
   }
   return stats;
