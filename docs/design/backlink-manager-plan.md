@@ -182,6 +182,8 @@ t.timestamp('superseded_at');
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
 t.string('parked_from_status');  // the status a row held before parking as awaiting_owner/watching; restored on approval/resume (§7)
+t.string('renewal_status');      // CHECK (renewal_status IS NULL OR renewal_status IN ('active','lapsed')) — paid placements only; 'lapsed' = the renewal job declined to re-authorize (§6.3); placement-level, never the domain
+t.timestamp('renewal_recheck_at'); // when the verifier/renewal job next re-examines a lapsed placement (placement-level counterpart of the domain's watch_recheck_at)
 t.uuid('credential_id');         // → seo_link_credentials: the account this placement acts under (explicit; never inferred from domain)
 t.uuid('pending_path_id');       // → seo_link_acquisition_paths: the replacement path a superseded placement will be repointed to once its open post-exposure purchase settles (§3.2)
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
@@ -260,13 +262,13 @@ alone, nor send on an outreach approval alone.
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
 t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
-t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only)
+t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
 t.string('outcome').notNullable();    // CHECK (outcome IN (
                                       //   'slot_reserved','slot_released','submitting','submit_ambiguous', -- submission lifecycle (§13); slot_released = a reserved slot given back (lease expired, or ET-day rollover re-reservation) — terminal, audit-only, NEVER counted by the cap query
                                       //   'placed','pending','drafted','sent','failed','skipped','blocked','captcha',
                                       //   'needs_owner','human_step_done','ready_for_payment','ready_for_credentials',
                                       //   'no_payment_required','price_changed','instrument_unavailable','auto_renew_unavoidable',
-                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
+                                      //   'payment_ambiguous','mint_not_started','terms_changed','send_error','budget_month_rollover','manual_charged','price_entered','sandbox_replay' )) -- budget_month_rollover = the §6.3 rollover void (a `submit` attempt row records it in the same transaction as the void); manual_charged = the human settlement form's `human` attempt (action `manual_payment`, provider `human`), inserted in the same transaction as the terminal `manual_charged` purchase row — the only outcome a manual settlement may record; send_error = the retained sender's ambiguous Gmail failure (may have reached Gmail before timing out; reconciled by the sender flow as sent / not sent) — the ONE complete enum; every state named anywhere in this plan is here
 t.integer('cost_cents'); t.integer('duration_ms'); t.boolean('sandbox').notNullable().defaultTo(false); // sandbox rows use outcome='sandbox_replay'
 t.date('slot_day');                   // ET calendar day this submission slot counts against (set on slot_reserved; re-reserved on day rollover — §13); index (slot_day, outcome) for the cap count
 t.text('lease_token');                // the claim lease that holds this slot — the SAME ISO `claimed_at` token the retained claim/report contract already returns (text, not a new UUID); the sweep releases only slot_reserved rows whose lease expired
@@ -537,8 +539,10 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   `currency ≠ 'USD'` (no conversion is ever performed — a non-USD listing is an owner
   card), and the pre-mint/pre-submit final-total read verifies the LIVE checkout currency is
   USD as well as `final_cents` (any other currency ⇒ `voided`, `outcome='price_changed'`).
-  An unparseable or non-USD quote leaves the cents null, which §6.3's validity step turns
-  into INVALID for a `payment_required` path until an owner enters the USD amount on the card —
+  An unparseable or non-USD quote leaves the cents null, which §6.3 turns into
+  `OWNER_INPUT_REQUIRED` for the payment dimension of a `payment_required` path (a price-entry
+  card, §6.1 — never the non-overrideable INVALID, which would send the row back to
+  investigation with no owner affordance) until an owner enters the USD amount —
   a hallucinated or mis-scaled number can therefore never reach authority, an approval, or a
   budget reservation — plus
   `confidence` and `reasons`, and — for any `payment_required` path — the `merchant_binding`
@@ -569,7 +573,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` (the `authority` of a floor-waiver click's approval row only — never a dimension level, §6.3 1b) · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_INPUT_REQUIRED` (payment dimension only: the path is otherwise valid but its price is unknown/unparseable/non-USD — parked `awaiting_owner` with a PRICE-ENTRY card, never a purchase approval; the owner's entry writes `estimated_cost_cents`/`renewal_cost_cents` + `currency='USD'` on the path as an owner-sourced revision (bumps `revision_payment`, recorded as a `human` attempt `outcome='price_entered'`), after which the bridge re-decides normally — an entered price is an INPUT, never an approval) · `OWNER_OVERRIDE` (the `authority` of a floor-waiver click's approval row only — never a dimension level, §6.3 1b) · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -631,8 +635,8 @@ if path.last_investigated_at is null → INVALID
 if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shipped claim() filters on these lists; an unclaimable lane never gets authority
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
-if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
-if path.payment_required and path.currency !== 'USD' → INVALID                     # §5 currency gate: no conversion, ever; a non-USD or unmarked quote is an owner card until the owner enters the USD amount
+if path.payment_required and (not (Number.isSafeInteger(amount_cents) and amount_cents > 0) or path.currency !== 'USD'):
+    payment dimension → OWNER_INPUT_REQUIRED   # §5 currency gate / unparseable quote: no conversion, ever; NOT INVALID — the placement parks awaiting_owner with a price-entry card (§6.1) so the owner can supply the USD amount; every other dimension still evaluates; no AUTO_* or purchase approval can exist until the entry lands
 if path.legal_attestation and not validLegalTermsHash(path.legal_terms_hash) → INVALID   # 64 lowercase hex chars; an attestation with no bound agreement text is never actionable (§3.2)
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
@@ -724,10 +728,12 @@ aggregate rules; `rejected` ONLY when no placement is authorized, pending, await
 or acquired (a single `DENY` beside an approved sibling never rejects the domain); `INVALID`
 on every placement → back to `investigating`. Per-placement outcomes are stored on the
 placement (`OWNER_*` → `awaiting_owner` + card — EXCEPT a communication dimension decided
-`OWNER_OUTREACH` while no draft exists yet: that placement stays `prospect` with no card so
-the draft-only claim (`mode=draft`, which leases `prospect` rows regardless of authority) can
-produce the draft; the bridge re-decides once the draft exists and only then parks it for
-the send approval; `DENY` → reasons + override affordance). The job is
+to ANY unsatisfied owner-gated level (`OWNER_OUTREACH` or `OWNER_LEGAL` on the communication
+dimension) while no draft exists yet: that placement stays `prospect` with no card so the
+draft-only claim (`mode=draft`, which leases `prospect` rows regardless of authority) can
+produce the draft; the bridge re-decides once the draft exists and only then parks it
+`awaiting_owner` for the send/legal approval, whose `action_hash` binds that draft — an
+approval that must bind a draft is never requested before the draft exists; `DENY` → reasons + override affordance). The job is
 idempotent and re-runs the decision whenever ANY §6.3 input changes — policy, path
 revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
 evidence, month spend — for already-bridged placements too: a stale stamp is replaced (or a
@@ -907,7 +913,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   before a paid placement's `renews_at`, re-runs the §6.3 decision on the *current* D30
   evidence and price, and creates a `purchase_kind='renewal'` reservation for that period
   under the same lock/budget/idempotency rules — or lets **that placement** lapse
-  (placement `renewal_status='lapsed'`, `watch_recheck_at` set; its verified `live`/`indexed`
+  (placement `renewal_status='lapsed'`, `renewal_recheck_at` set — both §3.3 placement columns; its verified `live`/`indexed`
   status is untouched until the verifier proves a loss) if the policy no longer authorizes
   it. A lapse never writes the domain's `agent_state` directly: the aggregate is recomputed
   across ALL placements by the §3.1 rule, so it becomes `watching` only when no sibling
