@@ -312,7 +312,15 @@ matches — the row returns to `awaiting_owner` with a fresh card.
 The spend ledger with atomic monthly reservation and ambiguity-safe states; defined with the
 money mechanics in §6.3.
 
-### 3.8 Policy — `seo_link_policy` (single row, admin-editable, env-overridable)
+### 3.8 Policy — `seo_link_policy` (single row; the DB row is authoritative)
+
+The database row is the ONLY source of authority/spend thresholds; every change is an
+audited Policy-panel edit (`seo_link_policy_audit`: who, when, field, old → new). Environment
+variables may only **tighten**: an env value is applied when it is more restrictive than the
+row (lower cap, lower budget, `false` for a switch) and never when it would loosen; the
+effective override is recorded on the decision (`policy_effective` snapshot in the placement
+authority row's inputs hash) so an audit can see which limit actually applied. The `GATE_*`
+kill switches remain env-only by design (they only ever turn lanes off).
 
 See §6.2. Defaults ship conservative (everything owner-gated) and are loosened by Adam in the
 Policy panel, not by code.
