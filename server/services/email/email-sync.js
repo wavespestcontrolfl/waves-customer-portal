@@ -314,7 +314,14 @@ async function upsertEmail(parsed) {
   // bell like a text does (owner ruling 2026-08-28). Vendor/spam/bulk mail
   // (classification set, or a List-Unsubscribe header) never does.
   // Fire-and-forget: the bell is never allowed to fail the sync.
-  if (customerId && !emailData.classification && !parsed.list_unsubscribe && (parsed.label_ids || []).includes('INBOX')) {
+  if (customerEmailBellEligible({
+    customerId,
+    classification: emailData.classification,
+    listUnsubscribe: parsed.list_unsubscribe,
+    labelIds: parsed.label_ids,
+    authenticationResults: parsed.authentication_results,
+    fromAddress: parsed.from_address,
+  })) {
     try {
       const { triggerNotification } = require('../notification-triggers');
       void triggerNotification('customer_email_received', {
@@ -388,4 +395,20 @@ async function upsertEmail(parsed) {
   return true; // new email
 }
 
-module.exports = { syncEmails };
+/**
+ * Should a new inbound email ring the "email from a customer" bell?
+ * Pure. From is attacker-controlled, so an exact address match is not proof
+ * the customer sent it: the sender must pass DMARC-style alignment
+ * (inbox-hygiene.hasAlignedAuth — the same gate auto-unsubscribe trusts).
+ * Vendor/spam/bulk mail (classification set, or a List-Unsubscribe header)
+ * and anything not in INBOX never ring.
+ */
+function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress } = {}) {
+  if (!customerId || classification || listUnsubscribe) return false;
+  if (!(labelIds || []).includes('INBOX')) return false;
+  const { hasAlignedAuth } = require('./inbox-hygiene');
+  const { domainFromAddress } = require('./spam-blocker');
+  return hasAlignedAuth(authenticationResults, domainFromAddress(fromAddress));
+}
+
+module.exports = { syncEmails, customerEmailBellEligible };

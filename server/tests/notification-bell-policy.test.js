@@ -629,3 +629,23 @@ describe('live dashboard-alert overlay under the bell policy', () => {
     expect(computeDashboardAlerts).toHaveBeenCalled();
   });
 });
+
+describe('customer_email_received eligibility (email-sync) — sender must authenticate', () => {
+  const { customerEmailBellEligible } = require('../services/email/email-sync');
+  const base = { customerId: 'c1', classification: null, listUnsubscribe: null, labelIds: ['INBOX'], fromAddress: 'jane@customer-domain.com' };
+  test('aligned DKIM/SPF for the From domain rings', () => {
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=pass header.d=customer-domain.com; spf=pass smtp.mailfrom=customer-domain.com' })).toBe(true);
+  });
+  test('failed or unaligned auth (spoofed From) never rings', () => {
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=fail header.d=customer-domain.com; spf=fail' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: 'dkim=pass header.d=attacker.example' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: null })).toBe(false);
+  });
+  test('vendor/bulk/non-inbox/unknown-sender mail never rings', () => {
+    const ok = 'dkim=pass header.d=customer-domain.com';
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, classification: 'vendor' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, listUnsubscribe: '<mailto:x>' })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, labelIds: ['SENT'] })).toBe(false);
+    expect(customerEmailBellEligible({ ...base, authenticationResults: ok, customerId: null })).toBe(false);
+  });
+});
