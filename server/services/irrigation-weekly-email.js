@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, recoverWeekPlan } = require('./irrigation-week-plan');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
 const { isEnabled } = require('../config/feature-gates');
@@ -592,7 +592,7 @@ function buildWeeklyEmailDecision({
   };
 
   if (weekPlanEnabled) {
-    const { plan, restriction } = decideWeekPlan({
+    const { plan, restriction, decisionInputs } = decideWeekPlan({
       advice,
       month: monthFromYmd(weekEnding),
       forecastRainInches,
@@ -635,6 +635,7 @@ function buildWeeklyEmailDecision({
         advice,
         weekPlan: plan,
         restriction,
+        decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource },
         payload: {
           ...payload,
           summary_line: lastWeekLine,
@@ -1028,9 +1029,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         continue;
       }
 
+      let snapshotArgs = null;
       if (decision.weekPlan) {
         const p = decision.weekPlan;
         summary.plan[p.action === 'hold' ? 'hold' : (p.conditionalOnForecast ? 'conditional' : 'run')] += 1;
+        // Exactness: the row is written from THIS decision before the send
+        // (first write wins) and stamped sent only if the provider accepts;
+        // a failed/blocked send discards it so the next run's plan is the
+        // one both sent and stored.
+        snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p };
+        await persistWeekPlan(snapshotArgs);
       } else if (decision.weekPlanUnavailable) {
         summary.plan.unavailable += 1;
       }
@@ -1067,26 +1075,16 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // deduped (webhook/supersede races), as does a thrown error.
       if ((result.deduped || result.blocked) && !result.providerAttempted) summary.attempted -= 1;
 
-      // Snapshot the plan the customer actually received: written only
-      // after a send the provider accepted, and never overwritten (first
-      // write wins) — a rerun that the library dedupes keeps Monday's plan,
-      // so the report and the inbox stay identical for the week.
-      if (decision.weekPlan && result.sent && !result.deduped) {
-        await persistWeekPlan({
-          customerId: customer.id,
-          weekEnding,
-          planAsOf,
-          weatherInputs: {
-            rainfallInches7d: weekWeather.rainInches,
-            et0Inches: weekWeather.et0Inches,
-            rainSource: weekWeather.rainSource,
-            forecastRainInches,
-            targetInches: decision.advice?.recommendedInchesPerWeek ?? null,
-            appliedInches: decision.advice?.appliedInchesPerWeek ?? null,
-          },
-          restriction: decision.restriction,
-          plan: decision.weekPlan,
-        });
+      if (snapshotArgs) {
+        if (result.sent && !result.deduped) {
+          // Pre-send insert may have failed transiently — one more try, then stamp.
+          await persistWeekPlan(snapshotArgs);
+          await markWeekPlanSent({ customerId: customer.id, weekEnding });
+        } else if (result.deduped) {
+          await recoverWeekPlan(snapshotArgs);
+        } else {
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+        }
       }
 
       if (result.deduped) {

@@ -29,6 +29,8 @@ describe('weekly email decision — plan mode', () => {
     expect(d.advice.status).toBe('surplus');
     expect(d.weekPlan.action).toBe('run');
     expect(d.restriction.maxDaysPerWeek).toBe(1);
+    // The snapshot carries the inputs the decision saw (report comparisons use these).
+    expect(d.decisionInputs).toMatchObject({ runMinutes: 20, headTypes: ['spray'], forecastRainInches: 0.3, scheduleSource: 'portal', rainfallInches7d: 0.6 });
     // Last week's story stays in summary_line; the plan owns subject/heading/callout.
     expect(d.payload.summary_line).toMatch(/more than the .* your St\. Augustine needs/);
     // Typed 2" ÷ (20 min × 4 days) = a MEASURED 1.5 in/hr; need = 1.25 − ½"

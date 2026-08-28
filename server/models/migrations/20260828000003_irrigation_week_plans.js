@@ -1,7 +1,8 @@
 /**
  * irrigation_week_plans — the Monday watering-plan decision snapshot
  * (inputs + restriction policy + plan) so the lawn report renders the SAME
- * plan the email sent for that week. One row per customer per week.
+ * plan the email sent for that week. One row per customer per week; rows are
+ * inserted before the send and stamped sent_at after the provider accepts.
  */
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('irrigation_week_plans')) return;
@@ -13,6 +14,11 @@ exports.up = async function up(knex) {
     t.jsonb('weather_inputs').notNullable().defaultTo('{}');
     t.jsonb('restriction_policy');
     t.jsonb('week_plan').notNullable();
+    // Set once the provider accepts the email built from this plan. A row
+    // left null is a decision that was never delivered (send failed or was
+    // suppressed) and is discarded by the sweep; the report renders only
+    // sent plans.
+    t.timestamp('sent_at', { useTz: true });
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('updated_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.unique(['customer_id', 'week_ending']);

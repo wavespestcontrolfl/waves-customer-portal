@@ -22,7 +22,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { buildWeekPlan, HEAD_LABELS } = require('@waves/irrigation-runtime');
+const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { _private: advicePrivate } = require('./service-report/irrigation-advice');
@@ -76,7 +76,22 @@ function decideWeekPlan({
     rainSensor,
     rainKnown: advice?.rainKnown !== false,
   });
-  return { plan, restriction };
+  const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
+  // Everything the decision was made from, for the snapshot (the report
+  // renders comparisons from these, never from today's prefs).
+  const decisionInputs = {
+    targetInches: advice?.recommendedInchesPerWeek ?? null,
+    appliedInches: advice?.appliedInchesPerWeek ?? null,
+    rainKnown: advice?.rainKnown !== false,
+    forecastRainInches,
+    month,
+    runMinutes: runtime.runMinutes,
+    wateringDays: runtime.wateringDays,
+    headTypes: runtime.headTypes,
+    explicitInchesPerWeek: explicitInchesPerWeek ?? null,
+    rainSensor: rainSensor === true,
+  };
+  return { plan, restriction, decisionInputs };
 }
 
 function restrictionNote(restriction) {
@@ -214,24 +229,33 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
 }
 
 /**
- * Snapshot the Monday decision so the report renders the same plan. Insert
- * once per (customer_id, week_ending). Never throws — a snapshot miss must
- * not block the send.
+ * Snapshot lifecycle — exactness contract: the row the report renders is the
+ * decision the SENT email was built from.
+ *   persistWeekPlan()      before the send: insert, first write wins
+ *   markWeekPlanSent()     after the provider accepts: stamp sent_at
+ *   discardUnsentWeekPlan() send failed/blocked: drop the undelivered row so
+ *                          the next run's (possibly different) plan is the one
+ *                          that gets sent AND stored
+ *   recoverWeekPlan()      deduped rerun with NO row (the pre-send insert and
+ *                          the post-send retry both failed last time): store
+ *                          this run's decision flagged `recovered` — observed
+ *                          inputs are identical week-over-week, only the
+ *                          forecast can differ; better than a week with no plan
+ * None of these throw — a snapshot problem must never block a send.
  */
-async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), weatherInputs = {}, restriction = null, plan } = {}) {
+async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan, sentAt = null } = {}) {
   if (!customerId || !weekEnding || !plan) return false;
   try {
     const row = {
       customer_id: customerId,
       week_ending: weekEnding,
       plan_as_of: planAsOf,
-      weather_inputs: JSON.stringify(weatherInputs || {}),
+      weather_inputs: JSON.stringify(decisionInputs || {}),
       restriction_policy: JSON.stringify(restriction || null),
       week_plan: JSON.stringify(plan),
+      sent_at: sentAt,
       updated_at: db.fn.now(),
     };
-    // First write wins: the plan the customer actually received for the
-    // week is immutable — a rerun never rewrites it.
     await db('irrigation_week_plans')
       .insert({ ...row, created_at: db.fn.now() })
       .onConflict(['customer_id', 'week_ending'])
@@ -243,6 +267,46 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
   }
 }
 
+async function markWeekPlanSent({ customerId, weekEnding, sentAt = new Date() } = {}) {
+  try {
+    const n = await db('irrigation_week_plans')
+      .where({ customer_id: customerId, week_ending: weekEnding })
+      .whereNull('sent_at')
+      .update({ sent_at: sentAt, updated_at: db.fn.now() });
+    return n > 0;
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] mark-sent failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return false;
+  }
+}
+
+async function discardUnsentWeekPlan({ customerId, weekEnding } = {}) {
+  try {
+    await db('irrigation_week_plans')
+      .where({ customer_id: customerId, week_ending: weekEnding })
+      .whereNull('sent_at')
+      .del();
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] discard failed for ${customerId}/${weekEnding}: ${err.message}`);
+  }
+}
+
+async function hasWeekPlan({ customerId, weekEnding } = {}) {
+  try {
+    const row = await db('irrigation_week_plans').where({ customer_id: customerId, week_ending: weekEnding }).first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] exists check failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return true; // unknown → do not attempt a recovery write
+  }
+}
+
+async function recoverWeekPlan(args = {}) {
+  if (await hasWeekPlan(args)) return false;
+  logger.warn(`[irrigation-week-plan] no snapshot for ${args.customerId}/${args.weekEnding} after a deduped send — storing this run's decision as recovered`);
+  return persistWeekPlan({ ...args, decisionInputs: { ...(args.decisionInputs || {}), recovered: true }, sentAt: new Date() });
+}
+
 function samePolicy(a, b) {
   if (!a && !b) return true;
   if (!a || !b) return false;
@@ -252,8 +316,8 @@ function samePolicy(a, b) {
 }
 
 /**
- * The snapshot for the CURRENT week (the sweep's week_ending key), and only
- * if the restriction policy it was decided under is still the one in force
+ * The SENT snapshot for the CURRENT week (the sweep's week_ending key), and
+ * only if the restriction policy it was decided under is still the one in force
  * — a policy that expired or tightened mid-week makes Monday's plan wrong,
  * so the report shows nothing rather than a stale legal instruction.
  * Null when there is no such snapshot.
@@ -264,6 +328,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
     const weekEnding = lastCompletedWeekEndingET(now);
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding })
+      .whereNotNull('sent_at')
       .first();
     if (!row) return null;
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
@@ -272,7 +337,10 @@ async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
-      weatherInputs: parse(row.weather_inputs) || {},
+      sentAt: row.sent_at,
+      // The inputs the decision was made from — the report's "N minutes more
+      // than you run now" compares against THESE, not today's prefs.
+      decisionInputs: parse(row.weather_inputs) || {},
       restriction,
       plan: parse(row.week_plan),
     };
@@ -287,6 +355,9 @@ module.exports = {
   renderWeekPlanEmail,
   renderWeekPlanReport,
   persistWeekPlan,
+  markWeekPlanSent,
+  discardUnsentWeekPlan,
+  recoverWeekPlan,
   loadCurrentWeekPlan,
   _private: { fmtInches, restrictionNote, comparisonClause, samePolicy },
 };

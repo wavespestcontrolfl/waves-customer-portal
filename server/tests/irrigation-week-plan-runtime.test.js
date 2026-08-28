@@ -74,10 +74,15 @@ describe('buildWeekPlan — sizing', () => {
     expect(p.rateSource).toBeNull();
   });
 
-  test('a 0-day policy → hold with restriction_prohibits', () => {
+  test('a 0-day policy → hold with restriction_prohibits, even when the need is below the event minimum', () => {
     const p = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: { maxDaysPerWeek: 0 }, ...SPRAY });
     expect(p.action).toBe('hold');
     expect(p.reasons).toContain('restriction_prohibits');
+    expect(p.fallbackMinutesPerEvent).toBeNull();
+    const lowNeed = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: { maxDaysPerWeek: 0 }, ...SPRAY });
+    expect(lowNeed.reasons).toContain('restriction_prohibits');
+    expect(lowNeed.reasons).not.toContain('need_below_event_minimum');
+    expect(lowNeed.fallbackMinutesPerEvent).toBeNull();
   });
 });
 

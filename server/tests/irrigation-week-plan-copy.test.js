@@ -134,45 +134,76 @@ describe('decideWeekPlan (server glue)', () => {
   });
 });
 
-describe('loadCurrentWeekPlan (snapshot validity) and persistWeekPlan (first write wins)', () => {
+describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
-  const { loadCurrentWeekPlan, persistWeekPlan } = require('../services/irrigation-week-plan');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, recoverWeekPlan } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
   const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order' };
-  const row = (restriction) => ({ week_ending: '2026-08-23', plan_as_of: NOW, weather_inputs: '{}', restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }) });
+  const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20 }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
 
-  function stubSelect(returned, capture) {
+  function stubSelect(returned, capture = {}) {
     db.mockImplementation(() => ({
       where(w) { capture.where = w; return this; },
+      whereNotNull(c) { capture.notNull = c; return this; },
       first: async () => returned,
     }));
+    return capture;
   }
 
-  test('returns the CURRENT week\'s snapshot only when its policy matches the one in force', async () => {
-    const cap = {};
-    stubSelect(row(POLICY), cap);
+  test('load: current week, SENT rows only, policy must still be in force; exposes the decision inputs', async () => {
+    const cap = stubSelect(row(POLICY));
     const hit = await loadCurrentWeekPlan('c1', { now: NOW });
     expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23' });
+    expect(cap.notNull).toBe('sent_at');
     expect(hit.plan.action).toBe('run');
-    stubSelect(row({ ...POLICY, maxDaysWeek: 2, maxDaysPerWeek: 2 }), {});
+    expect(hit.decisionInputs.runMinutes).toBe(20);
+    stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
-    stubSelect(row(POLICY), {});
-    // Policy expired since Monday → the snapshot's legal instruction is stale.
-    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull();
+    stubSelect(row(POLICY));
+    expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
   });
 
-  test('persist inserts once and ignores a conflict (never overwrites Monday\'s plan)', async () => {
+  test('persist inserts once and ignores a conflict; mark-sent stamps only unsent rows; discard deletes only unsent', async () => {
     const calls = {};
     db.mockImplementation(() => ({
       insert(r) { calls.insert = r; return this; },
       onConflict(cols) { calls.conflict = cols; return this; },
       ignore: async () => { calls.ignored = true; },
       merge: async () => { calls.merged = true; },
+      where(w) { calls.where = w; return this; },
+      whereNull(c) { calls.whereNull = c; return this; },
+      update: async (patch) => { calls.update = patch; return 1; },
+      del: async () => { calls.deleted = true; return 1; },
     }));
-    const ok = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'hold' }, restriction: POLICY });
-    expect(ok).toBe(true);
+    expect(await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'hold' }, restriction: POLICY, decisionInputs: { runMinutes: 20 } })).toBe(true);
     expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
     expect(calls.ignored).toBe(true);
     expect(calls.merged).toBeUndefined();
+    expect(calls.insert.sent_at).toBeNull();
+    expect(JSON.parse(calls.insert.weather_inputs)).toEqual({ runMinutes: 20 });
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(true);
+    expect(calls.whereNull).toBe('sent_at');
+    expect(calls.update.sent_at).toBeInstanceOf(Date);
+    await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
+    expect(calls.deleted).toBe(true);
+    expect(calls.whereNull).toBe('sent_at');
+  });
+
+  test('recover: writes this run\'s decision (flagged) only when NO row exists', async () => {
+    const calls = { inserts: 0 };
+    let existing = { id: 'x' };
+    db.mockImplementation(() => ({
+      where() { return this; },
+      first: async () => existing,
+      insert(r) { calls.inserts += 1; calls.last = r; return this; },
+      onConflict() { return this; },
+      ignore: async () => {},
+    }));
+    expect(await recoverWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'run' }, decisionInputs: { runMinutes: 20 } })).toBe(false);
+    expect(calls.inserts).toBe(0);
+    existing = undefined;
+    expect(await recoverWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan: { action: 'run' }, decisionInputs: { runMinutes: 20 } })).toBe(true);
+    expect(JSON.parse(calls.last.weather_inputs)).toEqual({ runMinutes: 20, recovered: true });
+    expect(calls.last.sent_at).toBeInstanceOf(Date);
   });
 });

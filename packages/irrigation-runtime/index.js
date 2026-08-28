@@ -330,15 +330,17 @@ function buildWeekPlan({
 
   const common = { ...base, ...rate, carryoverInches: carryover, needInches: need, confidence };
 
+  // A legal ban wins over everything — checked BEFORE the low-need hold so a
+  // prohibited week never carries a wilt-override cycle.
+  if (maxEvents === 0) {
+    reasons.push('restriction_prohibits');
+    return { ...common, action: 'hold', events: 0, fallbackMinutesPerEvent: null };
+  }
   if (need < HOLD_BELOW_INCHES) {
     reasons.push('need_below_event_minimum');
     // The wilt-override cycle the copy offers is one default-dose event.
     const fallback = sizeRun(EVENT_DEPTH_MIN_INCHES);
     return { ...common, action: 'hold', events: 0, depthInches: null, minutesPerEvent: null, fallbackMinutesPerEvent: fallback.minutesPerEvent };
-  }
-  if (maxEvents === 0) {
-    reasons.push('restriction_prohibits');
-    return { ...common, action: 'hold', events: 0 };
   }
   const run = sizeRun(need);
   if (need > run.events * EVENT_DEPTH_MAX_INCHES) {

@@ -2589,7 +2589,8 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   if (featureGates.isEnabled('irrigationWeekPlan')) {
     const snapshot = await loadCurrentWeekPlan(service.customer_id);
     if (snapshot?.plan) {
-      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: propertyPrefs?.irrigation_run_minutes ?? null });
+      // Compare against the runtime Monday's decision saw, never today's prefs.
+      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });
     }
   }
 
