@@ -91,8 +91,13 @@ describe('weekly email decision — plan mode', () => {
     expect(d.templateKey).toBe(TEMPLATE_WEEK_PLAN);
     expect(d.payload.summary_line).toContain('your sprinkler schedule as entered in your portal (about 2" per week)');
     expect(d.payload.plan_note).toContain('We worked that 2" out from what you entered under Irrigation in your portal');
-    expect(d.payload.plan_note).not.toContain('rain sensor'); // renderer owns the sensor line
     expect(d.payload.plan_note).not.toContain('Minutes assume'); // provenance already states the assumed rate
+    // Sensor + derived: the provenance keeps the PAST-week upper-bound
+    // disclosure, and the generic future-skip line is dropped (not both).
+    const sensor = buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, rainSensor: true });
+    expect(sensor.payload.plan_note).toContain('some of those runs may have been skipped after rain');
+    expect(sensor.payload.plan_note).toContain('read it as the most your system would have applied');
+    expect(sensor.payload.plan_note).not.toContain('will skip a run on its own');
     // Gate off → the derived schedule still confirms, exactly as before.
     expect(buildWeeklyEmailDecision({ ...BASE, irrigationInchesPerWeek: null, weekPlanEnabled: false }).templateKey).toBe(TEMPLATE_CONFIRM_SCHEDULE);
   });
@@ -107,5 +112,16 @@ describe('weekly email decision — plan mode', () => {
     expect(d.templateKey).toBe(TEMPLATE_WEEK_PLAN);
     expect(d.templateKey).not.toBe(TEMPLATE_ON_TRACK);
     expect(d.payload.summary_line).toContain('right in line with');
+  });
+});
+
+describe('sweep — plan mode only on Monday', () => {
+  test('a Tue–Sun retry falls back to the pre-plan templates (late_retry counted)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '../services/irrigation-weekly-email.js'), 'utf8');
+    expect(src).toMatch(/const isMondayET = etParts\(now\)\.dayOfWeek === 1;/);
+    expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
+    expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
   });
 });

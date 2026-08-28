@@ -142,7 +142,7 @@ function eventsOnlyClause() {
  * Email copy for a decision. Returns null for an 'unavailable' plan so the
  * sender keeps its pre-plan template.
  */
-function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false } = {}) {
+function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', runMinutes = null, restriction = null, omitRateNote = false, omitSensorNote = false } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const name = String(firstName || '').trim() || 'there';
   const notes = [];
@@ -213,7 +213,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
   } else if (plan.action !== 'hold' && plan.rateSource === 'system_type_default' && !omitRateNote) {
     notes.push(`Minutes assume typical ${HEAD_LABELS[plan.headType] || 'sprinkler'} rates from University of Florida turf guidance. If you know your system's actual weekly output, enter Weekly Inches in your portal and we'll tighten this to your numbers.`);
   }
-  if (plan.rainSensor) {
+  if (plan.rainSensor && !omitSensorNote) {
     notes.push('Your rain sensor will skip a run on its own if we get a soaking.');
   }
   if (plan.reasons.includes('forecast_unavailable') && plan.action === 'run') {

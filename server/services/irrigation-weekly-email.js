@@ -638,9 +638,15 @@ function buildWeeklyEmailDecision({
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
-    // assumed head rate and the Weekly Inches ask — skip the renderer's copy
-    // of it so the note doesn't say it twice.
-    const planCopy = renderWeekPlanEmail(plan, { firstName, grassLabel, runMinutes: runtimeInputs.runMinutes, restriction, omitRateNote: scheduleSource === 'portal_derived' });
+    // assumed head rate, the Weekly Inches ask AND — for a sensor system —
+    // that last week's programmed total is only an upper bound; skip the
+    // renderer's generic copies so the note doesn't say them twice.
+    const sensorOn = rainSensor === true || rainSensor === 't';
+    const planCopy = renderWeekPlanEmail(plan, {
+      firstName, grassLabel, runMinutes: runtimeInputs.runMinutes, restriction,
+      omitRateNote: scheduleSource === 'portal_derived',
+      omitSensorNote: scheduleSource === 'portal_derived' && sensorOn,
+    });
     if (planCopy) {
       // LAST week's narrative only — the plan owns the week ahead, so the
       // forecast-rerouted summaries ("your current schedule has it covered")
@@ -655,10 +661,11 @@ function buildWeeklyEmailDecision({
           ? `Rain was light near your home last week (${rain}"), so with ${scheduleClause} your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" short of the ${target}" your ${grassLabel} needs this time of year.`
           : `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — right in line with the ${target}" your ${grassLabel} needs this time of year.`;
       // Provenance of a derived figure (same sentence confirm_schedule uses)
-      // rides the note; the renderer's own rain-sensor line already covers
-      // the sensor, so that clause is dropped here.
+      // rides the note, INCLUDING the sensor upper-bound disclosure — the
+      // summary quotes the full programmed amount as "received", and a
+      // sensor may have skipped some of it (codex #3478 r13 / #3565 r5).
       const provenance = scheduleSource === 'portal_derived'
-        ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: false })
+        ? buildScheduleNote({ scheduleSource, derived, scheduleFmt: irrigationFmt, rainSensor: sensorOn })
         : '';
       const planNote = [planCopy.plan_note, provenance].filter(Boolean).join(' ');
       const planReason = plan.action === 'hold' ? 'plan_hold' : (plan.conditionalOnForecast ? 'plan_conditional' : 'plan_run');
@@ -1003,9 +1010,15 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
     skipped: { rain_unknown: 0, unknown: 0, missing_email: 0, capped: 0 },
     failed: 0,
     // GATE_IRRIGATION_WEEK_PLAN outcomes (all zero while the gate is off).
-    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0 },
+    plan: { hold: 0, run: 0, conditional: 0, unavailable: 0, claimed_elsewhere: 0, late_retry: 0 },
   };
-  const weekPlanEnabled = isEnabled('irrigationWeekPlan');
+  // Plan mode only on the plan week's MONDAY: a retry Tue–Sun cannot know
+  // whether the customer's assigned watering day has already passed under a
+  // one-day policy, so it must not send an actionable "this week" plan —
+  // those customers get the pre-plan templates (counted as late_retry).
+  const isMondayET = etParts(now).dayOfWeek === 1;
+  const weekPlanGate = isEnabled('irrigationWeekPlan');
+  const weekPlanEnabled = weekPlanGate && isMondayET;
   const planAsOf = now;
   // Plan-week horizon: the Sunday after the completed week (ET).
   const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
@@ -1126,6 +1139,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         }
       } else if (decision.weekPlanUnavailable) {
         summary.plan.unavailable += 1;
+      } else if (weekPlanGate && !isMondayET) {
+        summary.plan.late_retry += 1;
       }
       // Consume the cap BEFORE the provider call: an error thrown after
       // SendGrid accepts (audit/DB failure) must still count as an attempt.
