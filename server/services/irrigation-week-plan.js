@@ -286,8 +286,9 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  *                           row whose decision_hash matches — a stale row
  *                           from another decision can never be stamped.
  *   discardUnsentWeekPlan() send failed/blocked/threw: drop the undelivered
- *                           row so the next run's plan is the one both sent
- *                           and stored.
+ *                           row — only the claimant's own (claim_token) —
+ *                           so the next run's plan is the one both sent and
+ *                           stored.
  *   weekPlanDeliveryState() the sweep's source of truth for "did a prior
  *                           run deliver, and which decision?" —
  *                           email_messages by idempotency key, whose
@@ -439,10 +440,13 @@ async function hasSentWeekPlan({ customerId, weekEnding } = {}) {
   }
 }
 
-async function discardUnsentWeekPlan({ customerId, weekEnding } = {}) {
+async function discardUnsentWeekPlan({ customerId, weekEnding, claimToken = null } = {}) {
+  // Only the claimant may discard, and only its own row: a worker whose
+  // lease expired must never delete the row a newer worker reclaimed.
+  if (!claimToken) return;
   try {
     await db('irrigation_week_plans')
-      .where({ customer_id: customerId, week_ending: weekEnding })
+      .where({ customer_id: customerId, week_ending: weekEnding, claim_token: claimToken })
       .whereNull('sent_at')
       .del();
   } catch (err) {

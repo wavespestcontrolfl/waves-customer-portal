@@ -1200,7 +1200,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           }
         } else {
           // Blocked / not sent: this decision was never delivered.
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
         }
       }
 
@@ -1243,7 +1243,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           // 'failed' is AMBIGUOUS (the library can mark a row failed when its
           // post-provider status update fails) — the row is retained for a
           // later reconciliation once the delivery webhook repairs the record.
-          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
+          await discardUnsentWeekPlan({ customerId: customer.id, weekEnding, claimToken: snapshotArgs.claimToken });
         }
       }
       summary.failed += 1;

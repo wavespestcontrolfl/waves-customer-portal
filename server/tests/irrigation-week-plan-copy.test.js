@@ -286,8 +286,13 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash });
     expect(calls.whereNull).toBe('sent_at');
     expect(calls.update.sent_at).toBeInstanceOf(Date);
+    // Discard is scoped to the claimant's own lease — no token, no delete.
+    calls.deleted = undefined;
     await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' });
+    expect(calls.deleted).toBeUndefined();
+    await discardUnsentWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok-1' });
     expect(calls.deleted).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', claim_token: 'tok-1' });
     expect(calls.whereNull).toBe('sent_at');
     // A DB error is reported distinctly so the sweep can fall back to the pre-plan email.
     db.mockImplementation(() => ({ insert() { throw new Error('db down'); } }));
