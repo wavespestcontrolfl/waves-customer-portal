@@ -275,6 +275,9 @@ async function recheckTopicTargeting(run, pr, gh) {
 }
 
 const TOPIC_BLOCKED_SKIP_REASON = 'topic_targeting_blocked';
+// Stamped on a parked run once its closed PR's terminal bookkeeping is done
+// (reconciliation then stops re-reading it); cleared by un-park.
+const TOPIC_BLOCK_PR_RETIRED = 'topic_block_pr_retired';
 // A deterministic merge-time topic block cannot clear by polling: park the
 // run out of the pending set (CAS on the exact pending state, like
 // supersedeRun) with the verdict in reviewer_notes, and stamp the parked
@@ -352,6 +355,11 @@ async function reconcileTopicBlockedPrs(gh) {
       .where('outcome', PENDING_OUTCOME)
       .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
       .whereNotNull('astro_pr_url')
+      // Rows whose closed PR finished its terminal bookkeeping leave the set
+      // (marker below); random rotation so a persistently failing retire
+      // cannot starve rows past the limit.
+      .where((q) => q.whereNull('poll_pending_reason').orWhereNot('poll_pending_reason', TOPIC_BLOCK_PR_RETIRED))
+      .orderByRaw('random()')
       .limit(25)
       .select('id', 'opportunity_id', 'action_type', 'astro_pr_url', 'skip_reason', 'outcome', 'reviewer_notes');
   } catch (err) {
@@ -381,11 +389,15 @@ async function reconcileTopicBlockedPrs(gh) {
       continue;
     }
     // Closed (by the retire, or by a human): terminal bookkeeping — idempotent,
-    // so a lost stamp converges.
+    // so a lost stamp converges; then the row leaves the reconcile set.
     try {
       const { markPrTerminal } = require('./codex-remediation');
       await markPrTerminal(prNumber, 'closed');
-    } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal for closed topic-blocked PR #${prNumber} failed: ${err.message}`); }
+      await db('autonomous_runs')
+        .where('id', run.id)
+        .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+        .update({ poll_pending_reason: TOPIC_BLOCK_PR_RETIRED, updated_at: new Date() });
+    } catch (err) { logger.warn(`[autonomous-pr-poller] terminal bookkeeping for closed topic-blocked PR #${prNumber} failed: ${err.message} (retried next tick)`); }
   }
   return { count: rows.length, retired, unparked };
 }
@@ -393,28 +405,34 @@ async function reconcileTopicBlockedPrs(gh) {
 // Merged after the park: restore the run's pending reason (CAS on the parked
 // state) and the queue row's, with a note — the next pollPending tick
 // finalizes it through the normal merged path.
+// Atomic like the park: both writes in one transaction, each must affect
+// exactly one row (a lost CAS rolls back; retried next tick).
 async function unparkTopicBlockedRun(run, prNumber) {
   const pendingReason = pendingSkipReasonForRun(run);
   const note = `PR #${prNumber} was merged after the topic-targeting park — returned to the pending lifecycle for merged finalization by autonomous-pr-poller.`;
   try {
-    const fresh = await db('autonomous_runs').where('id', run.id).first('reviewer_notes');
-    const n = await db('autonomous_runs')
-      .where('id', run.id)
-      .where('outcome', PENDING_OUTCOME)
-      .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
-      .update({
-        skip_reason: pendingReason,
-        reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
-        updated_at: new Date(),
-      });
-    if (Number(n) !== 1) return false;
-    if (run.opportunity_id) {
-      await db('opportunity_queue')
-        .where('id', run.opportunity_id)
-        .where('status', 'pending_review')
+    await db.transaction(async (trx) => {
+      const fresh = await trx('autonomous_runs').where('id', run.id).first('reviewer_notes');
+      const n = await trx('autonomous_runs')
+        .where('id', run.id)
+        .where('outcome', PENDING_OUTCOME)
         .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
-        .update({ skip_reason: pendingReason, updated_at: new Date() });
-    }
+        .update({
+          skip_reason: pendingReason,
+          reviewer_notes: [fresh?.reviewer_notes ?? run.reviewer_notes, note].filter(Boolean).join(' | ').slice(0, 4000),
+          poll_pending_reason: null,
+          updated_at: new Date(),
+        });
+      if (Number(n) !== 1) throw new Error('run left the parked state');
+      if (run.opportunity_id) {
+        const q = await trx('opportunity_queue')
+          .where('id', run.opportunity_id)
+          .where('status', 'pending_review')
+          .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)
+          .update({ skip_reason: pendingReason, updated_at: new Date() });
+        if (Number(q) !== 1) throw new Error('queue row left the parked state');
+      }
+    });
     logger.warn(`[autonomous-pr-poller] un-parked topic-blocked run ${run.id}: PR #${prNumber} merged by a human — finalizing through the merged lifecycle`);
     return true;
   } catch (err) {

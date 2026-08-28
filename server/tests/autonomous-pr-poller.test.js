@@ -791,13 +791,26 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(runBack.updates.reviewer_notes).toMatch(/merged after the topic-targeting park/);
     expect(updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'astro_pr_pending_merge')).toBeDefined();
 
+    // Un-park is transactional (hook): both writes on the transaction, exact-row CAS.
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+
     jest.clearAllMocks();
     updates = setupDb({ pending: [parked] });
     gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
     const r2 = await poller._internals.reconcileTopicBlockedPrs(gh);
     expect(r2).toMatchObject({ count: 1, retired: 0, unparked: 0 });
     expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
-    expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+    // Terminal bookkeeping done → the row leaves the reconcile set (marker), no state change.
+    const retiredMark = updates.find((u) => u.table === 'autonomous_runs');
+    expect(retiredMark.updates).toEqual(expect.objectContaining({ poll_pending_reason: 'topic_block_pr_retired' }));
+    expect(retiredMark.updates.skip_reason).toBeUndefined();
+
+    // A lost queue CAS rolls the un-park back (nothing changes; retried next tick).
+    jest.clearAllMocks();
+    setupDb({ pending: [parked], updateResult: 0 });
+    gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+    const r3 = await poller._internals.reconcileTopicBlockedPrs(gh);
+    expect(r3).toMatchObject({ count: 1, unparked: 0 });
   });
 
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {
