@@ -8821,13 +8821,12 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     const acceptanceTermsApplicable = acceptanceTermsApplyTo(estimate)
       && req.body?.paymentMethodPreference !== 'prepay_annual';
     const acceptanceTermsActive = featureGates.isEnabled('estimateAcceptanceTerms') && acceptanceTermsApplicable;
-    // Recording keys on the ATTESTATION, not the gate (GH Codex r5 P1): a
-    // tab that loaded while the gate was on and attests the current version
-    // saw the terms, and that record is kept even if the kill switch was
-    // unset before the tap. The gate governs what is shown and whether an
-    // unattested/stale accept is refused, never whether a real attestation
-    // is thrown away.
-    const recordAcceptanceTerms = acceptanceTermsApplicable
+    // The kill switch is absolute: gate OFF ⇒ nothing is recorded, even
+    // from a tab that loaded while the gate was on and attests the current
+    // version (the operator pulled the feature; that accept lands exactly
+    // as a pre-gate accept did). Reviewed both ways (GH r5 P1 vs pre-push
+    // P1) — the kill-switch contract in feature-gates.js wins.
+    const recordAcceptanceTerms = acceptanceTermsActive
       && acceptedTermsVersion === acceptanceTerms.ACCEPTANCE_TERMS_VERSION;
     // A STALE attestation is always refused: the tab rendered an older copy
     // than this server records, so it must reload and read the current line.

@@ -1316,7 +1316,7 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
   });
 
-  test('absent version: accepts unrecorded under `true` (pre-gate tab), refused under `required`; gate OFF keeps a real attestation, ignores a stale one', async () => {
+  test('absent version: accepts unrecorded under `true` (pre-gate tab), refused under `required`; gate OFF records nothing (kill switch)', async () => {
     mockGateState.acceptanceTerms = true;
     seed({ id: 'est-terms-4', token: 'tok-terms-4-x0123456789' });
     conversionOk();
@@ -1335,15 +1335,15 @@ describe('Acceptance terms — GATE_ESTIMATE_ACCEPTANCE_TERMS record', () => {
     expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     mockGateState.acceptanceTermsRequired = false;
 
-    // Gate turned OFF after this tab loaded: the tab still attests the
-    // current version it rendered — the record is kept (never thrown away).
+    // Kill switch is absolute: gate OFF ⇒ nothing recorded, even when the
+    // tab attests the current version (it loaded before the switch was pulled).
     mockGateState.acceptanceTerms = false;
     seed({ id: 'est-terms-5', token: 'tok-terms-5-x0123456789' });
     conversionOk();
     const gateOff = await putAccept('tok-terms-5-x0123456789', { termsVersion: CURRENT });
     expect(gateOff.status).toBe(200);
-    expect(db.__state.tables.estimate_acceptances).toHaveLength(1);
-    expect(storedEstimate().terms_version).toBe(CURRENT);
+    expect(db.__state.tables.estimate_acceptances).toHaveLength(0);
+    expect(storedEstimate().terms_version == null).toBe(true);
     // Gate off ⇒ a stale version is not inspected (nothing recorded, no 409).
     seed({ id: 'est-terms-6', token: 'tok-terms-6-x0123456789' });
     conversionOk();
