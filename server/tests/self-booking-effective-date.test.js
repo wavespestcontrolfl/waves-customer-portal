@@ -32,7 +32,35 @@ function commitGateSql(day) {
     .toNative();
 }
 
+// Mirror of the offer builder's fullDays count (routes/booking.js): the
+// expression bound once in a subquery, grouped by its plain column.
+function offerSweepSql(from, to) {
+  return kx(function effectiveDates() {
+    this.select('id', kx.raw(`${SELF_BOOKING_EFFECTIVE_DATE_SQL} AS effective_date`, SELF_BOOKING_INACTIVE_STATUSES))
+      .from('self_booked_appointments')
+      .whereNot('status', 'cancelled')
+      .as('sb');
+  })
+    .whereBetween('effective_date', [from, to])
+    .select('effective_date as date')
+    .count('* as count')
+    .groupBy('effective_date')
+    .toSQL()
+    .toNative();
+}
+
 describe('SELF_BOOKING_EFFECTIVE_DATE_SQL', () => {
+  test('offer-side sweep binds the expression ONCE and groups a plain column (PostgreSQL GROUP BY identity)', () => {
+    const { sql, bindings } = offerSweepSql('2026-08-19', '2026-08-25');
+    // Exactly one copy of the CASE, inside the subquery.
+    expect(sql.match(/case when exists/gi)).toHaveLength(1);
+    expect(sql).toMatch(/\) as "sb" where "effective_date" between \$\d and \$\d/i);
+    expect(sql).toMatch(/group by "effective_date"$/i);
+    // Bindings: 3 inactive statuses + the subquery's own status filter, then
+    // the range — the CASE's statuses appear exactly once.
+    expect(bindings).toEqual(['cancelled', 'rescheduled', 'skipped', 'cancelled', '2026-08-19', '2026-08-25']);
+  });
+
   test('keys on the linked live visit when one exists, correlated to THIS copy', () => {
     const { sql } = commitGateSql('2026-08-19');
     expect(sql).toMatch(/case when exists \(\s*select 1 from scheduled_services as linked_visit\s+where linked_visit\.self_booking_id = self_booked_appointments\.id/i);

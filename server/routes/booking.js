@@ -937,12 +937,20 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     SELF_BOOKING_EFFECTIVE_DATE_SQL: effectiveDateSql,
     SELF_BOOKING_INACTIVE_STATUSES: inactiveStatuses,
   } = require('../services/availability');
-  const bookingCounts = await db('self_booked_appointments')
-    .whereNot('status', 'cancelled')
-    .whereRaw(`${effectiveDateSql} BETWEEN ?::date AND ?::date`, [...inactiveStatuses, rangeFrom, rangeTo])
-    .select(db.raw(`${effectiveDateSql} AS date`, inactiveStatuses))
+  // The expression is bound ONCE, in a subquery, and the outer query
+  // filters/groups its plain column — PostgreSQL matches GROUP BY to SELECT
+  // by expression identity, and two separately-bound copies of the CASE
+  // ($1..$3 vs $4..$6) are not the same expression to it.
+  const bookingCounts = await db(function effectiveDates() {
+    this.select('id', db.raw(`${effectiveDateSql} AS effective_date`, inactiveStatuses))
+      .from('self_booked_appointments')
+      .whereNot('status', 'cancelled')
+      .as('sb');
+  })
+    .whereBetween('effective_date', [rangeFrom, rangeTo])
+    .select('effective_date as date')
     .count('* as count')
-    .groupByRaw(effectiveDateSql, inactiveStatuses);
+    .groupBy('effective_date');
   // ⭐ THE OFFER MUST COUNT WHAT THE COMMIT COUNTS. Voice-agent bookings write
   // only `scheduled_services` (the office-review pending lifecycle), and
   // countActiveSelfBookingsForDay — the commit-time gate — now includes them.

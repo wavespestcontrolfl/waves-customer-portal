@@ -774,6 +774,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
     const AppointmentReminders = require('../services/appointment-reminders');
     if (shiftedOccurrences) {
       for (const occ of shiftedOccurrences) {
+        // A flagged occurrence committed WINDOWLESS and its reminder row was
+        // pre-closed inside the rebooker trx — never re-arm it here at a
+        // fabricated time (the anchor's slot is not this visit's window).
+        if (occ.conflicted) continue;
         try {
           // coverDueWindows:true — same duplicate-reminder race guard the
           // admin series path uses: an already-due 24h window must not let

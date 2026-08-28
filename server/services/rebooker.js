@@ -1429,6 +1429,9 @@ class SmartRebooker {
               sibClashBeyondHorizon = true;
               updateData.window_start = null;
               updateData.window_end = null;
+              // Expiry was derived from the timed window above — recompute
+              // for the windowless row (helper applies its windowless default).
+              updateData.track_token_expires_at = scheduledServiceTrackTokenExpiry(trx, date, null);
               logger.warn(`[rebooker] series re-anchor for ${serviceId}: occurrence ${sib.id} projected onto a seeded-placeholder window ${String(date).split('T')[0]} ${occurrenceWindow.start} beyond the ${SERIES_SIBLING_CLASH_HORIZON_DAYS}d clash horizon — committed at cadence WITHOUT a window, flagged for retiming`);
             }
           }
@@ -1476,6 +1479,13 @@ class SmartRebooker {
             isOperational: true,
             code: 'SLOT_TAKEN',
           });
+        }
+        if (sibClashBeyondHorizon) {
+          // The row just went timed → windowless: pre-close its reminder in
+          // THIS trx (windows_preclosed marker), or the sync trigger's
+          // recompute leaves it armed for the 08:00 placeholder time.
+          const AppointmentReminders = require('./appointment-reminders');
+          await AppointmentReminders.precloseWindowlessReminderInTx(trx, sib.id);
         }
 
         if (sib.status !== 'confirmed') {

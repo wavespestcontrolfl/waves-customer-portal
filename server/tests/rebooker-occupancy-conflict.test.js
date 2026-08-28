@@ -547,11 +547,17 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     const historyInsert = chain();
     const logInsert = chain();
 
+    // Reminder pre-closure for the windowless occurrence: armed-row read,
+    // then the marker update (both on appointment_reminders).
+    const reminderRead = chain({ first: jest.fn().mockResolvedValue({ id: 'ar-2', customer_id: 'cust-1', appointment_time: new Date('2026-12-01T13:00:00Z') }) });
+    const reminderUpdate = chain({ update: jest.fn().mockResolvedValue(1) });
+    const reminderQueue = [reminderRead, reminderUpdate];
     const scheduledQueue = [siblingsQuery, seriesClashProbe, anchorUpdate, sibUpdate];
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'appointment_reminders') return reminderQueue.shift();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -592,6 +598,11 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
     expect(occurrences[1].conflicted).toBe(true);  // far sibling
     expect(occurrences[1].windowStart).toBeNull();
     expect(occurrences[1].windowEnd).toBeNull();
+    // Its reminder row was pre-closed IN the trx (durable windows_preclosed
+    // marker + both windows closed) — no 08:00 placeholder text can fire.
+    expect(reminderUpdate.update).toHaveBeenCalledWith(expect.objectContaining({
+      windows_preclosed: true, suppressed_by_sibling: true, reminder_72h_sent: true, reminder_24h_sent: true,
+    }));
   });
 
   test('sibling clash BEYOND the horizon with a REAL booking (not a seeded placeholder) still aborts', async () => {
