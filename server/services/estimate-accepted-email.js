@@ -129,7 +129,10 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       return { sent: false, outcome: 'no_address' };
     }
     const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
-    const acceptanceNote = await acceptanceNoteFor(estimateId, acceptanceId);
+    // Only THIS acceptance event's copy (pre-push Codex P1): without an
+    // acceptanceId (gate off / unattested pre-gate accept) nothing was shown
+    // for this event, so the note stays empty — never the newest row's terms.
+    const acceptanceNote = acceptanceId ? await acceptanceNoteFor(estimateId, acceptanceId) : '';
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey: 'estimate.accepted_onboarding',
       to: email,

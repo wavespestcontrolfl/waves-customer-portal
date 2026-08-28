@@ -366,6 +366,22 @@ const ACCEPTANCE_COPY_SETTLE_MINUTES = 30; // give the post-commit send time to 
 const ACCEPTANCE_COPY_ESCALATE_DAYS = 7;
 const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
 
+// Does the ACTIVE estimate.accepted_onboarding version reference the
+// acceptance_note variable (block or text body)?
+async function activeOnboardingTemplateCarriesNote() {
+  try {
+    const { loadTemplateByKey } = require('./email-template-library');
+    const loaded = await loadTemplateByKey('estimate.accepted_onboarding');
+    const v = loaded?.activeVersion;
+    if (!v) return false;
+    const blocks = typeof v.blocks === 'string' ? v.blocks : JSON.stringify(v.blocks || []);
+    return blocks.includes('acceptance_note') || String(v.text_body || '').includes('acceptance_note');
+  } catch (err) {
+    logger.warn(`[lifecycle-sweeps] could not inspect the active onboarding template: ${err.message}`);
+    return false;
+  }
+}
+
 async function runAcceptanceCopySweep() {
   if (!(await db.schema.hasTable('estimate_acceptances'))) return { sent: 0, checked: 0, escalated: 0 };
   const now = Date.now();
@@ -378,6 +394,7 @@ async function runAcceptanceCopySweep() {
   let sent = 0;
   let checked = 0;
   let escalated = 0;
+  let templateCarriesNote = null; // resolved once per run, lazily
   for (const row of rows) {
     if (seen.has(row.id)) continue;
     seen.add(row.id);
@@ -411,15 +428,22 @@ async function runAcceptanceCopySweep() {
           // Sent earlier, stamp missed (crash between send and stamp): fulfil now.
           await db('estimate_acceptances').where({ id: row.id }).whereNull('copy_emailed_at')
             .update({ copy_emailed_at: new Date() });
-        } else if (!row.copy_escalated_at) {
-          // Sent WITHOUT the copy: the active template version lacks the
-          // {{acceptance_note}} block — an operator fix, surfaced right away.
+          continue;
+        }
+        // Sent WITHOUT the copy: the active template version lacked the
+        // {{acceptance_note}} block. Surface once (operator fix); and once
+        // the active version carries the block again, re-send under a
+        // distinct key so the corrective copy actually goes out (pre-push
+        // Codex P1) — never a daily duplicate while it is still missing.
+        if (!row.copy_escalated_at) {
           const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_name', 'address');
           await escalate(estimate, `${estimate?.address || 'no address'} — the onboarding email went out without the accepted-terms copy: the active estimate.accepted_onboarding template version has no {{acceptance_note}} block. Restore the block (Email Templates) and the copy will be re-sent; meanwhile the accepted estimate page / PDF carries the same record.`);
         }
-        continue;
+        if (templateCarriesNote === null) templateCarriesNote = await activeOnboardingTemplateCarriesNote();
+        if (!templateCarriesNote) continue;
+        // fall through: corrective resend under the day-scoped copy key
       }
-      const wedged = await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
+      const wedged = delivered ? { id: delivered.id } : await db('email_messages').where({ idempotency_key: baseKey }).first('id', 'status');
       const estimate = await db('estimates').where({ id: row.estimate_id }).first('id', 'customer_id', 'customer_name', 'address', 'estimate_data');
       if (!estimate) continue;
       const EstimateConverter = require('./estimate-converter');
@@ -433,7 +457,7 @@ async function runAcceptanceCopySweep() {
         serviceLabel: firstService?.name || firstService?.label || 'service',
         appointment: null,
         acceptanceId: row.id,
-        idempotencyKey: wedged ? `${baseKey}:${etDateString()}` : baseKey,
+        idempotencyKey: delivered ? `${baseKey}:copy:${etDateString()}` : (wedged ? `${baseKey}:${etDateString()}` : baseKey),
       });
       if (result?.sent && !result?.copyMissing) { sent += 1; continue; }
       if (result?.copyMissing) {
@@ -484,14 +508,30 @@ async function runAcceptanceOwnershipSweep() {
       if (!estimate) continue;
       let customerId = estimate.customer_id || null;
       if (!customerId) {
-        const booked = await db('scheduled_services').where({ source_estimate_id: row.estimate_id }).whereNotNull('customer_id').first('customer_id');
-        customerId = booked?.customer_id || null;
+        // Candidates = every customer whose committed booking links this
+        // estimate. More than one is a race the request path already lost
+        // on both sides — refuse rather than pick one (pre-push Codex P1).
+        const booked = await db('scheduled_services').where({ source_estimate_id: row.estimate_id }).whereNotNull('customer_id').select('customer_id');
+        const candidates = [...new Set(booked.map((b) => String(b.customer_id)))];
+        if (candidates.length > 1) {
+          logger.warn(`[lifecycle-sweeps] acceptance ownership for estimate ${row.estimate_id} is ambiguous (${candidates.length} booking customers) — left for the office`);
+          continue;
+        }
+        customerId = candidates[0] || null;
       }
       if (!customerId) continue;
+      // Whoever owns (or now claims) the estimate: no other customer's visit
+      // may keep correlating to it.
+      const clearOtherLinks = async (ownerId) => db('scheduled_services')
+        .where({ source_estimate_id: row.estimate_id })
+        .whereNot({ customer_id: ownerId })
+        .update({ source_estimate_id: null });
       if (!estimate.customer_id) {
-        if ((await attachAcceptanceOwnership(db, { estimateId: row.estimate_id, customerId })).attached) attached += 1;
+        const claim = await attachAcceptanceOwnership(db, { estimateId: row.estimate_id, customerId });
+        if (claim.attached) { attached += 1; await clearOtherLinks(customerId); }
         continue;
       }
+      await clearOtherLinks(customerId);
       // Estimate already owned (accept-time customer or a later admin link):
       // bring the acceptance rows and the customer stamp along.
       await db.transaction(async (trx) => {

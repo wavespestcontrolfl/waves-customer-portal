@@ -23,6 +23,12 @@ jest.mock('../services/estimate-accepted-email', () => ({
   ACCEPTANCE_COPY_MARKER: 'You accepted electronically',
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
+const mockTemplate = { carriesNote: false };
+jest.mock('../services/email-template-library', () => ({
+  loadTemplateByKey: jest.fn(async () => ({ activeVersion: { blocks: mockTemplate.carriesNote ? '[{"content":"{{acceptance_note}}"}]' : '[]', text_body: null } })),
+  sendTemplate: jest.fn(),
+  redactEmailAddresses: (s) => s,
+}));
 jest.mock('../services/estimate-converter', () => ({
   recurringServicesFromEstimateData: () => [{ name: 'Pest Control' }],
   estimateOneTimeItemsFromData: () => [],
@@ -92,7 +98,8 @@ test('a sent-ish row that carries the copy → fulfilment stamped, never emailed
   expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_emailed_at: expect.any(Date) }));
 });
 
-test('a sent-ish row WITHOUT the copy (template lost the block) → escalated now, never stamped as emailed', async () => {
+test('a sent-ish row WITHOUT the copy (template lost the block) → escalated now, never stamped, no resend while the template still lacks it', async () => {
+  mockTemplate.carriesNote = false;
   emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat, your plan is confirmed.', html_snapshot: '<p>no note</p>' }];
   const result = await runAcceptanceCopySweep();
   expect(result).toEqual({ sent: 0, checked: 1, escalated: 1 });
@@ -100,6 +107,16 @@ test('a sent-ish row WITHOUT the copy (template lost the block) → escalated no
   expect(notifyAdmin.mock.calls[0][2]).toContain('{{acceptance_note}}');
   expect(acceptanceUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ copy_emailed_at: expect.any(Date) }));
   expect(acceptanceUpdate).toHaveBeenCalledWith(expect.objectContaining({ copy_escalated_at: expect.any(Date) }));
+});
+
+test('once the active template carries the block again → corrective resend under a distinct copy key', async () => {
+  mockTemplate.carriesNote = true;
+  emailRows.delivered = [{ id: 'm1', text_snapshot: 'Hi Pat, your plan is confirmed.' }];
+  acceptanceRows = [{ ...ACCEPTANCE, copy_escalated_at: new Date().toISOString() }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 1, checked: 1, escalated: 0 });
+  expect(sendEstimateAcceptedOnboarding.mock.calls[0][0].idempotencyKey).toMatch(/^estimate\.accepted_onboarding:est-1:acc:acc-1:copy:\d{4}-\d{2}-\d{2}$/);
+  expect(notifyAdmin).not.toHaveBeenCalled();
 });
 
 test('a fresh send that rendered without the copy → escalated now, not counted as sent', async () => {
@@ -157,4 +174,50 @@ test('a policy-suppressed alert is NOT stamped — retried next sweep', async ()
 test('table absent → no-op', async () => {
   db.schema.hasTable.mockResolvedValueOnce(false);
   expect(await runAcceptanceCopySweep()).toEqual({ sent: 0, checked: 0, escalated: 0 });
+});
+
+describe('runAcceptanceOwnershipSweep', () => {
+  const { runAcceptanceOwnershipSweep } = require('../services/lifecycle-email-sweeps');
+  const attach = require('../services/estimate-acceptance-record');
+
+  function rig({ estimate, bookings, attachResult = { attached: true } }) {
+    const updates = [];
+    jest.spyOn(attach, 'attachAcceptanceOwnership').mockResolvedValue(attachResult);
+    db.mockImplementation((table) => {
+      const b = {};
+      ['where', 'whereNull', 'whereNotNull', 'whereNot', 'orderBy', 'select'].forEach((m) => { b[m] = jest.fn(() => b); });
+      b.first = async () => (table === 'estimates' ? estimate : undefined);
+      b.update = async (patch) => { updates.push({ table, patch }); return 1; };
+      b.then = (resolve, reject) => Promise.resolve(
+        table === 'estimate_acceptances' ? [{ id: 'acc-1', estimate_id: 'est-1', terms_version: 'v2026-09' }]
+          : table === 'scheduled_services' ? bookings : [],
+      ).then(resolve, reject);
+      return b;
+    });
+    db.transaction = async (fn) => fn(db);
+    return { updates };
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  test('one booking customer → claim + clear any non-owner links', async () => {
+    const { updates } = rig({ estimate: { id: 'est-1', customer_id: null, status: 'accepted', terms_version: 'v2026-09' }, bookings: [{ customer_id: 'c1' }, { customer_id: 'c1' }] });
+    expect(await runAcceptanceOwnershipSweep()).toEqual({ attached: 1, checked: 1 });
+    expect(attach.attachAcceptanceOwnership).toHaveBeenCalledWith(expect.anything(), { estimateId: 'est-1', customerId: 'c1' });
+    expect(updates).toEqual([{ table: 'scheduled_services', patch: { source_estimate_id: null } }]);
+  });
+
+  test('two different booking customers → ambiguous, refused (no claim, no unlink)', async () => {
+    const { updates } = rig({ estimate: { id: 'est-1', customer_id: null, status: 'accepted', terms_version: 'v2026-09' }, bookings: [{ customer_id: 'c1' }, { customer_id: 'c2' }] });
+    expect(await runAcceptanceOwnershipSweep()).toEqual({ attached: 0, checked: 1 });
+    expect(attach.attachAcceptanceOwnership).not.toHaveBeenCalled();
+    expect(updates).toEqual([]);
+  });
+
+  test('estimate already owned → acceptance rows + stamp follow the owner, other links cleared', async () => {
+    const { updates } = rig({ estimate: { id: 'est-1', customer_id: 'c9', status: 'accepted', terms_version: 'v2026-09' }, bookings: [] });
+    expect(await runAcceptanceOwnershipSweep()).toEqual({ attached: 1, checked: 1 });
+    expect(attach.attachAcceptanceOwnership).not.toHaveBeenCalled();
+    expect(updates.map((u) => u.table)).toEqual(['scheduled_services', 'estimate_acceptances', 'customers']);
+  });
 });
