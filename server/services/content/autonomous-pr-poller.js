@@ -373,14 +373,26 @@ async function retireTopicBlockedPr(run, prNumber, gh, { pr = null } = {}) {
       }
       logger.warn(`[autonomous-pr-poller] retired PR #${prNumber} for topic-blocked run ${run.id}`);
     }
-    try {
-      const { markPrTerminal } = require('./codex-remediation');
-      await markPrTerminal(prNumber, current.merged ? 'merged' : 'closed');
-    } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal after topic-block park failed for PR #${prNumber}: ${err.message}`); }
+    if (!await stampTerminal(prNumber, current.merged ? 'merged' : 'closed', run)) return { retired: false, reason: 'terminal_stamp_failed' };
     return { retired: true };
   } catch (err) {
     logger.warn(`[autonomous-pr-poller] PR retire for topic-blocked run ${run.id} failed: ${err.message} (reconciled next tick)`);
     return { retired: false, reason: err.message };
+  }
+}
+
+// markPrTerminal never throws — it returns { error } — so the result is
+// checked here: false means the terminal bookkeeping did NOT land and the
+// run must stay in the reconcile set for the next tick.
+async function stampTerminal(prNumber, state, run) {
+  try {
+    const { markPrTerminal } = require('./codex-remediation');
+    const res = await markPrTerminal(prNumber, state);
+    if (res?.error) throw new Error(res.error);
+    return true;
+  } catch (err) {
+    logger.warn(`[autonomous-pr-poller] markPrTerminal(${state}) for topic-blocked run ${run?.id} PR #${prNumber} failed: ${err.message} (retried next tick)`);
+    return false;
   }
 }
 
@@ -431,10 +443,9 @@ async function reconcileTopicBlockedPrs(gh) {
       let moved = null;
       try { moved = await topicBlockedOpportunityMovedOn(run); } catch (err) { logger.warn(`[autonomous-pr-poller] topic-blocked run ${run.id}: could not verify whether its opportunity moved on: ${err.message} (retried next tick)`); continue; }
       if (moved) {
-        try {
-          const { markPrTerminal } = require('./codex-remediation');
-          await markPrTerminal(prNumber, 'merged');
-        } catch (err) { logger.warn(`[autonomous-pr-poller] markPrTerminal(merged) for superseded topic-blocked run ${run.id} failed: ${err.message}`); }
+        // Terminal bookkeeping FIRST; a failed stamp keeps the run in this
+        // set (the supersede would otherwise hide it for good).
+        if (!await stampTerminal(prNumber, 'merged', run)) continue;
         const res = await supersedeRun(run, moved.row, {
           fromSkipReason: TOPIC_BLOCKED_SKIP_REASON,
           note: `PR #${prNumber} was merged by a human after the topic-targeting park, but the opportunity has moved on (${moved.reason}) — run retired as superseded by autonomous-pr-poller; the newer lifecycle owns the opportunity.`,
@@ -451,8 +462,7 @@ async function reconcileTopicBlockedPrs(gh) {
     // Closed (by the retire, or by a human): terminal bookkeeping — idempotent,
     // so a lost stamp converges; then the row leaves the reconcile set.
     try {
-      const { markPrTerminal } = require('./codex-remediation');
-      await markPrTerminal(prNumber, 'closed');
+      if (!await stampTerminal(prNumber, 'closed', run)) continue;
       await db('autonomous_runs')
         .where('id', run.id)
         .where('skip_reason', TOPIC_BLOCKED_SKIP_REASON)

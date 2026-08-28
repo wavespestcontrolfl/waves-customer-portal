@@ -780,6 +780,27 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     expect(gh.getPr).not.toHaveBeenCalled();
   });
 
+  test('reconcileTopicBlockedPrs: a failed terminal stamp ({ error }, never a throw) keeps the run in the set — no retired marker, no supersede (hook r25 P1)', async () => {
+    const rem = require('../services/content/codex-remediation');
+    const spy = jest.spyOn(rem, 'markPrTerminal').mockResolvedValue({ updated: 0, error: 'db down' });
+    try {
+      // Closed PR: the marker stamp must NOT land.
+      const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
+      let updates = setupDb({ pending: [parked] });
+      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: false });
+      await poller._internals.reconcileTopicBlockedPrs(gh);
+      expect(updates.find((u) => u.table === 'autonomous_runs')).toBeUndefined();
+      // Merged + opportunity moved on: no supersede either.
+      jest.clearAllMocks();
+      spy.mockResolvedValue({ updated: 0, error: 'db down' });
+      updates = setupDb({ pending: [parked], queueFirst: { id: parked.opportunity_id, status: 'pending_review', skip_reason: 'astro_pr_pending_merge' } });
+      gh.getPr.mockResolvedValueOnce({ number: 42, state: 'closed', merged: true, merged_at: '2026-08-28T05:00:00Z' });
+      const r = await poller._internals.reconcileTopicBlockedPrs(gh);
+      expect(r).toMatchObject({ superseded: 0, unparked: 0 });
+      expect(updates.find((u) => u.table === 'autonomous_runs' && u.updates.skip_reason === 'superseded_by_review_queue_action')).toBeUndefined();
+    } finally { spy.mockRestore(); }
+  });
+
   test('reconcileTopicBlockedPrs: a merged PR whose opportunity was requeued/dismissed meanwhile is retired as SUPERSEDED (terminal merged stamp), never re-owned (r22)', async () => {
     const parked = makeRun({ id: 'run-parked', skip_reason: 'topic_targeting_blocked', outcome: 'completed_pending_review', created_at: '2026-08-28T04:00:00Z' });
     // The operator followed the park note: the queue row is back at the pending reason (requeued).
