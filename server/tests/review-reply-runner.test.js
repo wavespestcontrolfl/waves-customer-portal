@@ -19,6 +19,7 @@ jest.mock('../services/review-reply/grounding', () => ({
   loadActiveTechFirstNames: jest.fn(async () => ['Marcus']),
   loadAccountFacts: (...a) => mockAccountFacts(...a),
   accountFingerprint: (a) => (a ? `fp:${a.city || ''}|${a.tenure || ''}` : 'fp:none'),
+  groundingCustomerId: (r) => (r && r.customer_id && r.link_source !== 'click_auto' ? r.customer_id : null),
 }));
 jest.mock('../services/review-reply/drafter', () => ({
   draftReviewReply: (...a) => mockDraft(...a),
@@ -40,9 +41,20 @@ jest.mock('../services/review-reply/publisher', () => {
 jest.mock('../models/db', () => {
   const dbFn = (table) => {
     const filters = [];
+    let agg = null; let groupCol = null;
+    const hits = () => state.rows.filter((r) => filters.every((f) => f(r)));
+    const aggregate = (rows) => {
+      const as = agg.as;
+      if (agg.kind === 'count') return { [as]: rows.length };
+      const vals = rows.map((r) => r[agg.col]).filter((v) => v != null).sort();
+      return { [as]: vals[0] || null };
+    };
     const api = {
-      where(a, b) {
-        if (typeof a === 'string') { filters.push((r) => r[a] === b); return api; }
+      where(a, b, c) {
+        if (typeof a === 'string') {
+          if (arguments.length === 3) { filters.push((r) => (b === '>=' ? r[a] >= c : b === '<' ? r[a] < c : r[a] === c)); return api; }
+          filters.push((r) => r[a] === b); return api;
+        }
         if (typeof a === 'function') {
           // needsRealReply branch: whereNull(review_reply) OR like '[DRAFT]%'
           filters.push((r) => r.review_reply == null || String(r.review_reply).startsWith('[DRAFT]'));
@@ -60,16 +72,23 @@ jest.mock('../models/db', () => {
       },
       orWhere() { return api; },
       select() { return api; },
-      groupBy() { return api; },
-      count() { return api; },
-      min() { return api; },
-      async first(...cols) { return state.rows.filter((r) => filters.every((f) => f(r)))[0] || null; },
+      groupBy(col) { groupCol = col; return api; },
+      count(expr) { agg = { kind: 'count', as: (/as (\w+)/.exec(String(expr)) || [])[1] || 'n' }; return api; },
+      min(expr) { const [col, as] = String(expr).split(/ as /); agg = { kind: 'min', col, as: as || col }; return api; },
+      async first(...cols) { return agg ? aggregate(hits()) : hits()[0] || null; },
       async update(patch) {
         const hits = state.rows.filter((r) => filters.every((f) => f(r)));
         hits.forEach((r) => Object.assign(r, patch));
         return hits.length;
       },
-      then(res) { return Promise.resolve(state.rows.filter((r) => filters.every((f) => f(r)))).then(res); },
+      then(res) {
+        if (agg && groupCol) {
+          const groups = new Map();
+          for (const r of hits()) groups.set(r[groupCol], [...(groups.get(r[groupCol]) || []), r]);
+          return Promise.resolve([...groups].map(([k, rows]) => ({ [groupCol]: k, ...aggregate(rows) }))).then(res);
+        }
+        return Promise.resolve(hits()).then(res);
+      },
     };
     return api;
   };
@@ -691,11 +710,56 @@ describe('processDueAutoReplies — state machine', () => {
     expect(mockPublish).toHaveBeenCalledTimes(1);
   });
 
-  test('postedEditFields: a reviewer edit on a POSTED row parks it for a person', () => {
+  test('reviewEditFields: a reviewer edit on a POSTED row parks it for a person', () => {
     const posted = row({ auto_reply_status: 'posted' });
-    expect(Runner.postedEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
-    expect(Runner.postedEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
-    expect(Runner.postedEditFields(row({ auto_reply_status: 'skipped' }), { star_rating: 1, review_text: 'x', reviewer_name: 'Dana W.' })).toEqual({});
+    expect(Runner.reviewEditFields(posted, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
+    expect(Runner.reviewEditFields(posted, { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' })).toEqual({ auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post' });
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'skipped' }), { star_rating: 1, review_text: 'x', reviewer_name: 'Dana W.' })).toEqual({});
+  });
+  test('reviewEditFields: a reviewer edit clears a pipeline-owned draft and requeues; human drafts and reconciliation parks are left alone', () => {
+    const edit = { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' };
+    const draft = 'Hi Dana,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Sarasota Team';
+    const shadow = row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: draft, review_reply: `[DRAFT] ${draft}`, auto_reply_attempts: 2 });
+    expect(Runner.reviewEditFields(shadow, edit)).toEqual(expect.objectContaining({
+      auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_attempts: 0,
+      auto_reply_draft: null, auto_reply_drafted_at: null, auto_reply_grounding: null, review_reply: null, reply_updated_at: null,
+    }));
+    // Same review → nothing.
+    expect(Runner.reviewEditFields(shadow, { star_rating: 5, review_text: 'Great work', reviewer_name: 'Dana W.' })).toEqual({});
+    // Parked with a pipeline draft (e.g. google_failed) → requeue as well; a draft-less queued row has nothing to clear.
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'google_failed', auto_reply_draft: draft }), edit).auto_reply_status).toBe('queued');
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'queued' }), edit)).toEqual({});
+    // A human's [DRAFT] is theirs; reconciliation parks may have a live PUT.
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', auto_reply_draft: draft, review_reply: '[DRAFT] the owner wrote this' }), edit)).toEqual({});
+    expect(Runner.reviewEditFields(row({ auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft, review_reply: `[DRAFT] ${draft}` }), edit)).toEqual({});
+  });
+  test('applyReviewEditFields is a compare-and-set on the snapshot state and reply slot', async () => {
+    const draft = 'Hi Dana,\n\nGlad.\n\nThe 🌊 Waves Pest Control Sarasota Team';
+    const snap = row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: draft, review_reply: `[DRAFT] ${draft}` });
+    const edit = { star_rating: 1, review_text: 'Actually terrible', reviewer_name: 'Dana W.' };
+    // A human saved their own draft after the snapshot: the sync must not clear it.
+    state.rows = [{ ...snap, review_reply: '[DRAFT] owner text' }];
+    expect(await Runner.applyReviewEditFields('rev-1', snap, edit)).toBe(0);
+    expect(state.rows[0].review_reply).toBe('[DRAFT] owner text');
+    // Unchanged since the snapshot: cleared and requeued.
+    state.rows = [{ ...snap }];
+    expect(await Runner.applyReviewEditFields('rev-1', snap, edit)).toBe(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_draft: null, review_reply: null });
+  });
+  test('autoReplyStatus counts shadow-eligible drafts historically (acted-on drafts stay in the sample; 1-3★ never count)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [
+      row({ id: 'a', star_rating: 5, auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_drafted_at: '2026-08-21T00:00:00Z' }),
+      row({ id: 'b', star_rating: 5, auto_reply_status: 'posted', auto_reply_drafted_at: '2026-08-20T00:00:00Z', review_reply: 'posted' }), // Post now
+      row({ id: 'c', star_rating: 4, auto_reply_status: 'skipped', auto_reply_reason: 'manual_reply', auto_reply_drafted_at: '2026-08-22T00:00:00Z', review_reply: 'by hand' }),
+      row({ id: 'd', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_drafted_at: '2026-08-19T00:00:00Z' }),
+      row({ id: 'e', star_rating: 5, auto_reply_status: 'queued' }),
+    ];
+    const st = await Runner.autoReplyStatus();
+    expect(st.shadowDrafts).toBe(3);
+    expect(st.firstShadowDraftAt).toBe('2026-08-20T00:00:00Z');
+    expect(st.draftsTotal).toBe(4);
+    expect(st.byStatus).toEqual({ drafted: 1, posted: 1, skipped: 1, parked: 1, queued: 1 });
   });
 
   test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {

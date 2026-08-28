@@ -133,9 +133,10 @@ describe('publishReviewReply', () => {
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
-    // Human overwrite paths do not consult the live resource.
+    // Human overwrite paths consult the live resource too (codex r21): the
+    // reply they observed locally must still be what Google shows.
     await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true });
-    expect(mockGbp.getReview).toHaveBeenCalledTimes(2);
+    expect(mockGbp.getReview).toHaveBeenCalledTimes(3);
   });
 
   test('the ownership guard is re-run on a fresh read after the live GET, right before the PUT', async () => {
@@ -181,6 +182,31 @@ describe('publishReviewReply', () => {
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
+  });
+
+  test('overwriting callers compare the LIVE reply with the one they observed locally: a newer Google reply blocks the PUT and is recorded', async () => {
+    state.rows[0].review_reply = 'Already answered.';
+    state.rows[0].auto_reply_status = 'posted';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner rewrote this in Google', updateTime: '2026-08-28T01:00:00Z' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    expect(state.rows[0].review_reply).toBe('Owner rewrote this in Google');
+    // Matching live reply → the overwrite proceeds; no live reply at all (deleted on Google) → nothing to clobber, proceeds.
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner rewrote this in Google' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    let r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement two.', actor: { type: 'ib' }, allowOverwrite: true });
+    expect(r.googlePosted).toBe(true);
+    expect(mockGbp.replyToReview).toHaveBeenCalledTimes(2);
+  });
+  test('overwriting callers fail closed when the live review cannot be read', async () => {
+    state.rows[0].review_reply = 'Already answered.';
+    mockGbp.getReview.mockRejectedValueOnce(new Error('503'));
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.GOOGLE_FAILED });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
   });
 
   test('a local [DRAFT] is not a real reply — the pipeline\'s own draft is replaced, a foreign one blocks before the PUT', async () => {

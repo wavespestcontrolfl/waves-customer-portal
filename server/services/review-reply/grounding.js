@@ -149,6 +149,17 @@ async function loadActiveTechFirstNames(conn = db) {
   }
 }
 
+// The customer whose account facts a review may be grounded on. A click
+// auto-link (GATE_REVIEW_CLICK_AUTOLINK, link_source = 'click_auto') is
+// probabilistic evidence awaiting human confirmation — it can name the wrong
+// person, so a public reply must not carry that account's city / tenure /
+// services. Manual attribution restamps 'manual' and lifts this.
+function groundingCustomerId(review) {
+  if (!review || !review.customer_id) return null;
+  if (review.link_source === 'click_auto') return null;
+  return review.customer_id;
+}
+
 // Derived account facts. Reads ONLY: customers (city, member_since) and
 // completed scheduled_services (service_type, scheduled_date). No notes, no
 // findings, no comms, no money.
@@ -202,9 +213,10 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
   const rating = Number(review.star_rating) || 0;
 
   let account = null;
-  if (review.customer_id) {
+  const groundedCustomerId = groundingCustomerId(review);
+  if (groundedCustomerId) {
     try {
-      account = await loadAccountFacts(review.customer_id, conn);
+      account = await loadAccountFacts(groundedCustomerId, conn);
     } catch (err) {
       // Grounding is optional: a failed account read degrades to review-only.
       logger.warn(`[review-grounding] account facts failed for review ${review.id}: ${err.message}`);
@@ -255,6 +267,7 @@ async function buildReplyGrounding(review, { conn = db, techFirstNames = null } 
 }
 
 module.exports = {
+  groundingCustomerId,
   GROUNDING_VERSION,
   SERVED_CITIES,
   buildReplyGrounding,

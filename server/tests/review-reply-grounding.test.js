@@ -151,6 +151,22 @@ describe('buildReplyGrounding', () => {
     expect(g.account.tenure).toBe('long_term');
   });
 
+  test('a click auto-link (unconfirmed) grounds as review-only: no account facts from a probabilistic match', async () => {
+    mockState.customers = [{ id: 'cust-1', city: 'Venice', member_since: '2024-01-15' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-05-01' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-07-01' },
+    ];
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: 'click_auto' })).toBeNull();
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: 'manual' })).toBe('cust-1');
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: null })).toBe('cust-1');
+    const g = await G.buildReplyGrounding({ ...review, link_source: 'click_auto' });
+    expect(g.account).toBeNull();
+    expect(JSON.stringify(g)).not.toContain('Venice');
+    const confirmed = await G.buildReplyGrounding({ ...review, link_source: 'manual' });
+    expect(confirmed.account).toMatchObject({ relationship: 'recurring', city: 'Venice' });
+  });
+
   test('unlinked review: review-only pack, account null', async () => {
     const g = await G.buildReplyGrounding({ ...review, customer_id: null });
     expect(g.account).toBeNull();

@@ -30,7 +30,7 @@ const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix } = require('./draft-prefix');
-const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint } = require('./grounding');
+const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
 
@@ -191,7 +191,10 @@ function claimGuard(row, { publishingText = null, accountFingerprint: expectedAc
     if (Number(fresh.star_rating) !== Number(row.star_rating)
       || String(fresh.review_text || '').trim() !== String(row.review_text || '').trim()
       || String(fresh.reviewer_name || '').trim().toLowerCase() !== String(row.reviewer_name || '').trim().toLowerCase()
-      || (fresh.customer_id || null) !== (row.customer_id || null)) return REVIEW_CHANGED;
+      || (fresh.customer_id || null) !== (row.customer_id || null)
+      // A click auto-link confirmed (or cleared) mid-flight changes which
+      // account facts the draft may carry.
+      || (groundingCustomerId(fresh) || null) !== (groundingCustomerId(row) || null)) return REVIEW_CHANGED;
     // A "[DRAFT]" that is not ours (Agent Ops / operator saved one while we
     // were drafting) is a human intervention: never post over it.
     const human = humanDraftOn({ ...fresh, auto_reply_draft: row.auto_reply_draft || fresh.auto_reply_draft });
@@ -201,7 +204,7 @@ function claimGuard(row, { publishingText = null, accountFingerprint: expectedAc
     // the draft was in flight — same customer_id — makes it stale too.
     if (expectedAccountFp) {
       let current;
-      try { current = accountFingerprint(await loadAccountFacts(fresh.customer_id)); } catch { return 'account facts could not be re-read'; }
+      try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
       if (current !== expectedAccountFp) return REVIEW_CHANGED;
     }
     return null;
@@ -413,7 +416,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // then makes it stale: redraft)…
     && storedGrounding?.fingerprint === reviewFingerprint(merged)
     // …and for the SAME derived account facts (city / tenure / categories).
-    && storedGrounding?.accountFingerprint === accountFingerprint(await loadAccountFacts(merged.customer_id).catch(() => null));
+    && storedGrounding?.accountFingerprint === accountFingerprint(await loadAccountFacts(groundingCustomerId(merged)).catch(() => null));
   let draft;
   let snapshot;
   // A reused draft is re-verified against the CURRENT state (recent posted
@@ -623,7 +626,7 @@ async function postNow(reviewId, actor) {
   // A stored draft is only offered as-is when both the review fingerprint
   // AND the account-fact fingerprint still match; otherwise Post-now drafts
   // fresh (never a 409 the admin cannot get past).
-  const accountFpNow = accountFingerprint(await loadAccountFacts(row.customer_id).catch(() => null));
+  const accountFpNow = accountFingerprint(await loadAccountFacts(groundingCustomerId(row)).catch(() => null));
   const humanDraft = humanDraftOn(row);
   let existing = humanDraft
     || (row.auto_reply_draft
@@ -722,17 +725,60 @@ async function skipAutoReply(reviewId, { reason = 'admin_skip' } = {}) {
  * auto-reply state in the same statement (and drops a live claim, which
  * makes the holder's in-lock guard fail).
  */
+// Pipeline states whose stored draft is NOT a draft for the current review
+// once the reviewer edits it. Reconciliation parks (google_uncertain /
+// persist_failed: a PUT may be live) and human drafts are left alone.
+const REDRAFT_ON_EDIT_STATUSES = new Set([STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED]);
+const KEEP_ON_EDIT_REASONS = new Set(['google_uncertain', 'persist_failed', 'human_draft']);
+
 /**
- * A POSTED automatic reply whose review the reviewer has since edited
- * (rating / text / name — the sync just overwrote them) is no longer known
- * to fit: route it to a person. Returns {} when nothing changed.
+ * Fields the sync applies when the REVIEW itself changed (rating / text /
+ * name — the sync just overwrote them). Returns {} when nothing changed.
+ *   - A POSTED automatic reply is no longer known to fit: park for a person.
+ *   - A pipeline-owned draft (drafted / parked / failed, its own "[DRAFT]"
+ *     in the reply slot) was written for the OLD review: clear it and
+ *     requeue, so neither Post now nor "Use Draft" can carry an upbeat
+ *     draft onto a rewritten complaint. A human's "[DRAFT]" is theirs.
  */
-function postedEditFields(existing, normalized) {
-  if (!existing || existing.auto_reply_status !== STATUS.POSTED) return {};
+function reviewEditFields(existing, normalized) {
+  if (!existing) return {};
   const before = reviewFingerprint(existing);
   const after = reviewFingerprint({ ...existing, star_rating: normalized.star_rating, review_text: normalized.review_text, reviewer_name: normalized.reviewer_name });
   if (before === after) return {};
-  return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
+  if (existing.auto_reply_status === STATUS.POSTED) {
+    return { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'review_edited_after_post' };
+  }
+  if (!REDRAFT_ON_EDIT_STATUSES.has(existing.auto_reply_status) || KEEP_ON_EDIT_REASONS.has(existing.auto_reply_reason)) return {};
+  if (!existing.auto_reply_draft || humanDraftOn(existing)) return {};
+  return {
+    auto_reply_status: STATUS.QUEUED,
+    auto_reply_reason: 'review_changed',
+    auto_reply_due_at: new Date().toISOString(),
+    auto_reply_attempts: 0,
+    auto_reply_draft: null,
+    auto_reply_drafted_at: null,
+    auto_reply_grounding: null,
+    auto_reply_error: null,
+    ...(isDraftReply(existing.review_reply) ? { review_reply: null, reply_updated_at: null } : {}),
+  };
+}
+
+/**
+ * Apply reviewEditFields as a compare-and-set on the state the sync
+ * snapshot saw (status + reply slot): a publisher, skip, or human draft that
+ * landed between the sync's read and this write wins. Returns the
+ * affected-row count.
+ */
+async function applyReviewEditFields(reviewId, existing, normalized, { conn = db, now = new Date() } = {}) {
+  const fields = reviewEditFields(existing, normalized);
+  if (!Object.keys(fields).length) return 0;
+  const q = conn('google_reviews').where({ id: reviewId, auto_reply_status: existing.auto_reply_status });
+  if (existing.auto_reply_status !== STATUS.POSTED) {
+    q.whereRaw('(publish_claimed_until IS NULL OR publish_claimed_until < ?)', [now.toISOString()]);
+    if (existing.review_reply == null) q.whereNull('review_reply'); else q.where('review_reply', existing.review_reply);
+  }
+  const n = await q.update(fields);
+  return Array.isArray(n) ? n.length : n;
 }
 
 /**
@@ -875,11 +921,15 @@ async function autoReplyStatus() {
   for (const c of counts) byStatus[c.auto_reply_status] = Number(c.n);
   const firstDraft = await db('google_reviews').whereNotNull('auto_reply_drafted_at').min('auto_reply_drafted_at as at').first();
   const drafts = await db('google_reviews').whereNotNull('auto_reply_drafted_at').count('* as n').first();
-  // Shadow-exit sample = drafts the future AUTO lane would have posted:
-  // 4-5★ shadow drafts only (parked human-only rows and Post-now publishes
-  // do not exercise that lane).
-  const shadowDrafts = await db('google_reviews').where({ auto_reply_status: STATUS.DRAFTED, auto_reply_reason: 'shadow' }).whereNotNull('auto_reply_drafted_at').count('* as n').first();
-  const firstShadow = await db('google_reviews').where({ auto_reply_status: STATUS.DRAFTED, auto_reply_reason: 'shadow' }).whereNotNull('auto_reply_drafted_at').min('auto_reply_drafted_at as at').first();
+  // Shadow-exit sample = every draft produced for a review the AUTO lane
+  // would post (rated at/above the floor, never the 1-3★ human-only parks),
+  // counted HISTORICALLY: reviewing a draft and using Post now / Skip / the
+  // editor is the shadow workflow, and a row that left 'drafted' that way is
+  // still a sample — filtering on current state would shrink the count as
+  // admins do exactly what shadow asks of them.
+  const eligible = () => db('google_reviews').whereNotNull('auto_reply_drafted_at').where('star_rating', '>=', Math.max(cfg.minStars, 4));
+  const shadowDrafts = await eligible().count('* as n').first();
+  const firstShadow = await eligible().min('auto_reply_drafted_at as at').first();
   return {
     shadowDrafts: Number(shadowDrafts?.n || 0),
     firstShadowDraftAt: firstShadow?.at || null,
@@ -910,7 +960,8 @@ module.exports = {
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,
   applyRequeueOnIdentity,
-  postedEditFields,
+  reviewEditFields,
+  applyReviewEditFields,
   syncReplyFields,
   applySyncReplyFields,
   reviewFingerprint,

@@ -113,6 +113,24 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
   return null;
 }
 
+// Record the owner reply Google currently shows so the row leaves the
+// needs-reply queue, and close any pending pipeline state (a drafted/parked
+// row would otherwise sit labeled "Shadow draft / Needs you" beside the real
+// reply forever — the cron never reclaims those statuses).
+async function recordLiveOwnerReply(reviewId, live) {
+  const liveReply = String(live?.reviewReply?.comment || '').trim();
+  if (!liveReply) return;
+  await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
+    .update({
+      review_reply: liveReply,
+      reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(),
+      auto_reply_status: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'skipped' ELSE auto_reply_status END"),
+      auto_reply_reason: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'already_replied' ELSE auto_reply_reason END"),
+      auto_reply_claimed_until: null,
+    })
+    .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+}
+
 function updatedCount(updated) {
   return Array.isArray(updated) ? updated.length : updated;
 }
@@ -224,19 +242,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         if (liveReply) {
-          // Record what Google has so the row leaves the needs-reply queue,
-          // and close any pending pipeline state (a drafted/parked row would
-          // otherwise sit labeled "Shadow draft / Needs you" beside the
-          // real reply forever — the cron never reclaims those statuses).
-          await db('google_reviews').where({ id: reviewId }).whereNull('missing_since')
-            .update({
-              review_reply: liveReply,
-              reply_updated_at: live.reviewReply?.updateTime || new Date().toISOString(),
-              auto_reply_status: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'skipped' ELSE auto_reply_status END"),
-              auto_reply_reason: db.raw("CASE WHEN auto_reply_status IN ('queued','drafted','parked','failed') THEN 'already_replied' ELSE auto_reply_reason END"),
-              auto_reply_claimed_until: null,
-            })
-            .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+          await recordLiveOwnerReply(reviewId, live);
           throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has an owner reply on Google', { status: 409 });
         }
         // The LIVE review itself must still be the one the reply was drafted
@@ -260,6 +266,25 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
           if (hasRealReply(again.review_reply)) throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
           const lateReason = await guard(again);
           if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
+        }
+      }
+      if (allowOverwrite) {
+        // Overwriting (human / IB) callers work from the row as it was
+        // synced: a reply the owner wrote or edited directly in Google since
+        // then is invisible locally and this PUT would replace it unseen.
+        // The live reply must match what this call observed locally; on a
+        // mismatch record Google's text and make the person reload.
+        let live;
+        try {
+          live = await withDeadline((signal) => gbp.getReview(resourceName, review.location_id, { signal }), 'GBP getReview');
+        } catch (e) {
+          throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
+        }
+        const liveReply = String(live?.reviewReply?.comment || '').trim();
+        const seenReply = hasRealReply(review.review_reply) ? String(review.review_reply).trim() : '';
+        if (liveReply && liveReply !== seenReply) {
+          await recordLiveOwnerReply(reviewId, live);
+          throw new ReviewReplyError(CODES.STALE, 'The reply on Google changed since this review was loaded — reload it and try again.', { status: 409 });
         }
       }
       try {

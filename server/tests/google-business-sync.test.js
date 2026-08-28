@@ -141,11 +141,14 @@ function createDbMock(initialRows = {}) {
       limit(n) { this._limit = n; return this; },
       async first() {
         const rows = state.rows[this._table] || [];
-        return rows
+        const hit = rows
           .filter(row => matchesWhere(row, this._where))
           .filter(row => this._rawFilters.every(fn => fn(row)))
           .filter(row => !this._whereNull || row[this._whereNull] == null)
-          .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value)) || null;
+          .find(row => !this._whereNot || Object.entries(this._whereNot).every(([key, value]) => row[key] !== value));
+        // A snapshot, as knex returns: a later UPDATE must not mutate the
+        // row a caller read earlier (the edit reconcile compares the two).
+        return hit ? { ...hit } : null;
       },
       insert(record) {
         // created_at mirrors the DB column default — the degraded-sync
@@ -436,6 +439,53 @@ describe('Google Business review sync', () => {
     await service.syncAllReviews();
 
     expect(db.__state.rows.google_reviews.find(r => r.id === 'review-2').review_reply).toBe('[DRAFT] We are sorry.');
+  });
+
+  test('GBP sync: a reviewer edit on a row with a pipeline draft clears the draft and requeues it (never a stale upbeat draft on a rewritten review)', async () => {
+    const draft = 'Hi John,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Bradenton Team';
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'John Doe',
+      star_rating: 5,
+      review_text: 'Great work',
+      review_created_at: '2026-05-25T12:00:00Z',
+      review_reply: `[DRAFT] ${draft}`,
+      auto_reply_status: 'drafted',
+      auto_reply_reason: 'shadow',
+      auto_reply_draft: draft,
+      auto_reply_drafted_at: '2026-05-26T12:00:00Z',
+      auto_reply_attempts: 1,
+    });
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('maps.googleapis.com')) {
+        return { json: async () => ({ status: 'OK', result: { rating: 4.9, user_ratings_total: 20 } }) };
+      }
+      return jsonResponse({ reviews: [{
+        name: 'accounts/1/locations/2/reviews/rev-1',
+        reviewer: { displayName: 'John Doe' },
+        starRating: 'ONE',
+        comment: 'They never came back and the ants are worse',
+        createTime: '2026-05-25T12:00:00Z',
+      }] });
+    });
+
+    await service.syncAllReviews();
+
+    const rows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      star_rating: 1,
+      review_text: 'They never came back and the ants are worse',
+      review_reply: null,
+      auto_reply_status: 'queued',
+      auto_reply_reason: 'review_changed',
+      auto_reply_draft: null,
+      auto_reply_attempts: 0,
+    });
   });
 
   test('Places fallback dedupes an edited review against the GBP row once content converges (no duplicate)', async () => {

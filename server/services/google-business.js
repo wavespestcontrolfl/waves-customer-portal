@@ -10,7 +10,7 @@ const { WAVES_LOCATIONS } = require('../config/locations');
 const MODELS = require('../config/models');
 const NotificationService = require('./notification-service');
 const { runExclusive } = require('../utils/cron-lock');
-const { DRAFT_REPLY_PREFIX, isDraftReply } = require('./review-reply/draft-prefix');
+const { DRAFT_REPLY_PREFIX } = require('./review-reply/draft-prefix');
 
 function starRatingToNumber(value) {
   if (typeof value === 'number') return value;
@@ -775,16 +775,18 @@ class GoogleBusinessService {
     return hit ? (await db('google_reviews').where({ id: hit.id }).first()) || null : null;
   }
 
-  // A reviewer edit on a review that carries a POSTED automatic reply: the
-  // reply may no longer fit (5★ praise → 1★ complaint) — park it for a
-  // person, conditional on the row still being 'posted'. Shared by the GBP
-  // upsert and the Places fallback.
-  async _reconcilePostedEdit(existing, normalized) {
-    const { postedEditFields } = require('./review-reply/runner');
-    const edited = postedEditFields(existing, normalized);
-    if (!Object.keys(edited).length) return false;
-    const n = await db('google_reviews').where({ id: existing.id, auto_reply_status: 'posted' }).update(edited);
-    if ((Array.isArray(n) ? n.length : n) === 0) return false;
+  // A reviewer edit (rating / text / name) on a review the auto-reply lane
+  // has touched: a POSTED reply may no longer fit (5★ praise → 1★
+  // complaint) — park it for a person; a pipeline-owned DRAFT was written
+  // for the old review — clear it and requeue (no bell: the runner redrafts).
+  // Compare-and-set on the state the snapshot saw. Shared by the GBP upsert
+  // and the Places fallback.
+  async _reconcileReviewEdit(existing, normalized) {
+    const { applyReviewEditFields } = require('./review-reply/runner');
+    const wasPosted = existing.auto_reply_status === 'posted';
+    const n = await applyReviewEditFields(existing.id, existing, normalized);
+    if (n === 0) return false;
+    if (!wasPosted) return true;
     const locName = (WAVES_LOCATIONS.find((l) => l.id === normalized.location_id) || {}).name || normalized.location_id;
     await NotificationService.notifyAdmin('review', 'Review edited after auto-reply', `${normalized.star_rating}★ review on ${locName} was edited by the reviewer after our automatic reply posted — check whether the reply still fits (edit or retract).`, {
       link: `/admin/reviews?responded=all&review=${encodeURIComponent(existing.id)}`,
@@ -855,10 +857,9 @@ class GoogleBusinessService {
       // Skip in the meantime wins).
       await applyRequeueOnIdentity(existing.id, existing, normalized);
       await applySyncReplyFields(existing.id, existingReplyFields, { expectedReply: existing.review_reply ?? null });
-      // A reviewer edit on a review that carries a POSTED automatic reply:
-      // the reply may no longer fit (5★ praise → 1★ complaint) — park it for
-      // a person, conditional on the row still being 'posted'.
-      await this._reconcilePostedEdit(existing, normalized);
+      // A reviewer edit: a POSTED reply parks for a person, a pipeline
+      // draft is cleared and requeued (compare-and-set on the snapshot).
+      await this._reconcileReviewEdit(existing, normalized);
       result = { id: existing.id, inserted: false };
     } else {
       try {
@@ -1051,16 +1052,16 @@ class GoogleBusinessService {
             }
             existing = candidate;
           } else {
-            // Different content on a row that carries a POSTED automatic
-            // reply: during a GBP outage this is how a reviewer edit looks
-            // (the Places id moved with the edit), and the upbeat reply may
-            // no longer fit. The row is still not merged or overwritten —
-            // only its posted reply state is routed to a person (conditional
-            // on 'posted'). A same-name different account costs one human
-            // glance at the bell; a rewritten complaint left answered by
-            // praise is the worse failure.
-            if (!candidate.missing_since && candidate.auto_reply_status === 'posted') {
-              await this._reconcilePostedEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
+            // Different content on a row the auto-reply lane has touched:
+            // during a GBP outage this is how a reviewer edit looks (the
+            // Places id moved with the edit). The row is still not merged or
+            // overwritten — only its auto-reply state is reconciled (posted →
+            // parked for a person; pipeline draft → cleared + requeued). A
+            // same-name different account costs one human glance at the
+            // bell; a rewritten complaint left answered by praise is the
+            // worse failure.
+            if (!candidate.missing_since && ['posted', 'drafted', 'parked', 'failed'].includes(candidate.auto_reply_status)) {
+              await this._reconcileReviewEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
             }
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
             continue;
@@ -1109,7 +1110,7 @@ class GoogleBusinessService {
           upd.synced_at = db.raw('GREATEST(COALESCE(synced_at, to_timestamp(0)), ?::timestamptz)', [sampleSyncStart.toISOString()]);
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
-        await this._reconcilePostedEdit(existing, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
+        await this._reconcileReviewEdit(existing, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
         // A Places owner reply that differs from the local one goes through
         // the canonical sync path: it fills an empty slot, replaces a
         // "[DRAFT]", and — when the owner edited our POSTED reply directly
