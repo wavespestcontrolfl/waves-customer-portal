@@ -292,7 +292,8 @@ the path's attributes and the policy at decision time, then stamped for the audi
 ```text
 auto_account_creation        = true
 auto_outreach_min_score      = 80
-auto_outreach_daily_cap      = 10        (≤ LINK_OUTREACH_DAILY_CAP, which remains the hard ceiling)
+auto_outreach_daily_cap      = 10        (≤ LINK_OUTREACH_DAILY_CAP, the hard ceiling; enforced INSIDE the sender's lock, §6.4)
+owner_price_tolerance_cents  = 0
 monthly_paid_budget          = 500
 max_auto_purchase            = 50
 auto_paid_min_score          = 80
@@ -343,7 +344,9 @@ t.uuid('id').primary(); t.uuid('prospect_id').notNullable(); t.uuid('path_id').n
 t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_York — `etDateString(now).slice(0, 7)` (server/utils/datetime-et.js); never the UTC month
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation ended voided / reconciled_not_charged
 t.string('idempotency_key').notNullable().unique(); // `${prospect_id}:${path_id}:${budget_month}:${generation}`
-t.decimal('amount', 10, 2).notNullable(); t.string('authority').notNullable();
+t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal)
+t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting
+t.string('authority').notNullable();
 t.string('state').notNullable();                    // reserved → submitting → charged | voided | ambiguous → reconciled_charged | reconciled_not_charged
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
@@ -352,22 +355,33 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 
 - **Reserve before exposing credentials.** The decision in §6.3 does NOT read a sum of past
   attempts. It runs inside one transaction: `pg_advisory_xact_lock(hashtext('link_budget:<YYYY-MM>'))`
-  → `month_spend = SUM(amount) WHERE budget_month = <ET month> AND state IN (reserved, charged, ambiguous, reconciled_charged)`
+  → `month_spend = SUM(COALESCE(final_cents, amount_cents)) WHERE budget_month = <ET month> AND state IN (reserved, submitting, charged, ambiguous, reconciled_charged)` — every state in which the card has been, or may be, used consumes budget; only `voided` and `reconciled_not_charged` release it
   → **open-purchase check**: if any row for `(prospect_id, path_id, budget_month)` is in
   `reserved`, `submitting`, `ambiguous`, `charged` or `reconciled_charged` → no new
   reservation (409; nothing to retry until it settles). Otherwise `generation` = 1 + the highest
   ended generation (`voided` / `reconciled_not_charged`) → if `month_spend + amount ≤
   monthly_paid_budget` insert the `reserved` row (the unique `idempotency_key` makes a
-  concurrent duplicate a no-op) → commit. So a pre-submission failure (voided) can be retried
+  concurrent duplicate a no-op) → commit. All money is integer cents. So a pre-submission failure (voided) can be retried
   in the same month as a new generation, while anything that may have reached the merchant
   never can. Only a committed
   reservation unlocks the card details to the provider. Two workers can never both pass the
   check; the lock is per ET budget month (`link_budget:<budget_month>`), so the policy month
   rolls over at midnight Eastern, not 4–5 hours early at UTC midnight.
-- **`submitting` before the external call — non-retryable.** Immediately before the provider
-  submits the checkout (the last point at which nothing has been charged), the worker flips
-  the row `reserved → submitting` (conditional on the lease; `submitting_at = now`). Only a
-  `submitting` row exposes the card to the provider. Where the merchant supports it the
+- **Final total is validated before `submitting`.** The provider must read the checkout's
+  final total (price + tax + fees + renewal terms as displayed) and report it as
+  `final_cents` BEFORE the card is exposed. The `reserved → submitting` transition runs under
+  the same `link_budget:<budget_month>` advisory lock and: refuses (→ `voided`,
+  `outcome='price_changed'`) if `final_cents > max_auto_purchase` for an `AUTO_PAID` row, or if
+  the renewal terms differ from the path; otherwise reserves the delta
+  (`final_cents − amount_cents`, if positive) against the month under the same budget check —
+  no room → `voided`; else commits `submitting` with `final_cents` as the consuming amount.
+  An owner-approved purchase whose final total exceeds the approved amount by more than
+  `policy.owner_price_tolerance_cents` (default 0) is also refused and re-parked with the new
+  total. The provider can never charge an amount the ledger has not reserved.
+- **`submitting` before the external call — non-retryable.** Immediately after that
+  validation (the last point at which nothing has been charged) the row is `submitting`
+  (conditional on the lease and prior state; `submitting_at = now`). Only a `submitting` row
+  exposes the card to the provider. Where the merchant supports it the
   `merchant_idempotency_key` is sent with the checkout. From `submitting` the ONLY
   transitions are `charged` (success reported with `merchant_ref`), `voided` (provider
   proves the merchant rejected before capture), or `ambiguous`.
@@ -388,7 +402,7 @@ t.text('merchant_ref'); t.text('evidence_url'); t.timestamp('reserved_at'); t.ti
 - **Instrument.** One dedicated **virtual card with a hard monthly limit** is the only payment
   method the runner can use; the bank's limit is a second, independent ceiling — it is not the
   policy. Owner-approved purchases above `max_auto_purchase` go through the same reservation
-  after the click. `seo_link_attempts.cost` mirrors `amount` for reporting only.
+  after the click. `seo_link_attempts.cost` mirrors `final_cents` for reporting only.
 
 ### 6.4 Bounded outreach mandate (replaces v1 §9's permanent manual valve)
 
@@ -396,8 +410,12 @@ Auto-send when **all** hold: authority `AUTO_OUTREACH`; score ≥ `auto_outreach
 `comms-lint` clean; recipient is a business inbox (never a customer); the draft contains no
 reciprocal promise, payment, discount, guarantee, or unusual commitment (drafter classifier +
 lint rule); the recipient passes the fail-closed customer exclusion (§13); and the day's sends <
-`auto_outreach_daily_cap`. Anything else → the existing approval queue. Sender, idempotency, `send_error` reconciliation and the trailing-24h cap are
-the shipped `link-prospect-outreach.js` unchanged. Follow-ups (one, +10 days, only if no
+`auto_outreach_daily_cap`. Anything else → the existing approval queue. Sender, idempotency
+and `send_error` reconciliation are the shipped `link-prospect-outreach.js`; its one change
+is that the cap check inside its existing advisory-lock claim transaction enforces
+`min(policy.auto_outreach_daily_cap, LINK_OUTREACH_DAILY_CAP)` for auto-sends (owner-approved
+sends keep the hard cap only) — the policy cap is never checked outside that lock, so
+concurrent auto-sends cannot exceed it. Follow-ups (one, +10 days, only if no
 reply) go through the same gate.
 
 The 56 drafts from June are the first batch through this mandate (self-disqualifying and
