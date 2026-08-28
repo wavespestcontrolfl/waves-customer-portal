@@ -948,7 +948,11 @@ together:
 - **Claim predicate is authority-aware, atomic and UNCONDITIONAL.** Today `claim()` filters
   only on prospect status/type. From step 4 it always joins the registry — no gate turns the
   old predicate back on; `GATE_LINK_AUTHORITY` only controls whether the policy may *grant*
-  an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement `status='prospect'`; registry
+  an `AUTO_*` level — and leases a row only when ALL hold inside the same locked select: placement status matches the
+  CLAIM MODE — `prospect` for initial acquisition / `mode=draft` / the initial `mode=send`;
+  `contacted`/`negotiating` for `mode=payment` and `mode=followup`; `placed`/`live`/`indexed`
+  for `mode=renewal` (each mode's extra predicate is defined where the mode is) — the
+  `prospect` restriction is never applied to the later-stage modes; registry
   `agent_state` in (`ready_to_acquire`, `acquiring`, `acquired`) — claimability is a
   placement property, so a second location's placement is leasable after the first was
   acquired; the placement's stamped `authority` is an `AUTO_*` level
