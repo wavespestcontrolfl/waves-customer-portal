@@ -210,8 +210,14 @@ follow-ups need exactly the communication authority (plus payment only if paid).
 irreversible step (submit, send, mint) load ALL rows for the placement. The dimension
 **owning the current action** (payment for mint, communication for send/follow-up, execution
 for submit/create-account) must be `AUTO_*` (gate on, re-run decision agreeing) or `OWNER_*`
-with a valid, **unconsumed, action-matching** approval — consumed by this step's terminal
-outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
+with a valid, **unconsumed, action-matching** approval. **An approval's scope is the whole
+action instance, not a single step:** the execution/`acquire` approval covers every step of
+one acquisition (create-account → email verification → resume → submit) and is consumed
+ONLY by the terminal outcome of the final submit (`placed`/`pending`/`failed`/`skipped`);
+intermediate steps verify it is valid and unconsumed but never consume it, and
+`satisfied_at` on the execution instance is set only after that final submit. Likewise the
+payment/`purchase` approval spans reserve → mint → submit and is consumed on the purchase's
+settlement; the communication approval on the send's terminal outcome. Every OTHER required dimension is a **durable prerequisite**: its row must be
 `AUTO_*` or `OWNER_*` with an approval that is valid and not invalidated (consumed is fine —
 the communication approval consumed by the send still satisfies the later mint of the same
 paid outreach placement, and vice versa). **Invalidation is scoped per dimension by construction:** each dimension has its own path
