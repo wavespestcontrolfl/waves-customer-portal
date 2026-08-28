@@ -163,7 +163,7 @@ t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-l
 t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
 t.text('source_detail');
 t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
-t.timestamp('renews_at');         // = paid_through; written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
+t.timestamp('renews_at');         // = the settling purchase row's own `paid_through` (its immutable terms_snapshot — never the path's current renewal_period); written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal); cleared when the listing lapses; read by the renewal job
 t.boolean('recurring_merchant').notNullable().defaultTo(false);
 ```
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
@@ -540,6 +540,8 @@ t.string('budget_month').notNullable();             // 'YYYY-MM' in America/New_
 t.string('purchase_kind').notNullable().defaultTo('initial'); // CHECK (purchase_kind IN ('initial','renewal')) — each renewal is its own separately authorized purchase
 t.integer('generation').notNullable().defaultTo(1); // bumps only when the prior generation of the SAME kind/period ended voided / reconciled_not_charged
 t.string('renewal_period_key');                     // for renewals: the period being bought, e.g. '2027' or '2026-11' — null for initial
+t.jsonb('terms_snapshot').notNullable();            // IMMUTABLE copy taken at reservation and re-confirmed at submitting from the checkout page: renewal_period, renewal_cost_cents, term_start (as displayed), term_end / paid_through (computed from term_start + renewal_period), auto_renew_disabled, legal terms shown — renewal scheduling reads ONLY this row, never the (mutable, supersedable) path
+t.timestamp('term_start'); t.timestamp('paid_through'); // denormalized from terms_snapshot for the renewal job; written before `submitting`, never recomputed later
 t.string('idempotency_key').notNullable().unique(); // initial: `${prospect_id}:initial:${generation}` (path-INDEPENDENT — a placement is paid for once, whatever path it was moved to); renewal: `${prospect_id}:renewal:${renewal_period_key}:${generation}` — never month-scoped
 t.integer('amount_cents').notNullable();            // reserved amount, integer cents (never decimal); CHECK (amount_cents > 0)
 t.integer('final_cents');                           // the checkout's final total incl. tax/fees, read before submitting; CHECK (final_cents IS NULL OR final_cents >= 0)
@@ -700,8 +702,10 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   worker/sweep **closes the single-use card at the issuer immediately** — before any
   reconciliation, before any budget accounting changes — and records `card_closed_at`. A
   merchant retry or late capture therefore has no live instrument to hit. `ambiguous` rows
-  keep consuming the month's budget until `reconcile` (issuer transaction lookup by
-  `issuer_card_id`/amount/time, or the owner card) settles them: `reconciled_charged` when a
+  keep consuming the month's budget until `reconcile` settles them on **issuer evidence
+  only** (the issuer's transaction record for `issuer_card_id` — fetched by API or attached
+  by the owner from the issuer portal; the owner card can present and confirm that evidence,
+  never substitute for it): `reconciled_charged` when a
   capture exists; `reconciled_not_charged` **only when the issuer confirms the card is
   irrevocably closed AND shows no captured or pending authorization** — that confirmation is
   the precondition for releasing the budget and allowing a new generation, never a lookup
@@ -1074,8 +1078,11 @@ cutover (replaced by the provider race), v1 open decisions 2–3.
 
 ## 16. Open decisions
 
-1. Reconciliation source for `ambiguous` purchases: card-issuer transaction API vs. owner
-   card only — decide at step 5 (issuer choice in 2 below determines it).
+1. HOW issuer evidence reaches the reconciler for `ambiguous` purchases — issuer transaction
+   API (automated) vs. owner-assisted inspection of the issuer's own transaction record
+   (pasted/attached into the owner card) — decide at step 5. Issuer evidence itself is
+   **mandatory** either way: `reconciled_not_charged` is never a human judgment without the
+   issuer's confirmation of closure + no captured/pending authorization (§6.3).
 2. Virtual card issuer for the acquisition budget — must support single-use per-purchase
    numbers with a hard monthly program limit (§6.3); Adam.
 3. `auto_outreach_daily_cap` starting value (proposal: 10; hard ceiling stays
