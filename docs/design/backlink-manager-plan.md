@@ -273,7 +273,7 @@ alone, nor send on an outreach approval alone.
 
 ```js
 t.uuid('id').primary(); t.uuid('prospect_id'); t.uuid('path_id');
-t.string('provider').notNullable();   // deterministic_runner | openai_cua | claude_cu | stagehand | grok | human
+t.string('provider').notNullable();   // CHECK (provider IN ('deterministic_runner','openai_cua','claude_cu','stagehand','grok','hermes','human')) — `hermes` = the legacy shared HERMES_SERVICE_TOKEN identity (§12): investigation/draft reports only, no payment/credential capability
 t.text('idempotency_key');            // for irreversible external mutations (`create_account`, `resume`/verification activation, `submit`): `${prospect_id}:${action}:${generation}`; partial UNIQUE where not null — a second lease that reaches the same mutation finds the existing row (ON CONFLICT DO NOTHING + re-select) and RESUMES it (persisted session + the row's state) instead of repeating the external call; a crashed mutation is therefore recovered, never duplicated
 t.string('acquisition_type_snapshot'); // the path's acquisition_type AT the attempt (with path_id, the durable learning key — a placement repointed to a superseding path keeps its successful attempt's own path/type)
 t.string('action').notNullable();     // investigate | create_account | complete_form | submit | resume | outreach_send | manual_payment (human settlement only) | price_entry (owner price-entry card only, outcome price_entered)
@@ -977,7 +977,7 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   depends on the payment authority: for `AUTO_PAID_WITHIN_POLICY` a fresh **next-generation**
   reservation is attempted immediately under the **new** month's lock and budget (same
   idempotency rules, new `budget_month`, new `generation`) before anything continues; for
-  `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` nothing is re-reserved — the placement is re-parked
+  `OWNER_PAYMENT` (the ONLY owner-approved payment level — `OWNER_MEMBERSHIP` is an execution-dimension decision and never authorizes a purchase; a paid membership's purchase runs on its separate payment approval) nothing is re-reserved — the placement is re-parked
   `awaiting_owner` with a fresh-generation approval card and the prior approval is marked
   `invalidated_reason='budget_month_rollover'` (never replayed), so the owner approves the
   new instance before any card exists — a
@@ -1145,7 +1145,7 @@ together:
   `mode=renewal`, mint and payment submit — never for a send or a free/account execution
   step on a path that happens to be paid (communication and payment are independent), and
   additionally `GATE_LINK_AUTO_PAID` only when the stamped payment authority is
-  `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` row needs
+  `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT` row (the only owner-approved payment level; `OWNER_MEMBERSHIP` is execution-only) needs
   the payments gate, not the auto-paid gate); no `submitting`/`close_pending`/
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
   (an unleased `renewal` reservation is claimable by the runner, §6.3 — and the claim's re-run of
