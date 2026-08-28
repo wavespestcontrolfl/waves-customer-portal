@@ -21,7 +21,7 @@ const db = require('../../models/db');
 const gbp = require('../google-business');
 const logger = require('../logger');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix } = require('./draft-prefix');
+const { hasRealReply, asDraft, isDraftReply, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 
 class ReviewReplyError extends Error {
   constructor(code, message, { status = 500, cause = null } = {}) {
@@ -142,6 +142,16 @@ async function recordLiveOwnerReply(reviewId, live) {
       auto_reply_claimed_until: null,
     })
     .catch((e) => logger.warn(`[review-reply] live owner reply record failed for ${reviewId}: ${e.message}`));
+}
+
+async function recordLiveOwnerReplyRemoved(reviewId, fresh) {
+  const fields = removedOwnerReplyFields(fresh);
+  if (!Object.keys(fields).length) return;
+  // Compare-and-set on the reply this call observed (we hold the publish
+  // claim, so no sync writes concurrently; a "[DRAFT]" is never touched).
+  await db('google_reviews').where({ id: reviewId, review_reply: fresh.review_reply }).whereNull('missing_since')
+    .update(fields)
+    .catch((e) => logger.warn(`[review-reply] live owner reply removal record failed for ${reviewId}: ${e.message}`));
 }
 
 function updatedCount(updated) {
@@ -290,9 +300,16 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
         const liveReply = String(live?.reviewReply?.comment || '').trim();
         const seenReply = hasRealReply(review.review_reply) ? String(review.review_reply).trim() : '';
-        if (liveReply && liveReply !== seenReply) {
-          await recordLiveOwnerReply(reviewId, live);
-          throw new ReviewReplyError(CODES.STALE, 'The reply on Google changed since this review was loaded — reload it and try again.', { status: 409 });
+        if (liveReply !== seenReply) {
+          if (liveReply) {
+            await recordLiveOwnerReply(reviewId, live);
+            throw new ReviewReplyError(CODES.STALE, 'The reply on Google changed since this review was loaded — reload it and try again.', { status: 409 });
+          }
+          // The owner deleted the reply directly in Google: a stale editor
+          // must not recreate what they deliberately removed. Record the
+          // removal (same fields the sync writes) and make them reload.
+          await recordLiveOwnerReplyRemoved(reviewId, fresh);
+          throw new ReviewReplyError(CODES.STALE, 'The reply on Google was removed since this review was loaded — reload it and try again.', { status: 409 });
         }
         // The review itself must also still be the one the person wrote
         // for: a reviewer rewrite on Google after the page loaded (praise →

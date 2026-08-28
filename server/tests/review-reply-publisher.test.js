@@ -198,6 +198,8 @@ describe('publishReviewReply', () => {
     await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } }))
       .rejects.toMatchObject({ code: CODES.HAS_REPLY, status: 409 });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
+    // The live reply matches what the admin saw locally → they may replace it.
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Already answered.' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
   });
@@ -210,10 +212,24 @@ describe('publishReviewReply', () => {
       .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
     expect(mockGbp.replyToReview).not.toHaveBeenCalled();
     expect(state.rows[0].review_reply).toBe('Owner rewrote this in Google');
-    // Matching live reply → the overwrite proceeds; no live reply at all (deleted on Google) → nothing to clobber, proceeds.
+    // Matching live reply → the overwrite proceeds.
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Owner rewrote this in Google' }, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     let r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement.', actor: { type: 'admin' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
+    expect(mockGbp.replyToReview).toHaveBeenCalledTimes(1);
+    // codex r23: the owner DELETED the reply on Google since the page loaded
+    // → a stale editor must not recreate it; the removal is recorded locally
+    // (posted auto reply → retracted/removed_on_google) and they reload.
+    state.rows[0].review_reply = 'Replacement.';
+    state.rows[0].auto_reply_status = 'posted';
+    mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Replacement two.', actor: { type: 'ib' }, allowOverwrite: true }))
+      .rejects.toMatchObject({ code: CODES.STALE, status: 409 });
+    expect(mockGbp.replyToReview).toHaveBeenCalledTimes(1);
+    expect(state.rows[0].review_reply).toBeNull();
+    expect(state.rows[0].auto_reply_status).toBe('retracted');
+    expect(state.rows[0].auto_reply_reason).toBe('removed_on_google');
+    // No reply locally and none live → nothing changed, proceeds.
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } });
     r = await publishReviewReply({ reviewId: 'rev-1', text: 'Replacement two.', actor: { type: 'ib' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);

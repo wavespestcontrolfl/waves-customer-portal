@@ -96,7 +96,10 @@ const BANNED_RE = new RegExp([
   // hurt", "is not able to affect", "couldn't bother"): the verbs themselves
   // are banned outright — a thank-you reply has no legitimate use for them.
   '\\bhurt\\w*\\b', '\\binjur\\w*\\b', '\\bendanger\\w*\\b', '\\bsicken\\w*\\b', '\\bthreat\\w*\\b', '\\bjeopard\\w*\\b',
-  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb)\\w*\\b",
+  // Illness family outright: "won't cause illness", "no sickness", "never
+  // makes anyone ill", "no allergic reaction", "no symptoms".
+  '\\bsick\\w*\\b', '\\bill\\b', '\\billness(?:es)?\\b', '\\bdisease\\w*\\b', '\\bsymptoms?\\b', '\\bailments?\\b', '\\bunwell\\b', '\\ballerg\\w*\\b', '\\birritat\\w*\\b', '\\bnause\\w*\\b', '\\bmedical\\b', '\\bhealth\\s+(?:risk|concern|hazard|issue|problem|effect|scare)s?\\b',
+  "\\b(?:won't|will\\s+not|doesn't|does\\s+not|don't|do\\s+not|never|no|not|cannot|can't|can\\s+not|couldn't|could\\s+not|shouldn't|should\\s+not|wouldn't|would\\s+not|isn't|is\\s+not|aren't|are\\s+not|unable\\s+to|without)\\s+(?:be\\s+|being\\s+|going\\s+to\\s+|able\\s+to\\s+|ever\\s+|any\\s+)?(?:harm|hurt|affect|bother|endanger|poison|sicken|threaten|injur|impact|upset|disturb|caus|lead\\s+to|result\\s+in|trigger|expos)\\w*\\b",
   // The whole poison / toxic / danger / hazard families, in every wrapper
   // ("won't poison", "no danger to", "non-poisonous", "hazard-free").
   '\\bpoison\\w*\\b', '\\btoxic\\w*\\b', '\\bdanger\\w*\\b', '\\bhazard\\w*\\b', '\\bmake\\s+(?:you|them|anyone|your\\s+\\w+)\\s+sick\\b', '\\b(?:okay|ok|fine|gentle)\\s+(?:around|for|with)\\s+(?:your\\s+)?(?:pets?|dogs?|cats?|kids?|children|family|babies|plants)\\b', '\\bnon[- ]?toxic\\b', '\\bchemical[- ]?free\\b', '\\b(?:pet|child|kid|family)[- ]?(?:safe|friendly)\\b', '\\beco[- ]?friendly\\b', '\\ball[- ]?natural\\b', '\\borganic\\b', '\\bepa\\b', '\\bre-?ent(?:ry|er)\\w*\\b',

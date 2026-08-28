@@ -120,6 +120,12 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants without any risk to your family.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and there is no threat to your cats.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and nothing will injure your pets.'))).toBe('banned_phrase');
+    // codex r23: illness constructions.
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't cause illness for your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and nobody got sick from it.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and it never makes anyone ill.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with no allergic reaction for the kids.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there are no health concerns for your family.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');

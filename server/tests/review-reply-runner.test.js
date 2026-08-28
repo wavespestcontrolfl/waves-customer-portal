@@ -202,13 +202,15 @@ describe('autoReplyInsertFields (merged into the sync INSERT)', () => {
   });
   test('never queues _stats rows, dismissed rows, replied rows, or disabled locations', () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
-    expect(Runner.autoReplyInsertFields({ ...base, reviewer_name: '_stats' })).toEqual({});
-    expect(Runner.autoReplyInsertFields({ ...base, dismissed: true })).toEqual({});
-    expect(Runner.autoReplyInsertFields({ ...base, owner_reply: 'Owner already replied on Google' })).toEqual({});
-    expect(Runner.autoReplyInsertFields({ ...base, owner_reply: '[DRAFT] local' }).auto_reply_status).toBe('queued');
+    // Frozen clock (codex r23): the fixture's review_created_at is a fixed
+    // date and the 48h max queue age is measured from `now`.
+    expect(Runner.autoReplyInsertFields({ ...base, reviewer_name: '_stats' }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, dismissed: true }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, owner_reply: 'Owner already replied on Google' }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields({ ...base, owner_reply: '[DRAFT] local' }, { now: NOW }).auto_reply_status).toBe('queued');
     process.env.REVIEW_AUTO_REPLY_LOCATIONS = 'sarasota';
-    expect(Runner.autoReplyInsertFields({ ...base, location_id: 'venice' })).toEqual({});
-    expect(Runner.autoReplyInsertFields(base).auto_reply_status).toBe('queued');
+    expect(Runner.autoReplyInsertFields({ ...base, location_id: 'venice' }, { now: NOW })).toEqual({});
+    expect(Runner.autoReplyInsertFields(base, { now: NOW }).auto_reply_status).toBe('queued');
   });
 });
 
@@ -766,6 +768,28 @@ describe('processDueAutoReplies — state machine', () => {
     expect(st.firstShadowDraftAt).toBe('2026-08-18T00:00:00Z');
     expect(st.draftsTotal).toBe(6);
     expect(st.byStatus).toEqual({ drafted: 1, posted: 1, skipped: 1, parked: 3, queued: 1 });
+  });
+
+  test('pipelineDraftGuard (Use Draft → human route): the stored draft posts only while its review + account fingerprints still match', async () => {
+    const draft = 'Hi Dana, glad Marcus got the ants. Thanks for having us.';
+    const base = row({ id: 'u', star_rating: 5, review_text: 'Great', customer_id: 'c1', auto_reply_status: 'drafted', auto_reply_draft: draft });
+    const stored = { fingerprint: Runner.reviewFingerprint(base), accountFingerprint: 'fp:Venice|new' };
+    const fresh = { ...base, auto_reply_grounding: stored };
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toBeNull();
+    // A person's own words, or an edited draft, are never guarded.
+    expect(await Runner.pipelineDraftGuard('My own reply.')({ ...fresh, auto_reply_grounding: null })).toBeNull();
+    // City corrected after drafting → stale.
+    mockAccountFacts.mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/customer facts changed/);
+    mockAccountFacts.mockResolvedValue({ city: 'Venice', tenure: 'new' });
+    // Re-attributed to another customer → review fingerprint moves → stale.
+    expect(await Runner.pipelineDraftGuard(draft)({ ...fresh, customer_id: 'c2' })).toMatch(/customer link changed/);
+    // No grounding record at all → refuse (fail closed).
+    expect(await Runner.pipelineDraftGuard(draft)({ ...fresh, auto_reply_grounding: null })).toMatch(/no grounding record/);
+    // Account read failure → fail closed.
+    mockAccountFacts.mockRejectedValueOnce(new Error('db down'));
+    expect(await Runner.pipelineDraftGuard(draft)(fresh)).toMatch(/could not be re-read/);
   });
 
   test('a review skipped as missing is re-queued when the authoritative sync sees it live again', async () => {

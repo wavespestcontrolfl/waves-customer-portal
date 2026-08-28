@@ -355,6 +355,10 @@ router.post('/:id/reply', async (req, res, next) => {
       // A human posting closes out a pending/posted auto-reply state on the
       // row; a never-queued row keeps NULL.
       autoFields: AutoReply.manualReplyCloseFields(db),
+      // "Use Draft" re-submits the pipeline's stored draft through this
+      // route: it must still match the review + account facts it was
+      // grounded on (a re-attribution or city fix since then → 409).
+      guard: AutoReply.pipelineDraftGuard(replyText),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

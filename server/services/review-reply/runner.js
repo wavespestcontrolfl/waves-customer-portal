@@ -29,7 +29,7 @@ const logger = require('../logger');
 const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix } = require('./draft-prefix');
+const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix, removedOwnerReplyFields } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames, loadAccountFacts, accountFingerprint, groundingCustomerId } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, verifyReplyText, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
@@ -823,12 +823,8 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
     }
     return fields;
   }
-  if (isDraftReply(existing?.review_reply)) return {};
-  if (existing?.auto_reply_status === STATUS.POSTED && hasRealReply(existing.review_reply)) {
-    // Our posted reply is gone from Google (owner deleted it there).
-    return { review_reply: null, reply_updated_at: null, auto_reply_status: STATUS.RETRACTED, auto_reply_reason: 'removed_on_google' };
-  }
-  return { review_reply: null, reply_updated_at: null };
+  // No owner reply on Google: ours is gone (owner deleted it there).
+  return removedOwnerReplyFields(existing);
 }
 
 /**
@@ -908,6 +904,31 @@ function dismissCancelFields(conn = db) {
 }
 
 /**
+ * Guard for the HUMAN reply route: when the text being posted is the
+ * pipeline's own stored draft ("Use Draft" on the Reviews page), it was
+ * written against a review + account-facts snapshot; a re-attribution, a
+ * city / tenure correction, or a review edit since then makes it a claim
+ * about someone else. Runs inside the publish claim on the fresh row and
+ * refuses (409 STALE) unless both fingerprints still match. Any other text
+ * (a person's own words, an edited draft) passes untouched.
+ */
+function pipelineDraftGuard(text) {
+  const submitted = String(text || '').trim();
+  return async (fresh) => {
+    if (!fresh || !fresh.auto_reply_draft) return null;
+    if (submitted !== String(fresh.auto_reply_draft).trim()) return null;
+    if (![STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(fresh.auto_reply_status)) return null;
+    const stored = fresh.auto_reply_grounding && typeof fresh.auto_reply_grounding === 'object' ? fresh.auto_reply_grounding : null;
+    if (!stored?.fingerprint) return 'this automatic draft has no grounding record — write the reply yourself or use Post now';
+    if (stored.fingerprint !== reviewFingerprint(fresh)) return 'the review or its customer link changed since this draft was written — reload and draft again';
+    let current;
+    try { current = accountFingerprint(await loadAccountFacts(groundingCustomerId(fresh))); } catch { return 'account facts could not be re-read'; }
+    if (current !== stored.accountFingerprint) return 'the customer facts changed since this draft was written — reload and draft again';
+    return null;
+  };
+}
+
+/**
  * Status for the admin page / shadow exit criteria (7 days AND ≥20 drafts).
  */
 async function autoReplyStatus() {
@@ -972,6 +993,7 @@ module.exports = {
   applySyncReplyFields,
   reviewFingerprint,
   autoReplyStatus,
+  pipelineDraftGuard,
   classifyReplyMode,
   isDraftReply,
 };
