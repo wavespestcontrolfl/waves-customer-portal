@@ -106,6 +106,13 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus is glad the ants are gone. Please give us five stars.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus used a safe product and the ants are gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't harm your pets."))).toBe('banned_phrase');
+    // The poison / toxic / danger / hazard families in every wrapper (codex r19).
+    expect(verify(good("Hi Dana, Marcus got the ants and our treatments won't poison your pets."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a non-poisonous product.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and there is no danger to your dogs.'))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants with a product that poses no hazard to kids.'))).toBe('banned_phrase');
+    expect(verify(good("Hi Dana, Marcus got the ants and the products won't make your pets sick."))).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the toxicity is low.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with products that are fine around kids.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we guarantee they stay gone.'))).toBe('banned_phrase');
     expect(verify(good("Hi Dana, Marcus got the ants and we're guaranteeing they stay gone."))).toBe('banned_phrase');

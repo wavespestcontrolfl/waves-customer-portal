@@ -1051,6 +1051,17 @@ class GoogleBusinessService {
             }
             existing = candidate;
           } else {
+            // Different content on a row that carries a POSTED automatic
+            // reply: during a GBP outage this is how a reviewer edit looks
+            // (the Places id moved with the edit), and the upbeat reply may
+            // no longer fit. The row is still not merged or overwritten —
+            // only its posted reply state is routed to a person (conditional
+            // on 'posted'). A same-name different account costs one human
+            // glance at the bell; a rewritten complaint left answered by
+            // praise is the worse failure.
+            if (!candidate.missing_since && candidate.auto_reply_status === 'posted') {
+              await this._reconcilePostedEdit(candidate, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
+            }
             logger.info(`[gbp] Places sample: ambiguous same-name review at ${loc.id} (row ${candidate.id}) — deferring to GBP feed`);
             continue;
           }

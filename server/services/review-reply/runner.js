@@ -603,9 +603,10 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
 }
 
 /**
- * Admin "Post now": bypass the jitter (and shadow mode) for one review. If a
- * verified auto draft already exists it is published as-is; otherwise a fresh
- * draft is produced. Low-rating rows may be posted this way because a human
+ * Admin "Post now": bypass the jitter (and shadow mode) for one review. A
+ * human "[DRAFT]" is published as written; a stored auto draft is published
+ * once it re-verifies against the current state; otherwise a fresh draft is
+ * produced. Low-rating rows may be posted this way because a human
  * asked.
  */
 async function postNow(reviewId, actor) {
@@ -623,12 +624,32 @@ async function postNow(reviewId, actor) {
   // AND the account-fact fingerprint still match; otherwise Post-now drafts
   // fresh (never a 409 the admin cannot get past).
   const accountFpNow = accountFingerprint(await loadAccountFacts(row.customer_id).catch(() => null));
-  const existing = humanDraftOn(row)
+  const humanDraft = humanDraftOn(row);
+  let existing = humanDraft
     || (row.auto_reply_draft
       && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status)
       && storedFp === reviewFingerprint(row)
       && storedGrounding?.accountFingerprint === accountFpNow
       ? row.auto_reply_draft : null);
+  // A stored AUTO draft was verified against the posted replies of its day;
+  // another review may have posted the same opening since, or the verifier
+  // may have tightened. Re-verify it against the current state (same rule as
+  // the retry lane) and draft fresh when it no longer passes. A human
+  // "[DRAFT]" is the admin's own text and is published as written.
+  if (existing && !humanDraft) {
+    try {
+      const groundingNow = await buildReplyGrounding(row);
+      const recentNow = await loadRecentPostedReplies(row.location_id);
+      const verdict = verifyReplyText(existing, groundingNow, { recentReplies: recentNow, mode: row.auto_reply_mode || undefined });
+      if (verdict) {
+        logger.info(`[review-auto-reply] post-now: stored draft for ${row.id} no longer verifies (${verdict}) — drafting fresh`);
+        existing = null;
+      }
+    } catch (err) {
+      await releaseClaim(row, { auto_reply_error: String(err.message || err).slice(0, 1000) }).catch(() => {});
+      throw err;
+    }
+  }
   if (existing) {
     const publishedAt = new Date().toISOString();
     try {
@@ -646,7 +667,7 @@ async function postNow(reviewId, actor) {
         auditMeta: { version: row.auto_reply_version, mode: row.auto_reply_mode, intent: 'post_now' },
         // Post-now publishes the draft the admin is looking at — a human
         // draft on the row is the payload, not an intervention.
-        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraftOn(row) ? null : storedGrounding?.accountFingerprint || null }),
+        guard: claimGuard(row, { publishingText: existing, accountFingerprint: humanDraft ? null : storedGrounding?.accountFingerprint || null }),
         requireGoogle: true,
       });
       return { outcome: 'posted', mode: row.auto_reply_mode };

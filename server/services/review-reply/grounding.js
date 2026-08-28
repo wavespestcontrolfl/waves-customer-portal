@@ -149,25 +149,31 @@ async function loadActiveTechFirstNames(conn = db) {
   }
 }
 
-// Derived account facts. Reads ONLY: customers (city, member_since,
-// created_at) and completed scheduled_services (service_type, count). No
-// notes, no findings, no comms, no money.
+// Derived account facts. Reads ONLY: customers (city, member_since) and
+// completed scheduled_services (service_type, scheduled_date). No notes, no
+// findings, no comms, no money.
 async function loadAccountFacts(customerId, conn = db) {
   if (!customerId) return null;
   // member_since::text keeps the DATE a calendar date (a JS Date would be
   // UTC midnight = the previous ET evening).
-  const customer = await conn('customers').where({ id: customerId }).first('id', 'city', 'created_at', conn.raw('member_since::text as member_since'));
+  const customer = await conn('customers').where({ id: customerId }).first('id', 'city', conn.raw('member_since::text as member_since'));
   if (!customer) return null;
   const visits = await conn('scheduled_services')
     .where({ customer_id: customerId, status: 'completed' })
     .select('service_type', 'scheduled_date');
   // Distinct VISIT DATES, not rows: a multi-service first appointment is
   // several completed rows but one visit ("recurring" would be a lie).
-  const completed = new Set(visits.map((v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10)).filter(Boolean)).size || (visits.length ? 1 : 0);
+  const visitDays = [...new Set(visits.map((v) => String(v.scheduled_date == null ? '' : (v.scheduled_date instanceof Date ? v.scheduled_date.toISOString() : v.scheduled_date)).slice(0, 10)).filter(Boolean))].sort();
+  const completed = visitDays.length || (visits.length ? 1 : 0);
   const relationship = completed === 0 ? null : completed === 1 ? 'first_visit' : 'recurring';
+  // Tenure starts when the customer CONVERTED (member_since), else at their
+  // first completed visit. customers.created_at is lead intake — an old
+  // lead who just converted is NOT a long-term customer, and "thanks for
+  // being with us for years" would be a fabrication.
+  const tenureSince = customer.member_since || visitDays[0] || null;
   return {
     relationship,
-    tenure: tenureBucket(customer.member_since || customer.created_at),
+    tenure: tenureBucket(tenureSince),
     serviceCategories: serviceCategoriesFrom(visits.map((v) => v.service_type)),
     city: servedCity(customer.city),
   };

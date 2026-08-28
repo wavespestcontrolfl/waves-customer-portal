@@ -555,6 +555,58 @@ describe('Google Business review sync', () => {
     });
   });
 
+  test('Places fallback: same-name different content on a POSTED auto-reply row parks it for a person (no merge, no overwrite)', async () => {
+    // A reviewer edit during a GBP outage moves the Places id and changes
+    // the content — the row is still deferred to GBP, but the upbeat reply
+    // already posted on it may no longer fit: route it to a person now.
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Original text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hello Paula! Thanks!',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    const NotificationService = require('../services/notification-service');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue(null);
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 1,
+          text: 'Completely different text',
+          time: 1779307832,
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      star_rating: 5,
+      review_text: 'Original text', // still deferred to GBP — never overwritten here
+      review_reply: 'Hello Paula! Thanks!',
+      auto_reply_status: 'parked',
+      auto_reply_reason: 'review_edited_after_post',
+    });
+    expect(spy).toHaveBeenCalledWith('review', 'Review edited after auto-reply', expect.any(String), expect.objectContaining({
+      link: '/admin/reviews?responded=all&review=gbp-row-1',
+      metadata: expect.objectContaining({ reason: 'review_edited_after_post', reviewId: 'gbp-row-1' }),
+    }));
+    spy.mockRestore();
+  });
+
   test('Places fallback never name-merges into an un-linked Places row (same display name = new row)', async () => {
     // Display names are not unique across Google accounts. A row without a
     // GBP linkage has no authoritative feed to self-heal from, so a same-name

@@ -745,6 +745,36 @@ describe('admin actions', () => {
     expect(mockPublish.mock.calls[0][0]).toMatchObject({ actor: { type: 'admin', adminUserId: 'u1' }, text: expect.stringContaining('Sorry'), requireGoogle: true });
     expect(state.rows[0].auto_reply_status).toBe('posted');
   });
+  test('postNow re-verifies a stored AUTO draft against current posted replies; a failing verdict drafts fresh', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    const stored = 'Hi Dana,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Sarasota Team';
+    const mk = () => row({ auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: stored, auto_reply_mode: 'results', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' } });
+    // Still verifies → published as stored, no model call, verifier saw the current replies.
+    state.rows = [mk()];
+    let r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
+    expect(r.outcome).toBe('posted');
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(mockVerify).toHaveBeenCalledWith(stored, expect.objectContaining({ reviewId: 'rev-1' }), expect.objectContaining({ recentReplies: [], mode: 'results' }));
+    expect(mockPublish.mock.calls[0][0].text).toBe(stored);
+    // Another review posted the same opening since → verdict fails → fresh draft, not the stale text.
+    jest.clearAllMocks();
+    mockVerify.mockReturnValueOnce('repeated_opening');
+    state.rows = [mk()];
+    r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
+    expect(r.outcome).toBe('posted');
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(mockPublish.mock.calls[0][0].text).toBe(GOOD_DRAFT.text);
+    expect(state.rows[0].auto_reply_status).toBe('posted');
+  });
+  test('postNow does not re-verify a human [DRAFT] (the admin\'s own text is the payload)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    const human = 'Hi Dana,\n\nThe owner wrote this.\n\nThe 🌊 Waves Pest Control Sarasota Team';
+    state.rows = [row({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: `[DRAFT] ${human}`, auto_reply_draft: 'Hi Dana,\n\nOld auto draft.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint(row()), accountFingerprint: 'fp:none' } })];
+    const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
+    expect(r.outcome).toBe('posted');
+    expect(mockVerify).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0].text).toBe(human);
+  });
   test('postNow with no draft drafts fresh and publishes even in shadow', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
     state.rows = [row({ auto_reply_due_at: '2099-01-01T00:00:00Z' })];
