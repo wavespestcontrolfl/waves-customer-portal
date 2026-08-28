@@ -21,7 +21,7 @@ jest.mock('../services/estimate-accepted-email', () => ({
   sendEstimateAcceptedOnboarding: jest.fn(async () => ({ sent: true })),
   acceptedOnboardingKey: (estimateId, acceptanceId) => `estimate.accepted_onboarding:${estimateId}:acc:${acceptanceId}`,
 }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'notif-1' })) }));
 jest.mock('../services/estimate-converter', () => ({
   recurringServicesFromEstimateData: () => [{ name: 'Pest Control' }],
   estimateOneTimeItemsFromData: () => [],
@@ -108,6 +108,15 @@ test('no usable email: escalated to the office ONCE after 7 days, not before', a
   result = await runAcceptanceCopySweep();
   expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
   expect(notifyAdmin).toHaveBeenCalledTimes(1);
+});
+
+test('a policy-suppressed alert is NOT stamped — retried next sweep', async () => {
+  sendEstimateAcceptedOnboarding.mockResolvedValue(null);
+  notifyAdmin.mockResolvedValueOnce({ id: null, suppressed: true, reason: 'bell_policy' });
+  acceptanceRows = [{ ...ACCEPTANCE, accepted_at: new Date(Date.now() - 8 * 86400000).toISOString() }];
+  const result = await runAcceptanceCopySweep();
+  expect(result).toEqual({ sent: 0, checked: 1, escalated: 0 });
+  expect(acceptanceUpdate).not.toHaveBeenCalledWith(expect.objectContaining({ copy_escalated_at: expect.any(Date) }));
 });
 
 test('table absent → no-op', async () => {

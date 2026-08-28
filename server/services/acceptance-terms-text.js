@@ -78,11 +78,15 @@ function deviceLabelFromUserAgent(ua) {
         : /Macintosh/i.test(ua) ? 'Mac'
           : /Windows/i.test(ua) ? 'Windows'
             : 'Device';
+  // iOS Chrome/Firefox carry CriOS/FxiOS (plus a Safari/ token) — matched
+  // before the Safari fallback so provenance names the real browser.
   const browser = /Edg\//i.test(ua) ? 'Edge'
-    : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'
-      : /Firefox\//i.test(ua) ? 'Firefox'
-        : /Safari\//i.test(ua) ? 'Safari'
-          : 'Browser';
+    : /CriOS\//i.test(ua) ? 'Chrome'
+      : /FxiOS\//i.test(ua) ? 'Firefox'
+        : /Chrome\//i.test(ua) && !/Chromium/i.test(ua) ? 'Chrome'
+          : /Firefox\//i.test(ua) ? 'Firefox'
+            : /Safari\//i.test(ua) ? 'Safari'
+              : 'Browser';
   return `${device} · ${browser}`;
 }
 

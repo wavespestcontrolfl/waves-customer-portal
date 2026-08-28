@@ -9,11 +9,20 @@
  * - The gate is OFF by default in every env (fail closed).
  */
 
+const crypto = require('crypto');
 const serverText = require('../services/acceptance-terms-text');
 
+// The EXACT text pinned together with its version (GH Codex r3 P1): a
+// copy-only edit that forgets the version bump would let an already-open tab
+// attest 'v2026-09' for text the customer never saw. Bump BOTH when editing.
+const PINNED_VERSION = 'v2026-09';
+const PINNED_SNAPSHOT_SHA256 = '517ff8fc3cad1153efc1e440ebed5ba1b5f83f9f96fb2946baf8a5b499e6f495';
+
 describe('acceptance terms text', () => {
-  test('version is pinned', () => {
-    expect(serverText.ACCEPTANCE_TERMS_VERSION).toBe('v2026-09');
+  test('version AND text are pinned together — edit the copy ⇒ bump the version and this hash', () => {
+    expect(serverText.ACCEPTANCE_TERMS_VERSION).toBe(PINNED_VERSION);
+    const hash = crypto.createHash('sha256').update(serverText.acceptanceTermsSnapshot(), 'utf8').digest('hex');
+    expect(hash).toBe(PINNED_SNAPSHOT_SHA256);
   });
 
   test('copy is short: one line above Accept, five drawer lines', () => {
@@ -65,6 +74,8 @@ describe('acceptance record customer-facing shape', () => {
   test('user agent reduces to a device · browser family', () => {
     expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1')).toBe('iPhone · Safari');
     expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36 Edg/120.0')).toBe('Windows · Edge');
+    expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/120.0 Mobile/15E148 Safari/604.1')).toBe('iPhone · Chrome');
+    expect(serverText.deviceLabelFromUserAgent('Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/120.0 Mobile/15E148 Safari/605.1.15')).toBe('iPad · Firefox');
     expect(serverText.deviceLabelFromUserAgent(null)).toBeNull();
   });
 });

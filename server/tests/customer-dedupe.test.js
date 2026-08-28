@@ -1084,6 +1084,28 @@ describe('executeMerge', () => {
       .rejects.toThrow(/not a shell \(billing_mode\)/);
   });
 
+  it('accepted_terms_version: a newer (or only) loser version folds into the winner; an older one never downgrades it', async () => {
+    const base = { first_name: 'Fay', last_name: 'Manager', email: 'fay@example.com', phone: '+16124074763' };
+    // Winner never accepted terms, loser did → winner absorbs the loser's version.
+    let built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: null }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2026-09' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    let result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBe('v2026-09');
+    expect(built.state.backfilled.accepted_terms_version).toBe('v2026-09');
+
+    // Loser accepted a NEWER version → winner moves forward.
+    built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: 'v2026-09' }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2027-01' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBe('v2027-01');
+
+    // Loser's version is OLDER → winner keeps its own.
+    built = buildTrx({ winner: { id: WINNER, ...base, accepted_terms_version: 'v2027-01' }, loser: { id: LOSER, ...base, phone: '6124074763', accepted_terms_version: 'v2026-09' }, fkRows: FK_ROWS });
+    db.transaction.mockImplementation(async (fn) => fn(built.trx));
+    result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(result.backfills.accepted_terms_version).toBeUndefined();
+  });
+
   it('contact_role backfills from a loser-only role and never overrides an explicit winner role', async () => {
     // A property-manager duplicate merged into a NULL-role winner must not
     // revert the surviving profile to assumed-owner semantics.

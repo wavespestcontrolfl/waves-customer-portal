@@ -1542,6 +1542,17 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       winnerPriorValues.service_contacts_consent_source = winner.service_contacts_consent_source ?? null;
       winnerPriorValues.service_contacts_consent_text_version = winner.service_contacts_consent_text_version ?? null;
     }
+    // Acceptance-terms stamp (GATE_ESTIMATE_ACCEPTANCE_TERMS): the loser's
+    // estimate_acceptances rows repoint to the winner below, so the winner's
+    // customer-level "latest version accepted on any estimate" must absorb a
+    // newer (or only) loser version. Versions are 'vYYYY-MM' — string order is
+    // chronological. The winner's prior value is journaled for the undo.
+    if (!isEmptyValue(loser.accepted_terms_version)
+      && (isEmptyValue(winner.accepted_terms_version)
+        || String(loser.accepted_terms_version) > String(winner.accepted_terms_version))) {
+      if (!isEmptyValue(winner.accepted_terms_version)) winnerPriorValues.accepted_terms_version = winner.accepted_terms_version;
+      backfills.accepted_terms_version = loser.accepted_terms_version;
+    }
     // Combined-session fence, UNCONDITIONAL (codex #3427 r13/r14 P1,
     // widened r24 P1): the payer case is the sharpest hazard (every
     // invoice starts resolving to the effective winner payer), but a
