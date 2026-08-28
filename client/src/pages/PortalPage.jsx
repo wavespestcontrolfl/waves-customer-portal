@@ -10041,10 +10041,15 @@ function MyPlanTab({ customer, focusService }) {
   // padding, numServices, or the savings copy. A live recurring rodent row on
   // the visible schedule still earns a service row — appended after the tier
   // services so rodent customers can see cadence, progress, and coverage.
-  const hasRodentBait = [nextService, ...upcomingServices].some(s =>
+  const rodentBaitRow = [nextService, ...upcomingServices].find(s =>
     s && s.isRecurring === true && s.isCallback !== true &&
     !PLAN_TERMINAL_STATUSES.has((s.status || '').toLowerCase()) &&
     serviceMatches('rodent_bait', s));
+  const hasRodentBait = !!rodentBaitRow;
+  if (rodentBaitRow) {
+    const realName = rodentBaitRow.serviceType || rodentBaitRow.service_type || rodentBaitRow.type;
+    if (realName) detectedServiceNames.rodent_bait = realName;
+  }
   const displayedServices = hasRodentBait
     ? [...includedServices, SERVICE_CATALOG.find(svc => svc.id === 'rodent_bait')].filter(Boolean)
     : includedServices;
