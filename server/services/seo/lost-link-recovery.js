@@ -239,7 +239,16 @@ async function queueOne(loss, out, scoreMod) {
     // Atomic against a concurrent writer racing the existence check (the
     // scoring/contact lookup above is slow): the unique (target_domain,
     // target_page) conflict is ignored and counted as a skip, never thrown.
-    const inserted = await db('seo_link_prospects').insert({
+    const inserted = await db.transaction(async (trx) => {
+      // Serialize recovery writers per canonical domain and RE-CHECK in-flight
+      // rows under the lock: the unique key is the textual (target_domain,
+      // target_page) pair, so a row filed for this domain under another Waves
+      // page or spelling during the slow scoring/contact lookup would not
+      // conflict — it would land beside this one, both claimable.
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`lost_recovery:${domain}`]);
+      const raced = await byDomain(trx('seo_link_prospects'), domain).whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
+      if (raced && IN_FLIGHT_STATUSES.has(raced.status)) return { raced };
+      return trx('seo_link_prospects').insert({
       target_domain: domain,
       target_url: loss.source_url || null,
       // live_url = the page the link lived on. It puts the row under the DAILY
@@ -263,7 +272,13 @@ async function queueOne(loss, out, scoreMod) {
       source: 'lost_recovery',
       source_ref: loss.backlink_id || null,
       owner: 'backlink_monitor',
-    }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+      }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+    });
+    if (inserted && inserted.raced) {
+      out.skipped++;
+      out.reasons.push({ domain, reason: `already on board (concurrent ${inserted.raced.status}${inserted.raced.target_page ? ` for ${targetPathOf(inserted.raced.target_page)}` : ''})` });
+      return;
+    }
     // pg resolves an insert without returning() to [] even when a row landed;
     // with returning('id') an ON CONFLICT DO NOTHING is the only empty result.
     if (!Array.isArray(inserted) || inserted.length === 0) {

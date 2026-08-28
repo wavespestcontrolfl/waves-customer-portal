@@ -577,6 +577,23 @@ describe('lost-link recovery', () => {
     for (const r of raws) expect(r).toEqual([expect.stringMatching(/split_part.*target_domain/), ['blog.example']]);
   });
 
+  test('insert is atomic per domain: advisory lock + in-flight RE-CHECK under it catches a row filed during scoring (other page/spelling)', async () => {
+    let probes = 0; const raws = [];
+    makeDb({ seo_link_prospects: (op, st) => {
+      if (op === 'first' && st.ins.some(i => i[0] === 'status')) { probes++; return probes === 1 ? null : { id: 'p-race', status: 'contacted', target_page: 'https://www.wavespestcontrol.com/other/' }; }
+      if (op === 'first') return null;
+      if (op === 'insert') throw new Error('must not insert — the re-check under the lock found the racing row');
+      return null;
+    } });
+    db.raw = jest.fn((sql, bind) => { raws.push([sql, bind]); return { __raw: sql, bind }; });
+    const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', gate: { ok: true, lane: 'outreach' }, contact: { contact_email: 'ed@blog.example' } }]) };
+    const r = await recovery.queueLostDomains([loss], { scorer });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'already on board (concurrent contacted for /other/)' }] }));
+    expect(probes).toBe(2); // pre-scoring probe + re-check under the lock
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(raws).toContainEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', ['lost_recovery:blog.example']]);
+  });
+
   test('a domain with an in-flight row for ANOTHER Waves page is not queued again (no parallel outreach to one inbox)', async () => {
     const ops = [];
     makeDb({ seo_link_prospects: (op, st) => {
