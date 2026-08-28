@@ -331,7 +331,8 @@ export default function PushSettingsV2() {
               The bell, phone banner and app badge ring for customer
               communication only (texts, emails, calls, voicemails, new
               leads). These categories are silent by default. Toggle one on
-              to get its bell and phone banner again.
+              to get its bell again — and its phone banner, for events that
+              push.
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (

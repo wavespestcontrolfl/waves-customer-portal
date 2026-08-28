@@ -63,4 +63,31 @@ async function ringMissedCallIfUnanswered(callSid) {
   }
 }
 
-module.exports = { missedCallEligible, ringMissedCallIfUnanswered };
+const TERMINAL_STATUSES = ['completed', 'no-answer', 'busy', 'canceled', 'failed'];
+
+/**
+ * Durable retry (runs on the 2-minute scheduler): re-offer unanswered,
+ * unclaimed customer calls from the last 24h that ended ≥3 minutes ago (so
+ * the voicemail recording has had its chance to land). Idempotent — the
+ * atomic claim inside ringMissedCallIfUnanswered makes a re-offer a no-op.
+ */
+async function sweepMissedCalls({ limit = 50 } = {}) {
+  const rows = await db('call_log')
+    .where({ direction: 'inbound' })
+    .whereNotNull('customer_id')
+    .whereIn('status', TERMINAL_STATUSES)
+    .whereNull('recording_sid')
+    .whereRaw("COALESCE(metadata->>'missed_call_notified_at','') = ''")
+    .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+    .where('created_at', '<', new Date(Date.now() - 3 * 60 * 1000))
+    .orderBy('created_at', 'asc')
+    .limit(limit)
+    .select('twilio_call_sid');
+  let rung = 0;
+  for (const r of rows) {
+    if (await ringMissedCallIfUnanswered(r.twilio_call_sid)) rung += 1;
+  }
+  return rung;
+}
+
+module.exports = { missedCallEligible, ringMissedCallIfUnanswered, sweepMissedCalls };

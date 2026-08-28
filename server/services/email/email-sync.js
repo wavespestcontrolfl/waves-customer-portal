@@ -45,6 +45,18 @@ async function fullSync(state) {
     const fullSyncLimit = process.env.GMAIL_FULL_SYNC_LIMIT
       ? Number.parseInt(process.env.GMAIL_FULL_SYNC_LIMIT, 10)
       : null;
+    // First connect: persist the scan boundary ONCE, before the remote
+    // listing begins, and reuse it on every retry — mail received after it
+    // (during the listing, or between a failed pass and its retry) is new
+    // and takes the normal path (codex P1).
+    const initialConnect = !state?.initial_sync_completed_at;
+    let scanBoundary = state?.initial_scan_started_at ? new Date(state.initial_scan_started_at) : null;
+    if (initialConnect && !scanBoundary && state?.id) {
+      scanBoundary = new Date();
+      await db('email_sync_state').where('id', state.id).whereNull('initial_scan_started_at').update({ initial_scan_started_at: scanBoundary });
+      const fresh = await db('email_sync_state').where('id', state.id).first('initial_scan_started_at');
+      if (fresh?.initial_scan_started_at) scanBoundary = new Date(fresh.initial_scan_started_at); // another pod may have won
+    }
     const messages = await gmailClient.listMessages('', Number.isFinite(fullSyncLimit) ? fullSyncLimit : null);
     logger.info(`[email-sync] Full sync: fetching ${messages.length} messages`);
     // fullSync serves two cases: first connect (mailbox HISTORY, never
@@ -57,19 +69,13 @@ async function fullSync(state) {
     // initial_sync_completed_at is written exactly once, when a full sync
     // COMPLETES (failed/incomplete runs also stamp last_sync_at, so that
     // cannot be the signal — codex P1). Null ⇒ this IS the first connect.
-    const initialConnect = !state?.initial_sync_completed_at;
-    // Scan boundary: only mail received BEFORE the scan began is history.
-    // A message arriving during a long first scan is genuinely new and takes
-    // the normal path (age guard decides), so its later incremental replay
-    // is not silenced by a pre-claim (codex P1).
-    const scanStartedAt = new Date();
 
     let failedMessages = 0;
     for (const msg of messages) {
       try {
         const parsed = await gmailClient.getMessage(msg.id);
         const receivedTs = parsed.received_at ? new Date(parsed.received_at).getTime() : 0;
-        const inserted = await upsertEmail(parsed, { backfill: initialConnect && receivedTs < scanStartedAt.getTime() });
+        const inserted = await upsertEmail(parsed, { backfill: initialConnect && Boolean(scanBoundary) && receivedTs < scanBoundary.getTime() });
         if (inserted) newEmails++;
       } catch (err) {
         // 404 = deleted mid-scan (benign). Anything else means this message
