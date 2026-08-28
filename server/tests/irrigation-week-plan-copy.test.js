@@ -244,7 +244,8 @@ describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
   const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, _private } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
-  const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', county: 'Manatee' };
+  // The full identity the sweep persists (what currentRestrictionPolicy returns).
+  const POLICY = { maxDaysPerWeek: 1, effectiveFrom: '2026-08-27', expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', hoursNote: "on your assigned day, during your area's allowed hours", county: 'Manatee' };
   const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
 
   function stubSelect(returned, capture = {}) {
@@ -265,6 +266,11 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(hit.decisionInputs.runMinutes).toBe(20);
     stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    // Any instruction-shaping field change retires the snapshot — hours included.
+    stubSelect(row({ ...POLICY, hoursNote: 'before 10 a.m. only' }));
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
+    expect(_private.samePolicy({ ...POLICY, hoursNote: 'x' }, { ...POLICY, hoursNote: 'y' })).toBe(false);
+    expect(_private.samePolicy({ ...POLICY, effectiveFrom: '2026-08-27' }, { ...POLICY, effectiveFrom: '2026-09-01' })).toBe(false);
     stubSelect(row(POLICY));
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
     // A snapshot whose plan week straddles the expiry (recorded planWeekEnd) is no longer covered → null.

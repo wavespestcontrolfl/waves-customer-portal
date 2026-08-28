@@ -1162,8 +1162,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           continue;
         }
         if (alreadySent === null) {
-          // Unreadable snapshot table is not proof of a sent row: the week's
+          // Unreadable snapshot table is not proof of a sent row — but the
+          // durable customer-week email record still is: a delivered or
+          // in-flight plan email stops this run (an email change must not
+          // earn a second, contradicting message). Otherwise the week's
           // email still goes out on the pre-plan template.
+          const priorUnreadable = await weekPlanDeliveryState({ triggerEventId, idempotencyKey });
+          if (priorUnreadable.state === 'sent') { summary.deduped += 1; continue; }
+          if (priorUnreadable.state === 'pending') { summary.plan.claimed_elsewhere += 1; continue; }
           summary.plan.claim_error += 1;
           decision = buildWeeklyEmailDecision({ ...decisionInputs, forecastRainInches, forecastEt0Inches, weekPlanEnabled: false });
           snapshotArgs = null;

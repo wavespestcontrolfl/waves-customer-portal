@@ -556,12 +556,17 @@ function etDateStringPlusDays(ymd, days) {
   return d.toISOString().slice(0, 10);
 }
 
+// Every field that shapes the instruction must match — days, dates, hours,
+// label, county: an operator changing hoursNote alone must retire Monday's
+// snapshot from the report just like a day-cap change would.
+const POLICY_IDENTITY_FIELDS = ['maxDaysPerWeek', 'effectiveFrom', 'expiresOn', 'label', 'hoursNote', 'county'];
+function policyIdentity(p) {
+  return JSON.stringify(POLICY_IDENTITY_FIELDS.map((k) => (k === 'maxDaysPerWeek' ? Number(p?.[k]) : String(p?.[k] ?? ''))));
+}
 function samePolicy(a, b) {
   if (!a && !b) return true;
   if (!a || !b) return false;
-  return Number(a.maxDaysPerWeek) === Number(b.maxDaysPerWeek)
-    && String(a.expiresOn || '') === String(b.expiresOn || '')
-    && String(a.label || '') === String(b.label || '');
+  return policyIdentity(a) === policyIdentity(b);
 }
 
 /**

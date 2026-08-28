@@ -130,8 +130,8 @@ describe('sweep — plan mode only on Monday', () => {
     expect(src).toMatch(/if \(priorLegacyPath\.state === 'pending'\) \{[\s\S]{0,400}continue;/);
     expect(src).toMatch(/const weekPlanEnabled = weekPlanGate && isMondayET;/);
     expect(src).toMatch(/summary\.plan\.late_retry \+= 1;/);
-    // An UNKNOWN sent-check (unreadable table) falls back to the pre-plan email too.
-    expect(src).toMatch(/if \(alreadySent === null\) \{[\s\S]{0,400}weekPlanEnabled: false/);
+    // An UNKNOWN sent-check (unreadable table) still consults the durable customer-week record — sent/pending stop — before falling back to the pre-plan email.
+    expect(src).toMatch(/if \(alreadySent === null\) \{[\s\S]{0,700}priorUnreadable\.state === 'sent'[\s\S]{0,200}priorUnreadable\.state === 'pending'[\s\S]{0,400}weekPlanEnabled: false/);
     // The sweep binds the home (address + coords) it decided for into the snapshot.
     expect(src).toMatch(/home: \{ addressLine1: customer\.address_line1, addressLine2: customer\.address_line2, city: customer\.city, zip: customer\.zip, latitude: customer\.latitude, longitude: customer\.longitude \}/);
     // A snapshot-claim DB error falls back to the pre-plan email (never silence) — and the hash is assigned only on a successful claim.
