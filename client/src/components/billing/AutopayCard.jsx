@@ -110,10 +110,10 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ fontSize: 14, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: FONTS.heading }}>
             Auto Pay
           </div>
-          <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>
             {title}
           </div>
           {message && (
@@ -512,37 +512,41 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
         <div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
             <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+            <span style={{ fontSize: 14, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em', fontFamily: FONTS.heading }}>
               Auto Pay / {theme.label}
             </span>
           </div>
-          <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
-            {state === 'active'
+          {/* Eyebrow / short title / muted subline — the same header rhythm
+              as Plan Charges and Payment Methods. The old 18px title carried
+              the whole explanatory sentence (08-28 sub-header pass). */}
+          {(() => {
+            const head = state === 'active'
               ? (perApplicationBilling
-                ? 'Auto Pay is on — your saved payment method is charged after each application.'
+                ? ['Auto Pay is on', 'Your saved payment method is charged after each application.']
                 : annualPrepayBilling
-                  ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
+                  ? ['Auto Pay is on', 'Your plan is prepaid; your saved method is used at renewal.']
                   : perVisitBilling
-                    ? 'Your payment method is saved — we send an invoice after each completed service.'
+                    ? ['Payment method saved', 'We send an invoice after each completed service.']
                     : monthlyUnpriced
-                    ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
+                    ? ['Auto Pay is on', 'Your monthly rate is being finalized, so no charge is scheduled yet.']
                     // No date → drop the "on <date>" clause instead of
                     // rendering "on Not scheduled" (eyeball 07-12 finding 4).
                     : formatDate(next_charge_date) === 'Not scheduled'
-                      ? `Next charge: $${nextChargeAmount.toFixed(2)}`
-                      : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
+                      ? [`Next charge: $${nextChargeAmount.toFixed(2)}`, null]
+                      : [`Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`, null])
               : state === 'paused'
-                ? `Paused until ${formatDate(paused_until)}`
-                : 'Auto Pay is off. Charges will not run automatically.'}
-          </div>
+                ? [`Paused until ${formatDate(paused_until)}`, null]
+                : ['Auto Pay is off', 'Charges will not run automatically.'];
+            return (
+              <>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>{head[0]}</div>
+                {head[1] && <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 4, lineHeight: 1.45 }}>{head[1]}</div>}
+              </>
+            );
+          })()}
           {state === 'active' && nextChargeSurcharge > 0 && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
               ${nextChargeBase.toFixed(2)} + ${nextChargeSurcharge.toFixed(2)} credit card surcharge
-            </div>
-          )}
-          {activeCard && state !== 'disabled' && (
-            <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : cardBrandLabel(activeCard.brand, 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>
@@ -565,7 +569,9 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
         </div>
       )}
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      {/* Actions fill the row (owner 08-28: centered, not a stub button
+          hugging the left edge). */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
         {state === 'active' && (
           <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving} onClick={() => setModal('manage')}>
             Manage Auto Pay
@@ -595,7 +601,7 @@ export default function AutopayCard({ onStateChange, openRequest = null, onOpenR
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('pause')}>Pause payments</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change payment method</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
-              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off Auto Pay</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off</button>
             </div>
           )}
           {modal === 'pause' && (

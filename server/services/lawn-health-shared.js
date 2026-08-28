@@ -42,6 +42,17 @@ function applyLawnServiceFilter(query, alias = 'ss') {
   });
 }
 
+// Lawn-care membership for customer-facing lawn surfaces (Lawn Health card,
+// weather lawn advisories). Owner ruling 2026-08-28: a customer must
+// actually be ON lawn care to see lawn tracking. The old shortcut accepted
+// ANY waveguard_tier (Bronze = one recurring service, usually pest) and a
+// free-text lawn_type — both present on pest-only accounts (the irrigation
+// audience audit measured 86% of tier-qualified customers as pest-only), so
+// a Bronze pest customer saw "Lawn health tracking will start soon". Tier
+// and lawn_type are no longer evidence; the recurring-lawn predicate the
+// irrigation email already enforces is (an upcoming lawn visit on a
+// recurring series, or ≥2 lawn visits in the trailing window). An active
+// turf profile still qualifies: it only exists once a lawn assessment ran.
 async function hasCustomerLawnCare(customerId, knex = db) {
   const profile = await knex('customer_turf_profiles')
     .where({ customer_id: customerId, active: true })
@@ -49,17 +60,9 @@ async function hasCustomerLawnCare(customerId, knex = db) {
     .catch(() => null);
   if (profile) return true;
 
-  const customer = await knex('customers')
-    .where({ id: customerId })
-    .first('id', 'waveguard_tier', 'lawn_type')
-    .catch(() => null);
-  if (customer?.waveguard_tier || customer?.lawn_type) return true;
-
-  const scheduled = await applyLawnServiceFilter(
-    knex('scheduled_services as ss').where('ss.customer_id', customerId),
-    'ss'
-  ).first('ss.id').catch(() => null);
-  return Boolean(scheduled);
+  // Lazy require: irrigation-weekly-email pulls in the notification stack.
+  const { hasLawnServiceEvidence } = require('./irrigation-weekly-email');
+  return Boolean(await hasLawnServiceEvidence(customerId).catch(() => false));
 }
 
 module.exports = {

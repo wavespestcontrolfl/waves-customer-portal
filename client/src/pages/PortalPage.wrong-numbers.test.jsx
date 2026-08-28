@@ -118,23 +118,18 @@ describe('expanded visit hydration and pagination', () => {
     products: [{ product_name: 'Prodiamine 65 WDG', product_category: 'herbicide', active_ingredient: 'Prodiamine' }],
   };
 
-  it('fetches the full record on expand so Rate and Amount render', async () => {
+  it('expands into the report card — Download, no inline product table, no detail fetch', async () => {
+    // Owner 08-28: the expanded row IS the service report (preview + Share /
+    // Download); the old inline reproduction (products, conditions, photos)
+    // and its per-row hydration are gone.
     api.getServices.mockResolvedValue({ services: [listRow], total: 1 });
-    api.getService.mockResolvedValue({
-      id: 'svc-1', photos: [],
-      products: [{
-        product_name: 'Prodiamine 65 WDG', product_category: 'herbicide',
-        active_ingredient: 'Prodiamine', application_rate: '0.5', rate_unit: 'oz/1000 sq ft',
-        total_amount: '2.5', amount_unit: 'oz',
-      }],
-    });
 
     render(<ServicesTab />);
     fireEvent.click(await screen.findByText('Lawn Fertilization Round 2'));
 
-    await waitFor(() => expect(api.getService).toHaveBeenCalledWith('svc-1'));
-    expect(await screen.findByText('0.5 oz/1000 sq ft')).toBeInTheDocument();
-    expect(screen.getByText('2.5 oz')).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /download/i })).toBeInTheDocument();
+    expect(screen.queryByText('Products Applied')).not.toBeInTheDocument();
+    expect(api.getService).not.toHaveBeenCalled();
   });
 
   it('offers Load More when the server reports more visits than one page', async () => {
