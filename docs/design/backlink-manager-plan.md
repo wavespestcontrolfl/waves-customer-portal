@@ -160,7 +160,7 @@ t.timestamp('superseded_at');
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
-t.string('authority');            // authority level under which this placement was/will be acted on
+t.string('authority');            // SUMMARY only (the most restrictive dimension, for lists/cards); the binding record is seo_link_placement_authorities
 t.text('source_detail');
 t.timestamp('paid_through');      // end of the term the last `charged` purchase bought
 t.timestamp('renews_at');         // = paid_through; written atomically when a purchase reaches `charged` (i.e. after close confirmation) OR `reconciled_charged` (initial or renewal) from path.renewal_period + the term start shown at checkout; cleared when the listing lapses; read by the renewal job
@@ -169,6 +169,25 @@ t.boolean('recurring_merchant').notNullable().defaultTo(false);
 New statuses: **`awaiting_owner`** (parked on an owner decision: payment / membership / legal)
 and **`watching`** (unactionable today, rechecked). `PROSPECT_STATUSES` in
 `admin-backlink-agent-v2.js` is the contract; the worker's `claim()` never leases either.
+
+### 3.3b `seo_link_placement_authorities` — one row per required dimension
+
+```js
+t.uuid('id').primary(); t.uuid('prospect_id').notNullable();
+t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','payment','communication'))
+t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
+t.uuid('approval_id');                 // required when level is OWNER_*/OWNER_OVERRIDE (approval.action must match the dimension: acquire | renewal ↔ payment/execution, outreach_send/followup ↔ communication)
+t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable();
+t.timestamp('decided_at').notNullable();
+t.unique(['prospect_id', 'dimension']);
+```
+The bridge job writes one row per dimension the path touches (execution always; payment when
+`payment_required`; communication for outreach/content types). The locked claim and every
+irreversible step (submit, send, mint) load ALL rows for the placement and require, for each:
+level is `AUTO_*` (with its gate on and the re-run decision agreeing) or `OWNER_*` with a
+valid, unconsumed, dimension-matching approval; any row at `DENY`/`INVALID`, or a required
+dimension with no row, blocks. A paid guest post thus cannot execute on a payment approval
+alone, nor send on an outreach approval alone.
 
 ### 3.4 `seo_link_attempts` — every execution, whoever performed it
 
@@ -323,11 +342,9 @@ bridge → authority before any send).
   `backlink_id`, `first_live_at = seo_backlinks.first_seen`, `target_page` =
   `targetPageOf(target_url)`, `is_dofollow` from the row) — the verifier/indexer then treat
   it like any placement — but **D30/D90 are never inferred from age**: for an imported link
-  they are set only if `seo_backlink_events`/scan history proves an **uninterrupted active
-  interval across the cutoff**: a scan observation strictly before the cutoff, a scan
-  observation on/after it, and NO `lost` (or `merged`) event anywhere between those two
-  observations — a link that vanished near D30 and returned (loss event landing after the
-  cutoff) fails this test; otherwise they stay `null` (= unknown, excluded from learning) — a link that vanished and returned, or
+  they are set only by the §8 sampled rule (a recorded observation inside the D30/D90
+  window with no loss event before it); an import whose cutoffs predate scan coverage stays
+  `null` (= unknown, excluded from learning) — a link that vanished and returned, or
   predates scan coverage, must not teach the scorer that its path "survives"; the path is
   `seo_link_acquisition_paths` with `acquisition_type` mapped from the link's classified
   `link_type` (directory/citation → `self_service_free` or `self_service_account`,
@@ -434,7 +451,8 @@ BOTH an `AUTO_PAID_WITHIN_POLICY`/`OWNER_PAYMENT` decision AND an
 `AUTO_OUTREACH`/`OWNER_OUTREACH` decision with its exact-draft approval; the claim,
 reservation and send/submit steps require every dimension's gate/approval to be satisfied
 before the irreversible action, and `DENY`/`INVALID` in any dimension wins. The pseudocode
-below is written per dimension; `authority` on the placement stores the set.
+below is written per dimension; the set is stored in `seo_link_placement_authorities`
+(§3.3b) and the placement's `authority` column is only the most restrictive level, for display.
 
 ```
 # 1a. VALIDITY — non-overrideable. Not policy: data and money that cannot be acted on by
@@ -857,12 +875,17 @@ learned from attempt outcomes). Outreach: `OutreachProvider` = drafter + `link-p
 - **Verification** is unchanged and authoritative: verifier (crawl + DataForSEO, scan-tracked
   rows only), indexer (`site:` SERP), profile cross-link, `first_live_at`, `is_dofollow` read
   from live `rel`. A provider report never sets `live`.
-- **D30 survival** = the link provably active AT `first_live_at + 30d` (and again at D90):
-  the same bracketing rule as the imported baseline in §4 — a verified observation (verifier
-  live check or scan) strictly before the cutoff, one on/after it, and no `lost`/`merged`
-  event between them; a link absent at the cutoff that recovered before the nightly job ran
-  is NOT d30_live. Derived nightly; stored on the placement (`d30_live`, `d90_live`, tri-state
-  true/false/null=unknown) — this is the only success metric that counts.
+- **D30 survival** = a **sampled observation at the cutoff**, not an inference from
+  neighbours: the daily verifier records an explicit `d30_sample` (and `d90_sample`) check
+  for each placement within a bounded window `[cutoff, cutoff + 3 days]`; `d30_live=true`
+  only if that sampled crawl/reconcile found the link active AND no `lost`/`merged` event
+  exists between `first_live_at` and the sample; `false` if the sample found it gone (or a
+  loss event precedes the sample); `null` (unknown, excluded from learning) if no sample was
+  taken inside the window — bracketing observations days apart never stand in for the
+  sample, because a link can vanish and return between scans without a two-miss loss
+  event. The same rule replaces the imported-baseline test in §4 (imports predating scan
+  coverage stay `null`). Stored on the placement (`d30_live`, `d90_live`, tri-state) — this is
+  the only success metric that counts.
 - **Learning:** nightly aggregate `persistence` and `index_rate` per `(source, acquisition_type)`
   and per `domain` into `seo_link_learning` (small table, replaced each night). The scorer reads
   them:
