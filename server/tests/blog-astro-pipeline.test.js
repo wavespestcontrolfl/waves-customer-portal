@@ -3596,6 +3596,39 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(parsed.content).toContain('![Generated alt two](/images/blog/pest-control/drywood-frass-venice/body-2.webp)');
   });
 
+  test('update run: a REUSED alt goes through the compliance second pass alongside generated alts (GH r2)', async () => {
+    const complianceGate = require('../services/content/compliance-gate');
+    const spy = jest.spyOn(complianceGate, 'evaluate');
+    try {
+      const liveMd = fmModule.stringify(
+        { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+        'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+      );
+      const b64 = (dataUrl) => dataUrl.split(',')[1];
+      gh.getFile.mockImplementation(async (path) => {
+        if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+        if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+        if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
+        return null;
+      });
+      heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
+      await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+      // The alts are folded into `body` after META_SECTION_MARKER (field-value marker).
+      const altPass = spy.mock.calls.find(([arg]) => String(arg?.body || '').includes(complianceGate.META_SECTION_MARKER) && String(arg.body).includes('Live alt for pellets'));
+      expect(altPass).toBeTruthy();
+      expect(altPass[0].body).toContain('Generated alt two');
+    } finally { spy.mockRestore(); }
+  });
+
+  test('update run: intro-slot reuse compares against the LIVE title — a retitled article does not inherit its old intro illustration (GH r2)', async () => {
+    const { reusableLiveBodyImage } = AstroPublisher._internals;
+    const live = { file: { content: fmModule.stringify({ title: 'Old Title' }, 'Intro prose.\n\n![Old intro pic](/images/blog/x/body-1.webp)\n\n## A\n\nProse.\n') } };
+    // New slot heading = NEW title (intro pseudo-section) → live side is judged by the OLD title → no match.
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'New Title', { title: 'New Title' })).toBeNull();
+    // Same title → reusable.
+    expect(reusableLiveBodyImage(live, '/images/blog/x/body-1.webp', 'Old Title', { title: 'Old Title' })).toBe('Old intro pic');
+  });
+
   test('update run: a REUSED committed body image is hashed too — one that duplicates the reused hero is regenerated instead of reused (hook r8)', async () => {
     const liveMd = fmModule.stringify(
       { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
@@ -3674,6 +3707,11 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     ].join('\n');
     expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/e.webp']);
     expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(7);
+  });
+
+  test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![d](/images/blog/foo/body-(detail).webp)\n![t](/images/2026/08/a.webp "Title (x)")');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-(detail).webp', '/images/2026/08/a.webp']);
   });
 
   test('bodyImageRefs: comments, JSX comments, code spans and escaped syntax are not images; an escaped backslash before ! still renders (GH r1)', () => {

@@ -1691,7 +1691,9 @@ function bodyImagesEnabled() {
 // Rendered image references in the body — fenced code is skipped (an
 // `![x](y)` inside a code block is text, not an image).
 // Only an ODD backslash run escapes the "!" (Markdown escape parity).
-const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(([^)\s]*)[^)]*\)/g;
+// Destination = up to the first whitespace; ONE level of balanced parens is
+// part of the path ("/body-(detail).webp"), as CommonMark allows.
+const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(((?:[^()\s]|\([^()\s]*\))*)(?:\s[^)]*)?\)/g;
 
 // The body with every non-rendered region blanked (fenced/indented code,
 // code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
@@ -1853,10 +1855,18 @@ function reusableLiveBodyImage(existingFile, src, slotHeading, { title = '' } = 
   const content = existingFile?.file?.content;
   if (!content) return null;
   let liveBody;
-  try { liveBody = fm.parse(content)?.content ?? String(content); } catch { liveBody = String(content); }
+  let liveTitle = '';
+  try {
+    const parsed = fm.parse(content);
+    liveBody = parsed?.content ?? String(content);
+    liveTitle = String(parsed?.data?.title || '').trim();
+  } catch { liveBody = String(content); }
   const ref = bodyImageRefs(liveBody).find((r) => r.src === src);
   if (!ref?.alt) return null;
-  const liveHeading = liveSectionHeadingForImage(liveBody, src, { title });
+  // The intro pseudo-section is named by the TITLE; the live side must use
+  // the live file's title, not the new draft's, or a retitled article
+  // would always match its old intro illustration.
+  const liveHeading = liveSectionHeadingForImage(liveBody, src, { title: liveTitle || title });
   if (!liveHeading || headingKey(liveHeading) !== headingKey(slotHeading)) return null;
   return ref.alt;
 }
@@ -1946,15 +1956,20 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // describes it; otherwise (re)generate — never reuse a picture blind.
     if (existingFile) {
       const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title });
-      const committed = liveAlt ? await committedImageBuffer(repoPath) : null;
+      // A reused alt is customer-facing copy too: it must clear the same
+      // guardrails as a generated alt (no fallback → regenerate) and it joins
+      // the compliance second pass below.
+      const vettedAlt = liveAlt ? vetGeneratedAlt(liveAlt, null, Array.isArray(frontmatter?.domains) ? frontmatter.domains : null) : null;
+      const committed = vettedAlt ? await committedImageBuffer(repoPath) : null;
       if (committed) {
         // A reused picture obeys the same rule as a generated one: if it
         // duplicates the (possibly new) hero or a sibling, regenerate.
         const dup = await nearDuplicateOf(committed, seen);
         if (!dup.label) {
           seen.push({ label: `body-${n}`, hash: dup.hash });
-          images.push({ src, alt: liveAlt, reused: true });
-          placements.push({ insertAt: slot.insertAt, src, alt: liveAlt });
+          images.push({ src, alt: vettedAlt, reused: true });
+          newAlts.push(vettedAlt);
+          placements.push({ insertAt: slot.insertAt, src, alt: vettedAlt });
           continue;
         }
         logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — regenerating instead of reusing`);
@@ -2189,8 +2204,9 @@ async function publishOrUpdatePage(draft, brief = {}) {
 
   // Body images (owner rule: ≥3 images per post) — resolved after the hero so
   // a hero failure never burns two more generations, and before the branch is
-  // cut so a failure can't orphan a PR. Their alts are generated text that
-  // the semantic gate never saw: the same narrow second pass as the hero alt.
+  // cut so a failure can't orphan a PR. Their alts (generated OR reused from
+  // the live post) are text the semantic gate never saw on this draft: the
+  // same narrow second pass as the hero alt.
   const bodyImages = await resolveBodyImages({
     frontmatter, slug, body, existingFile, brief,
     // Fresh hero bytes, or the committed hero's repo path when it was reused.
