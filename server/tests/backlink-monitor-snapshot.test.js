@@ -120,7 +120,7 @@ describe('BacklinkMonitor snapshots', () => {
     const missUpdate = {
       whereIn: jest.fn(() => missUpdate),
       where: jest.fn(() => missUpdate), whereNull: jest.fn(() => missUpdate),
-      whereRaw: jest.fn(() => missUpdate), whereNotIn: jest.fn(() => missUpdate),
+      whereRaw: jest.fn(() => missUpdate), orWhereRaw: jest.fn(() => missUpdate), whereNotIn: jest.fn(() => missUpdate),
       select: jest.fn(async () => []), update: jest.fn(async () => 0),
       increment: jest.fn(async () => 1),
     };
@@ -129,6 +129,7 @@ describe('BacklinkMonitor snapshots', () => {
     };
 
     db.transaction = jest.fn(async (fn) => fn(db));
+    db.raw = jest.fn((sql, bind) => ({ __raw: sql, bind }));
     db.mockImplementation((table) => {
       if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
       if (activeQuery.select.mock.calls.length === 0) return activeQuery;

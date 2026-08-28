@@ -187,17 +187,19 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(updates.find(u => u.patch.recovery_queued_at)).toBeUndefined(); // stamp goes through whereIn, captured below
   });
 
-  test('an unevaluated verified loss older than 90 days is aged out: stamped terminal + recovery_aged_out ledger row, in one transaction', async () => {
+  test('losses older than 90 days age out EXPLICITLY for both obligations: recovery (stamp + recovery_aged_out) when unstamped, alert (loss_alert_skipped aged_out) when never ledgered — one transaction', async () => {
     const log = [];
-    const { events } = scanWith({ items: [], total: 0, active: [], aged: [{ id: 'old-a' }, { id: 'old-b' }] });
+    // old-a: neither obligation closed → both; old-b: recovery already stamped, bell never landed → alert only (no re-stamp)
+    const { events } = scanWith({ items: [], total: 0, active: [], aged: [{ id: 'old-a', recovery_queued_at: null, alert_ledgered: false }, { id: 'old-b', recovery_queued_at: new Date('2026-05-01T00:00:00Z'), alert_ledgered: false }] });
     const origImpl = db.getMockImplementation();
     db.mockImplementation((table) => { const b = origImpl(table); const u = b.update; b.update = jest.fn((p) => { log.push({ table, ins: b.whereIn.mock.calls.map(c => c[1]).flat(), patch: p }); return u(p); }); return b; });
     await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), now: new Date('2026-08-30T07:30:00Z') });
     const stamp = log.find(l => l.patch.recovery_queued_at);
-    expect(stamp.ins).toEqual(['old-a', 'old-b']);
+    expect(stamp.ins).toEqual(['old-a']); // old-b keeps its original stamp
     expect(events).toEqual([
       expect.objectContaining({ backlink_id: 'old-a', event_type: 'recovery_aged_out', detail: JSON.stringify({ after_days: 90 }) }),
-      expect.objectContaining({ backlink_id: 'old-b', event_type: 'recovery_aged_out', detail: JSON.stringify({ after_days: 90 }) }),
+      expect.objectContaining({ backlink_id: 'old-a', event_type: 'loss_alert_skipped', detail: JSON.stringify({ reason: 'aged_out', after_days: 90 }) }),
+      expect.objectContaining({ backlink_id: 'old-b', event_type: 'loss_alert_skipped', detail: JSON.stringify({ reason: 'aged_out', after_days: 90 }) }),
     ]);
     expect(db.transaction).toHaveBeenCalledTimes(1);
   });

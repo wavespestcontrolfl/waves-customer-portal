@@ -341,18 +341,27 @@ class BacklinkMonitor {
       // an unevaluated loss that ages past it (queue kept erroring, or deferred
       // behind a sibling link that stayed up) gets an explicit TERMINAL verdict
       // — stamped + ledgered as aged out — so nothing sits owed forever.
+      // Both obligations expire EXPLICITLY at the window's edge — recovery
+      // (stamp + 'recovery_aged_out') and the alert ('loss_alert_skipped',
+      // reason aged_out) — so a row whose bell kept failing never just drops
+      // out of the owed query with nothing in the ledger.
+      const ALERT_LEDGERED_SQL = "EXISTS (SELECT 1 FROM seo_backlink_events e WHERE e.backlink_id = seo_backlinks.id AND e.event_type IN ('loss_alerted', 'loss_alert_skipped'))";
       const aged = await db('seo_backlinks')
         .where('status', 'lost')
-        .whereNull('recovery_queued_at')
+        .where((qb) => qb.whereNull('recovery_queued_at').orWhereRaw(`NOT ${ALERT_LEDGERED_SQL}`))
         .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
         .whereRaw("lost_at <= now() - interval '90 days'")
-        .select('id');
+        .select('id', 'recovery_queued_at', db.raw(`${ALERT_LEDGERED_SQL} AS alert_ledgered`));
       if (aged.length) {
         await db.transaction(async (trx) => {
-          await trx('seo_backlinks').whereIn('id', aged.map(a => a.id)).update({ recovery_queued_at: now });
-          for (const a of aged) await this.recordEvent(a.id, 'recovery_aged_out', { after_days: 90 }, trx);
+          const recoveryUnstamped = aged.filter(a => !a.recovery_queued_at).map(a => a.id);
+          if (recoveryUnstamped.length) await trx('seo_backlinks').whereIn('id', recoveryUnstamped).update({ recovery_queued_at: now });
+          for (const a of aged) {
+            if (!a.recovery_queued_at) await this.recordEvent(a.id, 'recovery_aged_out', { after_days: 90 }, trx);
+            if (!a.alert_ledgered) await this.recordEvent(a.id, 'loss_alert_skipped', { reason: 'aged_out', after_days: 90 }, trx);
+          }
         });
-        logger.info(`Backlink scan: ${aged.length} unevaluated loss(es) older than 90 days aged out of recovery (stamped)`);
+        logger.info(`Backlink scan: ${aged.length} loss(es) older than 90 days aged out (recovery and/or alert obligations closed in the ledger)`);
       }
       const rollup = await this.domainLevelLosses(lostLinks.concat(owed));
       lostDomains = rollup.filter(d => !d.stillLinking);
