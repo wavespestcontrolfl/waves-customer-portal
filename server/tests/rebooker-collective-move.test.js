@@ -834,6 +834,14 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     expect(planCadenceExceptions(parent, rows)).toEqual({ planned: [], ambiguous: true });
   });
 
+  test('the cadence-deviation backfill leaves a row whose ONLY logged date moves were auto_dispatch to regenerate (optimizer placement is not intent); unlogged and manually-moved rows are stamped', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8');
+    const loop = src.slice(src.indexOf('const plannedIds = plan.planned.map((entry) => entry.id);'), src.indexOf("date_exception_source: 'backfill_cadence'"));
+    expect(loop).toContain(".whereRaw('original_date <> new_date')");
+    expect(loop).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch')) optimizerOnly.add(id);");
+    expect(loop).toContain('if (optimizerOnly.has(String(entry.id))) {');
+  });
+
   test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {
     expect(planCadenceExceptions(parent, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: dayOffset(19) }])).toEqual({ planned: [], ambiguous: true });
     expect(planCadenceExceptions({ ...parent, recurring_pattern: null }, [{ id: 'a', scheduled_date: BASE }, { id: 'b', scheduled_date: SIB1 }])).toEqual({ planned: [], ambiguous: false });
@@ -879,6 +887,12 @@ describe('caller wiring (source)', () => {
     expect(body).toContain("if (synced === 'stale') {");
     expect(body).toContain('seriesReminderGuards.push(...ownedGuards(occurrenceGuards));');
     expect(body).toContain('const closeIds = ownedOccurrences()');
+    // The text and the close are separate recorded steps: customer_notified is written BEFORE the close is attempted, a failed close leaves notified_at NULL, and a retry with the text already out redoes ONLY the close.
+    expect(body).toContain('await recordCustomerNotified();\n            await closeSeriesReminders();');
+    expect(body).toContain('} else if (notify && markers.customer_notified === true) {');
+    expect(body).toContain('const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});');
+    expect(body).toContain("if (!closed) {");
+    expect(disp.slice(disp.indexOf('async function markRescheduleReminderNotified('), disp.indexOf('// Snapshot the reminder rows THIS request just synced'))).toContain('return outcome !== null && outcome !== undefined;');
     expect(body).toContain('await rearmRescheduleReminderWindows(guardsForRearm, ownedOccurrences().map((occurrence) => ({');
     // A retry pass re-arms guarded on a fresh, owned snapshot — not unguarded over every occurrence.
     expect(body).toContain('const retryGuards = ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));');
@@ -902,7 +916,7 @@ describe('caller wiring (source)', () => {
     const body = disp.slice(fn, disp.indexOf('async function reconcileSeriesMoveEffects('));
     expect(body).toContain('definitiveNonSend = sendOutcome.lastDeferred !== true && sendOutcome.retryable !== true;');
     expect(body).toContain('.filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));');
-    expect(body).toContain('await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});');
+    expect(body).toContain('const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});');
   });
 
   test('auto-dispatch hard-codes seriesPolicy single on its own move — never a caller convention', () => {

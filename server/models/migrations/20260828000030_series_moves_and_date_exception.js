@@ -146,7 +146,36 @@ async function backfillCadenceDeviations(knex) {
       console.log(`[20260828000030] series ${parent.id}: no cadence origin explains a majority of its ${rows.length} rows — ${preserved} live row(s) preserved at their own dates`);
       continue;
     }
+    // Optimizer placement is not customer intent (the rebooker never stamps
+    // an auto-dispatch nudge as an exception): a row whose ONLY logged date
+    // moves were initiated by auto_dispatch sits off cadence because the
+    // optimizer put it there — it is regenerated from cadence, not
+    // preserved. Rows with no log at all (pre-lane Edit-appointment moves)
+    // and rows with any manual move stay in the plan (hook r16 P1).
+    const plannedIds = plan.planned.map((entry) => entry.id);
+    const optimizerOnly = new Set();
+    if (plannedIds.length) {
+      const moveLogs = await knex('reschedule_log')
+        .whereIn('scheduled_service_id', plannedIds)
+        .whereNotNull('original_date')
+        .whereNotNull('new_date')
+        .whereRaw('original_date <> new_date')
+        .select('scheduled_service_id', 'initiated_by');
+      const byService = new Map();
+      for (const log of moveLogs) {
+        const list = byService.get(String(log.scheduled_service_id)) || [];
+        list.push(String(log.initiated_by || ''));
+        byService.set(String(log.scheduled_service_id), list);
+      }
+      for (const [id, initiators] of byService) {
+        if (initiators.length && initiators.every((who) => who === 'auto_dispatch')) optimizerOnly.add(id);
+      }
+    }
     for (const entry of plan.planned) {
+      if (optimizerOnly.has(String(entry.id))) {
+        console.log(`[20260828000030] series ${parent.id}: row ${entry.id} sits off cadence from auto-dispatch placement only — left to regenerate`);
+        continue;
+      }
       // Only live upcoming rows are stamped (the WHERE repeats the guard).
       stamped += await knex('scheduled_services')
         .where({ id: entry.id, date_exception: false })

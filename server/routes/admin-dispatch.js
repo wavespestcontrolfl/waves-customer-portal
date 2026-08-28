@@ -13585,13 +13585,18 @@ async function syncRescheduleReminder(serviceId, date, window, { willNotify = fa
   }
 }
 
+// Returns true when the close ran (markRescheduleNoticeSent swallows its
+// own errors and resolves null — that is a failed close, reported false);
+// single-visit callers ignore it, the series effects retry on it.
 async function markRescheduleReminderNotified(serviceIds, options = {}) {
   try {
     const AppointmentReminders = require('../services/appointment-reminders');
-    await AppointmentReminders.markRescheduleNoticeSent(serviceIds, options);
+    const outcome = await AppointmentReminders.markRescheduleNoticeSent(serviceIds, options);
+    return outcome !== null && outcome !== undefined;
   } catch (err) {
     const count = Array.isArray(serviceIds) ? serviceIds.length : 1;
     logger.warn(`[dispatch] Reschedule SMS sent for ${count} appointment(s), but reminder notice sync failed: ${err.message}`);
+    return false;
   }
 }
 
@@ -14210,9 +14215,59 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
     // newer rows, and could send a stale notice months later if eligibility
     // ever changed.
     let definitiveNonSend = false;
+    // The text and the reminder close are recorded as SEPARATE steps:
+    // customer_notified = the series text went out (written before the
+    // close is attempted); notified_at = the effect CONCLUDED, close
+    // included. markRescheduleNoticeSent swallows its own errors, so a
+    // close that fails must leave notified_at NULL for the reconciler to
+    // redo the close — and only the close: a row with customer_notified
+    // already true never sends again (hook r16 P1).
+    const recordCustomerNotified = async () => {
+      if (!seriesMoveId) return;
+      try {
+        const stamped = await ownedRow(db('series_moves')).update({ customer_notified: true });
+        if (Number(stamped) === 0) logger.warn(`[dispatch] series_moves customer_notified stamp lost the lease for ${seriesMoveId}`);
+      } catch (err) {
+        logger.warn(`[dispatch] series_moves customer_notified stamp failed for ${seriesMoveId}: ${err.message}`);
+      }
+    };
+    // Guarded close: each reminder row is closed only if it still carries
+    // the state THIS pass synced (or, on a retry pass, the state read just
+    // before the close) — a row a concurrent reschedule moved on keeps its
+    // own flags.
+    const closeSeriesReminders = async () => {
+      const closeGuards = seriesReminderGuards.length
+        ? seriesReminderGuards
+        : ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
+      const guardsByServiceId = Array.isArray(closeGuards)
+        ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
+        : null;
+      // Only the occurrences still on this move's slot close — an id
+      // absent from the guard map closes UNGUARDED, so a stale one must
+      // leave the list, not just the map — and when a snapshot exists at
+      // all, only ids IN it close: a per-occurrence snapshot failure
+      // (partial map) must not turn into an unguarded close of that
+      // occurrence over a newer reschedule (codex r9 P2). An occurrence
+      // with no reminder row has nothing to close anyway.
+      const closeIds = ownedOccurrences()
+        .map((occurrence) => occurrence.id)
+        .filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));
+      const closed = await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});
+      if (!closed) {
+        logger.warn(`[dispatch] series move ${seriesMoveId || serviceId}: reminder close failed after the series text — notified_at left unstamped for the reconciler to redo the close`);
+        return false;
+      }
+      await stampMarker('notified_at', { customer_notified: true });
+      return true;
+    };
     if (notify && markers.notified_at) {
       notificationSent = markers.customer_notified === true;
       if (!notificationSent) notificationError = 'notification concluded earlier without a send';
+    } else if (notify && markers.customer_notified === true) {
+      // The text went out on an earlier pass that died (or failed) before
+      // the close concluded — redo the close only.
+      notificationSent = true;
+      await closeSeriesReminders();
     } else if (notify) {
       // Recipient routing, opt-in/opt-out and service-contact delivery come
       // from the shared appointment sender (AppointmentReminders.
@@ -14293,28 +14348,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             definitiveNonSend = sendOutcome.lastDeferred !== true && sendOutcome.retryable !== true;
           }
           if (notificationSent) {
-            // Guarded close: each reminder row is closed only if it still
-            // carries the state THIS pass synced (or, on a retry pass, the
-            // state read just before the send) — a row a concurrent
-            // reschedule moved on keeps its own flags.
-            const closeGuards = seriesReminderGuards.length
-              ? seriesReminderGuards
-              : ownedGuards(await captureReminderGuards(ownedOccurrences().map((occurrence) => occurrence.id)));
-            const guardsByServiceId = Array.isArray(closeGuards)
-              ? Object.fromEntries(closeGuards.map((g) => [g.scheduledServiceId, { appointmentTime: g.appointmentTime, updatedAt: g.updatedAt }]))
-              : null;
-            // Only the occurrences still on this move's slot close — an id
-            // absent from the guard map closes UNGUARDED, so a stale one
-            // must leave the list, not just the map — and when a snapshot
-            // exists at all, only ids IN it close: a per-occurrence snapshot
-            // failure (partial map) must not turn into an unguarded close of
-            // that occurrence over a newer reschedule (codex r9 P2). An
-            // occurrence with no reminder row has nothing to close anyway.
-            const closeIds = ownedOccurrences()
-              .map((occurrence) => occurrence.id)
-              .filter((id) => !guardsByServiceId || Object.prototype.hasOwnProperty.call(guardsByServiceId, id));
-            await markRescheduleReminderNotified(closeIds, guardsByServiceId ? { guardsByServiceId } : {});
-            await stampMarker('notified_at', { customer_notified: true });
+            // The send is recorded BEFORE the close is attempted, so a
+            // pass that dies or fails between the two is redone as a
+            // close-only pass, never as a second text.
+            await recordCustomerNotified();
+            await closeSeriesReminders();
           }
         } catch (err) {
           notificationError = err.message;
