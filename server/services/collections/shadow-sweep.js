@@ -93,7 +93,10 @@ async function fileProposalCard({ dedupeKey, customer, caseRow, invoice, invoice
   const invoiceLines = invoices.length > 1
     ? [
         `Invoices (${invoices.length}) - $${amountDollars} open balance; the oldest is ${daysOverdue} days past due:`,
-        ...invoices.map((inv) => `  ${inv.invoice_number || inv.id} - $${Number(invoiceAmountDue(inv)).toFixed(2)} (${daysOverdueOn(now, dueValueOf(inv))} days past due)`),
+        ...invoices.map((inv) => {
+          const days = daysOverdueOn(now, dueValueOf(inv));
+          return `  ${inv.invoice_number || inv.id} - $${Number(invoiceAmountDue(inv)).toFixed(2)} (${days > 0 ? `${days} days past due` : 'not yet due'})`;
+        }),
       ]
     : [`Invoice: ${invoiceRef} - $${amountDollars} open balance, ${daysOverdue} days past due.`];
 
@@ -287,6 +290,9 @@ async function runShadowSweep({ now = new Date() } = {}) {
       const idempotencyKey = `collections:${customerId}:${caseVersion}:${tier}`;
       const patch = {
         eligible_invoice_ids: JSON.stringify(invoiceIds),
+        // The per-invoice remainder the operator approves (origination holds
+        // the dial to exactly these line items).
+        eligible_invoice_cents: JSON.stringify(verdict.eligibleInvoiceCents || {}),
         eligible_balance_snapshot: verdict.eligibleBalanceCents,
         earliest_due_date: etCalendarDayOf(dueValue),
         case_version: caseVersion,

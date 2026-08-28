@@ -37,8 +37,6 @@ const ContactPolicy = require('../contact-policy');
 const ContactLedger = require('../contact-ledger');
 const { normalizeE164 } = require('../consent-provenance');
 const { isVoiceLatePaymentEnabled } = require('./gates');
-const { anchorInvoiceOf, dueValueOf, daysOverdueOn, dunningTierForOverdue } = require('../account-anchor');
-const { etCalendarDayOf } = require('../../../utils/datetime-et');
 
 const CALL_SOURCE = 'collections_voice';
 
@@ -47,6 +45,15 @@ function sortedIds(value) {
     ? value
     : (() => { try { return JSON.parse(value || '[]'); } catch { return []; } })();
   return arr.map(String).sort();
+}
+
+// jsonb {invoiceId: cents} as stored (object) or as a string; null when the
+// case predates the column or the map is empty/unparseable.
+function parseCentsMap(value) {
+  let map = value;
+  if (typeof map === 'string') { try { map = JSON.parse(map); } catch { return null; } }
+  if (!map || typeof map !== 'object' || Array.isArray(map) || !Object.keys(map).length) return null;
+  return map;
 }
 
 async function setCaseState(caseRow, patch, { fromState = 'approved' } = {}) {
@@ -142,18 +149,35 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
   const approvedIds = sortedIds(caseRow.eligible_invoice_ids);
   const liveSet = new Set(liveIds);
   const liveCents = verdict.eligibleInvoiceCents || {};
+  // The approval was for a TIER too (the idempotency key's suffix = the
+  // register Sandy speaks). An approval lives up to 24h, so an account can
+  // cross 30/60 days with NO invoice change (gh r1), and a joining invoice
+  // older than the anchor moves the clock — either way cancel and let the
+  // sweep re-propose at the right tier. Checked on EVERY origination.
+  const approvedTier = Number(String(caseRow.idempotency_key || '').split(':').pop());
+  const liveTier = verdict.eligibleAccountTier;
+  if (liveTier !== approvedTier) {
+    await setCaseState(caseRow, {
+      current_state: 'cancelled',
+      hold_reason: `predial_tier_changed: approved ${approvedTier}, live ${liveTier}`,
+    });
+    return { dialed: false, reason: 'snapshot_changed' };
+  }
   const approvedStillOpen = approvedIds.every((id) => liveSet.has(id));
-  // The APPROVED invoices' own remainder must still equal the snapshot
-  // (hook P1): a covered invoice paid down while a new one joined would
-  // otherwise read as net growth and dial on an approval for a different
-  // balance. Growth is only ever NEW invoices joining.
-  const approvedRemainderCents = approvedIds.reduce((sum, id) => sum + Number(liveCents[id] || 0), 0);
-  const approvedChanged = approvedRemainderCents !== Number(caseRow.eligible_balance_snapshot);
+  // Every APPROVED invoice's own remainder must be unchanged (gh r1):
+  // offsetting edits (one paid down, another edited up) leave the aggregate
+  // intact but the line items Sandy names are not what was approved. Cases
+  // approved before eligible_invoice_cents existed fall back to the
+  // aggregate compare — there is no per-invoice snapshot to hold them to.
+  const approvedCents = parseCentsMap(caseRow.eligible_invoice_cents);
+  const approvedChanged = approvedCents
+    ? approvedIds.some((id) => Number(liveCents[id] || 0) !== Number(approvedCents[id] || 0))
+    : approvedIds.reduce((sum, id) => sum + Number(liveCents[id] || 0), 0) !== Number(caseRow.eligible_balance_snapshot);
   const setChanged = JSON.stringify(liveIds) !== JSON.stringify(approvedIds);
   if (!approvedStillOpen || approvedChanged) {
-    // A covered invoice was paid/credited/reassigned since approval — the
-    // approval was for a DIFFERENT balance; never dial on it. Cancel and
-    // let the sweep regenerate a fresh proposal card.
+    // A covered invoice was paid/credited/reassigned/edited since approval —
+    // the approval was for DIFFERENT line items; never dial on it. Cancel
+    // and let the sweep regenerate a fresh proposal card.
     await setCaseState(caseRow, {
       current_state: 'cancelled',
       hold_reason: !approvedStillOpen ? 'predial_invoice_set_changed' : 'predial_balance_changed',
@@ -161,28 +185,16 @@ async function originateCollectionCall(caseId, { now = new Date(), clock = () =>
     return { dialed: false, reason: 'snapshot_changed' };
   }
   if (setChanged) {
-    // The balance only GREW — a new invoice joined the account (owner ruling
-    // 2026-08-28: new invoices join the existing balance silently). The
-    // approval was for a TIER too (the idempotency key's suffix = the
-    // register Sandy will speak): a joining invoice OLDER than the approved
-    // anchor moves the clock, and a call approved as friendly must never go
-    // out firm (hook r3 P1) — cancel and let the sweep re-propose at the
-    // right tier. Same tier ⇒ re-snapshot ids/balance/anchor date and proceed.
-    const liveRows = await db('invoices').whereIn('id', liveIds).select('id', 'due_date', 'created_at');
-    const anchor = anchorInvoiceOf(liveRows);
-    const liveTier = anchor ? dunningTierForOverdue(daysOverdueOn(now, dueValueOf(anchor))) : null;
-    const approvedTier = Number(String(caseRow.idempotency_key || '').split(':').pop());
-    if (!anchor || liveTier !== approvedTier) {
-      await setCaseState(caseRow, {
-        current_state: 'cancelled',
-        hold_reason: `predial_tier_changed: approved ${approvedTier}, live ${liveTier}`,
-      });
-      return { dialed: false, reason: 'snapshot_changed' };
-    }
+    // The balance only GREW, same tier — a new invoice joined the account
+    // (owner ruling 2026-08-28: new invoices join the existing balance
+    // silently). Re-snapshot the case so the disclosed figure and the pay
+    // link cover the whole account, then proceed. Fenced like every other
+    // pre-claim write.
     const resnapped = await setCaseState(caseRow, {
       eligible_invoice_ids: JSON.stringify(liveIds),
+      eligible_invoice_cents: JSON.stringify(liveCents),
       eligible_balance_snapshot: verdict.eligibleBalanceCents,
-      earliest_due_date: etCalendarDayOf(dueValueOf(anchor)),
+      earliest_due_date: verdict.eligibleAnchorDueDate || null,
     });
     if (!resnapped) return { dialed: false, reason: 'dial_claim_lost' };
     caseRow.eligible_invoice_ids = liveIds;

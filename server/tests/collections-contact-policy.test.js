@@ -455,6 +455,19 @@ describe('voice pilot caps (purpose late_payment)', () => {
     expect(result.eligibleInvoiceIds.sort()).toEqual(['inv-1', 'inv-new']);
     expect(result.eligibleBalanceCents).toBe(12800 + 4455);
     expect(result.eligibleInvoiceCents).toEqual({ 'inv-1': 12800, 'inv-new': 4455 }); // per-invoice remainder for the pre-dial drift check
+    expect(result.eligibleAccountTier).toBe(14); // the anchor's tier = the register origination holds the approval to
+    expect(result.eligibleAnchorDueDate).toBe('2026-07-22');
+  });
+
+  test('an INCOMPLETE account read (a dropped unprovable row, or the candidate bound) denies the call — a partial total is never "the total"', async () => {
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => { opts.onResolveFailure(); return [invoiceRow()]; });
+    expect((await evalVoice()).denialReasons).toContain('balance_read_incomplete');
+    armAllowedBaseline();
+    openBalanceInvoices.mockImplementationOnce(async (id, opts) => { opts.onTruncation(); return [invoiceRow()]; });
+    expect((await evalVoice()).denialReasons).toContain('balance_read_incomplete');
+    armAllowedBaseline();
+    expect((await evalVoice()).denialReasons).not.toContain('balance_read_incomplete');
   });
 
   test('a customer whose ONLY open invoice is 4 days old is not called (anchor too young)', async () => {

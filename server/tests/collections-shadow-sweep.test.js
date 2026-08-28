@@ -162,22 +162,27 @@ describe('case + card creation', () => {
 
   test('a multi-invoice account files ONE card that itemizes every invoice behind the total, oldest-due first', async () => {
     const second = { id: 'inv-2', invoice_number: 'WPC-2026-1101', title: 'Lawn Care', total: '44.55', credit_applied: 0, due_date: '2026-08-05', created_at: '2026-07-20T12:00:00.000Z' };
-    ContactPolicy.evaluate.mockResolvedValueOnce({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-2', 'inv-1'], eligibleBalanceCents: 12800 + 4455 });
+    const future = { id: 'inv-3', invoice_number: 'WPC-2026-1102', title: 'Mosquito', total: '20.00', credit_applied: 0, due_date: '2026-08-20', created_at: '2026-08-06T12:00:00.000Z' }; // not yet due on Aug 12
+    ContactPolicy.evaluate.mockResolvedValueOnce({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-2', 'inv-1', 'inv-3'], eligibleBalanceCents: 12800 + 4455 + 2000, eligibleInvoiceCents: { 'inv-2': 4455, 'inv-1': 12800, 'inv-3': 2000 } });
+    const caseInsert = chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 19255 }, chain({ result: [] })] });
     setDbQueues({
-      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [second, INVOICE] })], // loader order ≠ due order
+      invoices: [chain({ result: [{ customer_id: 'cust-1' }] }), chain({ result: [second, future, INVOICE] })], // loader order ≠ due order
       customers: [chain({ first: CUSTOMER })],
-      collection_cases: [chain({ result: [] }), chain({ first: undefined }), chain({ returning: [{ id: 'case-1', case_version: 1, eligible_balance_snapshot: 17255 }, chain({ result: [] })] })],
+      collection_cases: [chain({ result: [] }), chain({ first: undefined }), caseInsert],
       notifications: [chain({ result: 1 }), chain({ first: null })],
     });
     await ShadowSweep.runShadowSweep({ now: NOW });
 
     const [, title, body] = NotificationService.notifyAdmin.mock.calls[0];
-    expect(title).toContain('$172.55');
-    expect(body).toContain('Invoices (2) - $172.55 open balance; the oldest is 21 days past due:');
+    expect(title).toContain('$192.55');
+    expect(body).toContain('Invoices (3) - $192.55 open balance; the oldest is 21 days past due:');
+    expect(body).toMatch(/WPC-2026-1102 - \$20\.00 \(not yet due\)/); // never "-8 days past due"
+    expect(body).not.toMatch(/-\d+ days/);
     expect(body).toMatch(/WPC-2026-1100 - \$128\.00 \(21 days past due\)/);
     expect(body).toMatch(/WPC-2026-1101 - \$44\.55 \(7 days past due\)/);
+    expect(caseInsert.insert).toHaveBeenCalledWith(expect.objectContaining({ eligible_invoice_cents: JSON.stringify({ 'inv-2': 4455, 'inv-1': 12800, 'inv-3': 2000 }) })); // per-invoice approval snapshot
     expect(body.indexOf('WPC-2026-1100')).toBeLessThan(body.indexOf('WPC-2026-1101'));
-    expect(body).toContain('open balance of $172.55 across 2 invoices, the oldest for your Quarterly Pest Control service');
+    expect(body).toContain('open balance of $192.55 across 3 invoices, the oldest for your Quarterly Pest Control service');
     expect(`${title}\n${body}`).not.toMatch(/collection|delinquen/i);
   });
 

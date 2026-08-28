@@ -63,8 +63,9 @@ const CASE = {
   approved_at: new Date('2026-08-12T13:00:00Z'),
   approval_expires_at: new Date('2026-08-13T13:00:00Z'),
   eligible_invoice_ids: JSON.stringify(['inv-1']),
+  eligible_invoice_cents: JSON.stringify({ 'inv-1': 25800 }),
   eligible_balance_snapshot: 25800,
-  idempotency_key: 'collections:cust-1:3:14',
+  idempotency_key: 'collections:cust-1:3:14', // approved at tier 14 (friendly)
 };
 const CUSTOMER = { id: 'cust-1', phone: '9415551234', deleted_at: null };
 const ALLOWED_VERDICT = {
@@ -73,6 +74,8 @@ const ALLOWED_VERDICT = {
   eligibleInvoiceIds: ['inv-1'],
   eligibleBalanceCents: 25800,
   eligibleInvoiceCents: { 'inv-1': 25800 },
+  eligibleAccountTier: 14,
+  eligibleAnchorDueDate: '2026-07-22',
 };
 
 const calls = [];
@@ -191,14 +194,13 @@ test('a new invoice joining the account re-snapshots the case pre-dial and the c
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), resnap],
     customers: [chain('customers', { first: CUSTOMER }), chain('customers', { first: CUSTOMER })],
-    // The joining invoice is YOUNGER than the approved anchor (due 07-22 → 21d → tier 14, the key's suffix).
-    invoices: [chain('invoices', { result: [{ id: 'inv-2', due_date: '2026-08-05', created_at: '2026-07-20T12:00:00Z' }, { id: 'inv-1', due_date: '2026-07-22', created_at: '2026-07-01T12:00:00Z' }] })],
     call_log: [chain('call_log', { first: undefined })],
   });
   const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
   expect(res).toEqual({ dialed: false, reason: 'outside_call_window' }); // got PAST the snapshot gate
   expect(resnap._updated.eligible_invoice_ids).toBe(JSON.stringify(['inv-1', 'inv-2']));
   expect(resnap._updated.eligible_balance_snapshot).toBe(30255);
+  expect(resnap._updated.eligible_invoice_cents).toBe(JSON.stringify({ 'inv-1': 25800, 'inv-2': 4455 }));
   expect(resnap._updated.earliest_due_date).toBe('2026-07-22'); // anchor unchanged
   expect(resnap._updated.current_state).toBeUndefined(); // not cancelled
 });
@@ -207,18 +209,65 @@ test('a new invoice joining the account re-snapshots the case pre-dial and the c
 // clock — the approval was for a tier (friendly/firm/final), so cancel and
 // let the sweep re-propose rather than speak a firmer register unapproved.
 test('a joining invoice that moves the account into a firmer tier ⇒ cancelled (predial_tier_changed), never dialed', async () => {
-  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455, eligibleInvoiceCents: { 'inv-1': 25800, 'inv-2': 4455 } });
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800 + 4455, eligibleInvoiceCents: { 'inv-1': 25800, 'inv-2': 4455 }, eligibleAccountTier: 30, eligibleAnchorDueDate: '2026-06-20' });
   const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
   setDb({
     collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
     customers: [chain('customers', { first: CUSTOMER })],
-    invoices: [chain('invoices', { result: [{ id: 'inv-1', due_date: '2026-07-22' }, { id: 'inv-2', due_date: '2026-06-20' }] })], // 53d → tier 30 ≠ approved 14
   });
   const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
   expect(res).toEqual({ dialed: false, reason: 'snapshot_changed' });
   expect(stateChain._updated.current_state).toBe('cancelled');
   expect(stateChain._updated.hold_reason).toBe('predial_tier_changed: approved 14, live 30');
   expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
+// GH r1: an approval lives up to 24h — the SAME set can cross a tier with
+// no invoice or balance change (approved at 29 days, dialed at 30).
+test('the same invoice set crossing into a firmer tier before the dial ⇒ cancelled (predial_tier_changed)', async () => {
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleAccountTier: 30 });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: { ...CASE } }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+  expect(res).toEqual({ dialed: false, reason: 'snapshot_changed' });
+  expect(stateChain._updated.hold_reason).toBe('predial_tier_changed: approved 14, live 30');
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
+// GH r1: offsetting edits keep ids AND the aggregate — the per-invoice
+// snapshot is what the dial is held to.
+test('offsetting per-invoice changes with an unchanged aggregate ⇒ cancelled (predial_balance_changed)', async () => {
+  const twoApproved = {
+    ...CASE,
+    eligible_invoice_ids: JSON.stringify(['inv-1', 'inv-2']),
+    eligible_invoice_cents: JSON.stringify({ 'inv-1': 20000, 'inv-2': 5800 }),
+  };
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleInvoiceIds: ['inv-1', 'inv-2'], eligibleBalanceCents: 25800, eligibleInvoiceCents: { 'inv-1': 15000, 'inv-2': 10800 } });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: twoApproved }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW, clock: () => NOW });
+  expect(res).toEqual({ dialed: false, reason: 'snapshot_changed' });
+  expect(stateChain._updated.hold_reason).toBe('predial_balance_changed');
+  expect(mockCallsCreate).not.toHaveBeenCalled();
+});
+
+test('a case approved before eligible_invoice_cents existed falls back to the aggregate compare', async () => {
+  const legacy = { ...CASE, eligible_invoice_cents: null };
+  ContactPolicy.evaluate.mockResolvedValue({ ...ALLOWED_VERDICT, eligibleBalanceCents: 19900, eligibleInvoiceCents: { 'inv-1': 19900 } });
+  const stateChain = chain('collection_cases', { returningRows: [{ id: 'case-1' }] });
+  setDb({
+    collection_cases: [chain('collection_cases', { first: legacy }), stateChain],
+    customers: [chain('customers', { first: CUSTOMER })],
+  });
+  const res = await originateCollectionCall('case-1', { now: NOW });
+  expect(res.reason).toBe('snapshot_changed');
+  expect(stateChain._updated.hold_reason).toBe('predial_balance_changed');
 });
 
 // Hook P1: net GROWTH must not hide a payment on an approved invoice — the

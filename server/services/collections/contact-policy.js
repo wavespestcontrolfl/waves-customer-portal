@@ -18,7 +18,7 @@
  *   pilot_not_overdue_long_enough (account clock = OLDEST unpaid invoice),
  *   pilot_overdue_too_long, pilot_insufficient_dunning_history,
  *   customer_prefers_spanish,
- *   pilot_awaiting_microdeposit_verification,
+ *   pilot_awaiting_microdeposit_verification, balance_read_incomplete,
  *   line_type_unknown, line_type_not_mobile, commercial_customer,
  *   consent_no_evidence, rnd_check_required,
  *   policy_evaluation_error
@@ -28,9 +28,9 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { openBalanceInvoices } = require('../open-balance');
 const { invoiceAmountDue } = require('../invoice-helpers');
-const { etParts } = require('../../utils/datetime-et');
+const { etParts, etCalendarDayOf } = require('../../utils/datetime-et');
 const ConsentProvenance = require('./consent-provenance');
-const { anchorInvoiceOf, accountDaysOverdue } = require('./account-anchor');
+const { anchorInvoiceOf, accountDaysOverdue, dunningTierForOverdue, dueValueOf } = require('./account-anchor');
 
 const CHANNELS = new Set(['sms', 'email', 'voice', 'manual_call']);
 
@@ -190,8 +190,15 @@ async function deliveredDunningTouches(invoice) {
 // account was settled because it read a different loader). Open-balance
 // rows + legacy 'unpaid' (same predicates, same self-pay authority) minus
 // admin-stopped sequences (fail closed on a check error).
-async function loadEligibleInvoices(customerId) {
-  const eligible = await openBalanceInvoices(customerId);
+// `onIncomplete(reason)` fires when open-balance DROPPED a row it could not
+// prove (payer resolve failure) or hit its candidate bound — the survivors
+// then UNDERSTATE the account; a caller presenting the total as definitive
+// (the voice disclosure) must fail closed rather than call it "the total".
+async function loadEligibleInvoices(customerId, { onIncomplete = null } = {}) {
+  const eligible = await openBalanceInvoices(customerId, {
+    onResolveFailure: () => { if (onIncomplete) onIncomplete('payer resolve failed'); },
+    onTruncation: () => { if (onIncomplete) onIncomplete('candidate bound hit'); },
+  });
   const legacyUnpaid = await db('invoices')
     .where({ customer_id: customerId, status: 'unpaid' })
     .whereNull('payer_id')
@@ -228,6 +235,8 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     eligibleInvoiceIds: [],
     eligibleBalanceCents: 0,
     eligibleInvoiceCents: {}, // per-invoice remainder, keyed by id
+    eligibleAccountTier: null, // dunning tier of the OLDEST-due eligible invoice (the register)
+    eligibleAnchorDueDate: null, // its ET due day
     nextEligibleAt: null,
     consentEvidence: null,
     activeHolds: [],
@@ -279,7 +288,8 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // 'processing', which the loader above already excludes (it admits only
     // sent/viewed/overdue), same as paid/void/draft; credit-covered rows
     // fall to its cents test.
-    const eligible = await loadEligibleInvoices(customerId);
+    let balanceIncomplete = null;
+    const eligible = await loadEligibleInvoices(customerId, { onIncomplete: (reason) => { balanceIncomplete = reason; } });
     // (loader: open-balance + legacy 'unpaid' + stopped-sequence filter —
     // extracted so dial-time disclosure shares the SAME authority, codex
     // prb-r1.) Historical rationale for the arms lives on the loader.
@@ -289,6 +299,11 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       eligible.map((inv) => [String(inv.id), Math.round(invoiceAmountDue(inv) * 100)]),
     );
     result.eligibleBalanceCents = Object.values(result.eligibleInvoiceCents).reduce((sum, c) => sum + c, 0);
+    if (eligible.length) {
+      const anchor = anchorInvoiceOf(eligible);
+      result.eligibleAccountTier = dunningTierForOverdue(accountDaysOverdue(now, eligible));
+      result.eligibleAnchorDueDate = etCalendarDayOf(dueValueOf(anchor));
+    }
     // Dues-only carve-out (codex 2026-08-14 P1): the previsit rail
     // legitimately reminds about late MONTHLY-MEMBERSHIP DUES with zero
     // open invoices — dues aren't invoiced until collected. The caller
@@ -474,6 +489,10 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
     // ── Automated-voice-only checks ─────────────────────────────────────
     if (channel === 'voice') {
       if (purpose === 'late_payment') {
+        // An account read that dropped an unprovable row or hit the bound is
+        // not "the total" — the call would disclose a partial balance as the
+        // whole. Fail closed (gh r1).
+        if (balanceIncomplete) deny('balance_read_incomplete');
         // ACCOUNT-LEVEL (owner ruling 2026-08-28): every open self-pay invoice
         // is collected as ONE balance; the clock is the OLDEST unpaid
         // invoice's due date. (The single-invoice pilot rule is gone.)

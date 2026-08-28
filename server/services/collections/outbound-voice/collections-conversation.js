@@ -54,6 +54,17 @@ const flags = require('./flags');
 const { invoiceAmountDue } = require('../../invoice-helpers');
 const { anchorInvoiceOf, orderByDue, dueValueOf, daysOverdueOn, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
 
+// The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
+// CLAIMS these statuses (SEND_CLAIMABLE_STATUSES in services/invoice.js —
+// module-private). The eligible set also admits legacy 'unpaid' rows, which
+// the send path would refuse after the customer already agreed (gh r1) —
+// the link rides the oldest-due SENDABLE invoice instead; the dunning clock
+// still anchors on the oldest-due invoice of any status.
+const LINK_SENDABLE_STATUSES = new Set(['draft', 'scheduled', 'sent', 'viewed', 'overdue']);
+function linkAnchorOf(invoices = []) {
+  return orderByDue(invoices).find((inv) => LINK_SENDABLE_STATUSES.has(String(inv.status || ''))) || null;
+}
+
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
 const MAX_TOOL_ROUNDS = 4;
@@ -394,7 +405,7 @@ class CollectionsConversation {
         // (gh prb-r5 + hook r2): the balance disclosed in-call is computed
         // from it, and a link to a snapshot invoice paid since dialing would
         // contradict the spoken figure. Snapshot ids stay on the case row.
-        invoiceId: anchorInvoiceOf(eligibleInvoices)?.id || null,
+        invoiceId: linkAnchorOf(eligibleInvoices)?.id || null,
       };
       return true;
     } catch (err) {
@@ -735,7 +746,7 @@ class CollectionsConversation {
     // dunning-stopped rows). Ask the SAME selector /pay uses (hook r2 P1):
     // what she promises and what the ledger records is what the link would
     // actually collect. Any failure degrades to the anchor alone.
-    const anchor = anchorInvoiceOf(invoices);
+    const anchor = linkAnchorOf(invoices);
     let payLinkInvoiceIds = anchor ? [String(anchor.id)] : [];
     if (anchor && invoices.length > 1) {
       try {
@@ -1077,13 +1088,20 @@ class CollectionsConversation {
     // contradicted. Fail closed: an unreadable balance discloses nothing.
     try {
       const { loadEligibleInvoices } = require('../contact-policy');
-      const fresh = await loadEligibleInvoices(this._ctx.customer.id);
+      // A read that DROPPED an unprovable row or hit the bound understates
+      // the account (gh r1): never present the survivors as "the total".
+      let incomplete = null;
+      const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+      if (incomplete) {
+        logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
+        return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
+      }
       this._ctx.balance = {
         total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
         count: fresh.length,
         invoices: fresh,
       };
-      this._ctx.invoiceId = anchorInvoiceOf(fresh)?.id || null;
+      this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
       Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
@@ -1519,13 +1537,23 @@ class CollectionsConversation {
         // set; anything still open re-opens the latch and re-anchors so a
         // second send_pay_link collects the remainder. Never "settled" on
         // an unproven remainder.
+        // No SMS went out: the reservation above must not stand as a
+        // contact (gh r1) — it would trip the any-channel 24h window on the
+        // retry and suppress other outreach. never_contacted rows are
+        // excluded from the policy's recent-contact read.
+        await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: 'covered_by_credit', never_contacted: true });
         let remaining;
+        let incomplete = null;
         try {
           const { loadEligibleInvoices } = require('../contact-policy');
-          remaining = await loadEligibleInvoices(this._ctx.customer.id);
+          remaining = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
         } catch (err) {
           logger.error(`[collections-voice] balance re-read after credit cover failed callSid=${this.callSid}: ${err.message}`);
           return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be checked. Say the office will follow up — do NOT say the account is settled.';
+        }
+        if (incomplete) {
+          logger.warn(`[collections-voice] balance re-read after credit cover incomplete callSid=${this.callSid}: ${incomplete}`);
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be verified. Say the office will follow up — do NOT say the account is settled.';
         }
         if (!remaining.length) {
           return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
@@ -1535,7 +1563,7 @@ class CollectionsConversation {
           count: remaining.length,
           invoices: remaining,
         };
-        this._ctx.invoiceId = anchorInvoiceOf(remaining)?.id || null;
+        this._ctx.invoiceId = linkAnchorOf(remaining)?.id || null;
         Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, remaining));
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;
