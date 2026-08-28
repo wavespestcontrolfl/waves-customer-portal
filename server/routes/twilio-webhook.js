@@ -338,7 +338,9 @@ router.post('/sms', async (req, res) => {
       // them — write the row already read so the Messages unread dot and
       // the Unread chip only count messages that want an answer.
       isRead: quietReaction || courtesyOnly,
-      messageType: smsReaction ? 'sms_reaction' : undefined,
+      // Loud reactions are typed as ordinary inbound so the unanswered digest
+      // and completion guard count them (codex r3).
+      messageType: quietReaction ? 'sms_reaction' : undefined,
       metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
@@ -636,7 +638,7 @@ router.post('/sms', async (req, res) => {
         customer_id: customer?.id || null,
         direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received',
-        message_type: 'sms_reaction',
+        message_type: quietReaction ? 'sms_reaction' : 'inbound', // loud = ordinary inbound for the watchers
         is_read: quietReaction, // closers read on arrival — mirrors the unified messages row
         metadata: JSON.stringify({
           locationId: numberConfig.locationId,
@@ -654,15 +656,28 @@ router.post('/sms', async (req, res) => {
       }
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
-      if (!quietReaction && customer && !isAiNumber && (numberConfig.type === 'location' || numberConfig.type === 'gbp_tracking')) {
+      if (!quietReaction && !isAiNumber) {
         // Loud reaction (answer to a question, or a dislike/question mark):
-        // ring the same GUARDED thread bell a text gets (pre-check, beforePush,
-        // SID-scoped post-check), then stop — no reschedule/lead/estimator
-        // automation ever sees a tapback. AI toll-free line excluded (hook P1).
-        try {
-          await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
-        } catch (e) {
-          if (!e.alreadyRead) logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+        // same alert lifecycle as a text — guarded thread bell for known
+        // customers on any customer-facing number, legacy owner forward when
+        // the bell didn't land — then stop: no reschedule/lead/estimator
+        // automation ever sees a tapback (codex r2/r3).
+        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking'];
+        let landed = false;
+        if (customer && notifyTypes.includes(numberConfig.type)) {
+          try {
+            const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
+            landed = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+          } catch (e) {
+            if (e.alreadyRead) landed = true;
+            else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+          }
+        }
+        if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+          try {
+            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+            await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
+          } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
         }
       }
       return res.type('text/xml').send('<Response></Response>');
