@@ -236,11 +236,23 @@ function monthFromYmd(ymd) {
 const _forecastCache = new Map();
 const FORECAST_TTL_MS = 6 * 60 * 60 * 1000; // 6h — one cron sweep reuses freely
 
-async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
+/**
+ * Forecast for the PLAN WEEK: from today (ET) through `horizonEnd` (the
+ * plan week's Sunday, YYYY-MM-DD) — never a rolling seven days, so a sweep
+ * retried mid-week sizes the current week from the current week's remaining
+ * days and not from the following week's rain/ET₀ (GH codex r4 on #3565).
+ * Without a horizon the window is seven days from today.
+ */
+async function fetchUpcomingWeekForecast({ latitude, longitude, horizonEnd = null, now = new Date() } = {}) {
   const lat = numberOrNull(latitude);
   const lon = numberOrNull(longitude);
   if (lat == null || lon == null) return null;
-  const key = `${lat.toFixed(2)},${lon.toFixed(2)}`;
+  const startDate = etDateString(now);
+  const endDate = horizonEnd && /^\d{4}-\d{2}-\d{2}$/.test(String(horizonEnd)) && String(horizonEnd) >= startDate
+    ? String(horizonEnd)
+    : etDateString(addETDays(now, 6));
+  const expectedDays = Math.round((Date.UTC(...endDate.split('-').map(Number).map((v, i) => (i === 1 ? v - 1 : v))) - Date.UTC(...startDate.split('-').map(Number).map((v, i) => (i === 1 ? v - 1 : v)))) / 86400000) + 1;
+  const key = `${lat.toFixed(2)},${lon.toFixed(2)}:${startDate}:${endDate}`;
   const cached = _forecastCache.get(key);
   if (cached && Date.now() - cached.at < FORECAST_TTL_MS) return cached.value;
 
@@ -251,7 +263,8 @@ async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
   // sized from the week ahead's demand, not the completed week's (GH codex
   // r3 on #3565).
   url.searchParams.set('daily', 'precipitation_sum,et0_fao_evapotranspiration');
-  url.searchParams.set('forecast_days', '7');
+  url.searchParams.set('start_date', startDate);
+  url.searchParams.set('end_date', endDate);
   url.searchParams.set('precipitation_unit', 'inch');
   url.searchParams.set('timezone', 'America/New_York');
 
@@ -262,9 +275,9 @@ async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
     if (!response.ok) return null;
     const payload = await response.json();
     const days = payload?.daily?.precipitation_sum;
-    // A full 7-day window or nothing — a short array (Open-Meteo can 200 with
-    // a partial series) would understate the week and read as "little rain".
-    if (!Array.isArray(days) || days.length !== 7) return null;
+    // The full window or nothing — a short array (Open-Meteo can 200 with a
+    // partial series) would understate the week and read as "little rain".
+    if (!Array.isArray(days) || days.length !== expectedDays) return null;
     // Every day must be numeric — a partial window would understate the week.
     let total = 0;
     for (const value of days) {
@@ -279,10 +292,10 @@ async function fetchUpcomingWeekForecast({ latitude, longitude } = {}) {
     // by default) — same unit-aware conversion the service-week fetch uses.
     let et0Inches = null;
     const et0Days = payload?.daily?.et0_fao_evapotranspiration;
-    if (Array.isArray(et0Days) && et0Days.length === 7) {
+    if (Array.isArray(et0Days) && et0Days.length === expectedDays) {
       et0Inches = et0SumToInches(sumPrecipInches(et0Days), payload?.daily_units?.et0_fao_evapotranspiration);
     }
-    const value = { rainInches, et0Inches };
+    const value = { rainInches, et0Inches, startDate, endDate, days: expectedDays };
     _forecastCache.set(key, { at: Date.now(), value });
     return value;
   } catch (err) {
@@ -994,6 +1007,8 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
   };
   const weekPlanEnabled = isEnabled('irrigationWeekPlan');
   const planAsOf = now;
+  // Plan-week horizon: the Sunday after the completed week (ET).
+  const planWeekEnd = etDateString(addETDays(new Date(`${weekEnding}T16:00:00Z`), 7));
 
   for (const customer of candidates) {
     if (summary.attempted >= maxSendAttempts) {
@@ -1046,6 +1061,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       const upcoming = await fetchUpcomingWeekForecast({
         latitude: customer.latitude,
         longitude: customer.longitude,
+        // The plan week ends the Sunday after the completed week.
+        horizonEnd: planWeekEnd,
+        now: planAsOf,
       });
       const forecastRainInches = upcoming ? upcoming.rainInches : null;
       const forecastEt0Inches = upcoming ? upcoming.et0Inches : null;

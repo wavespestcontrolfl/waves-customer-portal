@@ -177,15 +177,17 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
         : `Your ${grassLabel} doesn't need a full watering this week`;
     actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on your permitted watering day.`;
   } else if (plan.conditionalOnForecast) {
-    subject = `Rain first, then decide — this week's watering, ${name}`;
-    heading = `Let the rain decide this week, ${name}`;
+    // Timing-neutral: a 7-day total can't promise the rain comes BEFORE the
+    // permitted day, so the subject asks for the check, not the wait.
+    subject = `Check the rain before you water this week, ${name}`;
+    heading = `Check the rain before you water, ${name}`;
     // The forecast is a 7-day total and we do not know the customer's assigned
     // day, so the copy never asserts the rain comes first — it keys the
     // decision on what has actually fallen by the permitted day.
     // Multi-day: each run is judged on the rain since the PREVIOUS run, so one
     // early soaking cancels one run, not the whole week's water.
     actionLine = plan.events > 1
-      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On each of your ${plan.events} permitted watering days: if ½" or more has fallen since your previous run (or since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
+      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On each of your ${plan.events} permitted watering days: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
       : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
@@ -241,16 +243,21 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
     };
   }
   if (plan.action === 'hold') {
+    // Same override cycle the email names — one default-dose event, sized
+    // from the stored fallback (never the customer's own longer cycle).
+    const fallback = plan.fallbackMinutesPerEvent != null
+      ? `one cycle of ${plan.rateSource === 'measured' ? '' : 'about '}${plan.fallbackMinutesPerEvent} minutes per turf zone`
+      : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
     return {
       title: 'This week: skip your turf watering',
-      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run one cycle on your permitted watering day.`,
+      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on your permitted watering day.`,
     };
   }
   if (plan.conditionalOnForecast) {
     return {
       title: 'This week: let the rain go first',
       detail: plan.events > 1
-        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on each of your ${plan.events} permitted watering days, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous run (or since the start of the week, for the first).`
+        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on each of your ${plan.events} permitted watering days, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
         : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on your permitted watering day, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }

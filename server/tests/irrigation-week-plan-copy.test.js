@@ -67,7 +67,8 @@ describe('renderWeekPlanEmail', () => {
   test('conditional: leave the turf irrigation off, run only if < ½" falls', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);
-    expect(copy.plan_subject).toMatch(/^Rain first, then decide/);
+    expect(copy.plan_subject).toBe('Check the rain before you water this week, Jordan');
+    expect(copy.plan_subject).not.toMatch(/rain first/i);
     expect(copy.week_plan).toContain('About 1.4" of rain is in this week\'s forecast');
     expect(copy.week_plan).toContain('leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run one cycle of about 30 minutes per turf zone');
     // A 7-day total can't establish that rain comes BEFORE the assigned day.
@@ -80,9 +81,9 @@ describe('renderWeekPlanEmail', () => {
     const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
     // Each run judged on rain since the previous run — one early soaking
     // cancels one run, not the whole week's water.
-    expect(copy.week_plan).toContain('On each of your 2 permitted watering days: if ½" or more has fallen since your previous run (or since the start of the week, for the first), skip that run; if less than ½" has, run one cycle of about 25 minutes per turf zone');
+    expect(copy.week_plan).toContain('On each of your 2 permitted watering days: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run one cycle of about 25 minutes per turf zone');
     const report = renderWeekPlanReport(plan);
-    expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous run');
+    expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous permitted watering day (skipped or not');
   });
 
   test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
@@ -126,6 +127,8 @@ describe('renderWeekPlanReport', () => {
     expect(run.detail).toContain('On your permitted watering day, about ¾" of water per run — 10 minutes more than you run now');
     const hold = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: ONE_DAY, ...SPRAY }));
     expect(hold.title).toBe('This week: skip your turf watering');
+    // The report's override cycle carries the same fallback minutes the email names.
+    expect(hold.detail).toContain('run one cycle of about 20 minutes per turf zone on your permitted watering day');
     const cond = renderWeekPlanReport(buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY }));
     expect(cond.title).toBe('This week: let the rain go first');
     expect(cond.detail).toContain('only if less than ½" has fallen so far this week');

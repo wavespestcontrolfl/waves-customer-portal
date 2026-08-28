@@ -324,10 +324,21 @@ describe('fetchUpcomingWeekForecast', () => {
   test('a full 7-day window sums to inches', async () => {
     // Under precipitation_unit=inch Open-Meteo reports ET₀ in inches too (daily_units).
     global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2], 'inch'));
-    await expect(fetchUpcomingWeekForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toEqual({ rainInches: 1.2, et0Inches: 1.4 });
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.01, longitude: -81.01 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: 1.4, days: 7 });
     // …and a mm series (no precipitation_unit, or a unit change upstream) is converted, never divided twice.
     global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5.08, 5.08, 5.08, 5.08, 5.08, 5.08, 5.08], 'mm'));
-    await expect(fetchUpcomingWeekForecast({ latitude: 28.06, longitude: -81.06 })).resolves.toEqual({ rainInches: 1.2, et0Inches: 1.4 });
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.06, longitude: -81.06 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: 1.4 });
+    // Bounded to the plan week: a Thursday retry asks for Thu→Sun (4 days), never a rolling 7.
+    const thursday = new Date('2026-08-27T16:00:00Z');
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5], [0.2, 0.2, 0.2, 0.2], 'inch'));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.07, longitude: -81.07, horizonEnd: '2026-08-30', now: thursday })).resolves.toMatchObject({ rainInches: 0.85, et0Inches: 0.8, startDate: '2026-08-27', endDate: '2026-08-30', days: 4 });
+    const url = String(global.fetch.mock.calls[0][0]);
+    expect(url).toContain('start_date=2026-08-27');
+    expect(url).toContain('end_date=2026-08-30');
+    expect(url).not.toContain('forecast_days');
+    // A 7-day answer to a 4-day ask is a window mismatch → null.
+    global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05]));
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.08, longitude: -81.08, horizonEnd: '2026-08-30', now: thursday })).resolves.toBe(null);
     expect(String(global.fetch.mock.calls[0][0])).toContain('daily=precipitation_sum%2Cet0_fao_evapotranspiration');
   });
 
@@ -341,7 +352,7 @@ describe('fetchUpcomingWeekForecast', () => {
     await expect(fetchUpcomingWeekForecast({ latitude: 28.03, longitude: -81.03 })).resolves.toBe(null);
     // A missing/partial ET₀ series leaves et0Inches null without dropping the rain window.
     global.fetch = jest.fn(async () => okJson([0.1, 0, 0.25, 0.5, 0, 0.3, 0.05], [5, 5, 5]));
-    await expect(fetchUpcomingWeekForecast({ latitude: 28.05, longitude: -81.05 })).resolves.toEqual({ rainInches: 1.2, et0Inches: null });
+    await expect(fetchUpcomingWeekForecast({ latitude: 28.05, longitude: -81.05 })).resolves.toMatchObject({ rainInches: 1.2, et0Inches: null });
   });
 
   test('a non-2xx response fails soft to null', async () => {
