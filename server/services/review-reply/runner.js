@@ -238,6 +238,23 @@ async function releaseClaim(row, patch = {}) {
   return (Array.isArray(n) ? n.length : n) > 0;
 }
 
+// Re-stamp OUR claim right before a row's provider work starts (codex r73).
+// claimDueRows stamps every row of a batch at once, but the batch runs
+// serially: behind a slow provider (45s draft deadlines + Google reads and
+// writes per row) the later rows can outlive the 10-minute stamp before their
+// turn, and an expired stamp lets Post now or another runner claim the row
+// while this worker is about to draft it. Token-matched, so a claim lost
+// meanwhile (skip/dismiss, or expiry + re-claim) is detected here — before
+// any LLM work — instead of at the publisher's ownership check.
+async function renewClaim(row, now = new Date()) {
+  const token = new Date(now.getTime() + CLAIM_MS).toISOString();
+  const n = await db('google_reviews')
+    .where({ id: row.id, auto_reply_claimed_until: row._claimToken })
+    .update({ auto_reply_claimed_until: token });
+  if (!((Array.isArray(n) ? n.length : n) > 0)) return null;
+  return { ...row, _claimToken: token };
+}
+
 // Ownership guard evaluated by the publisher INSIDE its publish claim, on a
 // fresh row read: our claim token must still be on the row (an admin skip,
 // a dismissal, or another worker clears/replaces it) and the row must not be
@@ -744,9 +761,18 @@ async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   stats.claimed = rows.length;
   if (!rows.length) return stats;
   const techFirstNames = await loadActiveTechFirstNames();
-  for (const row of rows) {
+  for (const claimed of rows) {
+    let row = claimed;
     try {
-
+      const renewed = await renewClaim(claimed);
+      if (!renewed) {
+        // Our stamp is gone: an admin skipped/dismissed the row, or the batch
+        // outran the claim and someone else now owns it. Their outcome stands.
+        stats.skipped++;
+        logger.info(`[review-auto-reply] row ${claimed.id} claim lost before processing — skipped`);
+        continue;
+      }
+      row = renewed;
       const r = await processClaimedRow(row, { cfg, techFirstNames });
       if (stats[r.outcome] != null) stats[r.outcome]++;
     } catch (err) {
@@ -1494,6 +1520,7 @@ module.exports = {
   rolloutCutoff,
   _resetRolloutCutoffCache: () => { rolloutCutoffCache = undefined; },
   claimDueRows,
+  renewClaim,
   processClaimedRow,
   processDueAutoReplies,
   postNow,

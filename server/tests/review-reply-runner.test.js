@@ -410,6 +410,28 @@ describe('processDueAutoReplies — state machine', () => {
     expect(qb.whereRaw).toHaveBeenCalledWith("NOT COALESCE((auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed')), false)");
   });
 
+  test('batch rows re-stamp their claim just before processing; a lost claim is skipped without drafting (codex r73)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
+    state.rows = [row({ id: 'a' }), row({ id: 'b' })];
+    const [ra, rb] = await Runner.claimDueRows({ limit: 2 });
+    const stamped = rb.auto_reply_claimed_until;
+    // Renewal is token-matched: a foreign token means the claim was lost.
+    expect(await Runner.renewClaim({ ...rb, _claimToken: '2000-01-01T00:00:00.000Z' })).toBeNull();
+    const renewed = await Runner.renewClaim(rb, new Date(Date.now() + 60000));
+    expect(renewed._claimToken).not.toBe(ra._claimToken);
+    expect(new Date(state.rows[1].auto_reply_claimed_until).getTime()).toBeGreaterThan(new Date(stamped).getTime());
+    // Batch path: row a's draft takes long enough that b's claim is taken by
+    // an admin (simulated by re-stamping b with a foreign token).
+    state.rows.forEach((r) => { r.auto_reply_claimed_until = null; });
+    mockDraft.mockImplementationOnce(async () => { state.rows[1].auto_reply_claimed_until = '2099-01-01T00:00:00.000Z'; return GOOD_DRAFT; });
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ claimed: 2, drafted: 1, skipped: 1, errors: 0 });
+    expect(mockDraft).toHaveBeenCalledTimes(1);
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'drafted', auto_reply_claimed_until: null });
+    // b is untouched: the foreign owner's stamp and state stand.
+    expect(state.rows[1]).toMatchObject({ auto_reply_status: 'queued', auto_reply_claimed_until: '2099-01-01T00:00:00.000Z' });
+  });
+
   test('verifier reject → parked, no draft text offered, action bell', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['forbidden_name', 'url'], mode: 'service_quality', version: 'reply-v1' });
