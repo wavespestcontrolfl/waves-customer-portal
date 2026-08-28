@@ -32,7 +32,7 @@ const knex = require('knex');
 const { etDateString } = require('../server/utils/datetime-et');
 const dataforseo = require('../server/services/seo/dataforseo');
 const scorer = require('../server/services/seo/prospect-scorer');
-const { claimProspectDomain } = require('../server/services/seo/prospect-domain-lock');
+const { claimProspectDomain, findPlacementRow } = require('../server/services/seo/prospect-domain-lock');
 const discovery = require('../server/services/seo/competitor-discovery');
 const { DEFAULT_COMPETITOR_DOMAINS } = require('../server/services/seo/competitor-gap-miner')._internals;
 
@@ -242,7 +242,7 @@ async function harvest(db, args) {
     const landed = await db.transaction(async (trx) => {
       const { inFlight } = await claimProspectDomain(trx, s.candidate.domain);
       if (inFlight) return false;
-      const dup = await trx('seo_link_prospects').where({ target_domain: s.candidate.domain, target_page: targetPage }).first();
+      const dup = await findPlacementRow(trx, s.candidate.domain, targetPage);
       if (dup) return false;
       await trx('seo_link_prospects').insert({
         target_domain: s.candidate.domain, target_page: targetPage,

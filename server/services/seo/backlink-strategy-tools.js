@@ -7,7 +7,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
-const { claimProspectDomain } = require('./prospect-domain-lock');
+const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
@@ -210,9 +210,7 @@ async function executeBacklinkTool(toolName, input) {
 
         // Pre-scoring existence probe (cheap skip); the authoritative check is
         // repeated under the per-domain board lock at insert time below.
-        const exists = await db('seo_link_prospects')
-          .where({ target_domain: domain, target_page: p.target_page })
-          .first();
+        const exists = await findPlacementRow(db, domain, p.target_page);
         if (exists) { duplicates.push(domain); skipped++; continue; }
 
         // Score on relevance + lead-value + contactability (not raw DR), and
@@ -256,7 +254,7 @@ async function executeBacklinkTool(toolName, input) {
         const landed = await db.transaction(async (trx) => {
           const { inFlight } = await claimProspectDomain(trx, domain);
           if (inFlight) return false;
-          const raced = await trx('seo_link_prospects').where({ target_domain: domain, target_page: p.target_page }).first('id');
+          const raced = await findPlacementRow(trx, domain, p.target_page);
           if (raced) return false;
           await trx('seo_link_prospects').insert({
             target_domain: domain,

@@ -4,7 +4,7 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
-const { claimProspectDomain, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
+const { claimProspectDomain, findPlacementRow, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -260,7 +260,8 @@ router.post('/prospects', async (req, res, next) => {
     const result = await db.transaction(async (trx) => {
       const { inFlight } = await claimProspectDomain(trx, domain);
       if (inFlight) return { inFlight };
-      const exists = await trx('seo_link_prospects').where({ target_domain: domain, target_page }).first();
+      // canonical placement lookup — any spelling of host or page
+      const exists = await findPlacementRow(trx, domain, target_page);
       if (exists) return { exists };
       const [row] = await trx('seo_link_prospects').insert({
         target_domain: domain, target_url: target_url || null, target_page,

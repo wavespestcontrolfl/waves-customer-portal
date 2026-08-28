@@ -37,32 +37,9 @@ const STALE_WHEN_DOMAIN_DARK = new Set(['live', 'indexed']);
 const normalizeDomain = canonicalProspectDomain;
 // byDomain / TARGET_DOMAIN_CANONICAL_SQL come from prospect-domain-lock (one canonical host everywhere).
 
-// Canonical board form of a Waves target page. The board's unique key is
-// textual (target_domain, target_page) and existing rows use both
-// https://wavespestcontrol.com/... and https://www.wavespestcontrol.com/...
-// (always with a trailing slash), so: lookups try every variant, inserts use
-// one canonical spelling (homepage bare — the 150-row majority — pages www).
-function targetPathOf(url) {
-  const raw = String(url || '').split('#')[0].split('?')[0];
-  let path = '/';
-  try { path = new URL(raw).pathname || '/'; } catch { path = raw.replace(/^https?:\/\/[^/]+/, '') || '/'; }
-  path = path.replace(/\/+$/, '');
-  return path ? `${path}/` : '/';
-}
-function targetPageOf(url) {
-  const path = targetPathOf(url);
-  return path === '/' ? 'https://wavespestcontrol.com/' : `https://www.wavespestcontrol.com${path}`;
-}
-function targetPageVariants(url) {
-  const path = targetPathOf(url);
-  const bare = path.replace(/\/$/, '');
-  const out = new Set();
-  for (const host of ['https://wavespestcontrol.com', 'https://www.wavespestcontrol.com', 'http://wavespestcontrol.com', 'http://www.wavespestcontrol.com']) {
-    out.add(`${host}${path}`);
-    if (bare) out.add(`${host}${bare}`);
-  }
-  return [...out];
-}
+// targetPathOf / targetPageOf / targetPageVariants live in prospect-domain-lock
+// (one canonical page identity for every board writer).
+const { targetPathOf, targetPageOf, targetPageVariants } = lockMod;
 
 /**
  * queueLostDomains(losses) — losses are the alertable entries from

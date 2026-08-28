@@ -44,6 +44,49 @@ function canonicalProspectDomain(d) {
 const TARGET_DOMAIN_CANONICAL_SQL = "split_part(split_part(regexp_replace(regexp_replace(regexp_replace(lower(btrim(target_domain)), '^https://', ''), '^http://', ''), '^(www|mail)\\.', ''), '/', 1), ':', 1)";
 const byDomain = (q, domain) => q.whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain]);
 
+// Canonical board form of a Waves target page. The board's unique key is
+// textual (target_domain, target_page) and existing rows use both
+// https://wavespestcontrol.com/... and https://www.wavespestcontrol.com/...
+// (always with a trailing slash), so: lookups try every variant, inserts use
+// one canonical spelling (homepage bare — the 150-row majority — pages www).
+function targetPathOf(url) {
+  const raw = String(url || '').split('#')[0].split('?')[0];
+  let path = '/';
+  try { path = new URL(raw).pathname || '/'; } catch { path = raw.replace(/^https?:\/\/[^/]+/, '') || '/'; }
+  path = path.replace(/\/+$/, '');
+  return path ? `${path}/` : '/';
+}
+function targetPageOf(url) {
+  const path = targetPathOf(url);
+  return path === '/' ? 'https://wavespestcontrol.com/' : `https://www.wavespestcontrol.com${path}`;
+}
+function targetPageVariants(url) {
+  const path = targetPathOf(url);
+  const bare = path.replace(/\/$/, '');
+  const out = new Set();
+  for (const host of ['https://wavespestcontrol.com', 'https://www.wavespestcontrol.com', 'http://wavespestcontrol.com', 'http://www.wavespestcontrol.com']) {
+    out.add(`${host}${path}`);
+    if (bare) out.add(`${host}${bare}`);
+  }
+  return [...out];
+}
+
+/**
+ * findPlacementRow(q, domain, targetPage, { excludeId }) → the board row for
+ * this placement under ANY spelling of either half of the key — canonical
+ * host for target_domain, every page variant for target_page — or null. The
+ * unique index is textual, so a raw-pair check lets www.example.com + a
+ * non-www page coexist with a canonical-equivalent row; every writer's
+ * "does this placement already exist" check goes through here.
+ */
+async function findPlacementRow(q, domain, targetPage, { excludeId = null, columns = ['id', 'status', 'target_page'] } = {}) {
+  const key = canonicalProspectDomain(domain);
+  if (!key) return null;
+  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
+  if (excludeId) qb = qb.whereNot('id', excludeId);
+  return (await qb.first(...columns)) || null;
+}
+
 async function lockProspectDomain(trx, domain) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
@@ -66,4 +109,4 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
   return { domain: key, inFlight: row && set.has(row.status) ? row : null };
 }
 
-module.exports = { lockProspectDomain, claimProspectDomain, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };
+module.exports = { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };

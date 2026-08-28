@@ -14,7 +14,7 @@
 const logger = require('../logger');
 const prospector = require('./local-opportunity-prospector');
 const scorer = require('./prospect-scorer');
-const { claimProspectDomain } = require('./prospect-domain-lock');
+const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
 const { etDateString } = require('../../utils/datetime-et');
 
 const HOME = 'https://wavespestcontrol.com/';
@@ -121,6 +121,9 @@ async function run({
     const inserted = await db.transaction(async (trx) => {
       const { inFlight } = await claimProspectDomain(trx, cand.domain);
       if (inFlight) return [];
+      // canonical placement check (any host/page spelling) — ON CONFLICT below only
+      // guards the exact textual pair
+      if (await findPlacementRow(trx, cand.domain, HOME)) return [];
       return trx('seo_link_prospects').insert({
         target_domain: cand.domain, target_page: HOME, target_url: cand.source_url || null,
         anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,

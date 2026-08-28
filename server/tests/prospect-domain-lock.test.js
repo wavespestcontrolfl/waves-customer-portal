@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const { lockProspectDomain, claimProspectDomain, canonicalProspectDomain, LOCK_PREFIX, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, TARGET_DOMAIN_CANONICAL_SQL } = require('../services/seo/prospect-domain-lock');
+const { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, targetPageVariants, LOCK_PREFIX, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, TARGET_DOMAIN_CANONICAL_SQL } = require('../services/seo/prospect-domain-lock');
 
 describe('prospect-domain-lock helper', () => {
   test('key = lost_recovery:<canonical host> — scheme, www/mail, path, port, case all collapse to one key', async () => {
@@ -51,6 +51,23 @@ describe('prospect-domain-lock helper', () => {
     expect(IN_FLIGHT_STATUSES).toEqual(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
   });
 
+  test('findPlacementRow: canonical host + every page spelling (www/non-www, http/https, ±slash), optional self-exclusion', async () => {
+    let captured = null;
+    const q = { whereRaw: jest.fn((sql, bind) => { captured = { sql, bind }; return q; }), whereIn: jest.fn((col, vals) => { captured.pages = [col, vals]; return q; }), whereNot: jest.fn((col, val) => { captured.not = [col, val]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' })) };
+    const trx = jest.fn(() => q);
+    const r = await findPlacementRow(trx, 'WWW.Blog.Example', 'http://www.wavespestcontrol.com/x/?utm=1', { excludeId: 'me' });
+    expect(r).toEqual({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' });
+    expect(captured.sql).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
+    expect(captured.bind).toEqual(['blog.example']);
+    expect(captured.pages[0]).toBe('target_page');
+    expect(new Set(captured.pages[1])).toEqual(new Set(targetPageVariants('https://wavespestcontrol.com/x/')));
+    expect(captured.pages[1]).toEqual(expect.arrayContaining(['https://wavespestcontrol.com/x/', 'https://www.wavespestcontrol.com/x', 'http://wavespestcontrol.com/x/']));
+    expect(captured.not).toEqual(['id', 'me']);
+    q.first.mockResolvedValueOnce(undefined);
+    await expect(findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/')).resolves.toBeNull();
+    await expect(findPlacementRow(trx, '', 'https://wavespestcontrol.com/')).resolves.toBeNull();
+  });
+
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {
     const { _test } = require('../services/seo/lost-link-recovery');
     for (const s of ['WWW.Blog.Example/', 'https://blog.example:443/x', 'mail.blog.example']) {
@@ -68,7 +85,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const iTrx = block.indexOf('db.transaction(async (trx)');
     const iLock = block.indexOf('claimProspectDomain(trx, domain)');
     const iRefuse = block.indexOf('if (inFlight) return { inFlight };');
-    const iExists = block.indexOf("trx('seo_link_prospects').where({ target_domain: domain, target_page }).first()");
+    const iExists = block.indexOf('findPlacementRow(trx, domain, target_page)');
     const iInsert = block.indexOf("trx('seo_link_prospects').insert(");
     expect(iTrx).toBeGreaterThan(-1);
     expect(iLock).toBeGreaterThan(iTrx);
@@ -103,7 +120,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const iTrx = block.indexOf('db.transaction(async (trx)');
     const iLock = block.indexOf('claimProspectDomain(trx, domain)');
     const iRefuse = block.indexOf('if (inFlight) return false;');
-    const iRecheck = block.indexOf("trx('seo_link_prospects').where({ target_domain: domain, target_page: p.target_page }).first('id')");
+    const iRecheck = block.indexOf('findPlacementRow(trx, domain, p.target_page)');
     const iInsert = block.indexOf("trx('seo_link_prospects').insert(");
     expect(iLock).toBeGreaterThan(iTrx);
     expect(iRefuse).toBeGreaterThan(iLock);
@@ -118,10 +135,12 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const iTrx = s.indexOf('db.transaction(async (trx)');
     const iLock = s.indexOf('claimProspectDomain(trx, cand.domain)');
     const iRefuse = s.indexOf('if (inFlight) return [];');
+    const iPair = s.indexOf('findPlacementRow(trx, cand.domain, HOME)');
     const iInsert = s.indexOf("trx('seo_link_prospects').insert(");
     expect(iLock).toBeGreaterThan(iTrx);
     expect(iRefuse).toBeGreaterThan(iLock);
-    expect(iInsert).toBeGreaterThan(iRefuse);
+    expect(iPair).toBeGreaterThan(iRefuse);
+    expect(iInsert).toBeGreaterThan(iPair);
     expect(s).not.toMatch(/\bdb\('seo_link_prospects'\)\.insert/);
   });
 
@@ -129,7 +148,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
     const s = fs.readFileSync(path.join(__dirname, '..', '..', 'scripts', 'backlink-deep-harvest.js'), 'utf8');
     const iTrx = s.indexOf('db.transaction(async (trx)');
     const iLock = s.indexOf('claimProspectDomain(trx, s.candidate.domain)');
-    const iDup = s.indexOf("trx('seo_link_prospects').where({ target_domain: s.candidate.domain, target_page: targetPage }).first()");
+    const iDup = s.indexOf('findPlacementRow(trx, s.candidate.domain, targetPage)');
     const iInsert = s.indexOf("trx('seo_link_prospects').insert(");
     expect(iLock).toBeGreaterThan(iTrx);
     expect(iDup).toBeGreaterThan(iLock);
@@ -144,6 +163,8 @@ describe('every board writer takes the shared lock inside its check+insert trans
     for (const f of hits) {
       const src = fs.readFileSync(path.join(root, f), 'utf8');
       expect({ file: f, guarded: /claimProspectDomain\(trx, /.test(src) }).toEqual({ file: f, guarded: true });
+      // and no writer checks the pair by raw spelling any more
+      expect({ file: f, rawPair: /where\(\{ target_domain: [^}]*target_page/.test(src) }).toEqual({ file: f, rawPair: false });
     }
     expect(hits.length).toBeGreaterThanOrEqual(5);
   });
