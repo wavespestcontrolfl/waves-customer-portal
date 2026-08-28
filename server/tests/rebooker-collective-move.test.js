@@ -246,12 +246,30 @@ describe('reschedule() choke point', () => {
 
   test('the same shape observed at the prior move\'s ORIGIN is the stale retry — 409', async () => {
     process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
-    wireLookup(anchorRow({ scheduled_date: dayOffset(20), window_start: '13:00:00', window_end: '15:00:00' }), {
-      priorMove: { id: 'sm-prior', original_date: BASE, new_date: TARGET, result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } },
+    const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
+    const { priorLookup } = wireLookup(anchorRow({ scheduled_date: dayOffset(20), window_start: '13:00:00', window_end: '15:00:00' }), {
+      priorMove,
       priorKey: `svc-1:${TARGET}:13:00:15:00`,
     });
+    // No LATER committed move of this anchor: the prior is this request's own earlier attempt.
+    priorLookup.first = jest.fn().mockResolvedValueOnce(priorMove).mockResolvedValue(undefined);
     await expect(SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expect: { scheduled_date: BASE, window_start: '09:00:00' } }))
       .rejects.toMatchObject({ statusCode: 409, code: 'SERIES_MOVE_STALE' });
+  });
+
+  test('a completed ROUND TRIP (A→B, B→A, A→B within the horizon) proceeds: a later committed move of this anchor makes the A→B row history, not this request\'s earlier attempt', async () => {
+    process.env.GATE_ADMIN_COLLECTIVE_MOVE = 'true';
+    const priorMove = { id: 'sm-prior', original_date: BASE, new_date: TARGET, created_at: new Date(Date.now() - 5 * 60 * 1000), result: { rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '13:00', windowEnd: '15:00' }] } };
+    const { priorLookup } = wireLookup(anchorRow({ scheduled_date: BASE, window_start: '13:00:00', window_end: '15:00:00' }), {
+      priorMove,
+      priorKey: `svc-1:${TARGET}:13:00:15:00`,
+    });
+    // The B→A move committed after the A→B row.
+    priorLookup.first = jest.fn().mockResolvedValueOnce(priorMove).mockResolvedValueOnce({ id: 'sm-back' });
+    const result = await SmartRebooker.reschedule('svc-1', TARGET, { start: '13:00', end: '15:00' }, 'admin', 'admin', { ...ADMIN_OPTS, expect: { scheduled_date: BASE, window_start: '13:00:00' } });
+    expect(result.seriesMoveId).toBe('sm-1');
+    expect(priorLookup.where).toHaveBeenCalledWith('created_at', '>', priorMove.created_at);
+    expect(SmartRebooker.rescheduleSeries).toHaveBeenCalledTimes(1);
   });
 
   test('an end-only correction right after a series move is a DIFFERENT request — no replay, the single same-date edit proceeds', async () => {
@@ -650,6 +668,31 @@ describe('rescheduleSeries — one recorded operation', () => {
     }));
   });
 
+  test('an anchor that moved between the outer read and the transaction (delta basis stale) is refused at the choke point — 409, nothing written — for every caller, pinned or not', async () => {
+    const { updates } = wireSeriesMocks([sib('svc-1', dayOffset(11)), sib('svc-2', SIB1)]);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS))
+      .rejects.toMatchObject({ statusCode: 409, code: 'SLOT_TAKEN', message: expect.stringContaining('changed concurrently') });
+    expect(updates[0].update).not.toHaveBeenCalled();
+  });
+
+  test('a replay runs the tracker cleanup for EVERY row the move rewound (rewoundIds) — an evidence-only rewound sibling included, not just a live anchor', async () => {
+    const { clearTechCurrentJob } = require('../services/tech-status');
+    wireSeriesMocks([sib('svc-1', TARGET)], {
+      priorMove: {
+        id: 'sm-prior', new_date: TARGET, customer_id: 'cust-1',
+        result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rewoundIds: ['svc-2'], rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
+        rows: [
+          { id: 'svc-1', anchor: true, before: { status: 'confirmed', technician_id: null }, after: { status: 'confirmed' } },
+          { id: 'svc-2', anchor: false, before: { status: 'pending', technician_id: 'tech-3' }, after: { status: 'pending' } },
+        ],
+      },
+      anchor: anchorRow({ scheduled_date: TARGET }),
+    });
+    const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
+    expect(result.replayed).toBe(true);
+    expect(clearTechCurrentJob).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 'tech-3', current_job_id: 'svc-2' }));
+  });
+
   test('the per-parent maintenance lock is taken AFTER the date-occupancy locks and BEFORE the locked re-read the sweep writes from', async () => {
     const { siblingsQuery, siblingsReread, trx, updates } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)]);
     await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
@@ -838,8 +881,15 @@ describe('migration backfill — cadence deviations (modal-moved exceptions with
     const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8');
     const loop = src.slice(src.indexOf('const plannedIds = plan.planned.map((entry) => entry.id);'), src.indexOf("date_exception_source: 'backfill_cadence'"));
     expect(loop).toContain(".whereRaw('original_date <> new_date')");
-    expect(loop).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch')) optimizerOnly.add(id);");
+    expect(loop).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {");
     expect(loop).toContain('if (optimizerOnly.has(String(entry.id))) {');
+  });
+
+  test('"optimizer only" requires the last auto-dispatch landing to BE the row\'s current date — an unlogged (modal) move after the nudge is ambiguous history and stays preserved', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../models/migrations/20260828000030_series_moves_and_date_exception.js'), 'utf8');
+    expect(src).toContain("if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {");
+    expect(src).toContain("const currentDate = new Map(rows.map((row) => [String(row.id), dateOnly(row.scheduled_date)]));");
+    expect(fs.existsSync(path.join(__dirname, '../models/migrations/20260828000031_series_moves_effects_attempted_at.js'))).toBe(true);
   });
 
   test('a series no origin can explain for a majority is left alone (ambiguous); no pattern or a single row plans nothing', () => {
@@ -905,6 +955,23 @@ describe('caller wiring (source)', () => {
     expect(body).toContain('window_end: row.window_end ?? null,');
     expect(body).toContain('estimated_duration_minutes: postEditDuration,');
     expect(body).toContain("const postEditDuration = (req.body.estimatedDuration !== undefined && req.body.estimatedDuration !== '')");
+  });
+
+  test('reconciler: rotates by last attempt (effects_attempted_at), carries a superseded row\'s unresolved conflict card (card-only pass), and runs the replay cleanup; preview reserves skipped slots; a cleared anchor window skips the elapsed guard', () => {
+    const disp = read('../routes/admin-dispatch.js');
+    const rec = disp.slice(disp.indexOf('async function reconcileSeriesMoveEffects('), disp.indexOf("router.get('/:serviceId/series-move-preview'"));
+    expect(rec).toContain("orderByRaw('COALESCE(effects_attempted_at, created_at) asc')");
+    expect(rec).toContain("update({ effects_attempted_at: db.fn.now() })");
+    expect(rec).toContain(".orWhere((s) => s.where({ status: 'superseded' }).where('conflict_count', '>', 0).whereNull('conflict_card_at'))");
+    expect(rec).toContain("await require('../services/rebooker').replaySeriesMoveCleanup(row);");
+    const fx = disp.slice(disp.indexOf('async function applySeriesMoveEffects('), disp.indexOf('async function reconcileSeriesMoveEffects('));
+    expect(fx).toContain("const cardOnly = markers.status === 'superseded';");
+    expect(fx).toContain("if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };");
+    const reb = read('../services/rebooker.js');
+    const preview = reb.slice(reb.indexOf('async previewSeriesMove('), reb.indexOf('module.exports = new SmartRebooker()'));
+    expect(preview).toContain('cadenceSlotDate(i);');
+    expect(reb).toContain("if (options.clearAnchorWindow !== true\n      && sameDayWindowElapsed(seriesDateStr");
+    expect(reb).toContain('rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],');
   });
 
   test('the dispatch explicit series path fences on the FULL pin the resolution read; a retryable provider failure keeps the series text pending; a partial guard map never closes an uncovered id', () => {

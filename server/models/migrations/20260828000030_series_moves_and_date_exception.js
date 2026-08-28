@@ -152,7 +152,14 @@ async function backfillCadenceDeviations(knex) {
     // optimizer put it there — it is regenerated from cadence, not
     // preserved. Rows with no log at all (pre-lane Edit-appointment moves)
     // and rows with any manual move stay in the plan (hook r16 P1).
+    // "Optimizer only" means the optimizer's placement IS the row's current
+    // date: every logged date move was auto_dispatch AND the latest one
+    // landed on the date the row still sits on. A row the pre-lane modal
+    // moved AFTER an optimizer nudge wrote no log, so its current date
+    // differs from the last logged landing — ambiguous history, preserved
+    // (codex r10 P0).
     const plannedIds = plan.planned.map((entry) => entry.id);
+    const currentDate = new Map(rows.map((row) => [String(row.id), dateOnly(row.scheduled_date)]));
     const optimizerOnly = new Set();
     if (plannedIds.length) {
       const moveLogs = await knex('reschedule_log')
@@ -160,15 +167,19 @@ async function backfillCadenceDeviations(knex) {
         .whereNotNull('original_date')
         .whereNotNull('new_date')
         .whereRaw('original_date <> new_date')
-        .select('scheduled_service_id', 'initiated_by');
+        .orderBy([{ column: 'created_at', order: 'asc' }, { column: 'id', order: 'asc' }])
+        .select('scheduled_service_id', 'initiated_by', 'new_date');
       const byService = new Map();
       for (const log of moveLogs) {
-        const list = byService.get(String(log.scheduled_service_id)) || [];
-        list.push(String(log.initiated_by || ''));
-        byService.set(String(log.scheduled_service_id), list);
+        const entry = byService.get(String(log.scheduled_service_id)) || { initiators: [], lastLanding: null };
+        entry.initiators.push(String(log.initiated_by || ''));
+        entry.lastLanding = dateOnly(log.new_date);
+        byService.set(String(log.scheduled_service_id), entry);
       }
-      for (const [id, initiators] of byService) {
-        if (initiators.length && initiators.every((who) => who === 'auto_dispatch')) optimizerOnly.add(id);
+      for (const [id, { initiators, lastLanding }] of byService) {
+        if (initiators.length && initiators.every((who) => who === 'auto_dispatch') && lastLanding === currentDate.get(id)) {
+          optimizerOnly.add(id);
+        }
       }
     }
     for (const entry of plan.planned) {

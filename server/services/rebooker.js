@@ -276,6 +276,19 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }
     const observedDate = expect && expect.scheduled_date ? dateOnly(expect.scheduled_date) : null;
     const observedElsewhere = observedDate && prior.original_date && observedDate !== dateOnly(prior.original_date);
     if (derived && observedElsewhere) return null;
+    // A completed ROUND TRIP (A→B, B→A, A→B within the horizon) is observed
+    // at the prior's origin too — but the anchor left that prior's landing
+    // by a LATER committed move of its own, so the prior is history this
+    // request walks past, not this request's earlier attempt (codex r10).
+    // Still pinned: the trx's expectAnchor fence refuses the request if the
+    // anchor is no longer where it was observed. No pin → stay safe.
+    if (derived && observedDate && prior.created_at) {
+      const later = await conn('series_moves')
+        .where({ anchor_service_id: serviceId, status: 'committed' })
+        .where('created_at', '>', prior.created_at)
+        .first('id');
+      if (later) return null;
+    }
     throw Object.assign(new Error('This move was already applied and the visit has changed since — reload and check the schedule before moving it again'), {
       statusCode: 409,
       isOperational: true,
@@ -313,18 +326,38 @@ async function findConcurrentSeriesMoveWinner(conn, serviceId, opKey, observedPr
 // anchor's tech_status pointer release (conditional on the pointer still
 // targeting this job) and the customer tracker refresh. The non-idempotent
 // follow-up shift is inside the move trx, so a replay never repeats it.
+// Covers every row the move REWOUND — a live anchor, and any anchor or
+// sibling whose tracker evidence (needsLifecycleRewind) was reset — from
+// the result's rewoundIds, not only the anchor's old status: a pass that
+// died between the commit and its post-commit loop left those techs pinned
+// and trackers stale too (codex r10 P1). Also run by the reconciler.
 async function replaySeriesMoveCleanup(prior) {
-  const anchor = Array.isArray(prior.rows) ? prior.rows.find((r) => r.anchor) : null;
-  if (!anchor || !LIVE_OVERRIDE_STATUSES.has(String(anchor.before?.status))) return;
-  const techId = anchor.before?.technician_id || null;
-  if (techId) {
+  const rows = Array.isArray(prior.rows) ? prior.rows : [];
+  const rewound = new Set((prior.result?.rewoundIds || []).map(String));
+  const anchor = rows.find((r) => r.anchor);
+  if (anchor && (LIVE_OVERRIDE_STATUSES.has(String(anchor.before?.status)) || rewound.has(String(anchor.id)))) {
+    const techId = anchor.before?.technician_id || null;
+    if (techId) {
+      try {
+        await clearTechCurrentJob({ tech_id: techId, current_job_id: anchor.id, status: 'idle' });
+      } catch (err) {
+        logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
+      }
+    }
+    emitCustomerJobRefresh({ id: anchor.id, customer_id: prior.customer_id }, 'confirmed');
+  }
+  for (const row of rows) {
+    if (row.anchor || !rewound.has(String(row.id))) continue;
+    const status = String(row.after?.status ?? row.before?.status ?? 'confirmed');
     try {
-      await clearTechCurrentJob({ tech_id: techId, current_job_id: anchor.id, status: 'idle' });
+      await applyLiveMovePostCommitEffects(
+        { id: row.id, customer_id: prior.customer_id, technician_id: row.before?.technician_id || null, status },
+        { toStatus: status },
+      );
     } catch (err) {
-      logger.error(`[rebooker] tech_status clear on series replay failed for ${anchor.id}: ${err.message}`);
+      logger.error(`[rebooker] track-rewind cleanup on series replay failed for sibling ${row.id}: ${err.message}`);
     }
   }
-  emitCustomerJobRefresh({ id: anchor.id, customer_id: prior.customer_id }, 'confirmed');
 }
 
 // What an operation_key replay hands back for a committed move: the result
@@ -1353,7 +1386,11 @@ class SmartRebooker {
         });
       }
     }
-    if (sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
+    // An explicit clear of both bounds lands the anchor windowless — no slot
+    // to have elapsed; the stored window is abandoned, not carried (codex
+    // r10 P2).
+    if (options.clearAnchorWindow !== true
+      && sameDayWindowElapsed(seriesDateStr, win.end || service.window_end || win.start || service.window_start)) {
       throw Object.assign(new Error('That window has already passed today'), {
         statusCode: 409,
         isOperational: true,
@@ -1484,6 +1521,19 @@ class SmartRebooker {
         if (!anchorStillMovable) {
           throw Object.assign(new Error('Cannot reschedule — job transitioned to a non-reschedulable state concurrently'), {
             statusCode: 409,
+          });
+        }
+        // The delta and the projector were built from the OUTER anchor read
+        // (service.scheduled_date). An anchor that moved between that read
+        // and this one makes both wrong — and the sibling fingerprint alone
+        // cannot see it, because both trx reads already agree on the newer
+        // date. Fence it here, for EVERY caller, pinned or not (codex r10
+        // P1: a fully explicit window reads nothing and carried no pin).
+        if (dateOnly(anchorRow.scheduled_date) !== dateOnly(service.scheduled_date)) {
+          throw Object.assign(new Error('Cannot reschedule — appointment changed concurrently'), {
+            statusCode: 409,
+            isOperational: true,
+            code: 'SLOT_TAKEN',
           });
         }
         return idx;
@@ -2138,6 +2188,9 @@ class SmartRebooker {
         deltaDays,
         skippedCount,
         exceptionCount,
+        // Rows whose tracker lifecycle this move rewound — the replay /
+        // reconciler cleanup set (replaySeriesMoveCleanup).
+        rewoundIds: [...(anchorRewound ? [serviceId] : []), ...rewoundSiblings.map((row) => row.id)],
         ...(seriesWarnings.length ? { warnings: seriesWarnings } : {}),
       };
       await trx('series_moves').insert({
@@ -2290,7 +2343,7 @@ class SmartRebooker {
       .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date');
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
-    const { deltaDays, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
+    const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
     const swept = siblings.slice(droppedIdx);
     // Staff surfaces move a live anchor (allowLive); every other live/skipped
     // row is counted-but-not-moved, exactly as the sweep does.
@@ -2301,7 +2354,12 @@ class SmartRebooker {
     let conflictCount = 0;
     for (let i = 0; i < swept.length; i++) {
       const row = swept[i];
-      if (!movable.includes(row)) continue;
+      if (!movable.includes(row)) {
+        // Same slot reservation the sweep makes for a skipped/live row, so
+        // the disclosed dates are the dates the move writes (codex r10 P2).
+        cadenceSlotDate(i);
+        continue;
+      }
       const date = projectOccurrenceDate(i, row);
       dates.push(date);
       if (i === 0 || !row.window_start) continue;
@@ -2420,6 +2478,7 @@ module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
 module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.replaySeriesMoveCleanup = replaySeriesMoveCleanup;
 module.exports.dateExceptionStamp = dateExceptionStamp;
 module.exports.nextRecurringDate = nextRecurringDate;
 module.exports.recurrenceOrdinalOptions = recurrenceOrdinalOptions;

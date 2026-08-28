@@ -14067,7 +14067,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       if (Number(leased) === 0) {
         return { notificationSent: false, notificationError: 'effects_in_progress', conflicts, seriesMoveId, inProgress: true };
       }
-      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified')) || markers;
+      markers = (await ownedRow(db('series_moves')).first('conflict_card_at', 'reminders_synced_at', 'notified_at', 'customer_notified', 'status')) || markers;
     } catch (err) {
       // Without a held lease no marker write can land (they are fenced on
       // the owner), so effects run here would be unrecorded and repeated by
@@ -14098,19 +14098,36 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
   };
 
   try {
+    // A SUPERSEDED operation (a later move under the same derived key
+    // retired it) still owes the operator its conflict card when it died
+    // before ringing it: the successor kept those siblings windowless but
+    // probed nothing, so it recorded no conflicts of its own. Reminders and
+    // the customer text belong to the successor — this pass rings the card
+    // for the rows STILL windowless and concludes (codex r10 P1).
+    const cardOnly = markers.status === 'superseded';
+    let dueConflicts = conflicts;
+    if (cardOnly && conflicts.length && !markers.conflict_card_at) {
+      const stillWindowless = new Set((await db('scheduled_services')
+        .whereIn('id', conflicts.map((c) => c.id))
+        .whereNull('window_start')
+        .whereNotIn('status', ['cancelled', 'completed', 'skipped', 'no_show'])
+        .select('id')).map((r) => String(r.id)));
+      dueConflicts = conflicts.filter((c) => stillWindowless.has(String(c.id)));
+      if (!dueConflicts.length) await stampMarker('conflict_card_at');
+    }
     // Occurrences the rebooker committed WITHOUT a window (their projected
     // window held a seeded placeholder beyond the clash horizon): date and
     // tech are kept; the operator sets a time from dispatch. Those rows often
     // land outside the reloaded week view — surface them in the response AND
     // ring the bell so a series move can't silently leave untimed visits.
-    if (conflicts.length && !markers.conflict_card_at) {
+    if (dueConflicts.length && !markers.conflict_card_at) {
       try {
         const NotificationService = require('../services/notification-service');
         const notif = await NotificationService.notifyAdmin(
           'schedule_conflict',
           'Series move left visits without a time window',
-          `A series move shifted ${conflicts.length} future visit(s) onto already-booked windows; they kept their date and technician but have NO time window (${conflicts.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
-          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts } }
+          `A series move shifted ${dueConflicts.length} future visit(s) onto already-booked windows; they kept their date and technician but have NO time window (${dueConflicts.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
+          { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts } }
         );
         if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');
@@ -14119,6 +14136,7 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
       }
     }
 
+    if (cardOnly) return { notificationSent: false, notificationError: 'superseded', conflicts: dueConflicts, seriesMoveId };
     const seriesReminderGuards = [];
     let seriesGuardSnapshotFailed = false;
     const remindersThisPass = !markers.reminders_synced_at;
@@ -14402,22 +14420,42 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
 // customer web page and Quick Move keep their own effect paths).
 const RECONCILE_SURFACES = ['dispatch_board', 'edit_modal', 'sms_reply'];
 async function reconcileSeriesMoveEffects({ olderThanMs = 15 * 60 * 1000, limit = 25 } = {}) {
+  // Committed rows with any unfinished effect, plus SUPERSEDED rows that
+  // still owe their conflict card (applySeriesMoveEffects runs card-only
+  // for those). Ordered by the LAST ATTEMPT (effects_attempted_at, else
+  // created_at) and stamped before running, so a class of rows that keeps
+  // failing retryably (a destination Twilio keeps 5xx-ing) rotates to the
+  // back and can never monopolize the fixed batch (codex r10 P2).
   const rows = await db('series_moves')
-    .where({ status: 'committed' })
     .whereIn('source_surface', RECONCILE_SURFACES)
     .where('created_at', '<', new Date(Date.now() - olderThanMs))
     .where((q) => q
-      .whereNull('reminders_synced_at')
-      .orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at'))
-      .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at')))
-    .orderBy('created_at', 'asc')
+      .where((c) => c.where({ status: 'committed' }).where((u) => u
+        .whereNull('reminders_synced_at')
+        .orWhere((q2) => q2.where('notify_requested', true).whereNull('notified_at'))
+        .orWhere((q3) => q3.where('conflict_count', '>', 0).whereNull('conflict_card_at'))))
+      .orWhere((s) => s.where({ status: 'superseded' }).where('conflict_count', '>', 0).whereNull('conflict_card_at')))
+    .orderByRaw('COALESCE(effects_attempted_at, created_at) asc')
     .limit(limit)
-    .select('id', 'anchor_service_id', 'new_date', 'result', 'notify_requested');
+    .select('id', 'anchor_service_id', 'customer_id', 'new_date', 'result', 'rows', 'notify_requested', 'status');
+  if (rows.length) {
+    try {
+      await db('series_moves').whereIn('id', rows.map((r) => r.id)).update({ effects_attempted_at: db.fn.now() });
+    } catch (err) {
+      logger.warn(`[dispatch] series move effects attempt stamp failed: ${err.message}`);
+    }
+  }
   let finished = 0;
   for (const row of rows) {
     const stored = row.result && typeof row.result === 'object' ? row.result : null;
     if (!stored) continue;
     try {
+      // A pass that died between the commit and the rebooker's post-commit
+      // loop left rewound techs pinned / trackers stale — the same
+      // idempotent cleanup an operation_key replay runs (codex r10 P1).
+      if (row.status === 'committed') {
+        await require('../services/rebooker').replaySeriesMoveCleanup(row);
+      }
       const out = await applySeriesMoveEffects({
         result: { ...stored, seriesMoveId: row.id },
         serviceId: row.anchor_service_id,
