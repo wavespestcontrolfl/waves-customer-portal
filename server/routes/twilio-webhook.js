@@ -626,6 +626,7 @@ router.post('/sms', async (req, res) => {
         direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received',
         message_type: 'sms_reaction',
+        is_read: true, // read on arrival — mirrors the unified messages row (hook P1)
         metadata: JSON.stringify({
           locationId: numberConfig.locationId,
           source: numberConfig.type,

@@ -82,8 +82,10 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
         AND NOT EXISTS (
           -- the unified dual-write can fail while sms_log + bell succeed: an
           -- unread legacy inbound row means the thread still wants an answer
+          -- (rows execution would mirror-read via the closer messages excluded)
           SELECT 1 FROM sms_log l WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE)
             AND n.link = '/admin/communications?thread=' || l.customer_id::text
+            AND NOT (l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($1::uuid[]) AND twilio_sid IS NOT NULL))
         )`, [[...wouldRead]]);
     console.log(`inbound_sms bells with no remaining unread message (would clear): ${orphanBells.rows.length}`);
     console.log('dry run — nothing written. Re-run with --execute to apply.');

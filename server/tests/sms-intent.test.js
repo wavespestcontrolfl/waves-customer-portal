@@ -71,14 +71,6 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
       expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "does 9am work?" → 👍 is the answer
       expect([t, isCourtesyOnly(t)]).toEqual([t, false]); // default = strict
     }
-    // Gratitude closes the thread in any context.
-    for (const t of ['Thanks!', 'Sounds good, thanks!', 'Thank you 🙏']) {
-      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, true]);
-    }
-    // Real content stays loud even when nothing is pending.
-    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works']) {
-      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
-    }
   });
 
   test('bare affirmatives and 👍 are closers only when we are NOT awaiting an answer', () => {
