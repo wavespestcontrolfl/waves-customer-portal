@@ -14,6 +14,10 @@ describe('week-plan premise binding', () => {
     expect(src).toMatch(/if \(snapshot\?\.plan && !servicedElsewhere\) \{/);
     // …and the cache signature applies the same binding, so an address change re-keys cached PDFs.
     expect(src).toMatch(/weekPlanSentAt = snapshot\?\.sentAt && planBindsToService\(snapshot, service\) \? new Date\(snapshot\.sentAt\)\.toISOString\(\) : null;/);
+    // The canonical lookup is STRICT and outside the fail-open prefs catch: a failure propagates (render refused), never plan=none.
+    expect(src).toMatch(/const snapshot = await loadCurrentWeekPlan\(service\.customer_id, \{ strict: true \}\);/);
+    // The report renderer receives the snapshot's restriction (hour constraints).
+    expect(src).toMatch(/renderWeekPlanReport\(snapshot\.plan, \{ runMinutes: [^}]*, restriction: snapshot\.restriction \|\| null \}\)/);
   });
 
   test('two units in one building are different homes; the same premise is not', () => {

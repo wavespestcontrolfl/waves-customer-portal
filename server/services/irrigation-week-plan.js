@@ -46,10 +46,19 @@ function fmtInches(n) {
 
 // Under a multi-day policy a single prescribed run may land on ANY of the
 // customer's assigned days — never imply there is only one.
-function permittedDayPhrase(plan) {
-  return Number(plan?.legalMaxEvents) > 1 && Number(plan?.events || 0) <= 1
+function permittedDayPhrase(plan, restriction = null) {
+  const day = Number(plan?.legalMaxEvents) > 1 && Number(plan?.events || 0) <= 1
     ? 'one of your permitted watering days'
     : 'your permitted watering day';
+  return withHours(day, restriction);
+}
+
+// The policy's hour restriction rides EVERY instruction (email and report
+// alike), not just the footnote — a run on the right day at the wrong hour
+// is still illegal.
+function withHours(dayPhrase, restriction) {
+  const hours = restriction && restriction.hoursNote ? String(restriction.hoursNote).trim() : '';
+  return hours ? `${dayPhrase} (${hours})` : dayPhrase;
 }
 
 function minutesPhrase(plan) {
@@ -200,7 +209,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
       : cool
         ? `December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
         : `Your ${grassLabel} doesn't need a full watering this week`;
-    actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on ${permittedDayPhrase(plan)}.`;
+    actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on ${permittedDayPhrase(plan, restriction)}.`;
   } else if (plan.conditionalOnForecast) {
     // Timing-neutral: a 7-day total can't promise the rain comes BEFORE the
     // permitted day, so the subject asks for the check, not the wait.
@@ -212,14 +221,14 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     // Multi-day: each run is judged on the rain since the PREVIOUS run, so one
     // early soaking cancels one run, not the whole week's water.
     actionLine = plan.events > 1
-      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On each of your ${plan.events} permitted watering days: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
-      : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When ${permittedDayPhrase(plan)} comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
+      ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
+      : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When ${permittedDayPhrase(plan, restriction)} comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
     heading = `Your watering plan for this week, ${name}`;
     const dayClause = plan.events > 1
-      ? ` on each of your ${plan.events} permitted watering days`
-      : ` on ${permittedDayPhrase(plan)}`;
+      ? ` on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}`
+      : ` on ${permittedDayPhrase(plan, restriction)}`;
     const depth = fmtInches(plan.depthInches);
     actionLine = minutes
       ? `This week: run each turf zone ${minutes}${dayClause}${comparisonClause(plan, runMinutes)}. That's about ${depth} of water per run — the deep-and-infrequent pattern UF/IFAS recommends.`
@@ -260,7 +269,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
  * One callout for the lawn report's Water This Week card. Null when there is
  * no plan (the card keeps its current advice copy).
  */
-function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
+function renderWeekPlanReport(plan, { runMinutes = null, restriction = null } = {}) {
   if (!plan || plan.action === 'unavailable') return null;
   const minutes = minutesPhrase(plan);
   if (plan.action === 'hold' && plan.reasons.includes('restriction_prohibits')) {
@@ -277,15 +286,15 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
       : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
     return {
       title: 'This week: skip your turf watering',
-      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on ${permittedDayPhrase(plan)}.`,
+      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on ${permittedDayPhrase(plan, restriction)}.`,
     };
   }
   if (plan.conditionalOnForecast) {
     return {
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
-        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on each of your ${plan.events} permitted watering days, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
-        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
+        ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
+        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan, restriction)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }
   // No forecast was available when the plan was decided: the email carries
@@ -297,7 +306,7 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
     : '';
   return {
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
-    detail: `${plan.events > 1 ? `On each of your ${plan.events} permitted watering days` : `On ${permittedDayPhrase(plan)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
+    detail: `${plan.events > 1 ? `On ${withHours(`each of your ${plan.events} permitted watering days`, restriction)}` : `On ${permittedDayPhrase(plan, restriction)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.${noForecastNote}`,
   };
 }
 
@@ -616,5 +625,5 @@ module.exports = {
   planBindsToService,
   planCategory,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase, failedIsAmbiguous, CLAIM_LEASE_SECONDS },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase, withHours, failedIsAmbiguous, CLAIM_LEASE_SECONDS },
 };

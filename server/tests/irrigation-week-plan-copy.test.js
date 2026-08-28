@@ -24,7 +24,7 @@ describe('renderWeekPlanEmail', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);
     expect(copy.plan_subject).toBe('This week: about 30 minutes per turf zone, Jordan');
-    expect(copy.week_plan).toContain('run each turf zone about 30 minutes on your permitted watering day — 10 minutes more than you run now');
+    expect(copy.week_plan).toContain("run each turf zone about 30 minutes on your permitted watering day (on your assigned day, during your area's allowed hours) — 10 minutes more than you run now");
     expect(copy.week_plan).toContain('about ¾" of water per run');
     expect(copy.plan_note).toContain('limited to one watering day a week');
     expect(copy.plan_note).toContain('Minutes assume typical spray heads rates');
@@ -43,7 +43,7 @@ describe('renderWeekPlanEmail', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 0.5, season: 'peak', restriction: ONE_DAY, explicitInchesPerWeek: 2, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);
     expect(copy.plan_subject).toBe('This week: 20 minutes per turf zone, Jordan');
-    expect(copy.week_plan).toMatch(/run each turf zone 20 minutes on your permitted watering day — about what you run now/);
+    expect(copy.week_plan).toMatch(/run each turf zone 20 minutes on your permitted watering day \(on your assigned day, during your area's allowed hours\) — about what you run now/);
     expect(copy.plan_note).not.toContain('Minutes assume');
   });
 
@@ -53,7 +53,7 @@ describe('renderWeekPlanEmail', () => {
     expect(copy.plan_subject).toBe('Skip your turf watering this week, Jordan');
     expect(copy.week_plan).toMatch(/^This week: skip your turf watering\. Last week's rain and irrigation left more in the soil/);
     expect(copy.week_plan).toContain('dull blue-gray tint, or footprints that stay pressed in');
-    expect(copy.week_plan).toContain('run one cycle of about 20 minutes per turf zone on your permitted watering day');
+    expect(copy.week_plan).toContain("run one cycle of about 20 minutes per turf zone on your permitted watering day (on your assigned day, during your area's allowed hours)");
     expect(allText(copy)).not.toMatch(/turn .*off|controller/i);
   });
 
@@ -70,7 +70,7 @@ describe('renderWeekPlanEmail', () => {
     expect(copy.plan_subject).toBe('Check the rain before you water this week, Jordan');
     expect(copy.plan_subject).not.toMatch(/rain first/i);
     expect(copy.week_plan).toContain('About 1.4" of rain is in this week\'s forecast');
-    expect(copy.week_plan).toContain('leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run one cycle of about 30 minutes per turf zone');
+    expect(copy.week_plan).toContain("leave the turf irrigation off for now. When your permitted watering day (on your assigned day, during your area's allowed hours) comes around: if ½\" or more has fallen so far this week, skip that run; if less than ½\" has, run one cycle of about 30 minutes per turf zone");
     // A 7-day total can't establish that rain comes BEFORE the assigned day.
     expect(copy.week_plan).not.toMatch(/before your watering day/);
   });
@@ -81,7 +81,7 @@ describe('renderWeekPlanEmail', () => {
     const copy = renderWeekPlanEmail(plan, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
     // Each run judged on rain since the previous run — one early soaking
     // cancels one run, not the whole week's water.
-    expect(copy.week_plan).toContain('On each of your 2 permitted watering days: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run one cycle of about 25 minutes per turf zone');
+    expect(copy.week_plan).toContain("On each of your 2 permitted watering days (on your assigned day, during your area's allowed hours): if ½\" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½\" has, run one cycle of about 25 minutes per turf zone");
     const report = renderWeekPlanReport(plan);
     expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous permitted watering day (skipped or not');
   });
@@ -96,10 +96,22 @@ describe('renderWeekPlanEmail', () => {
     expect(renderWeekPlanEmail(hold, CTX).week_plan).toContain('on one of your permitted watering days');
     expect(renderWeekPlanReport(hold).detail).toContain('on one of your permitted watering days');
     const cond = buildWeekPlan({ targetInchesPerWeek: 0.6, forecastRainInches: 0.9, season: 'peak', restriction: two, ...SPRAY });
-    expect(renderWeekPlanEmail(cond, CTX).week_plan).toContain('When one of your permitted watering days comes around');
+    expect(renderWeekPlanEmail(cond, CTX).week_plan).toMatch(/When one of your permitted watering days( \([^)]*\))? comes around/);
     expect(renderWeekPlanReport(cond).detail).toContain('on one of your permitted watering days');
     // One-day policy keeps the singular.
     expect(_private.permittedDayPhrase({ legalMaxEvents: 1, events: 1 })).toBe('your permitted watering day');
+  });
+
+  test('the report carries the policy\'s hour restriction in every instruction when given the snapshot restriction', () => {
+    const run = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(run, { restriction: ONE_DAY }).detail).toContain("On your permitted watering day (on your assigned day, during your area's allowed hours)");
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(hold, { restriction: ONE_DAY }).detail).toContain("on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    const cond = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 0.9, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(renderWeekPlanReport(cond, { restriction: ONE_DAY }).detail).toContain("on your permitted watering day (on your assigned day, during your area's allowed hours)");
+    // No hoursNote → plain day phrase.
+    expect(renderWeekPlanReport(run, { restriction: { ...ONE_DAY, hoursNote: null } }).detail).toContain('On your permitted watering day,');
+    expect(_private.withHours('your permitted watering day', { hoursNote: 'before 10 a.m. or after 4 p.m.' })).toBe('your permitted watering day (before 10 a.m. or after 4 p.m.)');
   });
 
   test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
@@ -111,7 +123,7 @@ describe('renderWeekPlanEmail', () => {
   test('no head type → events-only cycle + ask for the head type; rain sensor line; forecast-unavailable caveat', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 1, season: 'peak', restriction: ONE_DAY, runMinutes: 20, wateringDays: ['Mon'], systemType: [], rainSensor: true, forecastRainInches: null });
     const copy = renderWeekPlanEmail(plan, { ...CTX, runMinutes: 20 });
-    expect(copy.week_plan).toContain('run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones on your permitted watering day');
+    expect(copy.week_plan).toContain("run one full cycle on each turf zone — ½ to ¾ inch of water, which is about 20 minutes on spray zones and 60 on rotor zones on your permitted watering day (on your assigned day, during your area's allowed hours)");
     expect(copy.plan_note).toContain('Add your sprinkler head type');
     expect(copy.plan_note).toContain('rain sensor will skip a run');
     expect(copy.plan_note).toContain("couldn't get a rain forecast");

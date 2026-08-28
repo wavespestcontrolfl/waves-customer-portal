@@ -2041,17 +2041,22 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
-    if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
-      // loadCurrentWeekPlan already returns null once the policy it was
-      // decided under is no longer in force, so its identity is the stamp.
-      // …and only when the snapshot binds to THIS premise: an address change
-      // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
-      const snapshot = await loadCurrentWeekPlan(service.customer_id);
-      weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, service) ? new Date(snapshot.sentAt).toISOString() : null;
-      irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
-    }
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
+  }
+  // The week-plan identity is resolved OUTSIDE the fail-open prefs catch and
+  // STRICTLY: a failed lookup here would otherwise stamp plan=none and pin
+  // the render plan-less — the queued PDF path could then mail an
+  // irreversible attachment without the plan the Monday email carried.
+  // Propagating refuses the render; the caller retries.
+  if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
+    // loadCurrentWeekPlan already returns null once the policy it was
+    // decided under is no longer in force, so its identity is the stamp —
+    // and only when the snapshot binds to THIS premise: an address change
+    // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
+    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, service) ? new Date(snapshot.sentAt).toISOString() : null;
+    irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
   }
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
@@ -2608,7 +2613,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     const servicedElsewhere = !!snapshot && !planBindsToService(snapshot, service);
     if (snapshot?.plan && !servicedElsewhere) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
-      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });
+      waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null });
     }
   }
 

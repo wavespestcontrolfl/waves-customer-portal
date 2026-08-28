@@ -1133,6 +1133,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           summary.deduped += 1;
           continue;
         }
+        if (priorLegacyPath.state === 'pending') {
+          // In flight, or a post-provider failure the webhook has not yet
+          // repaired: the plan may already be in the inbox — never a second,
+          // contradicting pre-plan email on top of it.
+          summary.plan.claimed_elsewhere += 1;
+          continue;
+        }
       }
 
       if (decision.weekPlan) {
