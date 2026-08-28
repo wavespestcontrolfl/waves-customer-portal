@@ -14,6 +14,12 @@ async function syncEmails() {
 
     const state = await db('email_sync_state').first();
 
+    // Durable retry for the customer-email bell: Gmail never re-emits a
+    // message, so a claim released by a transient delivery failure would be
+    // lost forever without this — every run re-offers unclaimed eligible
+    // rows (idempotent via the atomic claim) (hook P1).
+    await sweepUnclaimedCustomerEmailBells().catch((err) => logger.warn(`[email-sync] bell sweep failed: ${err.message}`));
+
     if (state?.last_history_id) {
       return incrementalSync(state);
     } else {
@@ -385,23 +391,55 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
 
   // Classify in background (don't block sync)
   if (!proofHandled && !approvalControl && (!email.classification || email.classification === 'vendor')) {
-    // Awaited (was setImmediate): the sync cursor must not advance past a
-    // message whose classification + bell have not happened — a process
-    // exit in that window would leave a row future syncs treat as existing,
-    // silently losing the bell (hook P1). The existing-row path below
-    // re-checks a never-notified candidate for the same reason.
     const { classifyEmail } = require('./email-classifier');
-    let classified = false;
-    try {
-      await classifyEmail(email);
-      classified = true;
-    } catch (err) {
-      logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+    if (bellCandidate) {
+      // Bell candidates only: classification + bell are AWAITED so the sync
+      // cursor never advances past a message whose bell has not happened
+      // (a process exit there would otherwise lose it). Everything else
+      // keeps the bounded background path — a full mailbox sync must not
+      // serialize an LLM call per message (hook P1 ×2).
+      let classified = false;
+      try {
+        await classifyEmail(email);
+        classified = true;
+      } catch (err) {
+        logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+      }
+      await ringCustomerEmailBell(email, { customerId, parsed, classified });
+    } else {
+      setImmediate(() => {
+        classifyEmail(email).catch((err) => {
+          logger.error(`[email-sync] Classification failed for ${email.id}: ${err?.message || err}`);
+        });
+      });
     }
-    if (bellCandidate) await ringCustomerEmailBell(email, { customerId, parsed, classified });
   }
 
   return true; // new email
+}
+
+const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Re-offer unclaimed, still-eligible customer emails from the last 24h.
+ * Cheap (indexed on customer_id / received_at), bounded, idempotent.
+ */
+async function sweepUnclaimedCustomerEmailBells() {
+  if (!(await db.schema.hasColumn('emails', 'customer_bell_claimed_at'))) return 0;
+  const rows = await db('emails')
+    .whereNull('customer_bell_claimed_at')
+    .whereNotNull('customer_id')
+    .where('received_at', '>', new Date(Date.now() - CUSTOMER_EMAIL_BELL_MAX_AGE_MS))
+    .where({ is_archived: false })
+    .orderBy('received_at', 'asc')
+    .limit(50);
+  let rung = 0;
+  for (const row of rows) {
+    const parsed = { from_name: row.from_name, from_address: row.from_address, subject: row.subject, label_ids: row.label_ids || [] };
+    await recoverLostCustomerEmailBell(row, { customerId: row.customer_id, parsed, backfill: false }).catch(() => {});
+    rung += 1;
+  }
+  return rung;
 }
 
 // Bulk/spam classes the classifier may assign after insert — never ring.
@@ -481,7 +519,6 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified }) 
  * Vendor/spam/bulk mail (classification set, or a List-Unsubscribe header)
  * and anything not in INBOX never ring.
  */
-const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 function customerEmailBellEligible({ customerId, classification, listUnsubscribe, labelIds, authenticationResults, fromAddress, receivedAt, backfill = false, now = Date.now() } = {}) {
   // A fullSync (first Gmail connect / empty table) is history, whatever its
   // timestamps say — it never notifies (hook P1). The 24h guard below is the
