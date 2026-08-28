@@ -378,6 +378,26 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(db.transaction).toHaveBeenCalledTimes(1); // survivor update + twin retirement = one transaction
   });
 
+  test('a GSC-import twin (excluded from loss detection) is still retired as merged when its canonical identity is reported', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
+    const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });
+    const g = activeRow({ id: 'g', source_url: 'http://www.blog.example/post/', target_url: 'https://www.wavespestcontrol.com', discovery_source: 'gsc_links_export' });
+    const { updates, events, increments } = scanWith({ items: [seen], active: [a, g] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ merged: 1, missed: 0 }));
+    expect(increments).toEqual([]);
+    expect(updates).toContainEqual({ ids: 'g', patch: expect.objectContaining({ status: 'merged' }) });
+    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'g', event_type: 'merged' }));
+  });
+
+  test('domain representative: a clean editorial loss out-ranks a warning-severity sibling (same reason/DR) so the domain stays alertable', async () => {
+    const warn = { id: 'w', source_url: 'https://blog.example/a', target_url: 'https://wavespestcontrol.com/', source_domain: 'blog.example', domain_rating: 45, severity: 'warning', link_type: 'editorial', lost_reason: 'link_removed' };
+    const clean = { id: 'c', source_url: 'https://blog.example/b', target_url: 'https://wavespestcontrol.com/', source_domain: 'blog.example', domain_rating: 45, severity: 'clean', link_type: 'editorial', lost_reason: 'link_removed' };
+    makeDb({ seo_backlinks: (op) => (op === 'first' ? null : []) });
+    const out = await BacklinkMonitor.domainLevelLosses([warn, clean]); // warning row FIRST in table order
+    expect(out).toEqual([expect.objectContaining({ domain: 'blog.example', backlink_id: 'c', alertable: true })]);
+  });
+
   test('twin retirement rolls back with the survivor update: a failing ledger insert leaves the twin untouched', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
     const a = activeRow({ id: 'a', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/' });

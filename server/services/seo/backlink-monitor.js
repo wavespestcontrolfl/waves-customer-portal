@@ -202,8 +202,11 @@ class BacklinkMonitor {
         // other active row under this identity is retired as 'merged' (ledgered
         // with the survivor's id) in the SAME transaction as the survivor's
         // update — never left active to inflate totals, snapshots, velocity.
+        // Twins come from the FULL canonical group (rowsByKey), not the
+        // scan-tracked activeMap: a GSC-import row spelled differently is just
+        // as much a duplicate of this identity and would otherwise stay active.
         const key = linkKey(link.url_from, link.url_to);
-        const twins = (activeMap.get(key) || []).filter(r => r.id !== existing.id);
+        const twins = (rowsByKey.get(key) || []).filter(r => r.id !== existing.id && r.status === 'active');
         if (twins.length) activeMap.set(key, (activeMap.get(key) || []).filter(r => r.id === existing.id));
         const retireTwins = async (q) => {
           for (const t of twins) {
@@ -547,10 +550,15 @@ class BacklinkMonitor {
     // alertable (verified reason + editorial-ish type), then DR. domain_rating is
     // domain-level so ties are the norm — picking "first row" would let a
     // rotated directory page or an unreachable row mask a real editorial loss.
+    // …and a NON-TOXIC row over a toxic sibling: toxicity is derived from the
+    // representative alone, so a warning-severity link (e.g. a foreign-language
+    // heuristic hit on one URL) must never out-rank a clean editorial loss and
+    // silence the whole domain.
     const rank = (l) => {
       const type = l.link_type || this.classifyLinkType(l);
       return (['page_gone', 'link_removed'].includes(l.lost_reason) ? 2 : 0)
         + (NON_EDITORIAL_TYPES.has(type) ? 0 : 1)
+        + (['critical', 'warning'].includes(l.severity) ? 0 : 0.5)
         + (l.domain_rating || 0) / 1000;
     };
     const byDomain = new Map();
