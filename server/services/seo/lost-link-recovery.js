@@ -259,7 +259,7 @@ async function queueOne(loss, out, scoreMod) {
       source: 'lost_recovery',
       source_ref: loss.backlink_id || null,
       owner: 'backlink_monitor',
-      }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+      }).onConflict(['target_domain', 'target_page', 'location_key']).ignore().returning('id');
     });
     if (inserted && inserted.raced) {
       out.skipped++;

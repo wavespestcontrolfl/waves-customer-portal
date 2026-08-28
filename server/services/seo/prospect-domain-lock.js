@@ -4,7 +4,7 @@
  * strategy agent's create_link_prospects, the local-opportunity promoter, the
  * deep-harvest script).
  *
- * The board's unique key is the textual (target_domain, target_page) pair, so
+ * The board's unique key is the textual (target_domain, target_page, location_key) triple, so
  * two rows for one site — another Waves page, another spelling — never
  * conflict; both are claimable and the outreach worker would email one inbox
  * twice. claimProspectDomain() is the guard: inside the caller's transaction it
@@ -35,8 +35,21 @@ const LOCK_PREFIX = 'lost_recovery:';
 // recovery lane (lanes: 'all') still sees every row.
 const { SIGNUP_TYPES } = require('./link-prospect-worker');
 
-const ACTIVE_OUTREACH_STATUSES = Object.freeze(['prospect', 'contacted', 'negotiating']);
-const IN_FLIGHT_STATUSES = Object.freeze([...ACTIVE_OUTREACH_STATUSES, 'placed', 'live', 'indexed']);
+// v2 (plan §3.3): `awaiting_owner` = parked on an owner decision — still the
+// domain's one conversation, so it stays in the ACTIVE set (a second writer
+// proposing the same host for another page is refused while one is parked);
+// `watching` = unactionable today, rechecked — not an open conversation, so
+// only the recovery lane (IN_FLIGHT) sees it. Neither is ever leased.
+const ACTIVE_OUTREACH_STATUSES = Object.freeze(['prospect', 'contacted', 'negotiating', 'awaiting_owner']);
+const IN_FLIGHT_STATUSES = Object.freeze([...ACTIVE_OUTREACH_STATUSES, 'placed', 'live', 'indexed', 'watching']);
+
+// Placement identity's third column (plan §3.3): the GBP location a signup
+// placement is for; '-' = not location-scoped (every outreach lane, and the
+// runner's legacy 'default'). Replaces quality_signals.location as identity.
+function locationKeyOf(loc) {
+  const v = String(loc == null ? '' : loc).trim().toLowerCase();
+  return v && v !== 'default' && v !== '-' ? v : '-';
+}
 
 // Canonical host: lower-cased, scheme/www/mail stripped, no path or port.
 // Every writer hashes the same string for the same site.
@@ -79,17 +92,18 @@ function targetPageVariants(url) {
 }
 
 /**
- * findPlacementRow(q, domain, targetPage, { excludeId }) → the board row for
- * this placement under ANY spelling of either half of the key — canonical
- * host for target_domain, every page variant for target_page — or null. The
+ * findPlacementRow(q, domain, targetPage, { excludeId, location }) → the board
+ * row for this placement under ANY spelling of either textual half of the key —
+ * canonical host for target_domain, every page variant for target_page — for
+ * the given location ('-' = not location-scoped, the default) — or null. The
  * unique index is textual, so a raw-pair check lets www.example.com + a
  * non-www page coexist with a canonical-equivalent row; every writer's
  * "does this placement already exist" check goes through here.
  */
-async function findPlacementRow(q, domain, targetPage, { excludeId = null, columns = ['id', 'status', 'target_page'] } = {}) {
+async function findPlacementRow(q, domain, targetPage, { excludeId = null, location = '-', columns = ['id', 'status', 'target_page'] } = {}) {
   const key = canonicalProspectDomain(domain);
   if (!key) return null;
-  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage));
+  let qb = byDomain(q('seo_link_prospects'), key).whereIn('target_page', targetPageVariants(targetPage)).where('location_key', locationKeyOf(location));
   if (excludeId) qb = qb.whereNot('id', excludeId);
   return (await qb.first(...columns)) || null;
 }
@@ -119,4 +133,4 @@ async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STA
   return { domain: key, inFlight: row && set.has(row.status) ? row : null };
 }
 
-module.exports = { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };
+module.exports = { lockProspectDomain, claimProspectDomain, findPlacementRow, canonicalProspectDomain, locationKeyOf, byDomain, TARGET_DOMAIN_CANONICAL_SQL, targetPathOf, targetPageOf, targetPageVariants, ACTIVE_OUTREACH_STATUSES, IN_FLIGHT_STATUSES, LOCK_PREFIX };

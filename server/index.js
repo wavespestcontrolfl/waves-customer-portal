@@ -1137,6 +1137,22 @@ httpServer.listen(PORT, () => {
     // and a live quote draft. The sweep strips the stranded pricing
     // (fail-safe: price-less single visit, office converts from the live
     // draft) and rings an admin bell. No-op when nothing is stranded.
+    // Backlink Manager v2 step 1: one-shot catch-up copying any legacy
+    // seo_signup_attempts row (written by an old pod during the rolling deploy)
+    // into seo_link_attempts. Idempotent; the signup-runner repeats it per run.
+    {
+      const legacyAttemptsCatchup = async () => {
+        try {
+          const { runExclusive } = require('./utils/cron-lock');
+          await runExclusive('link-attempts-legacy-catchup', async () => {
+            const { backfillLegacyAttempts } = require('./services/seo/link-registry-backfill');
+            const db = require('./models/db');
+            await backfillLegacyAttempts(db, { log: (m) => logger.info(m) });
+          }, { recordHealth: false });
+        } catch (err) { logger.warn(`[link-registry] legacy attempts boot catch-up failed: ${err.message}`); }
+      };
+      setTimeout(legacyAttemptsCatchup, 90 * 1000).unref();
+    }
     {
       const runWizardActivationSweep = async () => {
         try {

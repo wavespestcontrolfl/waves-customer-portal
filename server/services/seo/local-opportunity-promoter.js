@@ -137,7 +137,7 @@ async function run({
           scored_by: 'local_opportunity',
         }),
         source: tag, owner: 'strategy_agent',
-      }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+      }).onConflict(['target_domain', 'target_page', 'location_key']).ignore().returning('id');
     });
     if (inserted.length) summary.promoted++; else summary.dupes++;
   }

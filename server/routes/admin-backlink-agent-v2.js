@@ -5,6 +5,7 @@ const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
 const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
+const linkIntake = require('../services/seo/link-registry-intake');
 const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 
 router.use(adminAuthenticate, requireAdmin);
@@ -209,7 +210,45 @@ router.get('/strategy/reports', async (req, res, next) => {
 // LINK PROSPECTS — outbound link-building board (Backlink Manager M1)
 // =========================================================================
 
-const PROSPECT_STATUSES = ['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed', 'lost', 'rejected'];
+// The status contract (plan v2 §3.3). `awaiting_owner` = parked on an owner
+// decision (payment / membership / legal); `watching` = unactionable today,
+// rechecked. The worker's claim() leases only 'prospect', so neither is ever
+// leased; both join the per-domain guard sets in prospect-domain-lock.
+const PROSPECT_STATUSES = Object.freeze(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed', 'lost', 'rejected', 'awaiting_owner', 'watching']);
+const PARKED_STATUSES = Object.freeze(['awaiting_owner', 'watching']);
+// Sources the owner's paste box may stamp. Bulk lists are list_import; a seed
+// the owner typed to be investigated first is owner_seed (§3.5).
+const INTAKE_SOURCES = Object.freeze(['list_import', 'owner_seed']);
+
+// POST /api/admin/backlink-agent/opportunities/bulk — intake skeleton (plan v2 §4, step 1):
+// normalize → dedupe → upsert registry domains + touches. No resolvers, no
+// enrichment, no investigation queueing yet (steps 2–3). dryRun reports only.
+router.post('/opportunities/bulk', async (req, res, next) => {
+  try {
+    const { text, source = 'list_import', source_detail, dryRun } = req.body || {};
+    if (typeof text !== 'string' || !text.trim()) return res.status(400).json({ error: 'text (domains, URLs, or a pasted list) is required' });
+    if (text.length > 200000) return res.status(400).json({ error: 'text too large (200k chars max)' });
+    if (!INTAKE_SOURCES.includes(source)) return res.status(400).json({ error: `invalid source; must be one of ${INTAKE_SOURCES.join(', ')}` });
+    const detail = typeof source_detail === 'string' && source_detail.trim() ? source_detail.trim().slice(0, 200) : `paste:${new Date().toISOString().slice(0, 10)}`;
+    const result = await linkIntake.intake(db, { text, source, sourceDetail: detail, dryRun: dryRun === true || dryRun === 'true' });
+    res.json(result);
+  } catch (err) { next(err); }
+});
+
+// GET /api/admin/backlink-agent/registry — registry list (step 1: read-only view of what intake wrote)
+router.get('/registry', async (req, res, next) => {
+  try {
+    const { agent_state, source, q, page = 1, limit = 100 } = req.query;
+    let query = db('seo_link_domains');
+    if (agent_state) query = query.where({ agent_state });
+    if (source) query = query.where({ source });
+    if (q) query = query.whereILike('domain', `%${q}%`);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    const offset = (Math.max(parseInt(page, 10) || 1, 1) - 1) * lim;
+    const items = await query.clone().orderBy('discovery_priority', 'asc').orderBy('created_at', 'desc').limit(lim).offset(offset);
+    res.json({ items });
+  } catch (err) { next(err); }
+});
 
 // GET /api/admin/backlink-agent/prospects — board list (filters + pagination)
 router.get('/prospects', async (req, res, next) => {
@@ -448,3 +487,6 @@ router.post('/prospects/:id/outreach/reconcile', requireAdmin, async (req, res, 
 });
 
 module.exports = router;
+module.exports.PROSPECT_STATUSES = PROSPECT_STATUSES;
+module.exports.PARKED_STATUSES = PARKED_STATUSES;
+module.exports.INTAKE_SOURCES = INTAKE_SOURCES;

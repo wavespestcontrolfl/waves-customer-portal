@@ -25,6 +25,9 @@ const { uploadEvidence } = require('./signup-evidence');
 const { _internals: ssrf } = require('./contact-finder'); // isBlockedHostname
 const { WAVES_ADDRESS_LINE } = require('../../constants/business');
 const { CITY_TO_LOCATION } = require('../../config/locations'); // canonical city/service-area → GBP locId
+const { mapLegacyOutcome } = require('./link-registry');
+const { backfillLegacyAttempts } = require('./link-registry-backfill');
+const { locationKeyOf } = require('./prospect-domain-lock');
 
 // Filler errorCodes that are RUN-LEVEL (environment/outage), identical for every
 // prospect and NOT the prospect's fault — a misconfigured/degraded run must abort the
@@ -111,8 +114,9 @@ function buildNap(profile, prospect = null) {
 // this directory domain + GBP location? A multi-location business gets one listing per
 // location on a directory, so a SECOND prospect row for the SAME (domain, location) is a
 // duplicate — even across runs. Earlier same-run placements are already reported, so this
-// one check covers both the in-batch and cross-run cases. quality_signals.location is
-// stamped on every runner placement (see the placed report below).
+// one check covers both the in-batch and cross-run cases. Identity = the board's
+// location_key (plan v2 §3.3; '-' = not scoped), stamped on every runner placement by
+// the worker's placed report (see below) and backfilled from quality_signals.location.
 async function alreadyPlacedAt(domain, locId) {
   const dom = normDomain(domain);
   if (!dom) return false;
@@ -120,25 +124,44 @@ async function alreadyPlacedAt(domain, locId) {
     .whereIn('status', ['placed', 'live', 'indexed'])
     // https{0,1} not https? — a literal ? inside a knex whereRaw is parsed as a positional binding.
     .whereRaw("lower(regexp_replace(regexp_replace(target_domain, '^https{0,1}://', ''), '^www\\.', '')) = ?", [dom])
-    .whereRaw("COALESCE(quality_signals->>'location','') = ?", [String(locId || 'default')])
+    .whereRaw('location_key = ?', [locationKeyOf(locId)])
     .first();
   return !!row;
 }
 
-async function recordAttempt(p, result, evidenceKey) {
-  try {
-    await db('seo_signup_attempts').insert({
-      prospect_id: p.id,
-      outcome: result.outcome,
+/**
+ * The runner's ledger row (plan v2 §3.4): seo_link_attempts, provider
+ * deterministic_runner, the engine's verbatim outcome kept in detail.legacy_outcome
+ * and mapped onto the CHECKed enum (blocked_* → needs_owner/captcha/price_changed;
+ * placed without a live URL → pending). Never credentials, never page bodies.
+ */
+function attemptRowFor(p, result, evidenceKey) {
+  const placedPending = result.outcome === 'placed' && (!!result.pending || !result.liveUrl);
+  return {
+    prospect_id: p.id,
+    path_id: p.path_id || null,
+    provider: 'deterministic_runner',
+    action: 'submit',
+    outcome: placedPending ? 'pending' : mapLegacyOutcome(result.outcome),
+    cost_cents: 0,
+    duration_ms: Number.isFinite(result.durationMs) ? Math.round(result.durationMs) : null,
+    sandbox: false,
+    evidence_url: evidenceKey || null,
+    detail: JSON.stringify({
+      legacy_outcome: result.outcome == null ? null : String(result.outcome),
       mode: 'auto',
       live_url: result.liveUrl || null,
-      evidence_url: evidenceKey || null,
-      screenshot_url: evidenceKey || null,
-      cost_usd: 0,
       link_rel: p.offered_link_rel || 'unknown',
       error_code: result.errorCode || null,
       error_message: result.notes || null,
-    });
+      screenshot_url: evidenceKey || null,
+    }),
+  };
+}
+
+async function recordAttempt(p, result, evidenceKey) {
+  try {
+    await db('seo_link_attempts').insert(attemptRowFor(p, result, evidenceKey));
   } catch (err) { logger.warn(`[signup-runner] attempt-ledger write failed for ${p.target_domain}: ${err.message}`); }
 }
 
@@ -168,6 +191,11 @@ async function leaseGuardedReclassify(p, patch) {
  * no writes) and releases its leases. Returns { claimed, placed, blocked, failed, skipped }.
  */
 async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, anthropic } = {}) {
+  // Expand/contract catch-up (plan v2 §3.4): a legacy seo_signup_attempts row written
+  // by an old pod during the rolling deploy is copied forward here, never lost.
+  // Idempotent (keyed by legacy_attempt_id); a failure never blocks the run.
+  await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
+
   const allowlist = (allow && allow.length ? allow : String(process.env.SIGNUP_RUNNER_ALLOWLIST || '').split(','))
     .map((d) => normDomain(d)).filter(Boolean);
 
@@ -287,4 +315,4 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
 }
 
 module.exports = { run };
-module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify };
+module.exports._internals = { buildNap, parseAddress, normDomain, validateSubmitUrl, leaseGuardedReclassify, attemptRowFor };

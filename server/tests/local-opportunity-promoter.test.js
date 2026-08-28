@@ -20,6 +20,7 @@ function fakeDb({ ownActive = [], existing = [], inFlight = [] } = {}) {
       const probe = {
         whereRaw: (sql, bind) => { if (/target_domain/.test(sql)) probeDomain = bind[0]; return probe; },
         whereIn: () => probe,
+        where: () => probe, // v2: findPlacementRow adds .where('location_key', …)
         // the guard's domain-wide probe: an `inFlight` fixture row for the domain
         first: async () => inFlight.find((p) => p.target_domain === probeDomain) || null,
       };

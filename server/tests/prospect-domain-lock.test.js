@@ -53,15 +53,18 @@ describe('prospect-domain-lock helper', () => {
     await expect(claimProspectDomain(trx, 'blog.example')).resolves.toEqual({ domain: 'blog.example', inFlight: null });
     q.first.mockResolvedValueOnce({ id: 'p2', status: 'live', target_page: '/y' });
     await expect(claimProspectDomain(trx, 'blog.example', { statuses: IN_FLIGHT_STATUSES })).resolves.toEqual(expect.objectContaining({ inFlight: expect.objectContaining({ id: 'p2' }) }));
-    expect(IN_FLIGHT_STATUSES).toEqual(['prospect', 'contacted', 'negotiating', 'placed', 'live', 'indexed']);
+    // v2 (plan §3.3): awaiting_owner = still the domain's one conversation (ACTIVE); watching = recovery-lane visible only
+    expect(ACTIVE_OUTREACH_STATUSES).toEqual(['prospect', 'contacted', 'negotiating', 'awaiting_owner']);
+    expect(IN_FLIGHT_STATUSES).toEqual(['prospect', 'contacted', 'negotiating', 'awaiting_owner', 'placed', 'live', 'indexed', 'watching']);
   });
 
   test('findPlacementRow: canonical host + every page spelling (www/non-www, http/https, ±slash), optional self-exclusion', async () => {
     let captured = null;
-    const q = { whereRaw: jest.fn((sql, bind) => { captured = { sql, bind }; return q; }), whereIn: jest.fn((col, vals) => { captured.pages = [col, vals]; return q; }), whereNot: jest.fn((col, val) => { captured.not = [col, val]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' })) };
+    const q = { whereRaw: jest.fn((sql, bind) => { captured = { sql, bind }; return q; }), whereIn: jest.fn((col, vals) => { captured.pages = [col, vals]; return q; }), where: jest.fn((col, val) => { captured.loc = [col, val]; return q; }), whereNot: jest.fn((col, val) => { captured.not = [col, val]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' })) };
     const trx = jest.fn(() => q);
     const r = await findPlacementRow(trx, 'WWW.Blog.Example', 'http://www.wavespestcontrol.com/x/?utm=1', { excludeId: 'me' });
     expect(r).toEqual({ id: 'p1', status: 'lost', target_page: 'https://wavespestcontrol.com/x' });
+    expect(captured.loc).toEqual(['location_key', '-']); // v2 identity: third key column defaults to '-'
     expect(captured.sql).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
     expect(captured.bind).toEqual(['blog.example']);
     expect(captured.pages[0]).toBe('target_page');
@@ -71,6 +74,11 @@ describe('prospect-domain-lock helper', () => {
     q.first.mockResolvedValueOnce(undefined);
     await expect(findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/')).resolves.toBeNull();
     await expect(findPlacementRow(trx, '', 'https://wavespestcontrol.com/')).resolves.toBeNull();
+    // a location is normalized (trim/lower; 'default' = not scoped)
+    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: ' Sarasota ' });
+    expect(captured.loc).toEqual(['location_key', 'sarasota']);
+    await findPlacementRow(trx, 'blog.example', 'https://wavespestcontrol.com/', { location: 'default' });
+    expect(captured.loc).toEqual(['location_key', '-']);
   });
 
   test('canonical form matches the recovery lane normalizeDomain (one identity everywhere)', () => {

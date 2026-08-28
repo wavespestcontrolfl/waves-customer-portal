@@ -8,6 +8,8 @@ jest.mock('../services/seo/link-prospect-worker', () => ({
   ] }),
 }));
 jest.mock('../services/seo/browser-form-filler', () => ({ fillCitationForm: jest.fn() }));
+// v2 step 1: run() starts with the idempotent legacy-attempts catch-up (expand/contract).
+jest.mock('../services/seo/link-registry-backfill', () => ({ backfillLegacyAttempts: jest.fn(async () => ({ copied: 0, scanned: 0 })) }));
 jest.mock('../services/seo/signup-evidence', () => ({ uploadEvidence: jest.fn(async () => 'backlink-evidence/x.png') }));
 // Stub the SSRF helpers so URL validation is deterministic + offline (no real DNS).
 // Shape/host rejections in validateSubmitUrl happen BEFORE these are consulted.
@@ -168,7 +170,7 @@ describe('run — safety gates', () => {
     expect(r.skipped).toBe(1); // the durable duplicate is parked (reclassified skip), never resubmitted
     // p2 is reclassified to skip (so it's never re-claimed) + a skipped attempt is logged
     expect(mockUpdate).toHaveBeenCalledWith(expect.objectContaining({ automation_policy: 'skip', claimed_at: null }));
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', error_code: 'duplicate_placement' }));
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'skipped', provider: 'deterministic_runner', detail: expect.stringContaining('"error_code":"duplicate_placement"') }));
   });
   test('same directory, DIFFERENT locations → both submit (per-location listings are allowed)', async () => {
     worker.claim.mockResolvedValue([
@@ -188,7 +190,9 @@ describe('run — outcomes', () => {
     const r = await runner.run({ allow: ['citysquares.com'] });
     expect(r.placed).toBe(1);
     expect(worker.report).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', live_url: 'https://citysquares.com/biz/waves', evidence_url: 'backlink-evidence/x.png' }));
-    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', mode: 'auto' }));
+    // v2 ledger (seo_link_attempts): CHECKed enum outcome, provider + action, verbatim engine outcome in detail
+    expect(mockInsert).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'placed', provider: 'deterministic_runner', action: 'submit', path_id: null, detail: expect.stringContaining('"legacy_outcome":"placed"') }));
+    expect(require('../services/seo/link-registry-backfill').backfillLegacyAttempts).toHaveBeenCalled();
   });
   test('blocked_captcha → RECLASSIFIES (needs_account) + releases, no retry report', async () => {
     worker.claim.mockResolvedValue([prospect()]);
