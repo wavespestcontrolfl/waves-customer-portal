@@ -325,6 +325,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     return blockedInsert.length > 0; // true only if this sync actually inserted it (else a concurrent sync won)
   }
 
+  // First-connect history is pre-claimed at insert so the retry sweep can
+  // never re-offer it (hook P1). Column guard: the migration runs prebuild,
+  // but a sync racing an older pod must not fail the insert.
+  if (backfill && await bellClaimColumnExists()) emailData.customer_bell_claimed_at = new Date();
   const inserted = await db('emails').insert(emailData).onConflict('gmail_id').ignore().returning('*');
   if (!inserted.length) return false; // lost an insert race with a concurrent sync; already stored
   // A new inbound email from someone on the customer list rings the admin
@@ -424,8 +428,16 @@ const CUSTOMER_EMAIL_BELL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
  * Re-offer unclaimed, still-eligible customer emails from the last 24h.
  * Cheap (indexed on customer_id / received_at), bounded, idempotent.
  */
+let bellClaimColumnKnown = null;
+async function bellClaimColumnExists() {
+  if (bellClaimColumnKnown === null) {
+    bellClaimColumnKnown = await db.schema.hasColumn('emails', 'customer_bell_claimed_at').catch(() => false);
+  }
+  return bellClaimColumnKnown;
+}
+
 async function sweepUnclaimedCustomerEmailBells() {
-  if (!(await db.schema.hasColumn('emails', 'customer_bell_claimed_at'))) return 0;
+  if (!(await bellClaimColumnExists())) return 0;
   const rows = await db('emails')
     .whereNull('customer_bell_claimed_at')
     .whereNotNull('customer_id')
@@ -443,7 +455,7 @@ async function sweepUnclaimedCustomerEmailBells() {
 }
 
 // Bulk/spam classes the classifier may assign after insert — never ring.
-const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor']);
+const NEVER_RING_CLASSES = new Set(['spam', 'marketing_newsletter', 'vendor', 'vendor_invoice', 'vendor_communication']);
 
 /**
  * A row that exists but was never notified (sync died between insert and
