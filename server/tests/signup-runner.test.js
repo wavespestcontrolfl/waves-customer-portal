@@ -158,6 +158,21 @@ describe('run — safety gates', () => {
     // the attempt row carries the prospect's path (linked by the catch-up above)
     expect(runner._internals.attemptRowFor({ id: 'p', path_id: 'path-9' }, { outcome: 'blocked_phone_verification' }, null)).toMatchObject({ path_id: 'path-9', outcome: 'needs_owner' });
   });
+  test('a failing board→registry catch-up ABORTS the run before any claim (no unlinked prospect is ever submitted)', async () => {
+    const { backfillLegacyAttempts, backfillLegacyBoard } = require('../services/seo/link-registry-backfill');
+    backfillLegacyAttempts.mockClear(); backfillLegacyBoard.mockClear();
+    backfillLegacyBoard.mockRejectedValueOnce(new Error('boom'));
+    const r = await runner.run({ dryRun: false, allow: ['citysquares.com'] });
+    expect(r).toEqual({ claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, aborted: 'registry_catchup_failed' });
+    expect(worker.claim).not.toHaveBeenCalled();
+    expect(backfillLegacyAttempts).not.toHaveBeenCalled();
+    expect(mockInsert).not.toHaveBeenCalled();
+    // an attempts catch-up failure only logs
+    backfillLegacyAttempts.mockRejectedValueOnce(new Error('boom'));
+    worker.claim.mockResolvedValue([]);
+    await expect(runner.run({ dryRun: false, allow: ['citysquares.com'] })).resolves.toMatchObject({ claimed: 0 });
+    expect(worker.claim).toHaveBeenCalledTimes(1);
+  });
   test('dry-run uses a READ-ONLY preview claim (no lease/write)', async () => {
     worker.claim.mockResolvedValue([]);
     await runner.run({ dryRun: true, allow: ['citysquares.com'] });

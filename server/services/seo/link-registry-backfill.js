@@ -11,9 +11,11 @@
  *
  *  backfillLegacyBoard(q) — every `seo_link_prospects` row gets a registry
  *    domain (grouped by canonical host; first-touch source = the earliest legacy
- *    row's mapped source), its own historical touch (seen_at = the row's
- *    created_at, never now()), and an acquisition path mapped from its lane;
- *    then domain_id / path_id are linked. Rows already linked are skipped.
+ *    row's mapped source), its own historical touch (identity `prospect:<id>`,
+ *    seen_at = the row's created_at, never now()), and an acquisition path
+ *    mapped from its lane; then domain_id / path_id are linked. A linked row
+ *    whose recomputed path_key no longer matches its path (link_type / target_url
+ *    edited on the board) is RELINKED to the matching active path.
  *
  * Neither inserts a board row, sends anything, or spends anything.
  */
@@ -63,6 +65,14 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
       'domain_id', 'path_id', 'requires_account', 'requires_email_verification', 'requires_payment',
       'detected_price_usd', 'offered_link_rel');
 
+  // path_key of every currently linked path, one query — a board edit
+  // (link_type / target_url) must relink, not keep a stale path forever.
+  const linkedIds = [...new Set(rows.map((r) => r.path_id).filter(Boolean))];
+  const pathKeys = new Map();
+  if (linkedIds.length) {
+    for (const p of await q('seo_link_acquisition_paths').whereIn('id', linkedIds).select('id', 'path_key')) pathKeys.set(p.id, p.path_key);
+  }
+
   const groups = new Map();
   for (const r of rows) {
     const key = canonicalProspectDomain(r.target_domain);
@@ -71,15 +81,18 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
     groups.get(key).push(r);
   }
 
-  const out = { domains: 0, domainsCreated: 0, touches: 0, paths: 0, linked: 0, skippedNoHost: rows.length - [...groups.values()].reduce((n, g) => n + g.length, 0) };
+  const out = { domains: 0, domainsCreated: 0, touches: 0, paths: 0, linked: 0, relinked: 0, skippedNoHost: rows.length - [...groups.values()].reduce((n, g) => n + g.length, 0) };
   for (const [host, group] of groups) {
     // rows arrive ordered by created_at, id — group[0] is the deterministic first touch
     const first = group[0];
     const firstTouch = mapLegacySource(first.source);
+    // one touch PER board row: the prospect id makes the touch identity distinct
+    // even when several rows share a source with no source_ref
+    const touchDetail = (m, r) => `${m.source_detail} prospect:${r.id}`;
     const dom = await ensureDomain(q, {
       domain: host,
       source: firstTouch.source,
-      sourceDetail: firstTouch.source_detail,
+      sourceDetail: touchDetail(firstTouch, first),
       sourceRef: first.source_ref || null,
       seenAt: first.created_at || null,
       createdAt: first.created_at || null,
@@ -91,12 +104,16 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
     for (const r of group) {
       if (r !== first) {
         const m = mapLegacySource(r.source);
-        const t = await ensureDomain(q, { domain: host, source: m.source, sourceDetail: m.source_detail, sourceRef: r.source_ref || null, seenAt: r.created_at || null });
+        const t = await ensureDomain(q, { domain: host, source: m.source, sourceDetail: touchDetail(m, r), sourceRef: r.source_ref || null, seenAt: r.created_at || null });
         if (t.touched) out.touches += 1;
       }
-      if (r.domain_id && r.path_id) continue;
-
       const path = acquisitionPathFromLegacyRow(r);
+      // linked and unchanged → nothing to do; an unknown key (path row not
+      // loaded) is trusted as-is (the FK is SET NULL, so a dangling id cannot exist)
+      const linkedKey = r.path_id ? pathKeys.get(r.path_id) : null;
+      if (r.domain_id && r.path_id && (linkedKey === undefined || linkedKey === path.path_key)) continue;
+      const relink = !!(r.path_id && linkedKey !== undefined && linkedKey !== path.path_key);
+
       let existing = await findActivePath(q, dom.id, path.path_key);
       if (!existing) {
         // Concurrent catch-ups (boot, runner, CLI) hold different locks: insert
@@ -110,10 +127,10 @@ async function backfillLegacyBoard(q, { log = null } = {}) {
       }
       const patch = {};
       if (!r.domain_id) patch.domain_id = dom.id;
-      if (!r.path_id) patch.path_id = existing.id;
+      if (!r.path_id || relink) patch.path_id = existing.id;
       if (Object.keys(patch).length) {
         await q('seo_link_prospects').where({ id: r.id }).update({ ...patch, updated_at: q.fn ? q.fn.now() : new Date() });
-        out.linked += 1;
+        if (relink) out.relinked += 1; else out.linked += 1;
       }
     }
   }

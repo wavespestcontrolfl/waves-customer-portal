@@ -36,7 +36,7 @@ function parseOpportunities(text) {
     const domain = canonicalProspectDomain(token);
     if (!domain || !domain.includes('.')) { dropped.push({ token, reason: 'not_a_host' }); continue; }
     if (isNeverTargetHost(domain)) { dropped.push({ token, reason: 'never_target' }); continue; }
-    const url = hasPath(token) ? (token.startsWith('http') ? token : `https://${token}`) : null;
+    const url = hasPath(token) ? (/^https?:\/\//i.test(token) ? token.replace(/^https?:\/\//i, (m) => m.toLowerCase()) : `https://${token}`) : null;
     const prev = seen.get(domain);
     if (!prev) seen.set(domain, { domain, url });
     else if (!prev.url && url) prev.url = url;

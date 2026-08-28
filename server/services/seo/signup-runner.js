@@ -202,9 +202,15 @@ async function run({ batchSize = 5, dryRun = false, allow = [], launchBrowser, a
   //      so every attempt recorded below carries its path (never a permanent NULL);
   //  (b) a legacy seo_signup_attempts row written by an old pod during the rolling
   //      deploy is copied forward, never lost.
-  // Both idempotent; a failure never blocks the run.
+  // Both idempotent. (a) failing ABORTS the run before any claim — an unlinked
+  // prospect would otherwise be submitted with a permanent path_id=NULL attempt;
+  // (b) failing only logs (nothing this run writes depends on it).
   if (!dryRun) {
-    await backfillLegacyBoard(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] board→registry catch-up failed: ${err.message}`));
+    try { await backfillLegacyBoard(db, { log: (m) => logger.info(m) }); }
+    catch (err) {
+      logger.error(`[signup-runner] board→registry catch-up failed — aborting before claim: ${err.message}`);
+      return { claimed: 0, placed: 0, blocked: 0, failed: 0, skipped: 0, aborted: 'registry_catchup_failed' };
+    }
     await backfillLegacyAttempts(db, { log: (m) => logger.info(m) }).catch((err) => logger.warn(`[signup-runner] legacy attempts catch-up failed: ${err.message}`));
   }
 

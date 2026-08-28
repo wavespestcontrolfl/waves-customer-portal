@@ -251,6 +251,12 @@ describe('parseOpportunities (intake normalize, pure)', () => {
     expect(parseOpportunities('')).toEqual({ candidates: [], unresolved: [], dropped: [] });
     expect(parseOpportunities(null).candidates).toEqual([]);
   });
+  test('an upper/mixed-case scheme is recognized and lower-cased in the hint (never https://HTTPS://…)', () => {
+    expect(parseOpportunities('HTTPS://Example.com/submit Http://Other.example/add').candidates).toEqual([
+      { domain: 'example.com', url: 'https://Example.com/submit' },
+      { domain: 'other.example', url: 'http://Other.example/add' },
+    ]);
+  });
   test('an X post is parked as unresolved, never turned into an x.com domain; mobile./www. spellings too', () => {
     for (const u of ['x.com/a/status/1', 'https://mobile.twitter.com/a/status/22', 'https://www.x.com/a/status/333?s=20']) {
       const r = parseOpportunities(u);

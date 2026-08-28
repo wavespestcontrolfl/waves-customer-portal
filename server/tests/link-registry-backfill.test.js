@@ -17,6 +17,7 @@ function fakeDb({ prospects = [], legacyAttempts = [], hasLegacyTable = true } =
       ignore() { return q; },
       returning() { return q.then(); },
       where(w) { st.where = w; return q; },
+      whereIn(col, vals) { st.whereIn = [col, vals]; return q; },
       whereNull(c) { st.whereNull.push(c); return q; },
       leftJoin() { return q; },
       orderBy() { return q; },
@@ -51,7 +52,10 @@ function fakeDb({ prospects = [], legacyAttempts = [], hasLegacyTable = true } =
           }
           if (t === 'seo_link_prospects') return prospects;
           if (t === 'seo_link_domains') return store.domains.filter((d) => Object.entries(st.where || {}).every(([k, v]) => d[k] === v));
-          if (t === 'seo_link_acquisition_paths') return store.paths.filter((p) => Object.entries(st.where || {}).every(([k, v]) => p[k] === v) && !p.superseded_by);
+          if (t === 'seo_link_acquisition_paths') {
+            if (st.whereIn) return store.paths.filter((p) => st.whereIn[1].includes(p[st.whereIn[0]]));
+            return store.paths.filter((p) => Object.entries(st.where || {}).every(([k, v]) => p[k] === v) && !p.superseded_by);
+          }
           if (t === 'seo_signup_attempts') {
             // rows with no twin yet (the LEFT JOIN … WHERE la.id IS NULL)
             attemptsPass += 1;
@@ -93,12 +97,13 @@ describe('backfillLegacyBoard (plan §4 legacy board backfill)', () => {
     const out = await backfillLegacyBoard(db);
     expect(out).toMatchObject({ domains: 2, domainsCreated: 2, paths: 2, linked: 3, skippedNoHost: 1 });
     const dir = db._store.domains.find((d) => d.domain === 'dir.example');
-    expect(dir).toMatchObject({ source: 'owner_seed', source_detail: 'legacy:manual', discovery_priority: 'owner_seed', created_at: t0, agent_state: 'new' });
+    expect(dir).toMatchObject({ source: 'owner_seed', source_detail: 'legacy:manual prospect:p1', discovery_priority: 'owner_seed', created_at: t0, agent_state: 'new' });
+    expect(dir.source_detail).toBe('legacy:manual prospect:p1');
     const touches = db._store.sources.filter((s) => s.domain_id === dir.id).map((s) => [s.source, s.source_detail, s.seen_at]);
     expect(touches).toEqual([
-      ['owner_seed', 'legacy:manual', t0],
-      ['competitor_gap', 'legacy:deep_harvest_2026-07-15', t1],
-      ['strategy_agent', 'legacy:strategy_agent', t2],
+      ['owner_seed', 'legacy:manual prospect:p1', t0],
+      ['competitor_gap', 'legacy:deep_harvest_2026-07-15 prospect:p2', t1],
+      ['strategy_agent', 'legacy:strategy_agent prospect:p3', t2],
     ]);
     // never now(): every touch carries the legacy created_at
     expect(db._store.sources.every((s) => s.seen_at instanceof Date)).toBe(true);
@@ -121,6 +126,35 @@ describe('backfillLegacyBoard (plan §4 legacy board backfill)', () => {
     // p4 was already linked → no patch, no path
     expect(patches.some((p) => p.where.id === 'p4')).toBe(false);
     expect(db._store.paths.some((p) => p.domain_id === db._store.domains.find((d) => d.domain === 'done.example').id)).toBe(false);
+  });
+
+  test('several rows sharing one source and no source_ref each keep their own touch (seen_at preserved per row)', async () => {
+    const db = fakeDb({ prospects: [
+      { id: 'a1', target_domain: 'same.example', target_url: null, link_type: 'editorial', source: 'manual', created_at: t0 },
+      { id: 'a2', target_domain: 'same.example', target_url: null, link_type: 'resource', source: 'manual', created_at: t1 },
+      { id: 'a3', target_domain: 'same.example', target_url: null, link_type: 'editorial', source: 'manual', created_at: t2 },
+    ] });
+    const out = await backfillLegacyBoard(db);
+    expect(out.touches).toBe(3);
+    expect(db._store.sources.map((s) => [s.touch_key, s.seen_at])).toEqual([
+      ['owner_seed:legacy:manual prospect:a1', t0], ['owner_seed:legacy:manual prospect:a2', t1], ['owner_seed:legacy:manual prospect:a3', t2],
+    ]);
+  });
+
+  test('a linked row whose lane/url was edited on the board is RELINKED to the matching active path (never a stale path forever)', async () => {
+    const db = fakeDb({ prospects: [
+      // linked to a directory path, then edited to editorial with no url
+      { id: 'e1', target_domain: 'edit.example', target_url: null, link_type: 'editorial', source: 'manual', created_at: t0, domain_id: 'd1', path_id: 'pathOld' },
+      // linked and unchanged
+      { id: 'e2', target_domain: 'edit.example', target_url: 'https://edit.example/add', link_type: 'directory', source: 'manual', created_at: t1, domain_id: 'd1', path_id: 'pathOld' },
+    ] });
+    db._store.domains.push({ id: 'd1', domain: 'edit.example', source: 'owner_seed', discovery_priority: 'owner_seed' });
+    db._store.paths.push({ id: 'pathOld', domain_id: 'd1', path_key: 'self_service_account:https://edit.example/add', acquisition_type: 'self_service_account' });
+    const out = await backfillLegacyBoard(db);
+    expect(out).toMatchObject({ relinked: 1, linked: 0, paths: 1, domainsCreated: 0 });
+    expect(db._store.paths.map((p) => p.path_key)).toEqual(['self_service_account:https://edit.example/add', 'editorial_outreach:-']);
+    expect(db._store.prospectPatches).toEqual([{ where: { id: 'e1' }, patch: expect.objectContaining({ path_id: 'path2' }) }]);
+    expect(db._store.prospectPatches[0].patch).not.toHaveProperty('domain_id');
   });
 
   test('re-running against the linked board is a no-op (fixed point)', async () => {
