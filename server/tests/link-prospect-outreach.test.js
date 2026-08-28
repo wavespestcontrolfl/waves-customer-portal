@@ -14,7 +14,7 @@ const Outreach = require('../services/seo/link-prospect-outreach');
 // (the cap-count's nested where/orWhere never has to execute under the mock).
 function chain({ result = [], first, returning } = {}) {
   const q = {};
-  ['where', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'orderBy', 'orderByRaw', 'select', 'count']
+  ['where', 'whereRaw', 'whereIn', 'whereNull', 'whereNotNull', 'orWhere', 'andWhere', 'orderBy', 'orderByRaw', 'select', 'count']
     .forEach((m) => { q[m] = jest.fn(() => q); });
   q.update = jest.fn(() => q);
   q.first = jest.fn(async () => first);
@@ -374,5 +374,24 @@ describe('reconcileSendError', () => {
     const res = await Outreach.reconcileSendError({ prospectId: 'p1', outcome: 'requeue', approvedBy: 'Adam' });
     expect(res.ok).toBe(true);
     expect(upd.update).toHaveBeenCalledWith(expect.objectContaining({ outreach_status: 'drafted', outreach_attempted_at: null }));
+  });
+});
+
+describe('dailySendCount', () => {
+  test('counts the current attempt (COALESCEd — a NULL must not zero the row) PLUS every in-window entry of the append-only prior_outreach_attempts ledger', async () => {
+    const wheres = [], raws = [];
+    const q = Object.assign(() => q, {
+      whereRaw: jest.fn((sql, bind) => { wheres.push([sql, bind]); return q; }),
+      select: jest.fn(() => q),
+      first: jest.fn(async () => ({ c: '3' })),
+      raw: jest.fn((sql, bind) => { raws.push([sql, bind]); return { sql, bind }; }),
+    });
+    expect(await Outreach.dailySendCount(q)).toBe(3);
+    const [sql, bind] = raws[0];
+    expect(sql).toMatch(/SUM\(COALESCE\(\(outreach_attempted_at >= \?\)::int, 0\) \+ \(SELECT count\(\*\) FROM jsonb_array_elements_text\(.*'prior_outreach_attempts'.*\) AS a WHERE a::timestamptz >= \?\)\)/);
+    // both raws compile through knex with exactly two bindings each (since, since) — no stray '?'
+    const knex = require('knex')({ client: 'pg' });
+    expect(knex('seo_link_prospects').select(knex.raw(sql, bind)).toSQL().toNative().bindings).toHaveLength(2);
+    expect(knex('seo_link_prospects').whereRaw(wheres[0][0], wheres[0][1]).toSQL().toNative().bindings).toHaveLength(2);
   });
 });

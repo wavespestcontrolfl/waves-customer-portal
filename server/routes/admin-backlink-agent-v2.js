@@ -4,6 +4,8 @@ const db = require('../models/db');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const { isEnabled } = require('../config/feature-gates');
 const logger = require('../services/logger');
+const { claimProspectDomain, lockProspectDomain, findPlacementRow, ACTIVE_OUTREACH_STATUSES } = require('../services/seo/prospect-domain-lock');
+const { SIGNUP_TYPES } = require('../services/seo/link-prospect-worker');
 
 router.use(adminAuthenticate, requireAdmin);
 
@@ -251,19 +253,31 @@ router.post('/prospects', async (req, res, next) => {
     if (!domain) return res.status(400).json({ error: 'target_domain, target_url, or live_url is required' });
     if (!target_page) return res.status(400).json({ error: 'target_page (our money page) is required' });
 
-    const exists = await db('seo_link_prospects').where({ target_domain: domain, target_page }).first();
-    if (exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: exists.id });
-
-    const [row] = await db('seo_link_prospects').insert({
-      target_domain: domain, target_url: target_url || null, target_page,
-      anchor_planned: anchor_planned || null, link_type: link_type || null,
-      priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
-      // If the admin supplies a live_url, the link is already placed — seed it so the
-      // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
-      live_url: live_url || null,
-      ...(live_url ? { status: 'placed' } : {}),
-    }).returning('*');
-    res.json({ prospect: row });
+    // Admission through the shared per-domain guard (prospect-domain-lock, the
+    // same one every board writer uses): lock, then refuse if the domain already
+    // has a row in ACTIVE OUTREACH on any page / spelling (two claimable rows =
+    // two emails to one inbox). A site that already links to us may be added
+    // for another page. The exact-pair 409 is checked under the lock too.
+    const result = await db.transaction(async (trx) => {
+      const { inFlight } = await claimProspectDomain(trx, domain);
+      if (inFlight) return { inFlight };
+      // canonical placement lookup — any spelling of host or page
+      const exists = await findPlacementRow(trx, domain, target_page);
+      if (exists) return { exists };
+      const [row] = await trx('seo_link_prospects').insert({
+        target_domain: domain, target_url: target_url || null, target_page,
+        anchor_planned: anchor_planned || null, link_type: link_type || null,
+        priority: priority || null, notes: notes || null, source: 'manual', owner: req.technician?.name || 'admin',
+        // If the admin supplies a live_url, the link is already placed — seed it so the
+        // verifier sweep (which selects live_url IS NOT NULL) picks it up next run.
+        live_url: live_url || null,
+        ...(live_url ? { status: 'placed' } : {}),
+      }).returning('*');
+      return { row };
+    });
+    if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    if (result.exists) return res.status(409).json({ error: 'prospect already exists for this domain + target page', id: result.exists.id });
+    res.json({ prospect: result.row });
   } catch (err) { next(err); }
 });
 
@@ -278,9 +292,40 @@ router.patch('/prospects/:id', async (req, res, next) => {
     }
     if (Object.keys(patch).length === 0) return res.status(400).json({ error: 'no editable fields supplied' });
     patch.updated_at = new Date();
-    const [row] = await db('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
-    if (!row) return res.status(404).json({ error: 'prospect not found' });
-    res.json({ prospect: row });
+    // A status edit that REOPENS a row into active outreach (lost/rejected/
+    // placed/live/indexed → prospect/contacted/negotiating) is a board
+    // admission like an insert: it goes through the same per-domain guard
+    // (prospect-domain-lock) and is refused while another row for the domain is
+    // already in active outreach — otherwise both are claimable by the worker.
+    const result = await db.transaction(async (trx) => {
+      const current = await trx('seo_link_prospects').where({ id: req.params.id }).first('id', 'status', 'target_domain', 'target_page', 'link_type');
+      if (!current) return { missing: true };
+      // "In outreach" = active-outreach status AND an outreach-lane link_type:
+      // a status flip OR a link_type change out of the signup lane can put a
+      // row in front of the outreach worker, and either is a board admission.
+      const inOutreach = (status, type) => ACTIVE_OUTREACH_STATUSES.includes(status) && !SIGNUP_TYPES.includes(type || '');
+      const entersOutreach = inOutreach('status' in patch ? patch.status : current.status, 'link_type' in patch ? patch.link_type : current.link_type)
+        && !inOutreach(current.status, current.link_type);
+      if (entersOutreach) {
+        const { inFlight } = await claimProspectDomain(trx, current.target_domain);
+        if (inFlight && inFlight.id !== current.id) return { inFlight };
+      }
+      // A target_page edit is a placement move: under the same domain lock,
+      // refuse if another row already represents (domain, page) under ANY
+      // spelling — a textual variant would slip past the unique key, an exact
+      // one would 500 on it.
+      if ('target_page' in patch && patch.target_page !== current.target_page) {
+        await lockProspectDomain(trx, current.target_domain);
+        const taken = await findPlacementRow(trx, current.target_domain, patch.target_page, { excludeId: current.id });
+        if (taken) return { taken };
+      }
+      const [row] = await trx('seo_link_prospects').where({ id: req.params.id }).update(patch).returning('*');
+      return { row };
+    });
+    if (result.missing) return res.status(404).json({ error: 'prospect not found' });
+    if (result.inFlight) return res.status(409).json({ error: `domain already has a prospect in active outreach (${result.inFlight.status}${result.inFlight.target_page ? ` for ${result.inFlight.target_page}` : ''}) — one conversation per inbox`, id: result.inFlight.id });
+    if (result.taken) return res.status(409).json({ error: `another prospect already represents this domain + target page (${result.taken.status})`, id: result.taken.id });
+    res.json({ prospect: result.row });
   } catch (err) { next(err); }
 });
 

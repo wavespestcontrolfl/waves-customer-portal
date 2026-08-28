@@ -7,6 +7,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
 
 function extractDomain(url) {
   try { return new URL(url).hostname.replace('www.', ''); } catch { return null; }
@@ -207,9 +208,9 @@ async function executeBacklinkTool(toolName, input) {
         const domain = normalizeDomain(p.target_domain) || normalizeDomain(p.target_url);
         if (!domain || !p.target_page) { skipped++; continue; }
 
-        const exists = await db('seo_link_prospects')
-          .where({ target_domain: domain, target_page: p.target_page })
-          .first();
+        // Pre-scoring existence probe (cheap skip); the authoritative check is
+        // repeated under the per-domain board lock at insert time below.
+        const exists = await findPlacementRow(db, domain, p.target_page);
         if (exists) { duplicates.push(domain); skipped++; continue; }
 
         // Score on relevance + lead-value + contactability (not raw DR), and
@@ -246,32 +247,44 @@ async function executeBacklinkTool(toolName, input) {
           scored_by: 'create_link_prospects',
         } : null;
 
-        await db('seo_link_prospects').insert({
-          target_domain: domain,
-          target_url: p.target_url || null,
-          target_page: p.target_page,
-          anchor_planned: p.anchor_planned || scored?.suggested_anchor || null,
-          // The scorer's classification is CANONICAL: the contact gate was
-          // evaluated against it (signup-lane skips the contact check), so an
-          // agent-supplied link_type must NOT override the lane — else a
-          // no-contact directory could be stored as 'editorial' and cold-emailed.
-          // Honor p.link_type only when scoring didn't run (fail-soft), and only
-          // if it is worker-claimable.
-          link_type: scored?.intent_class || ((p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : null),
-          // Scored priority is canonical (it exists to replace raw-DR/agent guesses);
-          // honor an agent-supplied priority only as a fail-soft fallback.
-          priority: scored?.priority || p.priority || null,
-          domain_rating: p.domain_rating || null,
-          notes: p.notes || null,
-          contact_email: scored?.contact?.contact_email || null,
-          contact_url: scored?.contact?.contact_url || null,
-          contact_checked_at: scored?.contact ? new Date() : null,
-          score: scored?.score ?? null,
-          tier: scored?.tier ?? null,
-          quality_signals: qs ? JSON.stringify(qs) : null,
-          source: 'strategy_agent',
-          owner: 'strategy_agent',
+        // Admission through the shared per-domain guard (prospect-domain-lock):
+        // lock, then refuse if the domain already has a row in active outreach
+        // on any page / spelling — one conversation per inbox. The exact pair is
+        // re-checked under the lock too (the scoring above is slow).
+        const landed = await db.transaction(async (trx) => {
+          const { inFlight } = await claimProspectDomain(trx, domain);
+          if (inFlight) return false;
+          const raced = await findPlacementRow(trx, domain, p.target_page);
+          if (raced) return false;
+          await trx('seo_link_prospects').insert({
+            target_domain: domain,
+            target_url: p.target_url || null,
+            target_page: p.target_page,
+            anchor_planned: p.anchor_planned || scored?.suggested_anchor || null,
+            // The scorer's classification is CANONICAL: the contact gate was
+            // evaluated against it (signup-lane skips the contact check), so an
+            // agent-supplied link_type must NOT override the lane — else a
+            // no-contact directory could be stored as 'editorial' and cold-emailed.
+            // Honor p.link_type only when scoring didn't run (fail-soft), and only
+            // if it is worker-claimable.
+            link_type: scored?.intent_class || ((p.link_type && scorer.CLAIMABLE_LINK_TYPES.has(p.link_type)) ? p.link_type : null),
+            // Scored priority is canonical (it exists to replace raw-DR/agent guesses);
+            // honor an agent-supplied priority only as a fail-soft fallback.
+            priority: scored?.priority || p.priority || null,
+            domain_rating: p.domain_rating || null,
+            notes: p.notes || null,
+            contact_email: scored?.contact?.contact_email || null,
+            contact_url: scored?.contact?.contact_url || null,
+            contact_checked_at: scored?.contact ? new Date() : null,
+            score: scored?.score ?? null,
+            tier: scored?.tier ?? null,
+            quality_signals: qs ? JSON.stringify(qs) : null,
+            source: 'strategy_agent',
+            owner: 'strategy_agent',
+          });
+          return true;
         });
+        if (!landed) { duplicates.push(domain); skipped++; continue; }
         added++;
       }
 
