@@ -24,6 +24,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+const { queuedRowInFlight } = require('./email-template-library');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
 const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
@@ -236,7 +237,9 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     notes.push('Your rain sensor will skip a run on its own if we get a soaking.');
   }
   if (plan.reasons.includes('forecast_unavailable') && plan.action === 'run') {
-    notes.push('We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — if we get ½" or more of rain before your watering day, skip that run.');
+    notes.push(plan.events > 1
+      ? 'We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — before each run, if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run.'
+      : 'We couldn\'t get a rain forecast for your area this week, so this plan assumes a dry week — if we get ½" or more of rain before your run, skip it.');
   }
 
   return {
@@ -409,7 +412,8 @@ function hashFromCategories(raw) {
  * A prior run's delivery, from the durable email_messages record — looked up
  * at customer/week scope (trigger_event_id): { state, decisionHash } — state 'sent' (provider
  * accepted — sent/delivered/opened/clicked), 'blocked' (suppressed),
- * 'failed' (rejected BEFORE the provider — retryable), 'pending' (queued /
+ * 'failed' (rejected BEFORE the provider — retryable), 'stale' (queued past
+ * the library's in-flight lease — abandoned, retryable), 'pending' (queued
  * in flight / failed AFTER the provider accepted — ambiguous / lookup
  * failed), or null (no attempt); decisionHash = the snapshot the delivered email was built from
  * (null on a record that carries none). The sweep reconciles from THIS,
@@ -423,7 +427,7 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   const where = triggerEventId ? { trigger_event_id: triggerEventId } : (idempotencyKey ? { idempotency_key: idempotencyKey } : null);
   if (!where) return { state: null, decisionHash: null };
   try {
-    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id');
+    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id', 'queued_at');
     if (!rows || !rows.length) return { state: null, decisionHash: null };
     // 'failed' splits on whether the provider ever accepted the message: a
     // failed row WITH a provider_message_id is a post-provider bookkeeping
@@ -431,11 +435,17 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
     // a webhook repairs it); a failed row WITHOUT one is a definite
     // pre-provider rejection → 'failed', which the library's own
     // shouldRetryExistingMessage path is allowed to retry.
+    // A 'queued' row is in flight only inside the library's own two-minute
+    // lease (queuedRowInFlight); past it the row is abandoned (a worker died
+    // before recording a terminal status) and the library reclaims it on the
+    // next send — so it classifies 'stale' (claimable), never a week-long
+    // 'pending' that would lose the customer's Monday-only email.
     const classify = (row) => {
       const status = String(row.status || '').toLowerCase();
       if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
       if (status === 'blocked') return 'blocked';
       if (status === 'failed') return row.provider_message_id ? 'pending' : 'failed';
+      if (status === 'queued') return queuedRowInFlight(row) ? 'pending' : 'stale';
       return 'pending';
     };
     // A delivered record wins over any other attempt for the week.

@@ -1282,6 +1282,7 @@ module.exports = {
   loadVersion,
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
+  queuedRowInFlight,
   createDraftVersion,
   publishVersion,
   sendTemplate,

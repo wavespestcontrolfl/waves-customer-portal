@@ -115,6 +115,9 @@ describe('renderWeekPlanEmail', () => {
     expect(copy.plan_note).toContain('Add your sprinkler head type');
     expect(copy.plan_note).toContain('rain sensor will skip a run');
     expect(copy.plan_note).toContain("couldn't get a rain forecast");
+    expect(copy.plan_note).toContain('if we get ½" or more of rain before your run, skip it');
+    const twoNoForecast = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, forecastRainInches: null, ...SPRAY });
+    expect(renderWeekPlanEmail(twoNoForecast, CTX).plan_note).toContain('since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run');
   });
 
   test('watering prohibited (0-day policy) → skip, no override cycle, no "permitted day"', () => {
@@ -335,7 +338,7 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
     ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
   ])('status %s → %s', async (status, expected) => {
-    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null }]);
+    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null, queued_at: new Date().toISOString() }]);
     const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });
     expect(r.state).toBe(expected);
     expect(r.decisionHash).toBe('abc123');
@@ -347,6 +350,13 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: null, decisionHash: null });
     withRows([{ status: 'sent', categories: JSON.stringify(['plan:first']) }, { status: 'queued', categories: JSON.stringify(['plan:second']) }]);
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: 'first' });
+  });
+
+  test('a queued row is pending only inside the library\'s 2-minute lease; past it, stale (claimable)', async () => {
+    withRows([{ status: 'queued', categories: JSON.stringify(['plan:h']), queued_at: new Date(Date.now() - 30 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' });
+    withRows([{ status: 'queued', categories: JSON.stringify(['plan:h']), queued_at: new Date(Date.now() - 10 * 60 * 1000).toISOString() }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'stale', decisionHash: 'h' });
   });
 
   test('a failed row the provider had ACCEPTED (provider_message_id set) is ambiguous → pending; without one it is a retryable failure', async () => {
