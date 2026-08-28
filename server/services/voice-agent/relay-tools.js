@@ -839,12 +839,21 @@ async function executeTool(name, input = {}, ctx = {}) {
       // An email must be DELIVERABLE, not merely non-empty (hook P1): an
       // ASR-garbled or syntactically invalid address is reported as missing.
       const { isValidEmail } = require('../../utils/internal-email-recipients');
+      // Fields accumulate across captures on this call (hook P1): a retry that
+      // supplies only the missing piece keeps what earlier captures gave.
+      const priorEstimateFields = typeof ctx.getEstimateFields === 'function' ? (ctx.getEstimateFields() || {}) : {};
+      const emailNow = extracted.email && isValidEmail(String(extracted.email).trim()) ? extracted.email : null;
+      const estimateFields = {
+        first_name: extracted.first_name || priorEstimateFields.first_name || null,
+        last_name: extracted.last_name || priorEstimateFields.last_name || null,
+        email: emailNow || priorEstimateFields.email || null,
+        address_line1: extracted.address_line1 || priorEstimateFields.address_line1 || null,
+        city: extracted.city || priorEstimateFields.city || null,
+        zip: extracted.zip || priorEstimateFields.zip || null,
+      };
+      if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       const estimateMissing = estimateRequested
-        ? [
-          ['first_name', !!extracted.first_name], ['last_name', !!extracted.last_name],
-          ['email', !!extracted.email && isValidEmail(String(extracted.email).trim())],
-          ['address_line1', !!extracted.address_line1],
-        ].filter(([, ok]) => !ok).map(([k]) => k)
+        ? ['first_name', 'last_name', 'email', 'address_line1'].filter((k) => !estimateFields[k])
         : [];
       if (estimateRequested) {
         extracted.quote_requested = true;
@@ -1335,7 +1344,7 @@ async function executeTool(name, input = {}, ctx = {}) {
         } else if (leadResult && leadResult.customerId) {
           const { surfaceEstimateRequestForCustomer } = require('../lead-from-extraction');
           const surfaced = typeof surfaceEstimateRequestForCustomer === 'function'
-            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, extracted, { callSid: ctx.callSid || null, phone: callerPhone || null })
+            ? await surfaceEstimateRequestForCustomer(leadResult.customerId, { ...extracted, ...estimateFields }, { callSid: ctx.callSid || null, phone: callerPhone || null })
             : { persisted: false };
           estimateQueued = surfaced && surfaced.persisted === true;
         } else {

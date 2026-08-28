@@ -375,6 +375,26 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       expect(createLeadFromExtraction).toHaveBeenLastCalledWith(expect.objectContaining({ quote_promised: false }), expect.anything());
       expect(markCaptured).toHaveBeenCalledWith(expect.objectContaining({ holdOpen: true }));
     });
+    test('a retry that supplies only the missing field keeps the earlier fields (session accumulation)', async () => {
+      // stateful ctx like the real tool ctx
+      let stash = {};
+      const ctx = {
+        from: '+19415551234', callSid: 'CA-est10', markCaptured: jest.fn(),
+        getEstimateFields: () => ({ ...stash }),
+        noteEstimateFields: (f) => { stash = { ...stash, ...Object.fromEntries(Object.entries(f).filter(([, v]) => v)) }; },
+      };
+      createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
+      surfaceEstimateRequestForCustomer.mockClear();
+      surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
+      const first = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', address_line1: '12 Shell Dr' }, ctx);
+      expect(first).toMatch(/still missing: email/);
+      expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
+      const second = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, email: 'pat@example.com' }, ctx);
+      expect(second).toMatch(/IS on the office queue/);
+      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.anything());
+      expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: false }));
+    });
+
     test('a complete capture does not hold the call open', async () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: 'lead-4', created: true });
       const markCaptured = jest.fn();

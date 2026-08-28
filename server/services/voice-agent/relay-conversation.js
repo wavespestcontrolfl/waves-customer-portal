@@ -905,6 +905,14 @@ class RelayConversation {
       // creates no lead for one, so the floor must still stand down (a second
       // attempt hits the same guard and creates nothing) while the record must
       // not claim a lead that does not exist.
+      // Estimate fields accumulate ACROSS captures on this call (hook P1): a
+      // retry that supplies only the missing email must not lose the name
+      // and address given on the first capture.
+      getEstimateFields: () => ({ ...(convo._estimateFields || {}) }),
+      noteEstimateFields: (fields = {}) => {
+        const kept = Object.fromEntries(Object.entries(fields).filter(([, v]) => v != null && String(v).trim() !== ''));
+        convo._estimateFields = { ...(convo._estimateFields || {}), ...kept };
+      },
       markCaptured: ({ leadCreated = true, holdOpen = false } = {}) => {
         this.leadCaptured = true;
         if (leadCreated === false) this._noLeadCreated = true;
