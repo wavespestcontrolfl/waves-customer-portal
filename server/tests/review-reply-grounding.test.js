@@ -32,7 +32,7 @@ const G = require('../services/review-reply/grounding');
 const NOW = new Date('2026-08-27T12:00:00Z');
 
 beforeEach(() => {
-  mockState.technicians = [{ first_name: 'Marcus', active: true }, { first_name: 'Bob', active: true }, { first_name: 'Al', active: true }];
+  mockState.technicians = [{ name: 'Marcus Reyes', active: true }, { name: 'Bob Ortiz', active: true }, { name: 'Al', active: true }];
   mockState.customers = [];
   mockState.scheduled_services = [];
 });

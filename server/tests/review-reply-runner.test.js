@@ -439,7 +439,7 @@ describe('processDueAutoReplies — state machine', () => {
 describe('admin actions', () => {
   test('postNow publishes an existing verified draft immediately (shadow mode, low rating included) as the admin actor', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'shadow';
-    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana' })];
+    state.rows = [row({ star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: 'Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team', auto_reply_mode: 'low_rating', auto_reply_version: 'reply-v1', review_reply: '[DRAFT] Hi Dana,\n\nSorry.\n\nThe 🌊 Waves Pest Control Sarasota Team' })];
     const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
     expect(r.outcome).toBe('posted');
     expect(mockDraft).not.toHaveBeenCalled();
@@ -464,6 +464,28 @@ describe('admin actions', () => {
     // The cron must not pick it up again.
     await Runner.processDueAutoReplies();
     expect(mockPublish).toHaveBeenCalledTimes(1);
+  });
+
+  test('a human [DRAFT] on a queued row is a human intervention: cron parks it untouched, Post-now publishes THAT text', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row({ review_reply: '[DRAFT] Hi Dana, thank you for the kind review. - Waves Pest Control' })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats).toMatchObject({ parked: 1, posted: 0 });
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: 'human_draft', review_reply: '[DRAFT] Hi Dana, thank you for the kind review. - Waves Pest Control' });
+    const r = await Runner.postNow('rev-1', { type: 'admin', adminUserId: 'u1' });
+    expect(r.outcome).toBe('posted');
+    expect(mockDraft).not.toHaveBeenCalled();
+    expect(mockPublish.mock.calls[0][0].text).toBe('Hi Dana, thank you for the kind review. - Waves Pest Control');
+  });
+
+  test('posted bells deep-link to the responded view and the review; parked bells to the review', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    state.rows = [row(), row({ id: 'low', star_rating: 2 })];
+    await Runner.processDueAutoReplies();
+    const links = mockNotify.mock.calls.map((c) => c[3].link);
+    expect(links).toContain('/admin/reviews?responded=responded&review=rev-1');
+    expect(links).toContain('/admin/reviews?review=low');
   });
 
   test('postNow refuses a row that already has a real reply', async () => {

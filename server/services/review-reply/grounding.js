@@ -127,8 +127,10 @@ function servedCity(city) {
 
 async function loadActiveTechFirstNames(conn = db) {
   try {
-    const rows = await conn('technicians').where({ active: true }).select('first_name');
-    return [...new Set(rows.map((r) => String(r.first_name || '').trim()).filter(Boolean))];
+    // technicians has `name` (full), not first_name — the first token is the
+    // name a reviewer would write.
+    const rows = await conn('technicians').where({ active: true }).select('name');
+    return [...new Set(rows.map((r) => String(r.name || '').trim().split(/\s+/)[0]).filter(Boolean))];
   } catch (err) {
     logger.warn(`[review-grounding] technicians read failed: ${err.message}`);
     return [];

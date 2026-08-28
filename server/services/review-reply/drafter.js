@@ -79,7 +79,9 @@ const URL_RE = /(?:https?:\/\/|www\.)|\b(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a
 const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]+/;
 const PHONE_RE = /(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/;
 const MONEY_RE = /\$\s*\d|\b\d+\s*(?:dollars|bucks)\b/i;
-const ADDRESS_RE = /\b\d{1,6}\s+(?:[A-Z][a-z]+\s){0,3}(?:St|Street|Ave|Avenue|Rd|Road|Dr|Drive|Ln|Lane|Blvd|Boulevard|Way|Ct|Court|Cir|Circle|Pl|Place|Ter|Terrace|Trl|Trail|Pkwy|Parkway)\b\.?/;
+// Case-insensitive, and the street name may be a numbered/ordinal token
+// ("123 4th St", "123 main st") — Florida addresses are often numbered streets.
+const ADDRESS_RE = /\b\d{1,6}\s+(?:[\w'.-]+\s){0,3}(?:st|street|ave|avenue|rd|road|dr|drive|ln|lane|blvd|boulevard|way|ct|court|cir|circle|pl|place|ter|terrace|trl|trail|pkwy|parkway|hwy|highway)\b\.?/i;
 const FIRST_PERSON_SINGULAR_RE = /\b(?:I|I'm|I've|I'd|I'll|my|me|mine)\b/;
 const BANNED_RE = new RegExp([
   // Incentives of every flavor (Google review policy).
@@ -232,17 +234,30 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   // brand word. A hallucinated "Kevin" (or a former tech, a date, a product)
   // has no provenance and is rejected. Served cities are judged above.
   const reviewWords = new Set(normalizeWords(grounding.review.text));
+  // Only THIS location's area words (and the account city) are sourced;
+  // fragments of unrelated served cities are not ("Charlotte" from "Port
+  // Charlotte" must not launder a name).
   const cityWords = new Set((grounding.allow.cities || []).flatMap((c) => normalizeWords(c)));
-  const servedCityWords = new Set(SERVED_CITIES.flatMap((c) => normalizeWords(c)));
+  // Spans where a FULL served-city phrase appears — those words are judged
+  // by the city rule below, not here. A lone fragment ("Charlotte" without
+  // "Port") gets no such pass.
+  const citySpans = [];
+  for (const city of SERVED_CITIES) {
+    const re = new RegExp(`\\b${escapeRe(city)}\\b`, 'gi');
+    let cm;
+    while ((cm = re.exec(body)) !== null) citySpans.push([cm.index, cm.index + cm[0].length]);
+  }
+  const inCitySpan = (idx) => citySpans.some(([a, b]) => idx >= a && idx < b);
   const properNounRe = /(^|[^A-Za-z'])([A-Z][a-z'-]+)/g;
   let pn;
   while ((pn = properNounRe.exec(body)) !== null) {
+    if (inCitySpan(pn.index + pn[1].length)) continue;
     const before = body.slice(0, pn.index + pn[1].length);
     // Sentence-initial = start of text, after terminal punctuation, or the
     // first word of a new line (the greeting line ends with a comma).
     const sentenceInitial = /(?:^|[.!?]|\n)\s*$/.test(before);
     const w = pn[2].toLowerCase();
-    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || servedCityWords.has(w) || BRAND_WORDS.has(w)) continue;
+    if (allowedNames.has(w) || reviewWords.has(w) || cityWords.has(w) || BRAND_WORDS.has(w)) continue;
     // Sentence starts get the common-word exemption only; a capitalized
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.

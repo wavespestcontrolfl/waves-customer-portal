@@ -28,7 +28,7 @@ const logger = require('../logger');
 const gbp = require('../google-business');
 const NotificationService = require('../notification-service');
 const { WAVES_LOCATIONS } = require('../../config/locations');
-const { hasRealReply, isDraftReply, asDraft } = require('./draft-prefix');
+const { hasRealReply, isDraftReply, asDraft, stripDraftPrefix } = require('./draft-prefix');
 const { buildReplyGrounding, loadActiveTechFirstNames } = require('./grounding');
 const { draftReviewReply, loadRecentPostedReplies, classifyReplyMode, REPLY_VERSION } = require('./drafter');
 const { publishReviewReply, ReviewReplyError, CODES } = require('./publisher');
@@ -175,14 +175,27 @@ function claimGuard(row) {
   };
 }
 
+// A "[DRAFT]" on review_reply that the pipeline did NOT write (Agent Ops
+// template, an operator's saved draft) is a human intervention: the cron
+// leaves it alone and Post-now publishes THAT text, never a fresh model draft.
+function humanDraftOn(row) {
+  if (!isDraftReply(row.review_reply)) return null;
+  const text = stripDraftPrefix(row.review_reply);
+  if (row.auto_reply_draft && text === String(row.auto_reply_draft).trim()) return null;
+  return text || null;
+}
+
 function locationName(locationId) {
   return (WAVES_LOCATIONS.find((l) => l.id === locationId) || {}).name || locationId;
 }
 
-async function bell(row, { title, body, reason, action = false, extra = {} }) {
+async function bell(row, { title, body, reason, action = false, extra = {}, link = null }) {
   try {
     await NotificationService.notifyAdmin('review', title, body, {
-      link: '/admin/reviews',
+      // Parked/drafted rows live in the default needs-reply view; a posted
+      // reply has left it, so those bells deep-link to the responded view
+      // and the specific review.
+      link: link || `/admin/reviews?review=${encodeURIComponent(row.id)}`,
       bell: true,
       dedupeKey: `review-auto-reply:${row.id}:${reason}`,
       metadata: {
@@ -241,8 +254,11 @@ async function storeDraft(row, draft, status, reason, extra = {}) {
     const updated = await db('google_reviews')
       .where({ id: row.id, auto_reply_claimed_until: row._claimToken })
       .whereNull('missing_since')
-      .where(function needsRealReply() {
-        this.whereNull('review_reply').orWhere('review_reply', 'like', '[DRAFT]%');
+      .where(function ownDraftOrEmpty() {
+        // Never over a human's draft: only an empty reply or the pipeline's
+        // OWN previous draft may be replaced.
+        this.whereNull('review_reply');
+        if (row.auto_reply_draft) this.orWhere('review_reply', asDraft(row.auto_reply_draft));
       })
       .update({ ...patch, review_reply: asDraft(draft.text), reply_updated_at: null });
     if ((Array.isArray(updated) ? updated.length : updated) > 0) return true;
@@ -286,6 +302,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     return { outcome: 'skipped', reason: 'dismissed' };
   }
   const merged = { ...fresh, _claimToken: row._claimToken };
+  const humanDraft = humanDraftOn(fresh);
+  if (humanDraft && intent !== 'post_now') {
+    // Someone already wrote a draft for this review — it is in the
+    // needs-reply queue with "Use Draft"; the pipeline must not replace it.
+    await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'human_draft' });
+    return { outcome: 'parked', reason: 'human_draft' };
+  }
 
   if (intent !== 'post_now' && !locationAllowed(merged.location_id, cfg)) {
     await releaseClaim(row, { auto_reply_status: STATUS.PARKED, auto_reply_reason: 'location_disabled' });
@@ -384,6 +407,7 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
       reason: intent === 'post_now' ? 'posted_now' : 'auto_posted',
       action: false,
       extra: { mode: draft.mode },
+      link: `/admin/reviews?responded=responded&review=${encodeURIComponent(merged.id)}`,
     });
     return { outcome: 'posted', mode: draft.mode };
   } catch (err) {
@@ -468,8 +492,10 @@ async function postNow(reviewId, actor) {
     await releaseClaim(row);
     throw new ReviewReplyError(CODES.HAS_REPLY, 'This review already has a posted reply', { status: 409 });
   }
-  const existing = row.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status)
-    ? row.auto_reply_draft : null;
+  // The draft the admin is looking at wins: a human-written "[DRAFT]" first,
+  // then the pipeline's own verified draft, else draft fresh.
+  const existing = humanDraftOn(row)
+    || (row.auto_reply_draft && [STATUS.DRAFTED, STATUS.PARKED, STATUS.FAILED].includes(row.auto_reply_status) ? row.auto_reply_draft : null);
   if (existing) {
     const publishedAt = new Date().toISOString();
     try {

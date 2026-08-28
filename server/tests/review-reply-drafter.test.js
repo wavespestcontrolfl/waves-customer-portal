@@ -141,6 +141,14 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Anytime you need us, reach out.'))).toBe('unlisted_name');
     expect(verify(good('Hi Dana,\n\nGlad the ants are handled. Marcus says thanks. Thanks for having us out.'))).toBeNull();
   });
+  test('provenance: fragments of unrelated served cities do not launder a name', () => {
+    expect(verify(good('Hi Dana, Charlotte was glad to help with the ants alongside Marcus.'))).toBe('unlisted_name');
+  });
+  test('addresses are caught case-insensitively and with numbered streets', () => {
+    const g = grounding({ text: 'Marcus treated the ants at 123 main st and 123 4th St, great.' });
+    expect(verify(good('Hi Dana, glad Marcus got the ants at 123 main st handled.'), g)).toBe('address');
+    expect(verify(good('Hi Dana, glad Marcus got the ants at 123 4th St handled.'), g)).toBe('address');
+  });
   test('drying / curing / wait-before language is banned even when the number came from the review', () => {
     const g = grounding({ text: 'Marcus said it would be dry in 30 minutes and it was. Ants gone.' });
     expect(verify(good('Hi Dana, glad Marcus got the ants and the yard was dry in 30 minutes for you.'), g)).toBe('banned_phrase');

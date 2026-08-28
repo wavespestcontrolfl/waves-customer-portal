@@ -415,6 +415,7 @@ function ReviewCard({ review, onReplySubmit, onDismiss, onAutoReplyAction }) {
 
   return (
     <div
+      id={`review-${review.id}`}
       style={{
         background: D.card,
         border: `1px solid ${D.border}`,
@@ -1970,8 +1971,27 @@ export default function ReviewsPage() {
   // back through the hourly Places sync as `review_reply`) drop off the
   // list automatically. Operators can flip back to "All Reviews" via
   // the filter dropdown when they need the full archive.
-  const [filterResponded, setFilterResponded] = useState("needs-reply");
+  // Deep links from auto-reply bells: ?responded=responded|needs-reply|all
+  // picks the view (a posted reply has left the default needs-reply view)
+  // and ?review=<id> scrolls to that card once loaded.
+  const deepLink = (() => {
+    try {
+      const q = new URLSearchParams(window.location.search);
+      const responded = q.get("responded");
+      return {
+        responded: ["responded", "needs-reply", "all", "removed"].includes(responded) ? responded : null,
+        review: q.get("review") || null,
+      };
+    } catch { return { responded: null, review: null }; }
+  })();
+  const [filterResponded, setFilterResponded] = useState(deepLink.responded || "needs-reply");
   const [search, setSearch] = useState("");
+  const scrolledToRef = useRef(false);
+  useEffect(() => {
+    if (!deepLink.review || scrolledToRef.current || !data?.reviews?.length) return;
+    const el = document.getElementById(`review-${deepLink.review}`);
+    if (el) { scrolledToRef.current = true; el.scrollIntoView({ block: "center" }); }
+  }, [data]);
   const loadSeqRef = useRef(0);
   // Server pages at 200 rows; without a pager a large profile wipe would
   // leave older stamped reviews unreachable from the Removed filter (only
