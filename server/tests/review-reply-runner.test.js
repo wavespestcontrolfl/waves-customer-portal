@@ -689,6 +689,11 @@ describe('processDueAutoReplies — state machine', () => {
       expect(Runner.syncReplyFields(parked, { owner_reply: 'Something the owner wrote' }, { now }))
         .toMatchObject({ review_reply: 'Something the owner wrote', auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });
     }
+    // codex r44: a landed write whose grounding snapshot no longer matches the
+    // row (re-attributed / edited before this sync) parks for a person.
+    const moved = { review_reply: '[DRAFT] ' + draft, auto_reply_status: 'parked', auto_reply_reason: 'google_uncertain', auto_reply_draft: draft, auto_reply_published_at: null, publish_claimed_until: null, star_rating: 5, review_text: 'Great', reviewer_name: 'Dana W.', customer_id: 'c2', auto_reply_grounding: { fingerprint: Runner.reviewFingerprint({ star_rating: 5, review_text: 'Great', reviewer_name: 'Dana W.', customer_id: 'c1' }), accountFingerprint: 'fp:x' } };
+    expect(Runner.syncReplyFields(moved, { owner_reply: draft, owner_reply_updated_at: '2026-08-27T14:30:00Z' }, { now }))
+      .toMatchObject({ review_reply: draft, auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', auto_reply_published_at: '2026-08-27T14:30:00Z' });
     // Other parks (low_rating etc.) with the same text on Google are NOT ours.
     expect(Runner.syncReplyFields({ review_reply: '[DRAFT] ' + draft, auto_reply_status: 'parked', auto_reply_reason: 'low_rating', auto_reply_draft: draft, publish_claimed_until: null }, { owner_reply: draft }, { now }))
       .toMatchObject({ auto_reply_status: 'skipped', auto_reply_reason: 'owner_replied_on_google' });

@@ -281,15 +281,38 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
     if (isAuto || requireGoogle) throw new ReviewReplyError(CODES.NOT_CONFIGURED, 'Google Business Profile is not configured — the reply cannot be posted', { status: 503 });
     const fresh = await db('google_reviews').where({ id: reviewId }).first();
     await inClaimChecks(fresh);
-    const updated = await db('google_reviews')
-      .where({ id: reviewId })
-      .whereNull('missing_since')
-      .modify((qb) => { if (fresh.review_reply == null) qb.whereNull('review_reply'); else qb.where('review_reply', fresh.review_reply); })
-      // …and on the review content the checks ran against (codex r36).
-      .modify((qb) => whereSameContent(qb, prePutContent))
-      // Pipeline state closes here too (a shadow draft posted from the editor
-      // in a dev/preview env must not stay 'drafted' beside a real reply).
-      .update({ review_reply: replyText, reply_updated_at: new Date(), ...(autoFields || {}) });
+    // Account facts an AI draft was grounded on are re-checked and the write
+    // happens in ONE transaction with the review, customer and service rows
+    // locked — the same shape as the Google persistence path (codex r44).
+    const localSnapshot = (() => { try { return autoFields?.auto_reply_grounding ? JSON.parse(autoFields.auto_reply_grounding) : null; } catch { return null; } })();
+    const localExpectedFp = expectedAccountFingerprint || localSnapshot?.accountFingerprint || null;
+    const updated = await db.transaction(async (trx) => {
+      const locked = await trx('google_reviews').where({ id: reviewId }).forUpdate().first();
+      if (localExpectedFp) {
+        let nowFp = null;
+        try {
+          const { accountFingerprint, loadAccountFacts, groundingCustomerId } = require('./grounding');
+          const customerId = groundingCustomerId(locked || {});
+          if (customerId) {
+            await trx('customers').where({ id: customerId }).forUpdate().first('id');
+            await trx('scheduled_services').where({ customer_id: customerId }).forUpdate().select('id');
+          }
+          nowFp = accountFingerprint(await loadAccountFacts(customerId, trx));
+        } catch (e) {
+          throw new ReviewReplyError(CODES.STALE, `Reply not saved: account facts could not be re-read (${e.message})`, { status: 409 });
+        }
+        if (nowFp !== localExpectedFp) throw new ReviewReplyError(CODES.STALE, 'Reply not saved: the customer facts changed since this draft was generated — reload and draft again.', { status: 409 });
+      }
+      return trx('google_reviews')
+        .where({ id: reviewId })
+        .whereNull('missing_since')
+        .modify((qb) => { if (fresh.review_reply == null) qb.whereNull('review_reply'); else qb.where('review_reply', fresh.review_reply); })
+        // …and on the review content the checks ran against (codex r36).
+        .modify((qb) => whereSameContent(qb, prePutContent))
+        // Pipeline state closes here too (a shadow draft posted from the editor
+        // in a dev/preview env must not stay 'drafted' beside a real reply).
+        .update({ review_reply: replyText, reply_updated_at: new Date(), ...(autoFields || {}) });
+    });
     if (updatedCount(updated) === 0) throw new ReviewReplyError(CODES.RACE, 'This review was removed from Google while replying — the reply was not recorded locally.', { status: 409 });
     await audit({ googlePosted: false, localOnly: true });
     return { googlePosted: false, localOnly: true, reviewId };
@@ -388,11 +411,20 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // and the pipelineDraftGuard verdict above is then stale. Re-read
         // the row and run the guard again IMMEDIATELY before the PUT, as
         // the non-overwrite branch does.
-        if (guard) {
+        {
           const again = await db('google_reviews').where({ id: reviewId }).first();
           if (!again || again.missing_since) throw new ReviewReplyError(CODES.MISSING, MISSING_MSG, { status: 409 });
-          const lateReason = await guard(again);
-          if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
+          // The browser-observed review token is re-compared IMMEDIATELY
+          // before the PUT (codex r44): a handwritten reply carries no draft
+          // or grounding guard, so a reviewer rewrite the sync recorded
+          // during the live GET must be caught here, before it is public.
+          if (expectedReview !== undefined && String(expectedReview || '') !== reviewFingerprint(again)) {
+            throw new ReviewReplyError(CODES.REVIEW_CHANGED, 'The review changed since this page was loaded — reload it and read the current review first.', { status: 409 });
+          }
+          if (guard) {
+            const lateReason = await guard(again);
+            if (lateReason) throw new ReviewReplyError(CODES.STALE, `Reply not posted: ${lateReason}`, { status: 409 });
+          }
         }
       }
       try {

@@ -400,6 +400,14 @@ describe('publishReviewReply', () => {
       // Foreign human draft, non-overwriting caller → refused before any write.
       state.rows[0].review_reply = '[DRAFT] somebody else wrote this';
       await expect(publishReviewReply({ reviewId: 'rev-1', text: 'x', actor: { type: 'ib' } })).rejects.toMatchObject({ code: CODES.STALE });
+      // codex r44: an AI draft's account facts are re-checked in the same
+      // transaction as the local write.
+      state.rows[0].review_reply = null; state.rows[0].customer_id = 'c1';
+      mockAccountFacts.mockReset().mockResolvedValue({ city: 'Sarasota', tenure: 'new' });
+      await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Grounded on Venice.', actor: { type: 'admin' }, allowOverwrite: true, expectedAccountFingerprint: 'fp:Venice|new' }))
+        .rejects.toMatchObject({ code: CODES.STALE });
+      expect(state.rows[0].review_reply).toBeNull();
+      mockAccountFacts.mockReset().mockResolvedValue(null);
       // Everything matches → local-only write.
       state.rows[0].review_reply = null;
       const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'admin' }, allowOverwrite: true, expectedReply: null, expectedDraft: null, expectedReview: reviewFingerprint(state.rows[0]) });
@@ -409,6 +417,15 @@ describe('publishReviewReply', () => {
     } finally {
       mockGbp.configured = wasConfigured;
     }
+  });
+
+  test('the review token is re-compared immediately before a human PUT (codex r44): a rewrite recorded during the live GET is refused', async () => {
+    const { reviewFingerprint } = require('../services/review-reply/fingerprint');
+    const token = reviewFingerprint(state.rows[0]);
+    mockGbp.getReview.mockImplementationOnce(async () => { state.rows[0].review_text = 'Rewritten complaint'; state.rows[0].star_rating = 1; return { reviewReply: null, starRating: 'FIVE', comment: 'Great', reviewer: { displayName: 'Dana W.' } }; });
+    await expect(publishReviewReply({ reviewId: 'rev-1', text: 'Handwritten for the old review.', actor: { type: 'admin' }, allowOverwrite: true, expectedReview: token }))
+      .rejects.toMatchObject({ code: CODES.REVIEW_CHANGED });
+    expect(mockGbp.replyToReview).not.toHaveBeenCalled();
   });
 
   test('overwriting callers fail closed when the live review cannot be read', async () => {

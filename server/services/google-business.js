@@ -873,7 +873,11 @@ class GoogleBusinessService {
         // Skip in the meantime wins).
         await applyRequeueOnIdentity(existing.id, live, normalized, { conn: trx });
         const liveReplyFields = syncReplyFields(live, normalized, { fnNow: db.fn.now() });
-        await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null });
+        const promotedParked = liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post'
+          && (await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null })) > 0;
+        if (!promotedParked && !(liveReplyFields.auto_reply_status === 'parked' && liveReplyFields.auto_reply_reason === 'review_edited_after_post')) {
+          await applySyncReplyFields(existing.id, liveReplyFields, { conn: trx, expectedReply: live.review_reply ?? null });
+        }
         // A reviewer edit: a POSTED reply parks for a person, a pipeline
         // draft is cleared and requeued. Judged on the row AFTER the reply
         // sync (a landed google_uncertain / persist_failed write promoted to
@@ -881,7 +885,8 @@ class GoogleBusinessService {
         // with the review CONTENT from the pre-update snapshot.
         const afterSync = (await trx('google_reviews').where({ id: existing.id }).first()) || live;
         const basis = { ...afterSync, star_rating: live.star_rating, review_text: live.review_text, reviewer_name: live.reviewer_name, customer_id: live.customer_id };
-        return this._reconcileReviewEdit(basis, normalized, { conn: trx, bell: false });
+        const reconciled = await this._reconcileReviewEdit(basis, normalized, { conn: trx, bell: false });
+        return promotedParked ? 'posted_parked' : reconciled;
       });
       // The action bell only after the park is durable.
       if (edited === 'posted_parked') await this._bellEditedAfterPost(existing, normalized);

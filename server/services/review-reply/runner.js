@@ -987,10 +987,16 @@ function syncReplyFields(existing, normalized, { now = new Date(), fnNow = null 
     if (existing?.auto_reply_status === STATUS.PARKED
       && RECONCILE_REASONS.has(existing.auto_reply_reason)
       && existing.auto_reply_draft && ownerReply === String(existing.auto_reply_draft).trim()) {
+      // The landed reply was grounded on the review + attribution in its
+      // snapshot; if either moved since (a re-attribution before this sync,
+      // a reviewer edit) it lands as parked/review_edited_after_post for a
+      // person, never a clean 'posted' (codex r44).
+      const snap = (() => { const g = existing.auto_reply_grounding; if (!g) return null; if (typeof g === 'string') { try { return JSON.parse(g); } catch { return null; } } return g; })();
+      const groundedOnCurrent = !snap?.fingerprint || snap.fingerprint === reviewFingerprint(existing);
       return {
         ...fields,
-        auto_reply_status: STATUS.POSTED,
-        auto_reply_reason: null,
+        auto_reply_status: groundedOnCurrent ? STATUS.POSTED : STATUS.PARKED,
+        auto_reply_reason: groundedOnCurrent ? null : 'review_edited_after_post',
         auto_reply_published_at: existing.auto_reply_published_at || updatedAt,
         auto_reply_error: null,
         auto_reply_claimed_until: null,

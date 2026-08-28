@@ -66,6 +66,7 @@ jest.mock('../models/db', () => {
       },
       whereNull(col) { q.filters.push((r) => r[col] == null); return api; },
       whereNotNull(col) { q.filters.push((r) => r[col] != null); return api; },
+      forUpdate() { return api; },
       modify(fn, ...args) { fn(api, ...args); return api; },
       select(...cols) { q.selects = cols; return api; },
       limit(n) { q.limit = n; return api; },
@@ -113,6 +114,7 @@ jest.mock('../models/db', () => {
   }
   const db = (table) => makeQuery(table);
   db.raw = (sql) => ({ __raw: sql });
+  db.transaction = async (fn) => fn(db);
   return db;
 });
 
