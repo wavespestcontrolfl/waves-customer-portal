@@ -706,9 +706,9 @@ t.uuid('approval_id');                              // → seo_link_approvals (d
 t.text('merchant_idempotency_key');                 // sent to the merchant/checkout where supported (= idempotency_key)
 t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
-t.jsonb('merchant_binding');                        // IMMUTABLE at reservation, copied from the path: { checkout_origin, processor: { host, merchant_account_id? }, issuer_merchant_descriptor? }. NULLABLE only for `manual_charged` rows (the owner paid outside the system; the receipt is the record). For AUTOMATED purchases it is REQUIRED and must satisfy ONE of two enforcement modes, fail-closed: (a) `processor.merchant_account_id` present — validated immediately before mint AND before submit against the LIVE checkout (origin + the merchant/account id read from the live session/form); or (b) `issuer_merchant_descriptor` present AND the issuer actually minted the single-use card locked to that descriptor (`issuer_lock_applied=true` recorded at mint) — then the live check validates origin only. A processor HOST alone never binds anything; neither mode satisfiable ⇒ `instrument_unavailable` (pre-exposure void) and the path routes to OWNER_MANUAL_PAYMENT
+t.jsonb('merchant_binding');                        // IMMUTABLE at reservation, copied from the path: { checkout_origin, processor: { host, merchant_account_id? }, issuer_merchant_descriptor? }. NULLABLE only for `manual_charged` rows (the owner paid outside the system; the receipt is the record). For AUTOMATED purchases it is REQUIRED and there is ONE enforcement mode, fail-closed: `processor.merchant_account_id` (the independently verified processor/acquirer merchant account identity captured at investigation) MUST be present and is validated immediately before mint AND before submit against the LIVE checkout (origin + the merchant/account id read from the live session/form). `issuer_merchant_descriptor` is SUPPLEMENTAL evidence only (descriptors are neither unique nor immutable) — it is used to apply an issuer lock where supported and to cross-check reconciliation, never as the binding. A processor HOST alone never binds anything; no verifiable merchant account id ⇒ the path's payment dimension is OWNER_MANUAL_PAYMENT and no automated reservation is ever created
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
-t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms the merchant/descriptor lock is on the card); descriptor-only enforcement mode requires it = true before the card is exposed — a null/false value after mint takes the post-mint failure path (§6.3): the card is closed immediately and the row goes `submitting → ambiguous` with `card_exposed=false`
+t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms a merchant lock is on the card) — defence in depth on top of the merchant-account-id binding, never a substitute for it; if the issuer program declares lock support but the mint returns without it, the post-mint failure path applies (§6.3): the card is closed immediately and the row goes `submitting → ambiguous` with `card_exposed=false`
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
 t.boolean('card_exposed').notNullable().defaultTo(false); // set true the instant PAN/CVV are handed to the broker; a purchase that became `ambiguous` with card_exposed=false (post-mint precondition failure, never presented) may be reconciled_not_charged as soon as the issuer confirms the card is closed with no transaction — no presentment wait, because nothing could have been presented
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
@@ -764,14 +764,14 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   changed domain, an injected form — refuses (`voided` if pre-exposure, else `ambiguous`
   with the card closed). The recipient is bound at the **processor merchant/account level**
   (the merchant's Stripe/PayPal/etc. account identifier captured at investigation and
-  re-read from the live checkout, OR the issuer's descriptor lock actually applied at mint),
-  never merely at the processor host — a redirect to a different merchant on the same
-  processor fails the binding. Enforcement is
-  **fail-closed on two requirements, at least one of which must hold or no automated
-  purchase is made**: (1) the issuer mints the single-use card with a merchant lock to that
-  identity, or (2) the broker can read and verify the processor merchant/account id from
-  the live checkout. A merchant whose recipient identity cannot be verified either way is
-  refused (`instrument_unavailable`) and parked for the owner to pay manually.
+  re-read from the live checkout), never at the processor host and never by statement
+  descriptor (descriptors are not unique merchant identities and can be set per
+  transaction) — a redirect to a different merchant on the same processor fails the
+  binding. Enforcement is **fail-closed on the verified merchant account id**: the broker
+  must read it from the live checkout and it must equal the bound one, or no automated
+  purchase is made. An issuer merchant lock, where the program supports it, is applied in
+  addition as defence in depth. A merchant whose account identity cannot be verified is
+  never an automated purchase: its payment dimension is `OWNER_MANUAL_PAYMENT`.
 - **A verified zero total is a no-payment completion, not a purchase.** If the checkout's
   final total is `0` (waived/discounted fee), the row is `voided` with
   `outcome='no_payment_required'` BEFORE any mint (no card exists), the placement proceeds
