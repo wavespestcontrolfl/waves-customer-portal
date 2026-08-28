@@ -86,6 +86,22 @@ describe('renderWeekPlanEmail', () => {
     expect(report.detail).toContain('on each of your 2 permitted watering days, run one cycle of about 25 minutes per turf zone only if less than ½" has fallen since your previous permitted watering day (skipped or not');
   });
 
+  test('a single run under a multi-day policy says "one of your permitted watering days" everywhere', () => {
+    const two = { maxDaysPerWeek: 2 };
+    const run = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'peak', restriction: two, ...SPRAY });
+    expect(run.events).toBe(1);
+    expect(renderWeekPlanEmail(run, { ...CTX, restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } }).week_plan).toContain('on one of your permitted watering days');
+    expect(renderWeekPlanReport(run).detail).toContain('On one of your permitted watering days');
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'cool', restriction: two, ...SPRAY });
+    expect(renderWeekPlanEmail(hold, CTX).week_plan).toContain('on one of your permitted watering days');
+    expect(renderWeekPlanReport(hold).detail).toContain('on one of your permitted watering days');
+    const cond = buildWeekPlan({ targetInchesPerWeek: 0.6, forecastRainInches: 0.9, season: 'peak', restriction: two, ...SPRAY });
+    expect(renderWeekPlanEmail(cond, CTX).week_plan).toContain('When one of your permitted watering days comes around');
+    expect(renderWeekPlanReport(cond).detail).toContain('on one of your permitted watering days');
+    // One-day policy keeps the singular.
+    expect(_private.permittedDayPhrase({ legalMaxEvents: 1, events: 1 })).toBe('your permitted watering day');
+  });
+
   test('cool-season run adds the every-10–14-days-if-needed guidance', () => {
     const plan = buildWeekPlan({ targetInchesPerWeek: 0.6, season: 'cool', restriction: ONE_DAY, ...SPRAY });
     const copy = renderWeekPlanEmail(plan, CTX);
@@ -225,6 +241,10 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: new Date('2026-08-24T12:00:00Z').toISOString() })).toBeNull();
     expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null })).toBeNull();
     expect((await loadCurrentWeekPlan('c1', { now: NOW })).plan.action).toBe('run'); // unpinned = live
+    // Strict (pinned render): a failed lookup refuses instead of rendering plan-less.
+    db.mockImplementation(() => ({ where() { return this; }, whereNotNull() { return this; }, first: async () => { throw new Error('db down'); } }));
+    await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toThrow('db down');
+    expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
   });
 
   test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {

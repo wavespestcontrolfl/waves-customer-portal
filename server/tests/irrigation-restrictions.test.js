@@ -6,13 +6,13 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 const logger = require('../services/logger');
-const { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY } = require('../config/irrigation-restrictions');
+const { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private } = require('../config/irrigation-restrictions');
 
 const IN_FORCE = new Date('2026-08-28T12:00:00Z');
 const AFTER = new Date('2026-10-02T12:00:00Z');
 
 describe('currentRestrictionPolicy', () => {
-  beforeEach(() => logger.error.mockClear());
+  beforeEach(() => { logger.error.mockClear(); _private._lastLogged.clear(); });
 
   test('default = SWFWMD Modified Phase III, one day per week through 2026-10-01', () => {
     const p = currentRestrictionPolicy(IN_FORCE, { env: {}, county: 'Manatee' });
@@ -25,6 +25,10 @@ describe('currentRestrictionPolicy', () => {
     expect(currentRestrictionPolicy(new Date('2026-10-01T23:00:00Z'), { env: {}, county: 'Sarasota' })).not.toBeNull(); // 19:00 ET Oct 1
     expect(currentRestrictionPolicy(AFTER, { env: {}, county: 'Manatee' })).toBeNull();
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('expired 2026-10-01'));
+    // Once per hour per message, not once per customer / report load.
+    currentRestrictionPolicy(AFTER, { env: {}, county: 'Manatee' });
+    currentRestrictionPolicy(AFTER, { env: {}, county: 'Sarasota' });
+    expect(logger.error).toHaveBeenCalledTimes(1);
   });
 
   test('IRRIGATION_RESTRICTION_POLICY env JSON overrides the default', () => {

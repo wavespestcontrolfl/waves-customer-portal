@@ -2041,7 +2041,7 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     irrigationStamp = `${portalIrrigationInches(prefs) ?? ''}:${prefs?.irrigation_system === false ? 'off' : 'on'}:${prefs?.updated_at ? new Date(prefs.updated_at).toISOString() : ''}`;
     // The week plan is a render input too: a new Monday snapshot, a restriction
     // policy change/expiry, or the gate itself must re-render a cached PDF.
-    if (featureGates.isEnabled('irrigationWeekPlan')) {
+    if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
       // loadCurrentWeekPlan already returns null once the policy it was
       // decided under is no longer in force, so its identity is the stamp.
       const snapshot = await loadCurrentWeekPlan(service.customer_id);
@@ -2591,8 +2591,12 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // policy changed mid-week) → no callout: a "this week" instruction must
   // never be built from a historical report's weather and season.
   waterContext.weekPlan = null;
-  if (featureGates.isEnabled('irrigationWeekPlan')) {
-    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt });
+  // A stamped service address that diverges from the home (rental): the plan
+  // was decided for the home's parcel and county — never attach it here.
+  if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
+    // Pinned renders are STRICT: a failed lookup must refuse the render
+    // rather than cache a plan-less page under a plan-present key.
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt, strict: typeof pinnedWeekPlanSentAt === 'string' });
     if (snapshot?.plan) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });

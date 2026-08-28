@@ -85,13 +85,25 @@ function coversCounty(policy, county) {
 // { configured: false } when the variable is unset (default applies);
 // { configured: true, policy: null } when it is set but unusable (FAIL
 // CLOSED — an operator meant to override, so the default must not apply).
+// Diagnostics for a persistent configuration state (expired / malformed
+// policy) are emitted once per hour per message — the sweep calls this per
+// customer and every gated report load calls it again.
+const LOG_ONCE_MS = 60 * 60 * 1000;
+const _lastLogged = new Map();
+function logOnce(message) {
+  const at = _lastLogged.get(message);
+  if (at && Date.now() - at < LOG_ONCE_MS) return;
+  _lastLogged.set(message, Date.now());
+  logger.error(message);
+}
+
 function parseEnvPolicy(raw) {
   if (!raw || !String(raw).trim()) return { configured: false, policy: null };
   try {
     const parsed = JSON.parse(raw);
     return { configured: true, policy: parsed && typeof parsed === 'object' ? parsed : null };
   } catch (err) {
-    logger.error(`[irrigation-restrictions] IRRIGATION_RESTRICTION_POLICY is not valid JSON: ${err.message}`);
+    logOnce(`[irrigation-restrictions] IRRIGATION_RESTRICTION_POLICY is not valid JSON: ${err.message}`);
     return { configured: true, policy: null };
   }
 }
@@ -120,13 +132,13 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   const envPolicy = parseEnvPolicy(env.IRRIGATION_RESTRICTION_POLICY);
   const candidate = envPolicy.configured ? envPolicy.policy : DEFAULT_POLICY;
   if (!validPolicy(candidate)) {
-    logger.error('[irrigation-restrictions] restriction policy is malformed — weekly watering plan unavailable');
+    logOnce('[irrigation-restrictions] restriction policy is malformed — weekly watering plan unavailable');
     return null;
   }
   if (!coversCounty(candidate, county)) return null;
   if (candidate.effectiveFrom && today < candidate.effectiveFrom) return null;
   if (today > candidate.expiresOn) {
-    logger.error(`[irrigation-restrictions] restriction policy "${candidate.label}" expired ${candidate.expiresOn} — set IRRIGATION_RESTRICTION_POLICY; weekly watering plan unavailable until then`);
+    logOnce(`[irrigation-restrictions] restriction policy "${candidate.label}" expired ${candidate.expiresOn} — set IRRIGATION_RESTRICTION_POLICY; weekly watering plan unavailable until then`);
     return null;
   }
   return {
@@ -140,4 +152,4 @@ function currentRestrictionPolicy(now = new Date(), { env = process.env, county 
   };
 }
 
-module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, parseEnvPolicy, coversCounty, CITY_COUNTY } };
+module.exports = { currentRestrictionPolicy, resolveRestrictionCounty, DEFAULT_POLICY, _private: { validPolicy, parseEnvPolicy, coversCounty, CITY_COUNTY, _lastLogged } };

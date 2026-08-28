@@ -536,7 +536,7 @@ describe('offer composition is opt-in, and only the render path opts in (PR r15 
   test('exactly one call site opts in, and it is the /data render', () => {
     const optIns = src.match(/composeOffers: true/g) || [];
     expect(optIns).toHaveLength(1);
-    expect(src).toMatch(/mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true/);
+    expect(src).toMatch(/mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanSentAt, composeOffers: true/);
   });
 
   test('the Q&A call site does NOT opt in', () => {

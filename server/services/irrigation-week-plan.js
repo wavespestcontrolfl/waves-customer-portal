@@ -42,6 +42,14 @@ function fmtInches(n) {
   return `${String(Math.round(v * 100) / 100).replace(/\.?0+$/, '')}"`;
 }
 
+// Under a multi-day policy a single prescribed run may land on ANY of the
+// customer's assigned days — never imply there is only one.
+function permittedDayPhrase(plan) {
+  return Number(plan?.legalMaxEvents) > 1 && Number(plan?.events || 0) <= 1
+    ? 'one of your permitted watering days'
+    : 'your permitted watering day';
+}
+
 function minutesPhrase(plan) {
   if (plan.minutesPerEvent == null) return null;
   return plan.rateSource === 'measured' ? `${plan.minutesPerEvent} minutes` : `about ${plan.minutesPerEvent} minutes`;
@@ -175,7 +183,7 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
       : cool
         ? `December through March your ${grassLabel} is barely growing — every 10–14 days if needed is plenty`
         : `Your ${grassLabel} doesn't need a full watering this week`;
-    actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on your permitted watering day.`;
+    actionLine = `This week: skip your turf watering. ${why}. If the grass shows ${WILT_CUES}, run ${fallbackCycle} on ${permittedDayPhrase(plan)}.`;
   } else if (plan.conditionalOnForecast) {
     // Timing-neutral: a 7-day total can't promise the rain comes BEFORE the
     // permitted day, so the subject asks for the check, not the wait.
@@ -188,13 +196,13 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     // early soaking cancels one run, not the whole week's water.
     actionLine = plan.events > 1
       ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. On each of your ${plan.events} permitted watering days: if ½" or more has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first), skip that run; if less than ½" has, run ${fallbackCycle}.`
-      : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
+      : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When ${permittedDayPhrase(plan)} comes around: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
     heading = `Your watering plan for this week, ${name}`;
     const dayClause = plan.events > 1
       ? ` on each of your ${plan.events} permitted watering days`
-      : ' on your permitted watering day';
+      : ` on ${permittedDayPhrase(plan)}`;
     const depth = fmtInches(plan.depthInches);
     actionLine = minutes
       ? `This week: run each turf zone ${minutes}${dayClause}${comparisonClause(plan, runMinutes)}. That's about ${depth} of water per run — the deep-and-infrequent pattern UF/IFAS recommends.`
@@ -250,7 +258,7 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
       : 'one full cycle on each turf zone (½ to ¾ inch — about 20 minutes on spray zones, 60 on rotor zones)';
     return {
       title: 'This week: skip your turf watering',
-      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on your permitted watering day.`,
+      detail: `Your lawn has what it needs for the week. If the grass shows ${WILT_CUES}, run ${fallback} on ${permittedDayPhrase(plan)}.`,
     };
   }
   if (plan.conditionalOnForecast) {
@@ -258,12 +266,12 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
       title: 'This week: check the rain before you water',
       detail: plan.events > 1
         ? `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on each of your ${plan.events} permitted watering days, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen since your previous permitted watering day (skipped or not — since the start of the week, for the first).`
-        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on your permitted watering day, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
+        : `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on ${permittedDayPhrase(plan)}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }
   return {
     title: minutes ? `This week: ${minutes} per turf zone` : 'This week: one full cycle per turf zone',
-    detail: `${plan.events > 1 ? `On each of your ${plan.events} permitted watering days` : 'On your permitted watering day'}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.`,
+    detail: `${plan.events > 1 ? `On each of your ${plan.events} permitted watering days` : `On ${permittedDayPhrase(plan)}`}, about ${fmtInches(plan.depthInches)} of water per run${comparisonClause(plan, runMinutes)}.`,
   };
 }
 
@@ -443,7 +451,7 @@ function samePolicy(a, b) {
  * so the report shows nothing rather than a stale legal instruction.
  * Null when there is no such snapshot.
  */
-async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt } = {}) {
+async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt, strict = false } = {}) {
   if (!customerId) return null;
   // A render pinned to the cache-signature lookup's answer: the snapshot
   // counts only if it is the SAME one that lookup saw (its sent_at), so a
@@ -475,6 +483,9 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt 
     };
   } catch (err) {
     logger.warn(`[irrigation-week-plan] snapshot load failed for ${customerId}: ${err.message}`);
+    // A PINNED render must not quietly render plan-less under a plan-present
+    // cache key — refuse the render (the caller retries) instead.
+    if (strict) throw err;
     return null;
   }
 }
@@ -490,5 +501,5 @@ module.exports = {
   weekPlanDeliveryState,
   planCategory,
   loadCurrentWeekPlan,
-  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories },
+  _private: { fmtInches, restrictionNote, comparisonClause, samePolicy, decisionHash, hashFromCategories, permittedDayPhrase },
 };

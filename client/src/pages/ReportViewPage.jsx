@@ -9249,6 +9249,8 @@ export default function ReportViewPage() {
       id: id.trim(),
       sig: (params.get('asig') || '').trim(),
       exp: (params.get('aexp') || '').trim(),
+      // Week-plan identity the render is pinned to (inside the signature).
+      plan: (params.get('plan') || '').trim(),
     };
   }, []);
 
@@ -9270,6 +9272,7 @@ export default function ReportViewPage() {
         ? `&assessment=${encodeURIComponent(pinnedAssessment.id)}`
           + `&asig=${encodeURIComponent(pinnedAssessment.sig)}`
           + `&aexp=${encodeURIComponent(pinnedAssessment.exp)}`
+          + (pinnedAssessment.plan ? `&plan=${encodeURIComponent(pinnedAssessment.plan)}` : '')
         : '');
     // Staff browsers attach their portal JWT so internal-only shadow reports
     // (Phase 1b) render for review; the server ignores it for normal reports

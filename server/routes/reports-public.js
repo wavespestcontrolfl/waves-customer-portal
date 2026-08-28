@@ -1659,6 +1659,10 @@ router.post('/:token/ask', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1790,6 +1794,10 @@ router.get('/:token', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -1896,6 +1904,7 @@ router.get('/:token', async (req, res, next) => {
             // page's freedom to choose; the key already carries assessment
             // identity, so this render stays cacheable.
             pinnedLawnAssessmentId: canonicalPin,
+            pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           pdf = rendered.pdf;
           renderImageFailures = rendered.imageFailures ?? null;
@@ -2021,6 +2030,10 @@ router.get('/:token/map.svg', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -2078,6 +2091,10 @@ router.get('/:token/data', async (req, res, next) => {
         // the primary home only for non-divergent stamps (codex round-9 P2).
         db.raw(`COALESCE(ss.lat, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.latitude END) as customer_latitude`),
         db.raw(`COALESCE(ss.lng, CASE WHEN NOT ${stampedDivergesSql('ss', 'customers')} THEN customers.longitude END) as customer_longitude`),
+        // A stamped (rental) address that diverges from the home: the weekly
+        // watering plan is computed for the HOME parcel/county, so the report
+        // for the other property must not carry it (codex #3565 r6 P1).
+        db.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
         'technicians.name as technician_name',
         'technicians.photo_url as technician_photo_url',
         'technicians.avatar_url as technician_avatar_url',
@@ -2133,16 +2150,20 @@ router.get('/:token/data', async (req, res, next) => {
       // official, share-able portal report with an unfavourable assessment
       // removed. Only the renderer can sign, so only the renderer can pin.
       // Refused exactly like an unauthorized pin: same status, same fixed copy.
+      // The week-plan pin (ISO sent_at | 'none') is part of the signed
+      // payload — a tampered or missing value fails the same verification.
+      const requestedPlan = typeof req.query.plan === 'string' && req.query.plan.trim() ? req.query.plan.trim() : '';
       if (requestedAssessment
-        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp)) {
+        && !verifyAssessmentPin(req.params.token, requestedAssessment, req.query.asig, req.query.aexp, { plan: requestedPlan })) {
         logger.warn(`[reports-public] unsigned assessment pin refused for service_record ${serviceRecordId || 'unknown'}`);
         return res.status(409).json({ error: 'Requested assessment is not available for this report' });
       }
       const pinnedLawnAssessmentId = requestedAssessment;
+      const pinnedWeekPlanSentAt = requestedAssessment && requestedPlan ? (requestedPlan === 'none' ? null : requestedPlan) : undefined;
       const v1Data = await buildServiceReportV1ResponseData(service, req.params.token, {
         // The render path is the only consumer of the cross-sell/referral
         // keys, so it is the only caller that pays to compose them.
-        mode, staffViewer, pinnedLawnAssessmentId, composeOffers: true,
+        mode, staffViewer, pinnedLawnAssessmentId, pinnedWeekPlanSentAt, composeOffers: true,
       });
       // "Your Visit, in Motion" — surface the tech-approved recap inside the
       // report (owner ask 2026-07-05; the standalone /recap/:token player was

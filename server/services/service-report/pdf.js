@@ -180,13 +180,13 @@ async function renderReportPdf(url, { serviceRecordId } = {}) {
 }
 
 async function renderServiceReportV1Pdf(data, {
-  token, req, logger: callLogger, serviceRecordId, pinnedLawnAssessmentId = null,
+  token, req, logger: callLogger, serviceRecordId, pinnedLawnAssessmentId = null, pinnedWeekPlanSentAt,
 } = {}) {
   const reportToken = token || data.token;
   const recordId = serviceRecordId || data.serviceRecordId || data.id || null;
   // The pin rides on the URL the browser opens — `data` never reaches the
   // renderer (#3168), so this is the only channel to the page.
-  const url = serviceReportViewerUrl(reportToken, req, 'pdf', { pinnedLawnAssessmentId });
+  const url = serviceReportViewerUrl(reportToken, req, 'pdf', { pinnedLawnAssessmentId, pinnedWeekPlanSentAt });
   const provider = selectedPdfRenderer();
   const started = Date.now();
 

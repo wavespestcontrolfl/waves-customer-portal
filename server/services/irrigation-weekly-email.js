@@ -1074,8 +1074,10 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       const upcoming = await fetchUpcomingWeekForecast({
         latitude: customer.latitude,
         longitude: customer.longitude,
-        // The plan week ends the Sunday after the completed week.
-        horizonEnd: planWeekEnd,
+        // Plan mode only: the plan week ends the Sunday after the completed
+        // week. The legacy templates keep their seven-day window — their
+        // forecast_line says "over the next 7 days".
+        horizonEnd: weekPlanEnabled ? planWeekEnd : null,
         now: planAsOf,
       });
       const forecastRainInches = upcoming ? upcoming.rainInches : null;
@@ -1225,7 +1227,11 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         const prior = await weekPlanDeliveryState(snapshotArgs.idempotencyKey);
         if (prior.state === 'sent') {
           if (prior.decisionHash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: prior.decisionHash });
-        } else if (prior.state === null || prior.state === 'failed' || prior.state === 'blocked') {
+        } else if (prior.state === null || prior.state === 'blocked') {
+          // Never reached the provider / suppressed: definitely not delivered.
+          // 'failed' is AMBIGUOUS (the library can mark a row failed when its
+          // post-provider status update fails) — the row is retained for a
+          // later reconciliation once the delivery webhook repairs the record.
           await discardUnsentWeekPlan({ customerId: customer.id, weekEnding });
         }
       }
