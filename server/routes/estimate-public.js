@@ -278,7 +278,9 @@ function acceptanceTermsApplyTo(estimate) {
   // estimates (authored proposals and auto-priced alike — their terms live
   // in the proposal or the account manager's paperwork) and invoice-mode
   // billing (the invoice states its own payment terms).
-  if (estimate.bill_by_invoice === true) return false;
+  // Effective invoice mode (the column OR a derived guarantee-only renewal —
+  // the helper's own public-surface contract), never the raw column.
+  if (resolveEstimateInvoiceMode(estimate, d)) return false;
   if (String(estimate.category || '').toUpperCase() === 'COMMERCIAL') return false;
   if (isCommercialAutoAcceptEstimate(estimate)) return false;
   const result = d.result && typeof d.result === 'object' ? d.result : d;
@@ -8372,8 +8374,12 @@ async function handleEstimateView(req, res, next) {
     // that can still accept: expired / terminal / archived rows have no
     // accept to protect and keep their SSR pages (the expired carve-out
     // below). Gate-tied so the kill switch fully restores today's routing.
+    // Scoped to estimates that actually RECEIVE terms (acceptanceTermsApplyTo):
+    // termite/WDO, commercial and invoice-mode lanes show nothing new, so
+    // they keep their renderer and their GrowthBook holdback eligibility.
     const acceptanceTermsForcesReactView = featureGates.isEnabled('estimateAcceptanceTerms')
-      && isEstimateAcceptActive(estimate);
+      && isEstimateAcceptActive(estimate)
+      && acceptanceTermsApplyTo(estimate);
     let shouldUseReactEstimateView = estimate.use_v2_view === true
       || effectiveInvoiceMode
       || cardHoldForcesReactView
