@@ -330,10 +330,13 @@ class BacklinkMonitor {
       // 'loss_alerted' nor a 'loss_alert_skipped' ledger row and is swept back
       // in until one is written. Both stamps are in the ledger, so the two
       // obligations can not mask each other.
+      // Ledger checks are scoped to the CURRENT loss episode (events at/after
+      // the row's lost_at): the history is append-only, so a link that was
+      // alerted, recovered and is now verified lost again must ring again.
+      const ALERT_LEDGERED_SQL = "EXISTS (SELECT 1 FROM seo_backlink_events e WHERE e.backlink_id = seo_backlinks.id AND e.event_type IN ('loss_alerted', 'loss_alert_skipped') AND e.created_at >= COALESCE(seo_backlinks.lost_at, e.created_at))";
       const owed = await db('seo_backlinks')
         .where('status', 'lost')
-        .where((qb) => qb.whereNull('recovery_queued_at')
-          .orWhereRaw("NOT EXISTS (SELECT 1 FROM seo_backlink_events e WHERE e.backlink_id = seo_backlinks.id AND e.event_type IN ('loss_alerted', 'loss_alert_skipped'))"))
+        .where((qb) => qb.whereNull('recovery_queued_at').orWhereRaw(`NOT ${ALERT_LEDGERED_SQL}`))
         .whereIn('lost_reason', ['page_gone', 'link_removed'])
         .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
         .whereRaw("lost_at > now() - interval '90 days'")
@@ -348,7 +351,6 @@ class BacklinkMonitor {
       // (stamp + 'recovery_aged_out') and the alert ('loss_alert_skipped',
       // reason aged_out) — so a row whose bell kept failing never just drops
       // out of the owed query with nothing in the ledger.
-      const ALERT_LEDGERED_SQL = "EXISTS (SELECT 1 FROM seo_backlink_events e WHERE e.backlink_id = seo_backlinks.id AND e.event_type IN ('loss_alerted', 'loss_alert_skipped'))";
       const aged = await db('seo_backlinks')
         .where('status', 'lost')
         .where((qb) => qb.whereNull('recovery_queued_at').orWhereRaw(`NOT ${ALERT_LEDGERED_SQL}`))
@@ -420,7 +422,13 @@ class BacklinkMonitor {
     if (scanComplete && alertable.length) {
       const alertableDomains = new Set(alertable.map(d => d.domain));
       const rowsOnAlertable = evaluated.filter(l => alertableDomains.has(comparableDomain(l.source_domain)));
-      const rung = new Set((await db('seo_backlink_events').whereIn('backlink_id', rowsOnAlertable.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000'])).where('event_type', 'loss_alerted').select('backlink_id')).map(e => e.backlink_id));
+      // Current loss episode only (see ALERT_LEDGERED_SQL): an alert stamped
+      // before this row's lost_at belongs to an earlier loss that recovered.
+      const rung = new Set((await db('seo_backlink_events')
+        .whereIn('backlink_id', rowsOnAlertable.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000']))
+        .where('event_type', 'loss_alerted')
+        .whereRaw('seo_backlink_events.created_at >= COALESCE((SELECT b.lost_at FROM seo_backlinks b WHERE b.id = seo_backlink_events.backlink_id), seo_backlink_events.created_at)')
+        .select('backlink_id')).map(e => e.backlink_id));
       const unrung = rowsOnAlertable.filter(l => !rung.has(l.id));
       const unrungDomains = new Set(unrung.map(l => comparableDomain(l.source_domain)));
       alertNow.push(...alertable.filter(d => unrungDomains.has(d.domain)));

@@ -28,16 +28,21 @@ describe('prospect-domain-lock helper', () => {
     expect(trx.raw).not.toHaveBeenCalled();
   });
 
-  test('claimProspectDomain: lock FIRST, then the domain-wide probe (canonical host SQL, status set) — in-flight row returned, else null', async () => {
-    const order = []; let captured = null;
-    const q = { whereRaw: jest.fn((sql, bind) => { captured = [sql, bind]; order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { captured.push([col, vals]); return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })) };
+  test('claimProspectDomain: lock FIRST, then the domain-wide probe (canonical host SQL, status set, outreach lanes only by default) — in-flight row returned, else null', async () => {
+    const order = []; let raws = []; let ins = null;
+    const q = { whereRaw: jest.fn((sql, bind) => { raws.push([sql, bind]); order.push('probe'); return q; }), whereIn: jest.fn((col, vals) => { ins = [col, vals]; return q; }), first: jest.fn(async () => ({ id: 'p1', status: 'contacted', target_page: '/x' })) };
     const trx = Object.assign(jest.fn(() => q), { raw: jest.fn(async () => { order.push('lock'); }) });
     const r = await claimProspectDomain(trx, 'https://WWW.Blog.Example/');
-    expect(order).toEqual(['lock', 'probe']);
+    expect(order[0]).toBe('lock');
     expect(r).toEqual({ domain: 'blog.example', inFlight: { id: 'p1', status: 'contacted', target_page: '/x' } });
-    expect(captured[0]).toBe(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`);
-    expect(captured[1]).toEqual(['blog.example']);
-    expect(captured[2]).toEqual(['status', [...ACTIVE_OUTREACH_STATUSES]]);
+    expect(raws[0]).toEqual([`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']]);
+    expect(ins).toEqual(['status', [...ACTIVE_OUTREACH_STATUSES]]);
+    // signup-lane rows (directory/citation/social — claimed by the signup runner, per-location) are not an outreach conversation
+    expect(raws[1]).toEqual(["COALESCE(link_type, '') NOT IN (?, ?, ?)", ['directory', 'citation', 'social']]);
+    // lanes: 'all' (recovery) sees every row
+    raws = [];
+    await claimProspectDomain(trx, 'blog.example', { lanes: 'all' });
+    expect(raws.map(x => x[0]).join(' ')).not.toMatch(/link_type/);
     // the SQL twin compiles with exactly one binding (no bare '?' eaten by knex.raw)
     const knex = require('knex')({ client: 'pg' });
     const c = knex('seo_link_prospects').whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']).toSQL().toNative();
@@ -180,7 +185,7 @@ describe('every board writer takes the shared lock inside its check+insert trans
 
   test('lost-link recovery uses the shared guard with the wider IN_FLIGHT set for insert AND reopen (no private lock string / SQL twin)', () => {
     const s = src('services/seo/lost-link-recovery.js');
-    expect(s.match(/claimProspectDomain\(trx, domain, \{ statuses: IN_FLIGHT_STATUSES \}\)/g)).toHaveLength(2);
+    expect(s.match(/claimProspectDomain\(trx, domain, \{ statuses: IN_FLIGHT_STATUSES, lanes: 'all' \}\)/g)).toHaveLength(2);
     expect(s).not.toMatch(/pg_advisory_xact_lock/);
     expect(s).not.toMatch(/split_part\(split_part/);
   });

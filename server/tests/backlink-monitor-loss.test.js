@@ -775,7 +775,8 @@ describe('lost-link recovery', () => {
     const impl = db.getMockImplementation();
     db.mockImplementation((table) => { const b = impl(table); if (table === 'seo_backlinks') { const o = b.orWhereRaw; b.orWhereRaw = (sql, bind) => { raws.push(sql); return o(sql, bind); }; } return b; });
     await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery });
-    expect(raws.join(' ')).toMatch(/NOT EXISTS \(SELECT 1 FROM seo_backlink_events e WHERE e\.backlink_id = seo_backlinks\.id AND e\.event_type IN \('loss_alerted', 'loss_alert_skipped'\)\)/);
+    // episode-scoped: only ledger rows at/after the row's CURRENT lost_at count (an alert from an earlier, recovered loss does not)
+    expect(raws.join(' ')).toMatch(/NOT EXISTS \(SELECT 1 FROM seo_backlink_events e WHERE e\.backlink_id = seo_backlinks\.id AND e\.event_type IN \('loss_alerted', 'loss_alert_skipped'\) AND e\.created_at >= COALESCE\(seo_backlinks\.lost_at, e\.created_at\)\)/);
 
     // a low-DR (not alertable) verified loss: settled → recovery stamp + loss_alert_skipped in one transaction
     const crawl = jest.fn(async () => ({ found: false, status: 200 }));
@@ -801,6 +802,14 @@ describe('lost-link recovery', () => {
     expect(alertFn).toHaveBeenCalledWith(msg);
     expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted', detail: JSON.stringify({ domains: 1, notification_id: 'n-1' }) }));
     expect(order).toEqual(['bell', 'sms']); // bell + stamps committed BEFORE the SMS copy
+
+    // the "already rung?" ledger read is scoped to the current loss episode (created_at >= the row's lost_at)
+    const ledgerRaws = [];
+    scanWith({ items: [seen], active: [], owed, alerted: [] });
+    const impl0 = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = impl0(table); if (table === 'seo_backlink_events') { const w = b.whereRaw; b.whereRaw = (sql, bind) => { ledgerRaws.push(sql); return w(sql, bind); }; } return b; });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: jest.fn(async () => {}) });
+    expect(ledgerRaws.join(' ')).toMatch(/seo_backlink_events\.created_at >= COALESCE\(\(SELECT b\.lost_at FROM seo_backlinks b WHERE b\.id = seo_backlink_events\.backlink_id\), seo_backlink_events\.created_at\)/);
 
     // a failed SMS copy is logged by code only; the bell is the record, rows stay stamped (no re-ring next week)
     const { events: events2 } = scanWith({ items: [seen], active: [], owed, alerted: [] });

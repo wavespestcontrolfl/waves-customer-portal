@@ -18,7 +18,7 @@ function fakeDb({ ownActive = [], existing = [], inFlight = [] } = {}) {
       // already exists, else the inserted id.
       let probeDomain = null;
       const probe = {
-        whereRaw: (_sql, bind) => { probeDomain = bind[0]; return probe; },
+        whereRaw: (sql, bind) => { if (/target_domain/.test(sql)) probeDomain = bind[0]; return probe; },
         whereIn: () => probe,
         // the guard's domain-wide probe: an `inFlight` fixture row for the domain
         first: async () => inFlight.find((p) => p.target_domain === probeDomain) || null,

@@ -133,7 +133,7 @@ async function queueOne(loss, out, scoreMod) {
       // daily verifier can restore the row to live between our read and this
       // write — a 0-row update means it is no longer lost, not reopened.
       const reopened = await db.transaction(async (trx) => {
-        const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES });
+        const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
         if (raced) return { raced };
         return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
           status: 'prospect',
@@ -233,7 +233,7 @@ async function queueOne(loss, out, scoreMod) {
       // target_page) pair, so a row filed for this domain under another Waves
       // page or spelling during the slow scoring/contact lookup would not
       // conflict — it would land beside this one, both claimable.
-      const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES });
+      const { inFlight: raced } = await claimProspectDomain(trx, domain, { statuses: IN_FLIGHT_STATUSES, lanes: 'all' });
       if (raced) return { raced };
       return trx('seo_link_prospects').insert({
       target_domain: domain,

@@ -28,6 +28,13 @@
 
 const LOCK_PREFIX = 'lost_recovery:';
 
+// Signup-lane rows (directory / citation / social) are claimed by the signup
+// runner, not the outreach worker, and legitimately coexist per location
+// (two (domain, location) listings for one directory). They are NOT an open
+// outreach conversation, so the outreach-lane claim ignores them; the
+// recovery lane (lanes: 'all') still sees every row.
+const { SIGNUP_TYPES } = require('./link-prospect-worker');
+
 const ACTIVE_OUTREACH_STATUSES = Object.freeze(['prospect', 'contacted', 'negotiating']);
 const IN_FLIGHT_STATUSES = Object.freeze([...ACTIVE_OUTREACH_STATUSES, 'placed', 'live', 'indexed']);
 
@@ -95,16 +102,19 @@ async function lockProspectDomain(trx, domain) {
 }
 
 /**
- * claimProspectDomain(trx, domain, { statuses }) → { domain, inFlight }
+ * claimProspectDomain(trx, domain, { statuses, lanes }) → { domain, inFlight }
+ * lanes: 'outreach' (default) ignores signup-lane rows; 'all' sees every row.
  * Lock the canonical domain inside `trx`, then return the first board row for
  * that domain whose status is in `statuses` (null when the domain is free).
  * The caller inserts only when `inFlight` is null.
  */
-async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STATUSES } = {}) {
+async function claimProspectDomain(trx, domain, { statuses = ACTIVE_OUTREACH_STATUSES, lanes = 'outreach' } = {}) {
   const key = await lockProspectDomain(trx, domain);
   if (!key) return { domain: key, inFlight: null };
   const set = new Set(statuses);
-  const row = await byDomain(trx('seo_link_prospects'), key).whereIn('status', [...set]).first('id', 'status', 'target_page');
+  let qb = byDomain(trx('seo_link_prospects'), key).whereIn('status', [...set]);
+  if (lanes === 'outreach') qb = qb.whereRaw(`COALESCE(link_type, '') NOT IN (${SIGNUP_TYPES.map(() => '?').join(', ')})`, [...SIGNUP_TYPES]);
+  const row = await qb.first('id', 'status', 'target_page');
   // Belt and braces for test doubles / stale readers: only a row in the set counts.
   return { domain: key, inFlight: row && set.has(row.status) ? row : null };
 }
