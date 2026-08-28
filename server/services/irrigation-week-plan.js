@@ -408,8 +408,9 @@ function hashFromCategories(raw) {
  * A prior run's delivery, from the durable email_messages record — looked up
  * at customer/week scope (trigger_event_id): { state, decisionHash } — state 'sent' (provider
  * accepted — sent/delivered/opened/clicked), 'blocked' (suppressed),
- * 'pending' (queued / in flight / FAILED-ambiguous / lookup failed), or
- * null (no attempt); decisionHash = the snapshot the delivered email was built from
+ * 'failed' (rejected BEFORE the provider — retryable), 'pending' (queued /
+ * in flight / failed AFTER the provider accepted — ambiguous / lookup
+ * failed), or null (no attempt); decisionHash = the snapshot the delivered email was built from
  * (null on a record that carries none). The sweep reconciles from THIS,
  * never from a return shape or an exception, and stamps only the row whose
  * hash the record names.
@@ -421,15 +422,19 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   const where = triggerEventId ? { trigger_event_id: triggerEventId } : (idempotencyKey ? { idempotency_key: idempotencyKey } : null);
   if (!where) return { state: null, decisionHash: null };
   try {
-    const rows = await db('email_messages').where(where).select('status', 'categories');
+    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id');
     if (!rows || !rows.length) return { state: null, decisionHash: null };
-    // 'failed' is AMBIGUOUS — the library can mark a row failed when its
-    // post-provider status update fails — so it classifies as pending: never
-    // reclaimed, never resent, never deleted until a webhook repairs it.
+    // 'failed' splits on whether the provider ever accepted the message: a
+    // failed row WITH a provider_message_id is a post-provider bookkeeping
+    // failure (ambiguous → pending: never reclaimed, resent or deleted until
+    // a webhook repairs it); a failed row WITHOUT one is a definite
+    // pre-provider rejection → 'failed', which the library's own
+    // shouldRetryExistingMessage path is allowed to retry.
     const classify = (row) => {
       const status = String(row.status || '').toLowerCase();
       if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
       if (status === 'blocked') return 'blocked';
+      if (status === 'failed') return row.provider_message_id ? 'pending' : 'failed';
       return 'pending';
     };
     // A delivered record wins over any other attempt for the week.

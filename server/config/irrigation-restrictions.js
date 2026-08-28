@@ -39,10 +39,11 @@ const DEFAULT_POLICY = Object.freeze({
 
 // Service-area cities → county, for customers whose turf profile carries no
 // county. Only cities that sit wholly in one county; a city that straddles
-// counties (e.g. Longboat Key, Englewood) is deliberately absent → unknown.
+// counties (Lakewood Ranch, Longboat Key, Englewood) is deliberately absent
+// → unknown → no plan (fail closed) until an address-level lane exists.
 const CITY_COUNTY = Object.freeze({
   bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
-  'lakewood ranch': 'Manatee', 'anna maria': 'Manatee', 'holmes beach': 'Manatee',
+  'anna maria': 'Manatee', 'holmes beach': 'Manatee',
   'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
   sarasota: 'Sarasota', venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
   osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',

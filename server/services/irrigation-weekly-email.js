@@ -683,6 +683,10 @@ function buildWeeklyEmailDecision({
         decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource },
         payload: {
           ...payload,
+          // "What your grass needs right now" = THIS week's target (the plan's),
+          // not the completed week's — they differ at month boundaries and
+          // with a different forecast ET₀.
+          target_inches: formatInches(plan.targetInches),
           summary_line: lastWeekLine,
           // The conditional plan names the forecast in its own action line.
           forecast_line: plan.conditionalOnForecast ? '' : forecastLine({

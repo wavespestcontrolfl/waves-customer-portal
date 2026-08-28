@@ -40,8 +40,9 @@ describe('weekly email decision — plan mode', () => {
     expect(d.weekPlan.rateSource).toBe('measured');
     expect(d.payload.week_plan).toContain('turf zone');
     expect(d.payload.restriction_note).toContain('one day a week');
-    // Numbers block still fed.
+    // Numbers block still fed; "needs right now" is THIS week's target (the plan's).
     expect(d.payload.total_inches).toBe('2.6');
+    expect(d.payload.target_inches).toBe(String(d.weekPlan.targetInches));
     expect(d.payload.target_inches).toBe('1.25');
   });
 

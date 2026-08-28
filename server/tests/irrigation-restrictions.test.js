@@ -71,7 +71,8 @@ describe('jurisdiction', () => {
   test('resolveRestrictionCounty: turf-profile county first, then whole-county service cities, else null', () => {
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Sarasota' })).toBe('Sarasota'); // normalized
     expect(resolveRestrictionCounty({ county: 'sarasota county', city: 'Bradenton' })).toBe('Manatee'); // conflicting current city wins
-    expect(resolveRestrictionCounty({ city: 'Lakewood Ranch' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ city: 'Lakewood Ranch' })).toBeNull(); // straddles Manatee/Sarasota
+    expect(resolveRestrictionCounty({ city: 'Parrish' })).toBe('Manatee');
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties
     expect(resolveRestrictionCounty({})).toBeNull();

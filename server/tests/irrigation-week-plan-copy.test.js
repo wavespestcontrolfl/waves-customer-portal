@@ -333,9 +333,9 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
 
   test.each([
     ['sent', 'sent'], ['delivered', 'sent'], ['opened', 'sent'], ['clicked', 'sent'],
-    ['blocked', 'blocked'], ['failed', 'pending'], ['queued', 'pending'],
+    ['blocked', 'blocked'], ['failed', 'failed'], ['queued', 'pending'],
   ])('status %s → %s', async (status, expected) => {
-    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']) }]);
+    withRows([{ status, categories: JSON.stringify(['irrigation', 'plan:abc123']), provider_message_id: null }]);
     const r = await weekPlanDeliveryState({ triggerEventId: 'irrigation.weekly:c1:2026-08-23' });
     expect(r.state).toBe(expected);
     expect(r.decisionHash).toBe('abc123');
@@ -347,6 +347,13 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: null, decisionHash: null });
     withRows([{ status: 'sent', categories: JSON.stringify(['plan:first']) }, { status: 'queued', categories: JSON.stringify(['plan:second']) }]);
     expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'sent', decisionHash: 'first' });
+  });
+
+  test('a failed row the provider had ACCEPTED (provider_message_id set) is ambiguous → pending; without one it is a retryable failure', async () => {
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: 'sg-123' }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'pending', decisionHash: 'h' });
+    withRows([{ status: 'failed', categories: JSON.stringify(['plan:h']), provider_message_id: null }]);
+    expect(await weekPlanDeliveryState({ triggerEventId: 't' })).toEqual({ state: 'failed', decisionHash: 'h' });
   });
 
   test('a record without a plan category names no snapshot (report stays absent)', async () => {
