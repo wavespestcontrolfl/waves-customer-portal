@@ -638,6 +638,12 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified, le
         subject: parsed.subject,
         emailId: email.id,
         customerId,
+      }, {
+        // Channel-independent delivery receipt (codex r5): settle right
+        // BEFORE the push is dispatched. A push-only delivery leaves no bell
+        // row, so a crash after the push would otherwise let a reclaimed
+        // lease send the same banner again. Undone below if nothing sent.
+        beforePush: async () => { await settleCustomerEmailBell(email.id, lease); return true; },
       });
     } finally {
       // Settle only on a real outcome: a bell written, a push sent, or a
@@ -651,8 +657,9 @@ async function ringCustomerEmailBell(email, { customerId, parsed, classified, le
       if (delivered) {
         await settleCustomerEmailBell(email.id, lease).catch(() => {});
       } else {
+        // Nothing delivered: release the lease AND any pre-push receipt.
         await db('emails').where({ id: email.id, customer_bell_claimed_at: lease })
-          .update({ customer_bell_claimed_at: null }).catch(() => {});
+          .update({ customer_bell_claimed_at: null, customer_bell_settled_at: null }).catch(() => {});
       }
     }
   } catch (e) { logger.warn(`[email-sync] customer_email_received bell failed: ${e.message}`); }

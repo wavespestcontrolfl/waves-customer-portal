@@ -14,14 +14,23 @@ exports.up = async function up(knex) {
     table.timestamp('initial_scan_started_at', { useTz: true }).nullable();
   });
   // Proof of completion: a cursor, OR a completed run whose cursor was
-  // cleared by Gmail's history-expiry (errors = 'History expired…'). A
-  // failed FIRST sync stamps last_sync_at with errors 'full sync
-  // incomplete…' and stays null (codex P1 + P2).
+  // cleared by Gmail's history-expiry (errors = 'History expired…'), OR a
+  // mailbox the portal already holds mail for. The third covers the
+  // established mailbox whose history-expiry recovery FAILED before this
+  // migration ran — that path overwrites `errors` and leaves the cursor
+  // null, so the first two predicates alone would read it as a first
+  // connect and silence every bell for mail before the new scan boundary
+  // (codex r5). The asymmetry is deliberate: mis-reading a still-failing
+  // FIRST connect as established costs at most the 24h age guard's worth of
+  // bells (bounded noise); the reverse permanently loses customer alerts.
+  const [{ count }] = await knex('emails').count('* as count');
+  const hasMail = Number(count) > 0;
   await knex('email_sync_state')
     .whereNotNull('last_sync_at')
     .where(function completed() {
       this.whereNotNull('last_history_id')
         .orWhere(function expired() { this.whereNull('last_history_id').where('errors', 'like', 'History expired%'); });
+      if (hasMail) this.orWhereRaw('true');
     })
     .update({ initial_sync_completed_at: knex.raw('last_sync_at') });
 };
