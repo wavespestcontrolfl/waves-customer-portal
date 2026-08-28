@@ -1936,15 +1936,26 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   // paths holding the same picture, or a draft image that repeats the hero,
   // are not distinct illustrations and park the run (the draft body is not
   // ours to rewrite).
+  // Fail closed: a picture whose bytes cannot be read cannot be proven
+  // distinct, so it parks rather than slipping past the check.
   const seen = [];
   for (const sib of siblings) {
     let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
     if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
+    if (!buf && (sib?.repoPath || sib?.buffer)) {
+      const err = new Error(`autonomous blog body images: ${sib.label || 'hero'} bytes unavailable for ${slug} (${sib.repoPath || 'buffer'}) — cannot verify body images differ from it`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
     if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
   }
   for (const src of draftSrcs) {
     const buf = await committedImageBuffer(`public${src}`);
-    if (!buf) continue;
+    if (!buf) {
+      const err = new Error(`autonomous blog body images: draft for ${slug} references ${src} whose bytes cannot be read — cannot verify it is a distinct picture`);
+      err.code = 'BLOG_BODY_IMAGES_FAILED';
+      throw err;
+    }
     const dup = await nearDuplicateOf(buf, seen);
     if (dup.label) {
       const err = new Error(`autonomous blog body images: draft for ${slug} references ${src}, a near-duplicate of ${dup.label} — body images must be distinct pictures`);

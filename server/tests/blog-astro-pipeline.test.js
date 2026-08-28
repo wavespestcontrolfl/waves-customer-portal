@@ -3402,6 +3402,15 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     return `data:image/png;base64,${png.toString('base64')}`;
   }
   beforeAll(async () => { for (const seed of [1, 2, 3, 4, 5]) PATTERNS.push(await patternPng(seed)); });
+  // Committed-file stub with REAL distinct bytes (the picture-level check
+  // reads them): pattern index by path order.
+  const committedStub = (paths) => {
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    return async (path) => {
+      const idx = paths.indexOf(path);
+      return idx >= 0 ? { content: '', sha: `s${idx}`, raw: { content: b64(PATTERNS[(idx + 2) % PATTERNS.length]) } } : null;
+    };
+  };
 
   // Default generator: a different picture on every call, prompt-derived alt
   // for body images. Tests that need specific pictures override it.
@@ -3658,11 +3667,8 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
       'Old body.\n\n## Some other topic\n\nOld prose.\n\n![Live alt](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
     );
-    gh.getFile.mockImplementation(async (path) => {
-      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
-      if (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/')) return { content: 'x', sha: 'h' };
-      return null;
-    });
+    const committed = committedStub(['public/images/blog/pest-control/drywood-frass-venice/hero.webp', 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp']);
+    gh.getFile.mockImplementation(async (path) => (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx' ? { content: liveMd, sha: 'live-sha' } : committed(path)));
 
     await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
 
@@ -3676,7 +3682,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   });
 
   test('draft-authored image refs count only when COMMITTED in the repo; fenced `![..]` is not an image', async () => {
-    gh.getFile.mockImplementation(async (path) => (path.startsWith('public/images/2026/08/') ? { content: 'x', sha: 'i' } : null));
+    gh.getFile.mockImplementation(committedStub(['public/images/2026/08/a.webp', 'public/images/2026/08/b.webp']));
     const body = `${article}\n\n![a](/images/2026/08/a.webp)\n\n![b](/images/2026/08/b.webp)\n\n\`\`\`md\n![not an image](/images/2026/08/c.webp)\n\`\`\`\n`;
     expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/a.webp', '/images/2026/08/b.webp']);
     await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
@@ -3684,7 +3690,7 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
   });
 
   test('distinct sources count, not references; new body-N names skip ones the draft already references (hook r3)', async () => {
-    gh.getFile.mockImplementation(async (path) => (path === 'public/images/blog/pest-control/drywood-frass-venice/body-2.webp' ? { content: 'x', sha: 'b2' } : null));
+    gh.getFile.mockImplementation(committedStub(['public/images/blog/pest-control/drywood-frass-venice/body-2.webp']));
     // Two references to ONE committed file → one image → one more needed, and it must not be body-2.
     const body = `${article}\n\n![same](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n\n![same again](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`;
     await AstroPublisher.publishOrUpdatePage(draft(body), { action_type: 'new_supporting_blog' });
@@ -3804,6 +3810,32 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     } catch (err) { thrown = err; }
     expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
     expect(thrown.message).toMatch(/near-duplicate of hero/);
+  });
+
+  test('fail-closed: unreadable bytes for a reused hero or a draft image park — an unverifiable picture never passes the distinctness check (hook r12)', async () => {
+    // Reused hero (committed, but the contents API returned no bytes).
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n',
+    );
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h' };
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/hero bytes unavailable/);
+
+    // Draft image committed (path exists) but bytes unreadable.
+    jest.clearAllMocks();
+    gh.getFile.mockImplementation(async (path) => (path === 'public/images/2026/08/a.webp' ? { content: '', sha: 'a' } : null));
+    thrown = null;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/2026/08/a.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/bytes cannot be read/);
+    expect(gh.createBranch).not.toHaveBeenCalled();
   });
 
   test('imageDHash: identical pictures hash identically, different patterns are far apart, recompression is tolerated', async () => {
