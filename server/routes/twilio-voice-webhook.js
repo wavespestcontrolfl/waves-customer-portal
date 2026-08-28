@@ -505,12 +505,19 @@ function vestibuleInnerXml({ greetingUrl, vestibule }) {
 // in es-US (Spanish greeting = the §934.03 + automated-assistant disclosure,
 // non-interruptible; Twilio's default es-US voice unless the owner set one;
 // <Parameter lang=es> rides into the setup frame → RelayConversation.language).
+// The selection ALSO rides the signed <Connect action> URL (?lang=es) so the
+// failover voicemail is deterministically Spanish — Twilio's signature covers
+// the query string, and no best-effort DB stamp sits on that path.
+const RELAY_COMPLETE_ACTION_ES = `${RELAY_COMPLETE_ACTION}?lang=es`;
+function relayCompleteLanguage(req) {
+  return req && req.query && req.query.lang === 'es' ? 'es' : null;
+}
 function buildSpanishRelayTwiML({ vestibule, callSid }) {
   const { buildRelayTwiML, spanishWelcomeGreeting, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
   return buildRelayTwiML({
     wsUrl: vestibule.relayUrl,
     callSid,
-    action: RELAY_COMPLETE_ACTION,
+    action: RELAY_COMPLETE_ACTION_ES,
     language: SPANISH_LANGUAGE,
     voice: vestibule.voice || null,
     welcomeGreeting: spanishWelcomeGreeting(),
@@ -1139,18 +1146,11 @@ router.post('/relay-complete', async (req, res) => {
     // Undo the ai_agent/ai_handled stamp the relay handoff applied: this call
     // did NOT reach the agent, it went to voicemail. Reconcile before recording
     // so reporting doesn't show a failed relay call as AI-handled.
-    let language = null;
+    // A caller who chose Spanish gets Spanish voicemail. The selection rides
+    // the signed action URL the Spanish leg itself rendered (?lang=es) —
+    // deterministic, no DB dependency on the failover path.
+    const language = relayCompleteLanguage(req);
     if (callSid) {
-      // A caller who chose Spanish (stamped at the vestibule) gets Spanish
-      // voicemail — read BEFORE the reconcile so a read failure only costs
-      // the language, never the fallback.
-      language = await db('call_log').where('twilio_call_sid', callSid).first('metadata')
-        .then((row) => {
-          let meta = row && row.metadata;
-          if (typeof meta === 'string') { try { meta = JSON.parse(meta); } catch { meta = null; } }
-          return meta && meta.caller_language ? String(meta.caller_language) : null;
-        })
-        .catch(() => null);
       await db('call_log').where('twilio_call_sid', callSid)
         .update({ answered_by: 'voicemail', call_outcome: 'voicemail', updated_at: new Date() })
         .catch((err) => logger.warn(`[relay-complete] call_log reconcile failed for ${maskSid(callSid)}: ${err.message}`));
@@ -1909,6 +1909,7 @@ router._test = {
   appendLanguageVestibule,
   vestibuleInnerXml,
   buildSpanishRelayTwiML,
+  relayCompleteLanguage,
   spanishSelected,
   appendVoicemailRecording,
   SPANISH_MENU_PROMPT,

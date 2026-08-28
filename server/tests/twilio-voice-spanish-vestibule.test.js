@@ -17,7 +17,7 @@ const { isEnabled } = require('../config/feature-gates');
 const voiceRouter = require('../routes/twilio-voice-webhook');
 const {
   languageVestibule, appendLanguageVestibule, vestibuleInnerXml, buildSpanishRelayTwiML,
-  spanishSelected, appendVoicemailRecording, SPANISH_MENU_PROMPT, LANGUAGE_MENU_ACTION,
+  spanishSelected, appendVoicemailRecording, SPANISH_MENU_PROMPT, LANGUAGE_MENU_ACTION, relayCompleteLanguage,
 } = voiceRouter._test;
 const { DEFAULT_WELCOME_GREETING_ES, SPANISH_LANGUAGE } = require('../services/voice-agent/relay-protocol');
 
@@ -111,7 +111,9 @@ describe('Gather action contract', () => {
 describe('Spanish relay leg', () => {
   test('es-US session with the Spanish disclosure greeting, <Parameter lang=es>, relay-complete action, and NO voice by default', () => {
     const xml = buildSpanishRelayTwiML({ vestibule: VEST, callSid: 'CA123' });
-    expect(xml).toContain('<Connect action="/api/webhooks/twilio/relay-complete" method="POST">');
+    // The selection rides the SIGNED action URL so the failover voicemail is
+    // deterministically Spanish (no DB stamp on that path).
+    expect(xml).toContain('<Connect action="/api/webhooks/twilio/relay-complete?lang=es" method="POST">');
     expect(xml).toMatch(/<ConversationRelay [^>]*language="es-US"/);
     expect(xml).toMatch(/<ConversationRelay [^>]*welcomeGreetingInterruptible="none"/);
     expect(xml).toContain('<Parameter name="lang" value="es" />');
@@ -132,6 +134,13 @@ describe('Spanish relay leg', () => {
 });
 
 describe('Spanish voicemail failover', () => {
+  test('relay-complete language comes only from the signed action URL', () => {
+    expect(relayCompleteLanguage({ query: { lang: 'es' } })).toBe('es');
+    expect(relayCompleteLanguage({ query: { lang: 'en' } })).toBeNull();
+    expect(relayCompleteLanguage({ query: {} })).toBeNull();
+    expect(relayCompleteLanguage({})).toBeNull();
+    expect(relayCompleteLanguage(null)).toBeNull();
+  });
   test('English path unchanged', () => {
     const twiml = new VoiceResponse();
     appendVoicemailRecording(twiml);
