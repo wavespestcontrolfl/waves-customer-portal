@@ -705,8 +705,9 @@ t.timestamp('submitting_at');
 t.text('merchant_ref');                             // merchant order/receipt id ONLY — never card data
 t.jsonb('merchant_binding');                        // IMMUTABLE at reservation, copied from the path: { checkout_origin, processor: { host, merchant_account_id? }, issuer_merchant_descriptor? }. NULLABLE only for `manual_charged` rows (the owner paid outside the system; the receipt is the record). For AUTOMATED purchases it is REQUIRED and must satisfy ONE of two enforcement modes, fail-closed: (a) `processor.merchant_account_id` present — validated immediately before mint AND before submit against the LIVE checkout (origin + the merchant/account id read from the live session/form); or (b) `issuer_merchant_descriptor` present AND the issuer actually minted the single-use card locked to that descriptor (`issuer_lock_applied=true` recorded at mint) — then the live check validates origin only. A processor HOST alone never binds anything; neither mode satisfiable ⇒ `instrument_unavailable` (pre-exposure void) and the path routes to OWNER_MANUAL_PAYMENT
 t.text('issuer_card_id'); t.string('card_last4', 4); // opaque issuer identifier of the single-use card + last4; the PAN is NEVER persisted anywhere
-t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms the merchant/descriptor lock is on the card); descriptor-only enforcement mode requires it = true before the card is exposed — a null/false value after mint is `ambiguous`-safe: the card is closed and the row voided before exposure
+t.boolean('issuer_lock_applied');                   // written ATOMICALLY with issuer_card_id from the issuer's mint response (true only when the issuer confirms the merchant/descriptor lock is on the card); descriptor-only enforcement mode requires it = true before the card is exposed — a null/false value after mint takes the post-mint failure path (§6.3): the card is closed immediately and the row goes `submitting → ambiguous` with `card_exposed=false`
 t.timestamp('card_closed_at');                      // set the instant the card is closed at the issuer (charged/voided/ambiguous); reconciled_not_charged requires it
+t.boolean('card_exposed').notNullable().defaultTo(false); // set true the instant PAN/CVV are handed to the broker; a purchase that became `ambiguous` with card_exposed=false (post-mint precondition failure, never presented) may be reconciled_not_charged as soon as the issuer confirms the card is closed with no transaction — no presentment wait, because nothing could have been presented
 t.text('lease_token'); t.string('leased_by'); t.timestamp('leased_at'); t.timestamp('lease_expires_at'); // PURCHASE-level lease; token is TEXT = the retained worker contract's ISO `claimed_at` lease_token (never a second token type): every purchase transition is conditional on lease_token (the placement lease alone cannot represent renewal work while the placement is live); a claim sets it, a report/sweep clears it; a stale worker's token matches 0 rows
 t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
 ```
@@ -806,8 +807,15 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   the same card, never a second one, so one purchase can never hold two live instruments (the merchant cannot authorize or capture
   more than the ledger approved, whatever the checkout later shows; the issuer's program-wide
   monthly limit is a second ceiling, not the control). If the issuer cannot set a per-card
-  ceiling, **no automated purchase is made** — the row is refused (`voided`,
-  `outcome='instrument_unavailable'`) and parked for the owner. Reconciliation compares the
+  ceiling, **no automated purchase is made**. Issuer capabilities (per-card ceiling,
+  merchant/descriptor lock) are **preflighted from the issuer program's declared features
+  before `reserved → submitting`** — an unsupported requirement voids the row pre-mint
+  (`voided`, `outcome='instrument_unavailable'`, parked for the owner). If a mint
+  nonetheless returns a card without the required ceiling or lock, the **post-mint failure
+  path** applies: the broker closes the card at once, the row goes `submitting → ambiguous`
+  with `card_exposed=false`, and the reconciler settles it `reconciled_not_charged` on the
+  issuer's closed-and-no-transaction confirmation (no presentment wait — the PAN was never
+  fetched); `submitting → voided` never exists. Reconciliation compares the
   captured amount against the ceiling; a capture above `final_cents` is impossible by
   construction and any discrepancy is `ambiguous` until explained. (Issuer-generated per
   reservation; the ledger
@@ -897,7 +905,8 @@ t.text('evidence_url'); t.timestamp('reserved_at'); t.timestamp('settled_at');
   `reserved → voided` (worker/sweep, pre-exposure) · `reserved → submitting` (worker, after
   pre-mint revalidation) · `submitting → reserved` (sweep only, issuer-confirmed no card) ·
   `submitting → close_pending` (worker, merchant success) · `submitting → ambiguous` (worker
-  or sweep) · `close_pending → charged` (worker/sweep, issuer-confirmed closure + capture) ·
+  or sweep; includes every post-mint precondition failure — lock/ceiling missing — with
+  `card_exposed=false`) · `close_pending → charged` (worker/sweep, issuer-confirmed closure + capture) ·
   `close_pending → ambiguous` (sweep) · `ambiguous → reconciled_charged | reconciled_not_charged`
   (reconciler only). No other edge exists; tests enumerate this table.
 - **Lease safety.** Every purchase transition is conditional on the **purchase row's own
