@@ -704,22 +704,30 @@ function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   };
 }
 
-// Does ONE customer carry the recurring-lawn evidence above? The portal's
-// Weekly Inches field (and the PUT that stores it) gate on this — the same
-// predicate the Monday sweep uses to decide who gets the irrigation email,
-// so a customer the email asks for inches can always enter them. The
-// tier / lawn_type shortcut in routes/property.js stays as a fast path;
-// this is the authoritative fallback for standalone lawn-plan customers
-// with no turf type on file (2026-08-27: a lawn customer's portal showed
-// no Inches field on the day of her service).
-async function hasRecurringLawnEvidence(customerId, { now = new Date() } = {}) {
+// Does ONE customer have lawn-service evidence? Gates the portal's Weekly
+// Inches field (and the PUT that stores it) — a render/store gate, not a
+// send, so it is deliberately BROADER than the Monday sweep's audience: any
+// live lawn-flavored visit on or after the trailing cutoff, future visits
+// included and no recurring marker required. That is a strict superset of
+// recurringLawnEvidenceFilter (both branches imply one such visit) and also
+// admits the unstamped-first-visit member class findUnstampedRecurringLawnMembers
+// pages for (GH codex P2 on #3557) — that customer must be able to enter
+// inches even while the series is still unstamped. Tier / lawn_type remain
+// the fast path in routes/property.js. (2026-08-27: a lawn customer's portal
+// showed no Inches field on the day of her service.)
+async function hasLawnServiceEvidence(customerId, { now = new Date() } = {}) {
   if (!customerId) return false;
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
-  const todayET = etDateString(now);
-  const row = await db('customers as c')
-    .where('c.id', customerId)
-    .where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
-    .first('c.id');
+  const row = await db('scheduled_services as ss')
+    .where('ss.customer_id', customerId)
+    .whereNotIn('ss.status', NON_LIVE_VISIT_STATUSES)
+    .where('ss.scheduled_date', '>=', lawnServiceCutoff)
+    .where(function serviceTypes() {
+      for (const pattern of LAWN_SERVICE_TYPE_LIKES) {
+        this.orWhereRaw('LOWER(ss.service_type) LIKE ?', [pattern]);
+      }
+    })
+    .first('ss.id');
   return !!row;
 }
 
@@ -1247,7 +1255,7 @@ module.exports = {
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
-  hasRecurringLawnEvidence,
+  hasLawnServiceEvidence,
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,

@@ -7231,6 +7231,10 @@ function PropertyTab({ customer }) {
   // property/customer change, so capturing once at mount is sufficient.
   const editsCustomerIdRef = useRef(customer?.id);
   const [serverHasLawnCare, setServerHasLawnCare] = useState(null);
+  // A legacy row stored "off" by the retired toggle: the report and Monday
+  // email suppress derivation until the customer's next irrigation edit
+  // stamps it on, so the card must not claim a figure they aren't counting.
+  const [irrigationSuppressed, setIrrigationSuppressed] = useState(false);
 
   const loadPropertyPreferences = useCallback(() => {
     setLoading(true);
@@ -7243,6 +7247,7 @@ function PropertyTab({ customer }) {
         // service evidence) — the same test the PUT applies to Weekly
         // Inches, so the field never renders and then drops on save.
         if (typeof d.hasLawnCare === 'boolean') setServerHasLawnCare(d.hasLawnCare);
+        setIrrigationSuppressed(d.irrigationSuppressed === true);
         setLoading(false);
       })
       .catch(err => {
@@ -7561,6 +7566,9 @@ function PropertyTab({ customer }) {
     if (prefs.irrigationRunMinutes == null) return null;
     if (derivedIrrigation.inchesPerWeek != null) {
       const inches = derivedIrrigation.inchesPerWeek.toFixed(2).replace(/\.?0+$/, '');
+      if (irrigationSuppressed && !explicitInchesEntered) {
+        return `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week, but this schedule isn't being counted yet — it was switched off earlier. Save any change here and we'll start counting it.`;
+      }
       return explicitInchesEntered
         ? `Your ${describeRuntimeBasis(derivedIrrigation)} works out to about ${inches}" a week — your Weekly Inches entry above is what we'll use.`
         : `About ${inches}" a week from ${describeRuntimeBasis(derivedIrrigation)} — typical head rates from University of Florida turf guidance. If your controller runs more than one cycle a day, enter the total minutes; enter Weekly Inches if you know your system's actual output.`;
@@ -7617,9 +7625,22 @@ function PropertyTab({ customer }) {
   const irrigationInchesSummary = Number.isFinite(irrigationInches) && irrigationInches > 0
     ? ` · ${irrigationInches.toFixed(2).replace(/\.00$/, '')}" / week`
     : (Number.isFinite(irrigationRunMinutes) && irrigationRunMinutes > 0 ? ` · ${irrigationRunMinutes} min / zone` : '');
-  const irrigationSummary = prefs.irrigationZones || irrigationInchesSummary || prefs.rainSensor
-    ? `${prefs.irrigationZones || 'Unknown'} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}${prefs.rainSensor ? ' with rain sensor' : ''}${irrigationInchesSummary}`
-    : 'Add your watering schedule';
+  const wateringDayCount = Array.isArray(prefs.wateringDays) ? prefs.wateringDays.length : 0;
+  const irrigationSummaryParts = [
+    prefs.irrigationZones ? `${prefs.irrigationZones} zone${Number(prefs.irrigationZones) === 1 ? '' : 's'}` : '',
+    wateringDayCount ? `${wateringDayCount} watering day${wateringDayCount === 1 ? '' : 's'}` : '',
+    irrigationInchesSummary.replace(/^ · /, ''),
+    prefs.rainSensor ? 'rain sensor' : '',
+  ].filter(Boolean);
+  // Any persisted irrigation input is a schedule on file — watering days,
+  // head type, controller location or notes alone must not read as empty.
+  const irrigationHasAnything = irrigationSummaryParts.length > 0
+    || (Array.isArray(prefs.irrigationSystemType) && prefs.irrigationSystemType.length > 0)
+    || !!String(prefs.irrigationControllerLocation || '').trim()
+    || !!String(prefs.irrigationScheduleNotes || '').trim();
+  const irrigationSummary = irrigationSummaryParts.length
+    ? irrigationSummaryParts.join(' · ')
+    : (irrigationHasAnything ? 'Schedule details on file' : 'Add your watering schedule');
   const MOWING_DAY_ORDER = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const MOWING_TIME_SUMMARY = { morning: 'mornings', midday: 'midday', afternoon: 'afternoons', varies: 'time varies' };
   const mowingDaysList = MOWING_DAY_ORDER.filter(d => (Array.isArray(prefs.mowingDays) ? prefs.mowingDays : []).includes(d));

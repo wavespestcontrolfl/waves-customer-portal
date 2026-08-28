@@ -10,6 +10,9 @@
  *   mixed  spray+rotor → declines with the mixed-rates explanation
  *   notype no head type → asks for system type
  *   inches explicit weekly inches → derived figure defers to it
+ *   legacyoff row the retired toggle left "off" with inputs — derived line
+ *          must say the schedule isn't being counted yet
+ *   daysonly only watering days saved — summary must not read as empty
  *   lawnplan standalone lawn-plan customer: no tier, no turf type, nothing
  *          entered yet — Inches must still render (server hasLawnCare) and
  *          the card must be open with no toggle (2026-08-27 bug)
@@ -60,6 +63,11 @@ const STATES = {
   mixed: { irrigationSystemType: ['spray', 'rotor'] },
   notype: { irrigationSystemType: [] },
   inches: { irrigationInchesPerWeek: 1.25 },
+  legacyoff: {},
+  daysonly: {
+    irrigationZones: null, irrigationControllerLocation: '', irrigationRunMinutes: null,
+    irrigationSystemType: [], rainSensor: false, irrigationScheduleNotes: '',
+  },
   lawnplan: {
     irrigationZones: null, irrigationControllerLocation: '', irrigationRunMinutes: null,
     wateringDays: [], irrigationSystemType: [], rainSensor: false, irrigationScheduleNotes: '',
@@ -69,7 +77,7 @@ const STATES = {
 const PREFS = { ...BASE_PREFS, ...(STATES[state] || {}) };
 
 // The real GET carries the server's lawn eligibility alongside the row.
-api.getPropertyPreferences = async () => ({ preferences: PREFS, hasLawnCare: true });
+api.getPropertyPreferences = async () => ({ preferences: PREFS, hasLawnCare: true, irrigationSuppressed: state === 'legacyoff' });
 api.updatePropertyPreferences = async (patch) => ({ preferences: { ...PREFS, ...patch } });
 
 const customer = {

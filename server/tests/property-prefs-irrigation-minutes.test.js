@@ -9,13 +9,13 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn().mockResolvedValue(undefined) }));
-jest.mock('../services/irrigation-weekly-email', () => ({ hasRecurringLawnEvidence: jest.fn() }));
+jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn() }));
 
 const fs = require('fs');
 const path = require('path');
 const propertyRouter = require('../routes/property');
 
-const { hasRecurringLawnEvidence } = require('../services/irrigation-weekly-email');
+const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
 
 const {
   propertyChangeItems, prefsSchema, customerQualifiesForLawnInches, IRRIGATION_INPUT_FIELDS,
@@ -95,7 +95,6 @@ describe('property preferences — irrigation on by default', () => {
     expect(src).toMatch(/\.\.\.updates,\n\s+\.\.\.stampIrrigationOn,/);
     expect(src).toMatch(/irrigationSystem: true, irrigationControllerLocation/); // GET defaults (no row)
     expect(src).toMatch(/camelFields\.irrigationSystem = true/); // GET presentation of legacy false rows
-    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare \}\)/);
     // No portal toggle — irrigationSystem is no longer a customer-writable field.
     expect(src).not.toMatch(/irrigationSystem: Joi\.boolean\(\)/);
   });
@@ -106,29 +105,32 @@ describe('property preferences — irrigation on by default', () => {
 // plan customer with no turf type on file had no Inches field on the day of
 // her service (2026-08-27). GET and PUT share this one predicate.
 describe('property preferences — Weekly Inches eligibility', () => {
-  beforeEach(() => hasRecurringLawnEvidence.mockReset());
+  beforeEach(() => hasLawnServiceEvidence.mockReset());
 
   test('tier or lawn_type short-circuits without a DB lookup', async () => {
     await expect(customerQualifiesForLawnInches({ id: 'c1', waveguard_tier: 'Gold' })).resolves.toBe(true);
     await expect(customerQualifiesForLawnInches({ id: 'c1', lawn_type: 'St. Augustine' })).resolves.toBe(true);
-    expect(hasRecurringLawnEvidence).not.toHaveBeenCalled();
+    expect(hasLawnServiceEvidence).not.toHaveBeenCalled();
   });
 
   test('falls back to recurring lawn-service evidence', async () => {
-    hasRecurringLawnEvidence.mockResolvedValueOnce(true);
+    hasLawnServiceEvidence.mockResolvedValueOnce(true);
     await expect(customerQualifiesForLawnInches({ id: 'c2', waveguard_tier: 'Bronze', lawn_type: null })).resolves.toBe(true);
-    expect(hasRecurringLawnEvidence).toHaveBeenCalledWith('c2');
-    hasRecurringLawnEvidence.mockResolvedValueOnce(false);
+    expect(hasLawnServiceEvidence).toHaveBeenCalledWith('c2');
+    hasLawnServiceEvidence.mockResolvedValueOnce(false);
     await expect(customerQualifiesForLawnInches({ id: 'c3' })).resolves.toBe(false);
   });
 
-  test('a failed evidence lookup declines rather than throws', async () => {
-    hasRecurringLawnEvidence.mockRejectedValueOnce(new Error('db down'));
-    await expect(customerQualifiesForLawnInches({ id: 'c4' })).resolves.toBe(false);
+  test('a failed evidence lookup THROWS — the PUT must fail the save, never silently drop inches', async () => {
+    hasLawnServiceEvidence.mockRejectedValueOnce(new Error('db down'));
+    await expect(customerQualifiesForLawnInches({ id: 'c4' })).rejects.toThrow('db down');
   });
 
-  test('PUT gates irrigation_inches_per_week on the shared predicate', () => {
+  test('PUT gates irrigation_inches_per_week on the shared predicate and answers 503 on lookup failure; GET fails soft', () => {
     const src = fs.readFileSync(path.join(__dirname, '../routes/property.js'), 'utf8');
-    expect(src).toMatch(/'irrigation_inches_per_week' in updates && !\(await customerQualifiesForLawnInches\(req\.customer\)\)/);
+    expect(src).toMatch(/if \('irrigation_inches_per_week' in updates\) \{[\s\S]{0,400}eligible = await customerQualifiesForLawnInches\(req\.customer\);[\s\S]{0,600}res\.status\(503\)[\s\S]{0,300}if \(!eligible\) delete updates\.irrigation_inches_per_week;/);
+    expect(src).toMatch(/customerQualifiesForLawnInches\(req\.customer\)\.catch\(/); // GET
+    expect(src).toMatch(/res\.json\(\{ preferences: camelFields, hasLawnCare, irrigationSuppressed \}\)/);
+    expect(src).toMatch(/const irrigationSuppressed = fields\.irrigation_system === false;/);
   });
 });

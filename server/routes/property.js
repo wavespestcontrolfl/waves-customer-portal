@@ -6,7 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
-const { hasRecurringLawnEvidence } = require('../services/irrigation-weekly-email');
+const { hasLawnServiceEvidence } = require('../services/irrigation-weekly-email');
 
 // Cap the JSON body for this route family. The global limit is generous;
 // property preferences never need more than a few KB.
@@ -177,19 +177,16 @@ function customerHasLawnCare(customer = {}) {
 }
 
 // Weekly Inches eligibility. The tier / lawn_type shortcut misses standalone
-// lawn-plan customers with no turf type on file, so fall back to the same
-// recurring-lawn-service evidence the Monday irrigation email qualifies on
-// (2026-08-27: a lawn customer had no Inches field on the day of her
-// service). Used by BOTH the GET (render gate) and the PUT (store gate) so
-// the field can never render and then be silently dropped on save.
+// lawn-plan customers with no turf type on file, so fall back to live
+// lawn-service evidence (any live lawn-flavored visit in the trailing window
+// — see hasLawnServiceEvidence). Used by BOTH the GET (render gate) and the
+// PUT (store gate) so the field can never render and then be silently
+// dropped on save. THROWS on a lookup failure: the GET fails soft (field
+// hidden this load), the PUT must fail the save — a false here would delete
+// the customer's inches with a 200 (GH codex P2 on #3557).
 async function customerQualifiesForLawnInches(customer = {}) {
   if (customerHasLawnCare(customer)) return true;
-  try {
-    return await hasRecurringLawnEvidence(customer.id);
-  } catch (err) {
-    logger.warn(`[property] lawn evidence lookup failed for ${customer.id}: ${err.message}`);
-    return false;
-  }
+  return hasLawnServiceEvidence(customer.id);
 }
 
 // Irrigation is ON by default (owner ruling 2026-08-27: no toggle). The
@@ -211,7 +208,10 @@ router.get('/preferences', async (req, res, next) => {
   try {
     const [prefs, hasLawnCare] = await Promise.all([
       db('property_preferences').where({ customer_id: req.customerId }).first(),
-      customerQualifiesForLawnInches(req.customer),
+      customerQualifiesForLawnInches(req.customer).catch((err) => {
+        logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+        return false;
+      }),
     ]);
 
     if (!prefs) {
@@ -235,6 +235,7 @@ router.get('/preferences', async (req, res, next) => {
           updatedAt: null,
         },
         hasLawnCare,
+        irrigationSuppressed: false,
       });
     }
 
@@ -255,10 +256,15 @@ router.get('/preferences', async (req, res, next) => {
     }
     const camelFields = transformKeys(fields, snakeToCamel);
     // Rows written before the toggle was retired carry the old false
-    // default; the portal has no toggle any more, so present ON.
+    // default; the portal has no toggle any more, so present ON. The stored
+    // false still suppresses derivation in the report / weekly email until
+    // the customer's next irrigation edit stamps the row — surfaced
+    // separately so the portal never shows a derived figure those readers
+    // are not counting (GH codex P2 on #3557).
+    const irrigationSuppressed = fields.irrigation_system === false;
     camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields, hasLawnCare });
+    res.json({ preferences: camelFields, hasLawnCare, irrigationSuppressed });
   } catch (err) {
     next(err);
   }
@@ -282,8 +288,18 @@ router.put('/preferences', async (req, res, next) => {
         updates[field] = snakeBody[field];
       }
     }
-    if ('irrigation_inches_per_week' in updates && !(await customerQualifiesForLawnInches(req.customer))) {
-      delete updates.irrigation_inches_per_week;
+    if ('irrigation_inches_per_week' in updates) {
+      let eligible;
+      try {
+        eligible = await customerQualifiesForLawnInches(req.customer);
+      } catch (err) {
+        // Fail the save, never the field: a swallowed lookup error would
+        // drop the inches and answer 200, and the portal's autosave would
+        // mark it saved and stop retrying. A 503 keeps the edit queued.
+        logger.warn(`[property] lawn evidence lookup failed for ${req.customerId}: ${err.message}`);
+        return res.status(503).json({ error: "Couldn't verify your lawn service just now — please try again." });
+      }
+      if (!eligible) delete updates.irrigation_inches_per_week;
     }
     // Stamped on the row, not on `updates`: the account-updated email lists
     // what the customer changed, and the stamp is not a customer edit.
