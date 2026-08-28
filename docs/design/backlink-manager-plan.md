@@ -1169,8 +1169,13 @@ together:
   row is excluded from re-claim while `placed`. `live_url` is required only for a
   non-pending `placed` report, exactly as today.
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
-  gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `price_changed`,
-  `captcha`); `needs_owner` atomically maps the placement to `status='awaiting_owner'`
+  gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `ready_for_credentials`,
+  `price_changed`, `captcha`); `ready_for_credentials` atomically sets the placement
+  `status='ready_for_credentials'` (a §3.3 status; `parked_from_status` kept), releases the
+  lease, and is reclaimed ONLY through `claim(?mode=credentials)` whose predicate accepts
+  that status, requires the provider to be the `deterministic_runner`, and re-runs the
+  authority/approval/gate checks — the runner resumes from the persisted session and
+  continues as a credentialed execution; `needs_owner` atomically maps the placement to `status='awaiting_owner'`
   (+ the owner card) and stores the status it parked from in `parked_from_status`;
   `claim()` excludes `awaiting_owner`/`watching`, and approval restores `parked_from_status`
   (`prospect` for a fresh acquisition, `contacted`/`negotiating` for a paid outreach
@@ -1200,10 +1205,16 @@ pre-login form discovery, filling public fields with the canonical NAP) and hand
 `outcome='ready_for_credentials'`; it is never resumed inside an authenticated session. In
 EVERY discovery/fill stage — model-observed or deterministic, live or benchmark — the
 browser context runs under the §13 read-only request interception (mutating requests
-blocked and logged); mutating requests are unblocked ONLY inside the guarded `submit()`
-operation, after the slot reservation, authority/gate recheck and the durable `submitting`
-transition, and re-blocked when it returns — so a mis-click or page script during
-`completeForm` can never POST around the submission guard or the daily cap.
+blocked and logged); mutating requests are unblocked ONLY inside a **guarded mutation
+phase** — `submit()`, and, for the deterministic runner alone, `createAccount()` and
+`activateVerification()` (the verification link's GET is treated as mutating and allowed
+only here) — each of which is entered only after the locked authority/approval/gate recheck,
+a durable attempt row (`slot_reserved → submitting` for submit; `create_account`/`resume`
+attempts with their own idempotency key `${prospect_id}:${action}:${generation}` for the
+credentialed operations, so a crash mid-phase resumes rather than repeats), and is re-blocked
+when the phase returns — so a mis-click or page script during `completeForm` can never POST
+around the submission guard or the daily cap, and account creation cannot be blocked by the
+policy that protects it.
 
 **Payment boundary (P0 — PAN/CVV never cross into a model context).** Only the
 `deterministic_runner` may execute a `submit()` that involves payment, and even it does not
