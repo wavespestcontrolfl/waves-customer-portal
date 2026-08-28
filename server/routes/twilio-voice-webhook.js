@@ -36,6 +36,14 @@ function scheduleRecordingRecovery(callSid) {
     } catch (err) {
       logger.warn(`[call-status] Recording recovery failed for ${maskSid(callSid)}: ${err.message}`);
     }
+    // After recordings had their chance to land: a customer's unanswered
+    // call with no voicemail rings the missed-call bell (owner ruling
+    // 2026-08-28). Idempotent per call inside.
+    try {
+      await require('../services/missed-call-bell').ringMissedCallIfUnanswered(callSid);
+    } catch (err) {
+      logger.warn(`[call-status] missed-call bell failed for ${maskSid(callSid)}: ${err.message}`);
+    }
   }, 2 * 60 * 1000);
 }
 

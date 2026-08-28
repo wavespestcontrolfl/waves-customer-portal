@@ -258,6 +258,22 @@ const TRIGGER_REGISTRY = {
       link: p.emailId ? `/admin/email?id=${p.emailId}` : '/admin/email',
     }),
   },
+  // Fired 2 minutes after an inbound call from a customer on file ends with
+  // no human/AI answer and no voicemail (missed-call-bell.js). Voicemails
+  // ring through customer_voicemail_callback instead.
+  customer_missed_call: {
+    label: 'Missed call from a customer',
+    category: 'missed_call',
+    priority: 'high',
+    group: 'Communication',
+    // Same owner ruling as the voicemail bell: the number must be dialable.
+    allowContactDetails: true,
+    build: (p) => ({
+      title: `Missed call — ${p.name || 'a customer'}`,
+      body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
+      link: p.customerId ? `/admin/communications?thread=${p.customerId}` : '/admin/communications',
+    }),
+  },
   // Fired by estimate-converter when a paid acceptance deposit could not be
   // credited to the first invoice — the money sits on the deposit ledger
   // until someone reconciles it manually.
@@ -662,6 +678,9 @@ function pushTagFor(triggerKey, payload = {}) {
   if (triggerKey === 'sms_reply') {
     const thread = payload.threadId || 'unknown-thread';
     return `waves-sms_reply-${thread}-${crypto.randomUUID()}`;
+  }
+  if (triggerKey === 'customer_missed_call') {
+    return `waves-customer_missed_call-${payload.callLogId || crypto.randomUUID()}`;
   }
   if (triggerKey === 'customer_email_received') {
     // Per-email tag: same-tag pushes replace each other without renotifying,

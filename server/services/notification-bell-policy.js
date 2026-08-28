@@ -35,6 +35,7 @@ const TRIGGER_BELL_ALLOWLIST = new Set([
   'sms_reply',                      // a customer texted
   'customer_email_received',        // a customer emailed
   'customer_voicemail_callback',    // a customer left a voicemail
+  'customer_missed_call',           // a customer called, nobody answered, no voicemail
   'appointment_reschedule_intent',  // a customer texted a reschedule / away note
 ]);
 
@@ -54,6 +55,7 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
   'inbound_sms',
   'inbound_email',
   'voicemail_callback',
+  'missed_call',
 ]);
 
 

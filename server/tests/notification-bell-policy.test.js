@@ -474,7 +474,7 @@ describe('bellAllowed decision order', () => {
 
   test('customer communication rings; everything else is silent by default (owner ruling 2026-08-28)', async () => {
     mockTables({ notification_preferences: chainMock([]) });
-    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
+    for (const [category, triggerKey] of [['inbound_email', 'customer_email_received'], ['missed_call', 'customer_missed_call'], ['inbound_sms', 'sms_reply'], ['new_lead', 'new_lead'], ['voicemail_callback', 'customer_voicemail_callback'], ['schedule', 'appointment_reschedule_intent']]) {
       await expect(bellPolicy.bellAllowed({ category, triggerKey })).resolves.toBe(true);
     }
     for (const [category, triggerKey] of [['payment', 'payment_failed'], ['payment', 'bill_payment_error'], ['billing', null], ['dispute', null], ['new_lead', 'new_job_application'], ['estimate_converted', null], ['estimate_measurement_review', null], ['system', 'twilio_failure']]) {
@@ -660,5 +660,26 @@ describe('customer_email_received eligibility (email-sync) — sender must authe
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, receivedAt: null })).toBe(false);
     // First-connect fullSync: even a fresh timestamp never rings.
     expect(customerEmailBellEligible({ ...base, authenticationResults: ok, backfill: true })).toBe(false);
+  });
+});
+
+
+describe('missed-call bell eligibility (customer communication, owner ruling 2026-08-28)', () => {
+  const { missedCallEligible } = require('../services/missed-call-bell');
+  const base = { direction: 'inbound', customer_id: 'c1', answered_by: 'missed', recording_sid: null, call_outcome: null, metadata: null };
+  test('an unanswered inbound call from a customer with no voicemail rings', () => {
+    expect(missedCallEligible(base)).toBe(true);
+    expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: null })).toBe(true); // hung up at the prompt
+    expect(missedCallEligible({ ...base, answered_by: 'unknown' })).toBe(true);
+  });
+  test('answered, voicemail-left, AI-handled, outbound, unknown-caller or already-notified calls never ring', () => {
+    expect(missedCallEligible({ ...base, answered_by: 'human' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: 'ai_agent' })).toBe(false);
+    expect(missedCallEligible({ ...base, answered_by: 'voicemail', recording_sid: 'RE1' })).toBe(false); // voicemail lane
+    expect(missedCallEligible({ ...base, call_outcome: 'ai_handled' })).toBe(false);
+    expect(missedCallEligible({ ...base, direction: 'outbound' })).toBe(false);
+    expect(missedCallEligible({ ...base, customer_id: null })).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: { missed_call_notified_at: '2026-08-28T00:00:00Z' } })).toBe(false);
+    expect(missedCallEligible({ ...base, metadata: JSON.stringify({ missed_call_notified_at: 'x' }) })).toBe(false);
   });
 });
