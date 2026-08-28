@@ -328,7 +328,7 @@ function footprintContextRe() {
 // "Venice Beach" and "Sarasota Springs" contain served names and are not
 // served. Regex matching is for free-form targeting text only.
 function normalizeCityValue(value) {
-  return String(value || '')
+  return foldDiacritics(value)
     .toLowerCase()
     .replace(/[’'.]/g, '')
     .replace(/[^a-z0-9]+/g, ' ')
@@ -409,8 +409,14 @@ function findAll(re, text) {
  * footprint city is also present ("Tampa vs Sarasota" is still built around
  * Tampa demand).
  */
+// Accents are folded (NFD, combining marks dropped) so "México", "São
+// Paulo", "Montréal" match their matchers' ASCII spellings.
+function foldDiacritics(text) {
+  return String(text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
 function classifyGeoScope(text) {
-  const t = String(text || '');
+  const t = foldDiacritics(text);
   // Florida vernacular that contains a served-city name (the same scrub the
   // publisher's inferServiceAreas applies): not a footprint anchor.
   const footprint = [
@@ -627,7 +633,7 @@ function headingsOf(markdown) {
   const out = [];
   const clean = (v) => String(v).replace(/<[^>]+>/g, '').replace(/[*_`]/g, '').trim();
   let h;
-  const atx = /^#{2,3}\s+(.+?)\s*#*\s*$/gm;
+  const atx = /^ {0,3}#{2,3}\s+(.+?)\s*#*\s*$/gm; // CommonMark allows ≤3 leading spaces
   while ((h = atx.exec(src)) !== null) out.push(clean(h[1]));
   const setext = /^(?![\s#>|-])(.+?)[ \t]*\n[ \t]*(?:=+|-{3,})[ \t]*$/gm;
   while ((h = setext.exec(src)) !== null) out.push(clean(h[1]));

@@ -22,6 +22,8 @@ jest.mock('../services/content-astro/github-client', () => ({
   mergePr: jest.fn(),
   listPrFiles: jest.fn(),
   getFile: jest.fn(),
+  closePr: jest.fn().mockResolvedValue({}),
+  deleteRef: jest.fn().mockResolvedValue({}),
 }));
 jest.mock('../services/content-astro/pages-poll', () => ({
   latestDeploymentForBranch: jest.fn(),
@@ -724,6 +726,31 @@ describe('auto-merge gating (each condition individually blocking)', () => {
     const queuePark = updates.find((u) => u.table === 'opportunity_queue' && u.updates.skip_reason === 'topic_targeting_blocked');
     expect(queuePark).toBeDefined();
     expect(db.transaction).toHaveBeenCalledTimes(1); // both park writes ran inside the lock transaction
+    // The PR is retired with the park (r13): closed + branch deleted, remediation row terminal.
+    expect(gh.closePr).toHaveBeenCalledWith(42);
+    expect(gh.deleteRef).toHaveBeenCalledWith('content/autonomous-test');
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeDefined();
+  });
+
+  test('a GitHub failure while retiring the PR rolls the park back (nothing parked, retried next tick)', async () => {
+    process.env.AUTONOMOUS_BLOG_AUTO_MERGE = 'true';
+    const updates = setupDb({ pending: [makeRun()] });
+    gh.getPr.mockResolvedValue(openPr());
+    pagesPoll.latestDeploymentForBranch.mockResolvedValue({ id: 'deploy-1' });
+    pagesPoll.extractStatus.mockReturnValue({ status: 'success' });
+    pagesPoll.deploymentCommitSha.mockReturnValue('headsha1');
+    publisher.assertCodexReviewClear.mockResolvedValue(true);
+    topicGate.evaluateDraftTargeting.mockImplementation(() => ({ ok: false, findings: [{ severity: 'P0', code: 'TOPIC_CANNIBALIZES_EXISTING', message: 'owned' }] }));
+    gh.closePr.mockRejectedValueOnce(new Error('github 502'));
+    // A throw inside the transaction callback rejects db.transaction (rollback).
+    db.transaction = jest.fn(async (fn) => fn(fakeTrx(true)));
+
+    const res = await poller.pollPending();
+
+    expect(gh.mergePr).not.toHaveBeenCalled();
+    expect(res.results[0].parked).toBeUndefined();
+    expect(res.results[0]).toMatchObject({ transient: true, error: expect.stringMatching(/github 502/) });
+    expect(updates.find((u) => u.table === 'codex_remediation_state' && u.updates.status === 'closed')).toBeUndefined();
   });
 
   test('a deterministic block whose park CAS is lost (operator action mid-gate) rolls back and defers (hook, r12 push)', async () => {

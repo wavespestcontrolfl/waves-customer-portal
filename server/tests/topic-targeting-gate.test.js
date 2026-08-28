@@ -800,3 +800,14 @@ describe('PR codex r12 (4e38a9eb8)', () => {
     }
   });
 });
+
+describe('PR codex r13 (1673eea02)', () => {
+  test('accented spellings match the ASCII matchers', () => {
+    for (const t of ['pest control México', 'termite treatment São Paulo', 'pest control Montréal', 'Cancún exterminator']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+  });
+  test('ATX headings with ≤3 leading spaces count; 4 spaces is code', () => {
+    expect(gate._internals.headingsOf('   ## What Taexx Does\n\n  ### Costs\n    ## not a heading\n')).toEqual(['What Taexx Does', 'Costs']);
+  });
+});
