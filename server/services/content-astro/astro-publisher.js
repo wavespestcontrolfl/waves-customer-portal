@@ -2375,7 +2375,7 @@ async function assertTopicTargetingStillClear(post, pr) {
   }
   const data = fm.parse(resolved.file.content)?.data || {};
   const index = await topicGate.loadLiveIndex();
-  const topic = topicGate.evaluateDraftTargeting({ frontmatter: data }, { index, category: normalizeCategory(data.category || post.category, post.tag) || null });
+  const topic = topicGate.evaluateDraftTargeting({ frontmatter: data, body: resolved.file.content }, { index, category: normalizeCategory(data.category || post.category, post.tag) || null });
   if (!topic.ok) {
     const err = new Error(`PR #${pr.number} cannot merge — topic-targeting gate is no longer clear against the live corpus: ${topic.findings.map((f) => `${f.severity} ${f.code} — ${f.message}`).join('; ')}`);
     err.code = 'BLOG_TOPIC_TARGETING_BLOCKED';

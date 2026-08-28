@@ -387,7 +387,7 @@ function evaluateDraftTargeting(draft = {}, { index, category = null, service = 
   // slug and the coarse service are fallbacks inside evaluate().
   const emittedCategory = category || canonicalCategory(fm.category) || null;
   const own = evaluate(
-    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service },
+    { actionType: 'new_supporting_blog', query: String(fm.primary_keyword || '').trim(), title: framing.checked.title, slug: framing.checked.slug, category: emittedCategory, service, targeting: extraTargetingOf({ frontmatter: fm, body: draft?.body }) },
     { index, requireCorpus: true }
   );
   return { ...own, checked: framing.checked, stage: own.ok ? 'ok' : 'ownership' };
@@ -423,7 +423,7 @@ async function evaluateBlogPostRow(post = {}, { index = null, loadIndex = loadLi
   if (isLiveRow(post)) return { ok: true, applicable: false, findings: [], skipped: 'already_live' };
   const slug = String(post.slug || '').trim();
   return evaluate(
-    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category },
+    { actionType: 'new_supporting_blog', query: post.keyword || '', title: post.title || '', slug: slug ? `/${slug.replace(/^\/+|\/+$/g, '')}/` : '', city: post.city || '', category, targeting: extraTargetingOf({ body: post.content, meta_description: post.meta_description, secondary_keywords: post.secondary_keywords }) },
     { index: index || await loadIndex(), requireCorpus: true }
   );
 }
@@ -456,12 +456,30 @@ function parseTargetingFields(body) {
   try {
     ({ data, content: rest } = parseFrontmatter(src));
   } catch { data = {}; rest = ''; }
-  const out = { secondary_keywords: asStringList(data.secondary_keywords), headings: [] };
+  const out = { secondary_keywords: asStringList(data.secondary_keywords), headings: headingsOf(rest) };
   for (const key of TARGETING_SCALARS) out[key] = data[key] == null ? '' : String(data[key]).trim();
+  return out;
+}
+
+function headingsOf(markdown) {
+  const out = [];
   const headingRe = /^#{2,3}\s+(.+?)\s*#*\s*$/gm;
   let h;
-  while ((h = headingRe.exec(rest)) !== null) out.headings.push(h[1].replace(/[*_`]/g, ''));
+  while ((h = headingRe.exec(String(markdown || ''))) !== null) out.push(h[1].replace(/[*_`]/g, ''));
   return out;
+}
+
+// The candidate-side counterpart of targetingText(): every field the corpus
+// index treats as ownership evidence (meta description, secondary keywords,
+// H2/H3 headings), from the frontmatter and/or a markdown body. Ownership is
+// judged on these symmetrically; geo framing stays on title/slug/keyword.
+function extraTargetingOf({ frontmatter = {}, body = '', meta_description = null, secondary_keywords = null } = {}) {
+  const fromBody = parseTargetingFields(body);
+  return [
+    meta_description ?? frontmatter.meta_description ?? fromBody.meta_description,
+    ...asStringList(secondary_keywords ?? frontmatter.secondary_keywords), ...fromBody.secondary_keywords,
+    ...fromBody.headings,
+  ].filter(Boolean).map((v) => String(v).trim()).join(' ');
 }
 
 function targetingText(fields) {
@@ -605,7 +623,8 @@ function dfForCategory(idx, category) {
 
 /**
  * evaluate(candidate, { corpus | index, requireCorpus })
- *   candidate: { query, title, slug, secondaryKeywords, actionType, pageType }
+ *   candidate: { query, title, slug, city, category, service, targeting, actionType, pageType }
+ *   `targeting` = meta description + secondary keywords + H2/H3 text (ownership only)
  * → { ok, applicable, findings, geo, entity_owners, corpus_size }
  * Throws only when a corpus is required for an applicable candidate and none
  * was supplied — the runner maps that to an engine fault, never a pass.
@@ -657,7 +676,8 @@ function evaluate(candidate = {}, { corpus = null, index = null, requireCorpus =
   // ("actual", "explained") never trip it — an owner must be BUILT AROUND
   // the token (≥ OWNER_MIN_OCCURRENCES across its own targeting fields).
   const properNouns = idx.properNouns || new Set();
-  const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' ')].filter(Boolean).join(' ')).filter((tok) => properNouns.has(tok));
+  const targeting = String(candidate.targeting || '').trim();
+  const tokens = entityTokens([query, title, slug.replace(/[-/]+/g, ' '), targeting].filter(Boolean).join(' ')).filter((tok) => properNouns.has(tok));
   // Unknown candidate category (an unmapped tag): judge it against EVERY
   // category and union the owners. A global document frequency would let a
   // brand named across categories ("Advion" in termite + pest posts) exceed

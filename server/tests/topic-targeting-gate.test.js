@@ -580,3 +580,24 @@ describe('PR codex r5 (ab050983a)', () => {
     }
   });
 });
+
+describe('PR codex r6 (3203b54ac): every emitted targeting field is ownership evidence', () => {
+  const index = () => gate.indexCorpus(CORPUS);
+  const generic = { title: 'New-Home Pest Control in Lakewood Ranch: The First Year', slug: '/pest-control/new-home-pest-control-lakewood-ranch/', primary_keyword: 'new home pest control lakewood ranch' };
+  test('an owned entity in secondary_keywords, meta_description, or an H2 blocks the draft; a generic body passes', () => {
+    expect(gate.evaluateDraftTargeting({ frontmatter: { ...generic, secondary_keywords: ['taexx in wall system'] } }, { index: index(), service: 'pest' })).toMatchObject({ ok: false, stage: 'ownership' });
+    expect(gate.evaluateDraftTargeting({ frontmatter: { ...generic, meta_description: 'Why the Taexx tubes in your walls are not a plan.' } }, { index: index(), service: 'pest' }).ok).toBe(false);
+    expect(gate.evaluateDraftTargeting({ frontmatter: generic, body: '## Your first quarter\n\ntext\n\n## What Taexx actually does\n\ntext\n' }, { index: index(), service: 'pest' }).ok).toBe(false);
+    expect(gate.evaluateDraftTargeting({ frontmatter: generic, body: '## Your first quarter\n\nBuilders may mention Taexx in passing.\n' }, { index: index(), service: 'pest' }).ok).toBe(true);
+  });
+  test('a full file (frontmatter + body, the merge-time shape) is read the same way', () => {
+    const file = `---\ntitle: '${generic.title}'\nslug: ${generic.slug}\nprimary_keyword: ${generic.primary_keyword}\nsecondary_keywords:\n  - taexx system\n---\n\n## Intro\n`;
+    expect(gate.evaluateDraftTargeting({ frontmatter: { ...generic }, body: file }, { index: index(), service: 'pest' }).ok).toBe(false);
+  });
+  test('a persisted row: secondary_keywords / meta_description / content headings count too', async () => {
+    const row = { title: generic.title, keyword: generic.primary_keyword, slug: 'pest-control/new-home-pest-control-lakewood-ranch', status: 'draft', city: 'Lakewood Ranch' };
+    expect((await gate.evaluateBlogPostRow({ ...row, secondary_keywords: 'taexx tubes, new build' }, { index: index() })).ok).toBe(false);
+    expect((await gate.evaluateBlogPostRow({ ...row, content: '## What Taexx Leaves Out\n\ntext' }, { index: index() })).ok).toBe(false);
+    expect((await gate.evaluateBlogPostRow({ ...row, content: '## Your first quarter\n\ntext' }, { index: index() })).ok).toBe(true);
+  });
+});
