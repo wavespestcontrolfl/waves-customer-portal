@@ -274,6 +274,10 @@ function trustedUnitBand(engineInput, key, { requestedFrequency, roachType } = {
       : null;
     band = byCadence || (primary.frequency === cadence ? primary : null);
     if (!band) return { status: 'untrusted', reason: 'no_row_for_cadence' };
+    // The map KEY is unsigned — a legitimately signed bi-monthly row filed
+    // under `quarterly` would price bi-monthly dollars at quarterly visits.
+    // The signed row itself must name the requested cadence.
+    if (band.frequency !== cadence) return { status: 'untrusted', reason: 'cadence_mismatch' };
   }
   if (band.serviceCode !== BAND_SERVICE_KEYS[key]) return { status: 'untrusted', reason: 'service_key_mismatch' };
   if (!(Number(band.recurringPrice) > 0)) return { status: 'untrusted', reason: 'no_price' };
@@ -375,10 +379,20 @@ function unitBandEligibility({ intent, unitScope, propertyFacts } = {}) {
 async function resolveUnitBandPricing(db, { intent, unitScope, propertyFacts, extraction, bedroomCountOverride = null, asOf = new Date() } = {}) {
   if (!unitBandPricingEnabled()) return null;
   const verdict = unitBandEligibility({ intent, unitScope, propertyFacts });
-  if (!verdict.eligible) return null;
   const parked = {};
-  for (const [key, k] of Object.entries(verdict.keys)) {
+  for (const [key, k] of Object.entries(verdict.keys || {})) {
     if (!k.eligible) parked[key] = k.reason;
+  }
+  if (!verdict.eligible) {
+    // A unit whose only band keys are PARKED (monthly-only recurring, a
+    // roach program) still returns its audit — the lane's monthly /
+    // excluded-program review reason reads parked.pest, and dropping it
+    // here would let a probable German-roach/flea ask through on generic
+    // fallback-size reasons alone. Nothing is priced from the band.
+    if (Object.keys(parked).length) {
+      return { eligible: false, reason: verdict.reason, parked, missing: [], unresolved: null, pricingBasis: null, sizeBasis: null, bedroomCount: null, bedroomSource: null, pricingBand: null };
+    }
+    return null;
   }
   const stated = callerStatedBedroomCount({ extraction, intent, override: bedroomCountOverride });
   const base = {

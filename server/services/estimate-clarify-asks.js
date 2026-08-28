@@ -114,6 +114,9 @@ async function mergePendingClarify(trx, existing, { askable, firstName, linkage 
         missing: merged,
         lead_id: linkage.leadId || null,
         estimate_id: linkage.estimateId || null,
+        // The bedroom item binds to ITS unit draft, independent of the
+        // generic linkage a later merged ask may re-point.
+        ...(askable.includes('bedroom_count') && linkage.estimateId ? { bedroom_estimate_id: String(linkage.estimateId) } : {}),
         source: linkage.source,
         channel_provenance: linkage.channelProvenance || null,
       }),
@@ -272,6 +275,8 @@ async function parkClarifyAsk({
           toPhone: `+1${digits}`,
           lead_id: leadId || null,
           estimate_id: estimateId || null,
+          // Item-specific target for the bedroom re-price (see mergePendingClarify).
+          ...(askable.includes('bedroom_count') && estimateId ? { bedroom_estimate_id: String(estimateId) } : {}),
           source,
           channel_provenance: channelProvenance || null,
         }),
@@ -308,19 +313,47 @@ async function parkClarifyAsk({
 // A KNOWN-service tail on a captured address ("123 Main St, pest control")
 // is the service answer, not part of the address — bounded vocabulary,
 // deterministic split. Returns { address, serviceTail }.
-// How long an in-flight bedroom re-price blocks sending the linked draft.
-// A restart mid-re-draft leaves the marker with nobody to clear it, so the
-// guard lapses on its own; the ask row's reprice_pending stamp + the bell
-// remain the durable record for the operator.
-const REPRICE_PENDING_WINDOW_MS = 30 * 60 * 1000;
-
-/** True while an estimator draft carries a live (unexpired) re-price marker. */
-function repricePendingActive(engineData, now = Date.now()) {
+/**
+ * True while an estimator draft carries the re-price marker. The marker
+ * never lapses on its own: a draft whose dollars are KNOWN stale stays
+ * unsendable until either the replacement lands (the row is archived by
+ * the supersede) or the operator explicitly re-prices it (admin PUT /:id
+ * → clearEstimateRepricePending). A crash mid-re-draft therefore leaves
+ * the draft blocked with the bell/409 pointing at it — never sendable at
+ * the old price.
+ */
+function repricePendingActive(engineData) {
   const at = engineData && typeof engineData === 'object' ? engineData.reprice_pending_at : null;
-  if (!at) return false;
-  const t = Date.parse(at);
-  if (!Number.isFinite(t)) return false;
-  return now - t < REPRICE_PENDING_WINDOW_MS;
+  return typeof at === 'string' && at.length > 0;
+}
+
+/**
+ * Explicit operator price correction (admin PUT /:id ran the full server
+ * re-price): the stale-price block is lifted. Atomic JSONB path delete —
+ * no other key is touched.
+ */
+async function clearEstimateRepricePending(estimateId, database = db) {
+  const changed = await database('estimates')
+    .where({ id: estimateId })
+    .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'reprice_pending_at', '') <> ''")
+    .update({
+      estimate_data: database.raw("jsonb_set(estimate_data, '{estimatorEngine}', COALESCE(estimate_data->'estimatorEngine', '{}'::jsonb) - 'reprice_pending_at')"),
+      updated_at: new Date(),
+    });
+  return Number(changed) > 0;
+}
+
+// A failed re-price on a SCHEDULED draft: lifting the guard alone would
+// let the scheduler claim the due row and send the stale fallback price
+// — so the schedule is cancelled (inert draft, no due time) and the bell
+// hands it to the operator.
+async function unscheduleForOperatorReprice(trx, estimateId) {
+  const changed = await trx('estimates')
+    .where({ id: estimateId, status: 'scheduled' })
+    .whereNull('sent_at')
+    .whereNull('archived_at')
+    .update({ status: 'draft', scheduled_at: null, updated_at: new Date() });
+  return Number(changed) > 0;
 }
 
 // Stamp (or clear, at=null) estimator_engine.reprice_pending_at on an
@@ -332,10 +365,13 @@ function repricePendingActive(engineData, now = Date.now()) {
 async function setEstimateRepricePending(trx, estimateId, at) {
   // 'scheduled' rows are unsent drafts with a due time — the cron would
   // otherwise deliver the stale fallback price; the supersede path returns
-  // them to an inert draft when the replacement lands.
+  // them to an inert draft when the replacement lands. A row already in
+  // 'sending' gets the marker too: the delivery verdict holds the row FOR
+  // UPDATE so this write lands right after the claim, and the pre-handoff
+  // check (estimateInvalidatedJustBeforeHandoff) then aborts delivery.
   const changed = await trx('estimates')
     .where({ id: estimateId })
-    .whereIn('status', ['draft', 'scheduled', 'send_failed'])
+    .whereIn('status', ['draft', 'scheduled', 'send_failed', 'sending'])
     .whereNull('sent_at')
     .whereNull('archived_at')
     .whereRaw("COALESCE(estimate_data->'estimatorEngine'->>'linkage_invalidated_at', '') = ''")
@@ -640,7 +676,10 @@ async function handleClarifyReply({ phone, body }) {
       // reads the answer from the thread. The flag keeps the audit.
       if (recorded.includes('bedroom_count')) freshFlags.bedroom_count_answer = bedroomCount;
 
-      const lockedEstimateId = freshFlags.estimate_id ? String(freshFlags.estimate_id) : null;
+      // The bedroom re-price targets the unit draft the ASK was parked for
+      // (bedroom_estimate_id) — never the generic estimate_id, which a
+      // merged later ask may have re-pointed at an unrelated draft.
+      const lockedEstimateId = freshFlags.bedroom_estimate_id ? String(freshFlags.bedroom_estimate_id) : null;
       // Estimate-level send guard, stamped in the SAME locked phase that
       // records the answer: the linked draft's dollars are about to be
       // replaced, so admin send / schedule / public accept refuse it
@@ -775,10 +814,11 @@ async function handleClarifyReply({ phone, body }) {
           repriced_estimate_id: repriceOutcome.estimateId || null,
         });
       } else {
-        // No replacement: lift the send guard (the operator re-prices by
-        // hand from the bell) — a guard nobody will clear must not linger.
-        await withClarifyLock(digits, (trx) => setEstimateRepricePending(trx, repriceTarget, null))
-          .catch((err) => logger.warn(`[estimate-clarify] reprice guard release failed: ${err.message}`));
+        // No replacement: the draft's dollars are KNOWN stale, so the send
+        // guard STAYS (only the operator's explicit re-price clears it);
+        // a scheduled row is pulled off the cron so it cannot auto-send.
+        await withClarifyLock(digits, (trx) => unscheduleForOperatorReprice(trx, repriceTarget))
+          .catch((err) => logger.warn(`[estimate-clarify] unschedule for operator re-price failed: ${err.message}`));
         // Exception-based (CLAUDE.md rule 14): the pending stamp stays on
         // the ask row and the operator gets the one bell that names the
         // draft to re-price — the customer's answer is never lost silently.
@@ -1234,5 +1274,6 @@ module.exports = {
   clarifyPreDispatchCheck,
   reopenClarifyAfterFailedSend,
   repricePendingActive,
+  clearEstimateRepricePending,
   _private: { composeClarifyBody, extractAddressReply, extractBedroomReply, ASKABLE_MISSING, RECENT_SENT_WINDOW_MS },
 };

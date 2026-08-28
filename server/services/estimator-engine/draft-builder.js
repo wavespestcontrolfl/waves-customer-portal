@@ -707,7 +707,7 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // out — the bedroom ask is the clarify loop's job, the monthly cadence
   // is a human's (it usually signals an excluded program).
   const bandAudit = engineInput?.unitBandPricing;
-  if (bandAudit?.eligible) {
+  if (bandAudit && (bandAudit.eligible || Object.keys(bandAudit.parked || {}).length)) {
     if ((bandAudit.missing || []).includes('bedroom_count')) {
       reasons.push('residential unit with no unit sqft and no stated bedroom count — priced on the fallback footprint; ask how many bedrooms before send');
     }

@@ -570,6 +570,10 @@ router.put('/:id', async (req, res, next) => {
     });
     if (!dryRun) {
       logger.info(`[estimates] Revised estimate ${estimate.id} in place (status ${estimate.status})`);
+      // An operator revision IS the explicit price correction a pending
+      // bedroom re-price waits for — lift the stale-price send guard.
+      await require('../services/estimate-clarify-asks').clearEstimateRepricePending(estimate.id)
+        .catch((err) => logger.warn(`[estimates] reprice guard clear failed for ${estimate.id}: ${err.message}`));
     }
     res.json({
       dryRun: dryRun || undefined,

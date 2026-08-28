@@ -48,7 +48,7 @@ jest.mock('../models/db', () => {
     },
   });
   dbMock.transaction = async (callback) => callback(trx);
-  dbMock.raw = async () => ({});
+  dbMock.raw = (sql, params) => { mockState.raws.push({ sql: String(sql), params }); return { __raw: String(sql), params }; };
   return dbMock;
 });
 jest.mock('../services/logger', () => ({
@@ -887,7 +887,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockStartSmsThreadDraft.mockResolvedValue({ started: true });
     mockState.existingDraft = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     const result = await handleClarifyReply({ phone: '+19415550142', body: "It's a 2 bedroom, thanks" });
     expect(result.handled).toBe(true);
@@ -913,7 +913,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockStartSmsThreadDraft.mockResolvedValue({ started: true, draftPromise: new Promise((resolve) => { releaseDraft = resolve; }) });
     mockState.existingDraft = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
     // Returned while the re-draft is still running (detached from the webhook).
@@ -929,7 +929,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true });
     const awaiting = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     // first() order: awaiting (unlocked), fresh (locked), ask (reprice_pending
     // stamp), estimate (origin), ask (cleared). The estimate guard is an
@@ -958,7 +958,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'bell-2' });
     const awaiting = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9' } }) };
     mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
@@ -981,7 +981,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockStartSmsThreadDraft.mockResolvedValue({ started: true });
     const awaiting = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-2' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-2', bedroom_estimate_id: 'est-2' }),
     };
     const estimateRow = { id: 'est-2', estimate_data: JSON.stringify({ estimatorEngine: { origin: 'sms_thread', callLogId: null } }) };
     mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow, awaiting];
@@ -1007,14 +1007,16 @@ describe('bedroom_count ask (unit-band lane)', () => {
     expect(args.supersedeEstimateId).toBeUndefined();
   });
 
-  test('repricePendingActive: live inside the 30-minute window, lapsed after (a restart can never strand a draft)', () => {
-    const { repricePendingActive } = require('../services/estimate-clarify-asks');
-    const now = Date.parse('2026-08-28T12:00:00Z');
-    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:50:00Z' }, now)).toBe(true);
-    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:20:00Z' }, now)).toBe(false);
-    expect(repricePendingActive({}, now)).toBe(false);
-    expect(repricePendingActive(null, now)).toBe(false);
-    expect(repricePendingActive({ reprice_pending_at: 'garbage' }, now)).toBe(false);
+  test('repricePendingActive never lapses on its own — only a replacement or an explicit operator re-price clears it', async () => {
+    const { repricePendingActive, clearEstimateRepricePending } = require('../services/estimate-clarify-asks');
+    expect(repricePendingActive({ reprice_pending_at: '2026-08-28T11:50:00Z' })).toBe(true);
+    expect(repricePendingActive({ reprice_pending_at: '2020-01-01T00:00:00Z' })).toBe(true);
+    expect(repricePendingActive({})).toBe(false);
+    expect(repricePendingActive(null)).toBe(false);
+    // The explicit correction is an atomic one-key JSONB delete.
+    await clearEstimateRepricePending('est-1');
+    const upd = mockState.updates.find((u) => u.table === 'estimates');
+    expect(upd.payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at'\)/);
   });
 
   test('the linked ESTIMATE carries reprice_pending_at from the locked phase; a failed re-draft lifts it (bell stands)', async () => {
@@ -1023,7 +1025,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red' });
     const awaiting = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9', lane: 'yellow' } }) };
     // first() order: awaiting, fresh(locked), ask (pending stamp), estimate (origin)
@@ -1032,12 +1034,64 @@ describe('bedroom_count ask (unit-band lane)', () => {
     await result.repricePromise;
     // ATOMIC JSONB path updates only — never a whole-blob rewrite that
     // could erase a concurrent linkage marker.
+    // guard stamp → (failure) unschedule only — the guard STAYS (known-stale dollars)
     const estimateUpdates = mockState.updates.filter((u) => u.table === 'estimates');
     expect(estimateUpdates).toHaveLength(2);
     expect(estimateUpdates[0].payload.estimate_data.__raw).toMatch(/jsonb_set\(estimate_data, '\{estimatorEngine\}'.*jsonb_build_object\('reprice_pending_at'/);
     expect(estimateUpdates[0].payload.estimate_data.params[0]).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(estimateUpdates[1].payload.estimate_data.__raw).toMatch(/- 'reprice_pending_at'\)/);
+    expect(estimateUpdates[1].payload).toMatchObject({ status: 'draft', scheduled_at: null });
+    expect(estimateUpdates.some((u) => /- 'reprice_pending_at'\)/.test(String(u.payload.estimate_data?.__raw || '')))).toBe(false);
     expect(mockNotifyAdmin).toHaveBeenCalled();
+  });
+
+  test('the bedroom re-price binds to bedroom_estimate_id — a merged ask that re-pointed the generic estimate_id never archives the wrong draft', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      // generic linkage moved to an unrelated lawn draft by a later merged ask
+      flags: JSON.stringify({ missing: ['bedroom_count', 'specific_service'], lead_id: 'lead-1', estimate_id: 'est-LAWN', bedroom_estimate_id: 'est-UNIT' }),
+    };
+    const unitRow = { id: 'est-UNIT', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, unitRow, awaiting];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '2 bedroom' });
+    await result.repricePromise;
+    expect(mockMaybeDraftEstimateForCall).toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-UNIT' }));
+    expect(mockMaybeDraftEstimateForCall).not.toHaveBeenCalledWith(expect.objectContaining({ supersedeEstimateId: 'est-LAWN' }));
+  });
+
+  test('parking and merging a bedroom ask record bedroom_estimate_id; a merge for another item keeps it', async () => {
+    mockState.existingDraft = null;
+    await parkClarifyAsk({ missing: ['bedroom_count'], phone: '+19415550142', estimateId: 'est-UNIT', source: 'estimator_engine_unit_band', channelProvenance: 'voice' });
+    const parked = JSON.parse(mockState.inserts[0].flags);
+    expect(parked.bedroom_estimate_id).toBe('est-UNIT');
+    expect(parked.estimate_id).toBe('est-UNIT');
+    // A later street_address ask for the same phone merges in with ITS linkage…
+    mockState.existingDraft = { id: 'draft-1', status: 'pending', flags: mockState.inserts[0].flags };
+    await parkClarifyAsk({ missing: ['street_address'], phone: '+19415550142', estimateId: 'est-LAWN', leadId: 'lead-2', source: 'estimator_engine_red', channelProvenance: 'voice' });
+    const merged = JSON.parse(mockState.updates.find((u) => u.table === 'message_drafts').payload.flags);
+    expect(merged.missing).toEqual(['bedroom_count', 'street_address']);
+    expect(merged.estimate_id).toBe('est-LAWN');
+    // …but the bedroom item stays bound to the unit draft.
+    expect(merged.bedroom_estimate_id).toBe('est-UNIT');
+  });
+
+  test('a failed re-price on a SCHEDULED draft cancels the schedule (inert draft, no due time) before lifting the guard', async () => {
+    mockSmsThreadDraftsEnabled.mockReturnValue(true);
+    mockNotifyAdmin.mockResolvedValue({ id: 'bell-5' });
+    mockMaybeDraftEstimateForCall.mockResolvedValue({ created: false, lane: 'red' });
+    const awaiting = {
+      id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
+    };
+    const estimateRow = { id: 'est-1', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-9' } }) };
+    mockState.firstQueue = [awaiting, awaiting, awaiting, estimateRow];
+    const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });
+    await result.repricePromise;
+    const estimateUpdates = mockState.updates.filter((u) => u.table === 'estimates').map((u) => u.payload);
+    // guard stamp, then (failure) unschedule — never a guard release
+    expect(estimateUpdates.some((p) => p.status === 'draft' && p.scheduled_at === null)).toBe(true);
+    expect(estimateUpdates.some((p) => /- 'reprice_pending_at'\)/.test(String(p.estimate_data?.__raw || '')))).toBe(false);
   });
 
   test('a guard that stamps ZERO rows (draft already sent/moved on) fails closed: answer recorded, no re-draft, operator bell', async () => {
@@ -1045,7 +1099,7 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockNotifyAdmin.mockResolvedValue({ id: 'bell-4' });
     const awaiting = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-1', bedroom_estimate_id: 'est-1' }),
     };
     mockState.firstQueue = [awaiting, awaiting, awaiting];
     // update results: ask row bookkeeping (1), estimate guard (0 rows), pending stamp (1)…
@@ -1093,9 +1147,9 @@ describe('bedroom_count ask (unit-band lane)', () => {
     mockMaybeDraftEstimateForCall.mockResolvedValue({ created: true, estimateId: 'est-new' });
     const unlocked = {
       id: 'sent-1', customer_id: null, sent_at: '2026-07-18T12:00:00Z',
-      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-OLD' }),
+      flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-OLD', bedroom_estimate_id: 'est-OLD' }),
     };
-    const lockedRow = { ...unlocked, flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-FRESH' }) };
+    const lockedRow = { ...unlocked, flags: JSON.stringify({ missing: ['bedroom_count'], lead_id: 'lead-1', estimate_id: 'est-FRESH', bedroom_estimate_id: 'est-FRESH' }) };
     const estimateRow = { id: 'est-FRESH', estimate_data: JSON.stringify({ estimatorEngine: { callLogId: 'call-1' } }) };
     mockState.firstQueue = [unlocked, lockedRow, lockedRow, estimateRow, lockedRow];
     const result = await handleClarifyReply({ phone: '+19415550142', body: '1 bedroom' });

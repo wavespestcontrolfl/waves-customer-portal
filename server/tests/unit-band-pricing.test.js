@@ -304,6 +304,24 @@ describe('resolver (gate ON)', () => {
     expect(out.bedroomSource).toBe('composer_intent');
     expect(out.pest.recurringPrice).toBe(79);
   });
+  test('a monthly-ONLY unit intent keeps its parked audit (nothing priced) so the lane can flag the probable excluded program', async () => {
+    const db = fakeDb(seedRows());
+    const out = await resolve({
+      db, intent: unitIntent({ pest: { frequency: 'monthly' } }), unitScope: unitScope(), propertyFacts: unitFacts(), extraction: extractionWithBedrooms(1),
+    });
+    expect(out).toMatchObject({ eligible: false, parked: { pest: 'monthly_frequency' }, missing: [] });
+    expect(out.pest).toBeUndefined();
+    expect(db.calls).toEqual([]);
+    const { lane, reasons } = classifyLane({
+      intent: unitIntent({ pest: { frequency: 'monthly' } }), propertyFacts: unitFacts(),
+      engineResult: { summary: {}, lineItems: [{ service: 'pest_control', monthly: 37.33, annual: 448, pricingConfidence: 'low', requiresManualReview: true }] },
+      engineInput: { unitBandPricing: out }, totals: { monthly: 37.33, annual: 448, oneTime: 0 },
+      comps: { samples: 10, median: 30, outlier: false, insufficient: false }, calibration: [],
+      context: { isExistingCustomer: false, extractionSource: 'enriched', smsThread: [], transcript: 'Caller: monthly pest control for my apartment, it is a one bedroom.' },
+    });
+    expect(lane).toBe(LANES.YELLOW);
+    expect(reasons.some((r) => /monthly cadence on a residential unit/.test(r))).toBe(true);
+  });
   test('monthly recurring parks while a one-time on the same intent still band-prices', async () => {
     const out = await resolve({
       db: fakeDb(seedRows()), intent: unitIntent({ pest: { frequency: 'monthly' }, oneTimePest: {} }),
@@ -369,6 +387,9 @@ describe('snapshot integrity (hook P0 — engineInputs are browser-controlled)',
     expect(verdict(input, 'pest', { requestedFrequency: 'monthly' })).toEqual({ status: 'untrusted', reason: 'unsupported_cadence' });
     const quarterlyOnly = { address: ADDRESS, unitBandPricing: { pest: quarterly } };
     expect(verdict(quarterlyOnly, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'no_row_for_cadence' });
+    // A validly signed bi-monthly row filed under the quarterly KEY is untrusted (the key is unsigned).
+    const swapped = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly: biMonthly, bi_monthly: quarterly } } };
+    expect(verdict(swapped, 'pest', { requestedFrequency: 'quarterly' })).toEqual({ status: 'untrusted', reason: 'cadence_mismatch' });
     // A cadence row whose signature is off is untrusted even when the primary verifies.
     const forged = { address: ADDRESS, unitBandPricing: { pest: quarterly, pestCadences: { quarterly, bi_monthly: { ...biMonthly, recurringPrice: 1 } } } };
     expect(verdict(forged, 'pest', { requestedFrequency: 'bimonthly' })).toEqual({ status: 'untrusted', reason: 'signature' });
