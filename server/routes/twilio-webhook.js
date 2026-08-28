@@ -1770,6 +1770,7 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     // from a different line is a different thread (hook P1).
     const last = await db('sms_log')
       .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
+      .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
       .whereNot('message_type', 'internal_alert')
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .orderBy('created_at', 'desc')
