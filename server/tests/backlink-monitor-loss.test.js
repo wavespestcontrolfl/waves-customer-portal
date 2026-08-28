@@ -23,6 +23,7 @@ function makeDb(handlers) {
       whereIn: jest.fn((col, vals) => { state.ins.push([col, vals]); return b; }),
       whereNull: jest.fn((c) => { state.nulls.push(c); return b; }), orWhere: jest.fn(() => b),
       whereNotIn: jest.fn((col, vals) => { state.notIns.push([col, vals]); return b; }),
+      whereNot: jest.fn((col, val) => { state.wheres.push(['NOT', col, val]); return b; }),
       whereRaw: jest.fn((sql, bind) => { state.raws.push([sql, bind]); return b; }),
       raw: jest.fn((sql, bind) => ({ __raw: sql, bind })),
       orderBy: jest.fn(() => b), orderByRaw: jest.fn(() => b), limit: jest.fn(() => b),
@@ -44,26 +45,29 @@ const passthrough = (_name, fn) => fn();
 const activeRow = (over = {}) => ({
   id: 'bl-1', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x',
   source_domain: 'www.blog.example', domain_rating: 45, anchor_text: 'Waves Pest Control',
-  miss_count: 0, is_dofollow: true, severity: 'clean', link_type: null, ...over,
+  miss_count: 0, is_dofollow: true, severity: 'clean', link_type: null, status: 'active', ...over,
 });
 
-function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false, owed = [], aged = [] } = {}) {
+function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false, owed = [], aged = [], alerted = [], recoveryRows = [] } = {}) {
   dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [{ items, total_count: total }] }] });
   const events = [], updates = [], increments = [], inserts = [], prospectOps = [];
   makeDb({
     seo_backlinks: (op, st) => {
       if (op === 'select') {
         if (st.raws.some(r => /lost_at <= now\(\)/.test(r[0]))) return aged; // aged-out sweep
-        return st.nulls.includes('recovery_queued_at') ? owed : active;
+        if (st.nulls.includes('recovery_queued_at')) return owed;
+        // the ONE full-table load (no predicates): active rows + the lookup fixtures, by id
+        if (!st.wheres.length && !st.raws.length && !st.nulls.length && !st.ins.length) {
+          // lookup fixtures are keyed by their source URL; a fixture without a
+          // target is assumed to point where the feed's first item points
+          const fixtures = Object.entries(existingByUrl).map(([u, r]) => ({ source_url: u, target_url: items[0]?.url_to, ...r }));
+          const byId = new Map();
+          for (const r of active.concat(fixtures)) byId.set(r.id, byId.get(r.id) || r);
+          return [...byId.values()];
+        }
+        return active;
       }
       if (op === 'first') {
-        // per-link upsert lookup: CANONICAL source (comparable SQL) + canonical target
-        const srcRaw = st.raws.find(r => /source_url/.test(r[0]) && /split_part/.test(r[0]));
-        if (srcRaw) {
-          const norm = (u) => { const t = String(u).replace(/^https?:\/\//, '').replace(/^www\./, ''); const i = t.indexOf('/'); return (i === -1 ? t : t.slice(0, i)).toLowerCase() + (i === -1 ? '' : t.slice(i)).replace(/\/+$/, ''); };
-          const hit = Object.keys(existingByUrl).find(u => norm(u) === srcRaw[1][0]);
-          return hit ? existingByUrl[hit] : null;
-        }
         // domain-level "still active?" probe
         return stillActiveDomain ? { id: 'other' } : null;
       }
@@ -72,8 +76,12 @@ function scanWith({ items = [], total = items.length, active = [], existingByUrl
       if (op === 'insert') { inserts.push(st.payload); return [1]; }
       throw new Error(`unexpected op ${op}`);
     },
-    seo_backlink_events: (op, st) => { events.push(st.payload); return [1]; },
-    seo_link_prospects: (op, st) => { prospectOps.push({ op, wheres: st.wheres, raws: st.raws, payload: st.payload }); return op === 'update' ? 1 : []; },
+    seo_backlink_events: (op, st) => {
+      // the durable alert ledger read: rows already rung
+      if (op === 'select') return alerted.map(id => ({ backlink_id: id }));
+      events.push(st.payload); return [1];
+    },
+    seo_link_prospects: (op, st) => { prospectOps.push({ op, wheres: st.wheres, raws: st.raws, payload: st.payload }); return op === 'update' ? 1 : op === 'first' ? null : op === 'select' ? recoveryRows : []; },
   });
   return { events, updates, increments, inserts, prospectOps };
 }
@@ -242,9 +250,9 @@ describe('BacklinkMonitor verified loss detection', () => {
     const recovery = jest.fn(async (losses) => ({ queued: losses.length, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
     const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
     const owed = [{ id: 'old-1', source_url: 'https://old.example/res', target_url: 'https://wavespestcontrol.com/', source_domain: 'old.example', domain_rating: 60, anchor_text: null, severity: 'clean', link_type: null, lost_reason: 'page_gone' }];
-    scanWith({ items: [seen], active: [], owed });
+    scanWith({ items: [seen], active: [], owed, alerted: ['old-1'] });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery });
-    // owed-only sweep (retry after an earlier queue error): re-queued, NOT re-alerted — the bell rang when it was verified
+    // owed-only sweep (retry after an earlier queue error): re-queued, NOT re-alerted — the ledger says the bell already rang for this row
     expect(r).toEqual(expect.objectContaining({ lostCount: 0, lostDomains: 1, highValueLost: 1, alertedNew: 0, recoveryQueued: 1 }));
     expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'old.example', backlink_id: 'old-1', lost_reason: 'page_gone', alertable: true })]);
   });
@@ -312,28 +320,16 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-1', event_type: 'respelled' })]);
   });
 
-  test('target canonical SQL strips query/fragment BEFORE the trailing-slash strip (same order as the JS key)', async () => {
+  test('the canonical map strips query/fragment BEFORE the trailing-slash strip: /page/?utm=x resolves to the /page row (update, not a second row)', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/page/?utm=x', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
-    const raws = [];
-    scanWith({ items: [seen], active: [] });
-    const impl = db.getMockImplementation();
-    db.mockImplementation((table) => { const b = impl(table); const w = b.whereRaw; b.whereRaw = jest.fn((sql, bind) => { raws.push([sql, bind]); return w(sql, bind); }); return b; });
-    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
-    const tgt = raws.find(r => /target_url/.test(r[0]));
-    expect(tgt[1]).toEqual(['wavespestcontrol.com/page']); // JS side: query gone, slash gone
-    // SQL side: the query strip is INSIDE the canonical expression; the trailing-slash strip is its last step
-    expect(tgt[0]).toMatch(/regexp_replace\(target_url, '\[\\\?#\]\.\*\$', ''\)/);
-    expect(tgt[0]).toMatch(/'\/\+\$', ''\)\) = \?$/);
-    // and it COMPILES through real knex with exactly one binding — the regex '?' must be
-    // escaped (\?) or knex reads it as a second placeholder and every scan throws
-    const knex = require('knex')({ client: 'pg' });
-    for (const [sql, bind] of raws.filter(r => /source_url|target_url/.test(r[0]))) {
-      const compiled = knex('seo_backlinks').whereRaw(sql, bind).toSQL().toNative();
-      expect(compiled.bindings).toEqual(bind);
-      if (/target_url/.test(sql)) expect(compiled.sql).toContain("[?#]"); // the escape is consumed by knex, the regex reaches pg intact
-    }
+    const row = activeRow({ id: 'pg', source_url: 'https://blog.example/post', target_url: 'https://wavespestcontrol.com/page' });
+    const { updates, inserts, increments } = scanWith({ items: [seen], active: [row] });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 1, missed: 0, respelled: 1 }));
+    expect(inserts).toHaveLength(0);
+    expect(increments).toEqual([]);
+    expect(updates).toContainEqual({ ids: 'pg', patch: expect.objectContaining({ target_url: seen.url_to, status: 'active' }) });
   });
-
   test('canonical identity lower-cases the HOST only: /Post and /post are different links (the other is missed)', async () => {
     const { canonicalLinkUrl } = require('../services/seo/link-prospect-verifier')._test;
     expect(canonicalLinkUrl('HTTPS://WWW.Blog.Example/Post/')).toBe('blog.example/Post');
@@ -391,16 +387,19 @@ describe('BacklinkMonitor verified loss detection', () => {
   test('a lost row that reappears is recovered (lost_at/lost_reason cleared, event recorded) and its recovery prospect closed as live', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: true };
     const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed', source_url: seen.url_from, target_url: seen.url_to };
-    const { updates, events, prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const recoveryRows = [{ id: 'p-rec', target_page: 'https://www.wavespestcontrol.com/pest-control-sarasota-fl/' }];
+    const { updates, events, prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing }, recoveryRows });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
     expect(r).toEqual(expect.objectContaining({ recovered: 1 }));
     expect(updates[0].patch).toEqual(expect.objectContaining({ status: 'active', lost_at: null, lost_reason: null, miss_count: 0 }));
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-9', event_type: 'recovered' })]);
     // the un-pitched lost_recovery prospect for this link is resolved, not left for the drafter
+    const candidates = prospectOps.find(o => o.op === 'select');
+    expect(candidates.wheres[0][0]).toEqual({ status: 'prospect' });
+    expect(candidates.raws[0]).toEqual([expect.stringMatching(/target_domain/), ['blog.example']]);
+    expect(candidates.raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/);
     const resolve = prospectOps.find(o => o.op === 'update');
-    expect(resolve.wheres[0][0]).toEqual({ status: 'prospect' });
-    expect(resolve.raws[0]).toEqual([expect.stringMatching(/target_domain/), ['blog.example']]);
-    expect(resolve.raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/);
+    expect(resolve.wheres[0][0]).toEqual({ id: 'p-rec', status: 'prospect' });
     expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
     // prospect closure and the lost→active flip share ONE transaction
     expect(db.transaction).toHaveBeenCalledTimes(1);
@@ -409,7 +408,7 @@ describe('BacklinkMonitor verified loss detection', () => {
   test('if the backlink flip/ledger write fails after the prospect was closed, the whole recovery rolls back together', async () => {
     const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/', domain_from: 'blog.example', domain_from_rank: 45, dofollow: true };
     const existing = { id: 'bl-9', status: 'lost', is_dofollow: true, lost_reason: 'link_removed' };
-    const { prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing } });
+    const { prospectOps } = scanWith({ items: [seen], active: [], existingByUrl: { [seen.url_from]: existing }, recoveryRows: [{ id: 'p-rec', target_page: 'https://wavespestcontrol.com/' }] });
     const impl = db.getMockImplementation();
     db.mockImplementation((table) => { if (table === 'seo_backlink_events') throw new Error('ledger down'); return impl(table); });
     const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
@@ -646,23 +645,90 @@ describe('lost-link recovery', () => {
     expect(updates).toHaveLength(0);
   });
 
-  test('resolveRecoveredLink closes un-pitched recovery prospects at DOMAIN scope (any sibling link returning counts)', async () => {
+  test('resolveRecoveredLink closes un-pitched recovery prospects at DOMAIN scope; the row filed under a sibling page FOLLOWS the returned link (target_page moved) so the verifier will not demote it', async () => {
     const ops = [];
-    makeDb({ seo_link_prospects: (op, st) => { ops.push({ op, wheres: st.wheres, ins: st.ins, nulls: st.nulls, raws: st.raws, payload: st.payload }); return 2; } });
-    // The returning link targets /x/ — the recovery row may have been filed under a
-    // sibling target page (domainLevelLosses queues ONE representative per domain).
+    // two candidate rows: one already on /x/ (same page), one filed under the sibling /y/ whose (domain,/x/) pair is FREE
+    makeDb({ seo_link_prospects: (op, st) => {
+      ops.push({ op, wheres: st.wheres, ins: st.ins, nulls: st.nulls, raws: st.raws, payload: st.payload });
+      if (op === 'select') return [{ id: 'p-same', target_page: 'https://www.wavespestcontrol.com/x/' }, { id: 'p-sib', target_page: 'https://www.wavespestcontrol.com/y/' }];
+      if (op === 'first') return null; // no other row owns (domain, /x/)
+      return 1;
+    } });
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
-    expect(r).toEqual({ resolved: 2 });
-    expect(ops[0].wheres[0][0]).toEqual({ status: 'prospect' });
-    expect(ops[0].raws[0]).toEqual([expect.stringMatching(/^split_part\(split_part\(.*lower\(btrim\(target_domain\)\).*'\/', 1\), ':', 1\) = \?$/), ['blog.example']]); // canonical host, never the raw spelling
-    expect(ops[0].ins).toEqual([]); // no target_page predicate — domain scope, same as the queue side
-    expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/); // still only recovery rows, never a cold prospect
+    expect(r).toEqual({ resolved: 2, superseded: 0 });
+    const sel = ops[0];
+    expect(sel.op).toBe('select');
+    expect(sel.wheres[0][0]).toEqual({ status: 'prospect' });
+    expect(sel.raws[0]).toEqual([expect.stringMatching(/^split_part\(split_part\(.*lower\(btrim\(target_domain\)\).*'\/', 1\), ':', 1\) = \?$/), ['blog.example']]); // canonical host, never the raw spelling
+    expect(sel.ins).toEqual([]); // no target_page predicate — domain scope, same as the queue side
+    expect(sel.raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/); // still only recovery rows, never a cold prospect
     // only unsent rows: none/drafted and outreach_sent_at IS NULL — sending/sent are left for reconciliation
-    expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
-    expect(ops[0].nulls).toContain('outreach_sent_at');
-    expect(ops[0].payload).toEqual(expect.objectContaining({ status: 'live', backlink_id: 'bl-1' }));
-    expect(ops[0].payload.first_live_at.__raw).toBe('COALESCE(first_live_at, ?)'); // original first-live history preserved
-    expect(ops[0].payload.notes.bind[0]).toMatch(/closed 2026-09-06:/); // 08:00Z = 04:00 ET → same ET day; ET date, not UTC
+    expect(sel.raws.map(r => r[0]).join(' ')).toMatch(/outreach_status.*'none', 'drafted'/);
+    expect(sel.nulls).toContain('outreach_sent_at');
+    const updates = ops.filter(o => o.op === 'update');
+    expect(updates).toHaveLength(2);
+    const same = updates.find(u => u.wheres[0][0].id === 'p-same'), sib = updates.find(u => u.wheres[0][0].id === 'p-sib');
+    expect(same.wheres[0][0]).toEqual({ id: 'p-same', status: 'prospect' }); // conditional per row
+    expect(same.payload).toEqual(expect.objectContaining({ status: 'live', backlink_id: 'bl-1' }));
+    expect(same.payload.target_page).toBeUndefined(); // same page: identity untouched
+    expect(same.payload.first_live_at.__raw).toBe('COALESCE(first_live_at, ?)'); // original first-live history preserved
+    expect(same.payload.notes.bind[0]).toMatch(/closed 2026-09-06:/); // 08:00Z = 04:00 ET → same ET day; ET date, not UTC
+    // sibling row: moved to the returned page so live_url validates against target_page on the daily verify
+    expect(sib.payload).toEqual(expect.objectContaining({ status: 'live', target_page: 'https://www.wavespestcontrol.com/x/', live_url: 'https://blog.example/post' }));
+    expect(sib.payload.notes.bind[0]).toMatch(/Target page moved https:\/\/www\.wavespestcontrol\.com\/y\/ → https:\/\/www\.wavespestcontrol\.com\/x\//);
+    // the (domain, returned page) ownership probe ran for the sibling only, excluding itself
+    const probe = ops.find(o => o.op === 'first');
+    expect(probe.ins).toEqual([['target_page', expect.arrayContaining(['https://www.wavespestcontrol.com/x/', 'https://wavespestcontrol.com/x/'])]]);
+  });
+
+  test('resolveRecoveredLink: when another board row already owns (domain, returned page), the sibling recovery row is closed as SUPERSEDED (rejected + note), never left live under a wrong target', async () => {
+    const ops = [];
+    makeDb({ seo_link_prospects: (op, st) => {
+      ops.push({ op, wheres: st.wheres, payload: st.payload });
+      if (op === 'select') return [{ id: 'p-sib', target_page: 'https://www.wavespestcontrol.com/y/' }];
+      if (op === 'first') return { id: 'p-owner', status: 'live' };
+      return 1;
+    } });
+    const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'blog.example', target_url: 'https://wavespestcontrol.com/x/' }, new Date('2026-09-06T08:00:00Z'));
+    expect(r).toEqual({ resolved: 0, superseded: 1 });
+    const upd = ops.find(o => o.op === 'update');
+    expect(upd.wheres[0][0]).toEqual({ id: 'p-sib', status: 'prospect' });
+    expect(upd.payload).toEqual(expect.objectContaining({ status: 'rejected', backlink_id: 'bl-1', outreach_status: 'none', outreach_send_token: null }));
+    expect(upd.payload.target_page).toBeUndefined();
+    expect(upd.payload.notes.bind[0]).toMatch(/tracked by prospect p-owner \(live\); this recovery row is superseded/);
+  });
+
+  test('loss alert is DURABLE: an owed row with no loss_alerted ledger row rings (even though nothing was newly lost this scan), and rows are stamped only after the send succeeds', async () => {
+    const recovery = jest.fn(async (losses) => ({ queued: losses.length, results: losses.map(l => ({ domain: l.domain, outcome: 'queued' })) }));
+    const seen = { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true };
+    const owed = [{ id: 'old-1', source_url: 'https://old.example/res', target_url: 'https://wavespestcontrol.com/', source_domain: 'old.example', domain_rating: 60, anchor_text: null, severity: 'clean', link_type: null, lost_reason: 'page_gone' }];
+    const { events } = scanWith({ items: [seen], active: [], owed, alerted: [] });
+    const alertFn = jest.fn(async () => {});
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn });
+    expect(r).toEqual(expect.objectContaining({ lostCount: 0, alertedNew: 1, alerted: 1 }));
+    expect(alertFn).toHaveBeenCalledWith(expect.stringMatching(/1 referring domain\(s\) lost — verified by crawl: old\.example DR60 \(page_gone\)/));
+    expect(events).toContainEqual(expect.objectContaining({ backlink_id: 'old-1', event_type: 'loss_alerted' }));
+
+    // a failed send leaves the rows UNSTAMPED so the next scan rings again
+    const { events: events2 } = scanWith({ items: [seen], active: [], owed, alerted: [] });
+    const r2 = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), recoveryFn: recovery, alertFn: jest.fn(async () => { throw new Error('twilio down'); }) });
+    expect(r2).toEqual(expect.objectContaining({ alertedNew: 1, alerted: 0 }));
+    expect(events2.find(e => e && e.event_type === 'loss_alerted')).toBeUndefined();
+  });
+
+  test('a DataForSEO item is resolved from the in-memory canonical map — no per-item lookup query against seo_backlinks', async () => {
+    const seen = { url_from: 'https://blog.example/post', url_to: 'https://wavespestcontrol.com/pest-control-sarasota-fl/?utm=x', domain_from: 'www.blog.example', domain_from_rank: 45, dofollow: true };
+    const log = [];
+    const orig = db.getMockImplementation;
+    scanWith({ items: [seen, { ...seen, url_from: 'http://www.blog.example/post/' }], active: [activeRow()] });
+    const impl = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = impl(table); if (table === 'seo_backlinks') { const f = b.first; b.first = (...a) => { log.push('first'); return f(...a); }; const s = b.select; b.select = (...a) => { log.push('select'); return s(...a); }; } return b; });
+    const r = await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn() });
+    expect(r).toEqual(expect.objectContaining({ scanned: 2, missed: 0 }));
+    // one full-table select (+ the owed/aged sweeps); the per-item lookups never hit .first()
+    expect(log.filter(x => x === 'first')).toEqual([]);
+    expect(log.filter(x => x === 'select').length).toBeLessThanOrEqual(3);
+    void orig;
   });
 
   test('a reopened row with a null/unclaimable link_type gets a worker-claimable outreach type', async () => {

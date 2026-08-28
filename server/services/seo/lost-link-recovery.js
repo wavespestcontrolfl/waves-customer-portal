@@ -316,30 +316,65 @@ async function queueOne(loss, out, scoreMod) {
 async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   const domain = normalizeDomain(backlink.source_domain);
   if (!domain) return { resolved: 0 };
+  const q = trx || db;
   // Only UNSENT rows close automatically: a 'sending' row has a Gmail send in
   // flight whose finalizer needs the token; sent/send_error rows are the
   // operator's reconciliation, not ours.
   // `trx`: the monitor joins this to the backlink's lost→active flip so the
   // two commit (or roll back) together.
-  const n = await byDomain((trx || db)('seo_link_prospects'), domain)
+  const candidates = () => byDomain(q('seo_link_prospects'), domain)
     .where({ status: 'prospect' })
     .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
     .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
-    .whereNull('outreach_sent_at')
-    .update({
+    .whereNull('outreach_sent_at');
+  const rows = await candidates().select('id', 'target_page');
+  if (!Array.isArray(rows) || !rows.length) return { resolved: 0, superseded: 0 };
+
+  // The row's target identity must FOLLOW the link that returned: the daily
+  // verifier validates live_url against the row's target_page, so a
+  // domain-level recovery row filed under a sibling Waves page would be
+  // demoted back to lost by the very next definitive crawl. Same page → close
+  // as live; other page and that (domain, page) pair is free → move the row to
+  // the returned page and close as live; other page already owned by another
+  // board row → THAT row is the placement, this recovery is closed as
+  // superseded (rejected + note) rather than left live under a wrong identity.
+  const returnedPage = targetPageOf(backlink.target_url);
+  const variants = new Set(targetPageVariants(backlink.target_url));
+  const closeNote = `\nLost-link recovery closed ${etDateString(now)}: the link reappeared on its own (no outreach needed).`;
+  let resolved = 0, superseded = 0;
+  for (const row of rows) {
+    const samePage = variants.has(row.target_page);
+    const owner = samePage ? null
+      : await byDomain(q('seo_link_prospects'), domain).whereIn('target_page', [...variants]).whereNot('id', row.id).first('id', 'status');
+    if (owner) {
+      const n = await q('seo_link_prospects').where({ id: row.id, status: 'prospect' }).update({
+        status: 'rejected',
+        backlink_id: backlink.id || null,
+        claimed_at: null, claimed_by: null,
+        outreach_status: 'none', outreach_send_token: null,
+        notes: q.raw("COALESCE(notes, '') || ?", [`${closeNote} Placement for ${returnedPage} is tracked by prospect ${owner.id} (${owner.status}); this recovery row is superseded.`]),
+        updated_at: now,
+      });
+      superseded += n || 0;
+      continue;
+    }
+    const n = await q('seo_link_prospects').where({ id: row.id, status: 'prospect' }).update({
       status: 'live',
+      ...(samePage ? {} : { target_page: returnedPage }),
       live_url: backlink.source_url,
       backlink_id: backlink.id || null,
       // first_live_at = the FIRST time the placement went live (verifier sets it
       // only when null); a re-close after a loss must not rewrite that history.
-      first_live_at: db.raw('COALESCE(first_live_at, ?)', [now]),
+      first_live_at: q.raw('COALESCE(first_live_at, ?)', [now]),
       claimed_at: null, claimed_by: null,
       outreach_status: 'none', outreach_send_token: null,
-      notes: db.raw("COALESCE(notes, '') || ?", [`\nLost-link recovery closed ${etDateString(now)}: the link reappeared on its own (no outreach needed).`]),
+      notes: q.raw("COALESCE(notes, '') || ?", [samePage ? closeNote : `${closeNote} Target page moved ${row.target_page} → ${returnedPage} to follow the returned link.`]),
       updated_at: now,
     });
-  if (n) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${n} recovery prospect(s) closed as live`);
-  return { resolved: n || 0 };
+    resolved += n || 0;
+  }
+  if (resolved || superseded) logger.info(`[lost-link-recovery] ${domain}: link restored on its own — ${resolved} recovery prospect(s) closed as live, ${superseded} superseded`);
+  return { resolved, superseded };
 }
 
 module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf, targetPageVariants, TARGET_DOMAIN_CANONICAL_SQL } };

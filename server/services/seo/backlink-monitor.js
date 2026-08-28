@@ -65,7 +65,7 @@ class BacklinkMonitor {
     return exclusive('backlink-scan', () => this.scanExclusive(opts), { recordHealth: false });
   }
 
-  async scanExclusive({ crawlFn, recoveryFn, snapshot = false, now = new Date(), pageSize = 1000 } = {}) {
+  async scanExclusive({ crawlFn, recoveryFn, alertFn, snapshot = false, now = new Date(), pageSize = 1000 } = {}) {
     logger.info('Backlink scan starting...');
     const PAGE = pageSize;
     // Page until DataForSEO's total_count is reached. The cap is a runaway
@@ -110,21 +110,45 @@ class BacklinkMonitor {
     // totals, snapshots and velocity. Source = canonical link URL (scheme/www/
     // slash dropped, host lower-cased, path case KEPT — /Post ≠ /post); target =
     // the same minus query/fragment (our page, utm irrelevant).
-    const { canonicalLinkUrl, canonicalLinkUrlSql } = require('./link-prospect-verifier')._test;
+    const { canonicalLinkUrl } = require('./link-prospect-verifier')._test;
     const canonicalTarget = (u) => canonicalLinkUrl(String(u || '').split('#')[0].split('?')[0]);
     const linkKey = (source, target) => `${canonicalLinkUrl(source)}::${canonicalTarget(target)}`;
     // Query/fragment stripped FIRST, then the canonical normalization (which
     // ends with the trailing-slash strip) — the same order as canonicalTarget(),
     // so '/page/?utm=x' is '/page' on both sides.
     // `\?` = a literal question mark to knex.raw (a bare `?` is a binding slot).
-    const TARGET_CANONICAL_SQL = canonicalLinkUrlSql("regexp_replace(target_url, '[\\?#].*$', '')");
 
-    // Build active link map with canonical keys BEFORE processing (a key may
-    // hold several rows — legacy respelled duplicates — all seen together).
-    const activeLinks = await db('seo_backlinks')
-      .where('status', 'active')
-      .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
-      .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'miss_count', 'is_dofollow', 'severity', 'link_type');
+    // ONE load of the table (≈ a couple thousand rows), keyed canonically in
+    // memory: the per-item lookup below resolves against this map. Two
+    // regex-normalized comparisons over seo_backlinks per DataForSEO item (no
+    // functional index) is O(items × rows) — a 50k-link profile could not
+    // finish the weekly scan. The map is kept current as the loop inserts /
+    // moves rows, so a spelling reported twice in one feed resolves to the
+    // same row.
+    const allRows = await db('seo_backlinks')
+      .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'miss_count', 'is_dofollow', 'severity', 'link_type', 'status', 'lost_reason', 'last_checked', 'discovery_source');
+    const rowsByKey = new Map();
+    const indexRow = (l) => {
+      const k = linkKey(l.source_url, l.target_url);
+      if (!rowsByKey.has(k)) rowsByKey.set(k, []);
+      rowsByKey.get(k).push(l);
+    };
+    for (const l of allRows) indexRow(l);
+    // Canonical lookup; an exact-spelling row wins over a respelled twin so a
+    // legacy duplicate pair is never collapsed onto the wrong row; otherwise the
+    // most recently checked row (the same order the SQL lookup used).
+    const findExisting = (link) => {
+      const group = rowsByKey.get(linkKey(link.url_from, link.url_to));
+      if (!group || !group.length) return null;
+      const exact = group.find(r => r.source_url === link.url_from && r.target_url === link.url_to);
+      if (exact) return exact;
+      return group.slice().sort((a, b) => String(b.last_checked || '').localeCompare(String(a.last_checked || '')))[0];
+    };
+
+    // Active link map with canonical keys BEFORE processing (a key may hold
+    // several rows — legacy respelled duplicates — all seen together). Scan-
+    // tracked rows only: a GSC-export row is excluded from loss detection.
+    const activeLinks = allRows.filter(l => (l.status || 'active') === 'active' && (l.discovery_source == null || l.discovery_source === 'dataforseo'));
     const activeMap = new Map();
     for (const l of activeLinks) {
       const k = linkKey(l.source_url, l.target_url);
@@ -140,13 +164,7 @@ class BacklinkMonitor {
       seenKeys.add(linkKey(link.url_from, link.url_to));
       const isDofollow = link.dofollow !== false;
 
-      // Canonical lookup; an exact-spelling row wins over a respelled twin so a
-      // legacy duplicate pair is never collapsed onto the wrong row here.
-      const existing = await db('seo_backlinks')
-        .whereRaw(`${canonicalLinkUrlSql('source_url')} = ?`, [canonicalLinkUrl(link.url_from)])
-        .whereRaw(`${TARGET_CANONICAL_SQL} = ?`, [canonicalTarget(link.url_to)])
-        .orderByRaw('(source_url = ? AND target_url = ?) DESC, last_checked DESC NULLS LAST', [link.url_from, link.url_to])
-        .first();
+      const existing = findExisting(link);
       const record = {
         source_url: link.url_from, source_domain: link.domain_from, target_url: link.url_to,
         anchor_text: link.anchor, domain_rating: link.domain_from_rank,
@@ -191,6 +209,9 @@ class BacklinkMonitor {
             merged++;
           }
         };
+        // The in-memory row follows the write (spelling, status, rel) so a second
+        // report of the same identity in this feed resolves to the moved row.
+        const syncRow = () => Object.assign(existing, { source_url: link.url_from, target_url: link.url_to, status: newStatus, is_dofollow: isDofollow, last_checked: today, lost_reason: wasLost ? null : existing.lost_reason });
         if (wasLost) {
           // The recovery prospect queued for this link (still un-pitched) is now
           // moot. Its closure and the row's lost→active flip (+ ledger row) are
@@ -212,19 +233,24 @@ class BacklinkMonitor {
           }
           recovered++;
           if (relChanged) relChanges++;
+          syncRow();
         } else if (events.length || twins.length) {
           if (relChanged) relChanges++;
           await db.transaction(async (trx) => {
             await this.transition(existing.id, patch, events, trx);
             await retireTwins(trx);
           });
+          syncRow();
         } else {
           await db('seo_backlinks').where('id', existing.id).update(patch);
+          syncRow();
         }
+        for (const t of twins) t.status = 'merged';
       } else {
         record.first_seen = today;
         record.status = 'active';
-        await db('seo_backlinks').insert(record);
+        const [ins] = await db('seo_backlinks').insert(record).returning('id');
+        indexRow({ ...record, id: ins && typeof ins === 'object' ? ins.id : ins });
         if (toxicity.severity === 'critical') newCritical++;
       }
       scanned++;
@@ -348,22 +374,44 @@ class BacklinkMonitor {
     // Alert on VERIFIED referring-domain losses only (DR>=30, non-directory) —
     // a rotated directory page or an index-churn miss is not worth a bell.
     const alertable = lostDomains.filter(d => d.alertable);
-    // …and only ONCE per loss: a domain re-swept purely because its recovery
-    // queueing errored last time (owed rows, nothing newly lost this scan) was
-    // already rung — the retry marker (recovery_queued_at) must not re-ring it.
-    const freshDomains = new Set(lostLinks.map(l => comparableDomain(l.source_domain)));
-    const alertNow = alertable.filter(d => freshDomains.has(d.domain));
-    if (scanComplete && alertNow.length > 0 && process.env.NODE_ENV === 'production') {
-      try {
-        const TwilioService = require('../twilio');
-        if (process.env.ADAM_PHONE) {
+    // …and only ONCE per loss, DURABLY: a domain rings when any of its evaluated
+    // lost rows has no 'loss_alerted' ledger row yet, and the rows are stamped
+    // only after the send succeeds. Derived from the ledger, not from this
+    // invocation's in-memory list: a row committed lost by a scan that then
+    // threw (before ringing) comes back through the owed sweep and still rings;
+    // a domain re-swept purely because its recovery queueing errored (already
+    // rung) does not. A domain that was still linking when first evaluated
+    // rings when its last link goes.
+    const alertNow = [];
+    let unrungIds = [];
+    if (scanComplete && alertable.length) {
+      const alertableDomains = new Set(alertable.map(d => d.domain));
+      const rowsOnAlertable = evaluated.filter(l => alertableDomains.has(comparableDomain(l.source_domain)));
+      const rung = new Set((await db('seo_backlink_events').whereIn('backlink_id', rowsOnAlertable.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000'])).where('event_type', 'loss_alerted').select('backlink_id')).map(e => e.backlink_id));
+      const unrung = rowsOnAlertable.filter(l => !rung.has(l.id));
+      const unrungDomains = new Set(unrung.map(l => comparableDomain(l.source_domain)));
+      alertNow.push(...alertable.filter(d => unrungDomains.has(d.domain)));
+      unrungIds = unrung.map(l => l.id);
+    }
+    let alerted = 0;
+    if (alertNow.length > 0) {
+      const send = alertFn || (process.env.NODE_ENV === 'production' && process.env.ADAM_PHONE
+        ? (msg) => require('../twilio').sendSMS(process.env.ADAM_PHONE, msg, { messageType: 'internal_alert', link: '/admin/seo' })
+        : null);
+      if (send) {
+        try {
           const names = alertNow.slice(0, 3).map(d => `${d.domain} DR${d.domain_rating} (${d.lost_reason})`).join(', ');
-          await TwilioService.sendSMS(process.env.ADAM_PHONE,
-            `⚠️ ${alertNow.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`,
-            { messageType: 'internal_alert', link: '/admin/seo' }
-          );
+          await send(`⚠️ ${alertNow.length} referring domain(s) lost — verified by crawl: ${names}. Review in /admin/seo → Backlinks`);
+          // Stamp AFTER a successful send: a failed send leaves the rows unrung
+          // and the next scan rings them.
+          await db.transaction(async (trx) => {
+            for (const id of unrungIds) await this.recordEvent(id, 'loss_alerted', { domains: alertNow.length }, trx);
+          });
+          alerted = alertNow.length;
+        } catch (err) {
+          logger.warn(`Backlink scan: loss alert not sent (rows left unrung for the next scan): ${err.message}`);
         }
-      } catch { /* best effort */ }
+      }
     }
 
     // Reacquisition: a verified domain-level loss worth having back goes onto the
@@ -404,7 +452,7 @@ class BacklinkMonitor {
     return {
       scanned, newCritical, scanComplete, missed,
       lostCount: lostLinks.length, verifiedLive, unverified, relChanges, respelled, merged, recovered, unresolvedRecoveries,
-      lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, recoveryQueued,
+      lostDomains: lostDomains.length, highValueLost: alertable.length, alertedNew: alertNow.length, alerted, recoveryQueued,
       ...(snapshot ? { snapshotOk, snapshotError } : {}),
     };
   }
@@ -593,7 +641,11 @@ class BacklinkMonitor {
       updated_at: new Date(),
       total_backlinks: all.length,
       total_referring_domains: domains.size,
-      new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen >= (prev.snapshot_date || today)).length : all.length,
+      // STRICTLY after the previous snapshot's date: a link first seen on that
+      // day was counted by that day's row (the scan snapshots after it inserts;
+      // a same-day re-take merges into the same row), so an inclusive compare
+      // would report every weekly find as new again the following week.
+      new_backlinks_since_last: prev ? all.filter(b => b.first_seen && b.first_seen > (prev.snapshot_date || today)).length : all.length,
       // Count loss EVENTS, not rows currently lost: a link verified lost and
       // recovered within the window has its lost_at cleared, but the loss
       // still happened and belongs in the trend.

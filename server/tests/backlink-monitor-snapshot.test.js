@@ -91,15 +91,9 @@ describe('BacklinkMonitor snapshots', () => {
         { url_from: 'https://other.example/a', url_to: 'https://wavespestcontrol.com/', domain_from: 'other.example', domain_from_rank: 10, dofollow: true },
       ], total_count: 1 }] }],
     });
-    const sourceFilter = {
-      whereNull: jest.fn(() => sourceFilter),
-      orWhere: jest.fn(() => sourceFilter),
-    };
+    // ONE full-table load: a scan-tracked row (absent from the feed → first miss)
+    // and a GSC-export row (absent too — but excluded from loss detection by design)
     const activeQuery = {
-      where: jest.fn((arg) => {
-        if (typeof arg === 'function') arg(sourceFilter);
-        return activeQuery;
-      }),
       select: jest.fn(async () => [
         {
           id: 'dataforseo-link',
@@ -108,6 +102,16 @@ describe('BacklinkMonitor snapshots', () => {
           source_domain: 'dataforseo.example',
           domain_rating: 20,
           anchor_text: 'Waves Pest Control',
+          status: 'active', discovery_source: 'dataforseo',
+        },
+        {
+          id: 'gsc-link',
+          source_url: 'https://gsc.example/link',
+          target_url: 'https://wavespestcontrol.com/',
+          source_domain: 'gsc.example',
+          domain_rating: 20,
+          anchor_text: 'Waves Pest Control',
+          status: 'active', discovery_source: 'gsc',
         },
       ]),
     };
@@ -121,16 +125,14 @@ describe('BacklinkMonitor snapshots', () => {
       increment: jest.fn(async () => 1),
     };
     const upsert = {
-      where: jest.fn(() => upsert), whereRaw: jest.fn(() => upsert), orderByRaw: jest.fn(() => upsert),
-      first: jest.fn(async () => null),
-      insert: jest.fn(async () => [1]),
+      insert: jest.fn(() => ({ returning: jest.fn(async () => [1]) })),
     };
 
     db.transaction = jest.fn(async (fn) => fn(db));
     db.mockImplementation((table) => {
       if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
-      if (activeQuery.where.mock.calls.length === 0) return activeQuery;
-      if (upsert.first.mock.calls.length === 0 || upsert.insert.mock.calls.length === 0) return upsert;
+      if (activeQuery.select.mock.calls.length === 0) return activeQuery;
+      if (upsert.insert.mock.calls.length === 0) return upsert;
       return missUpdate;
     });
 
@@ -141,10 +143,9 @@ describe('BacklinkMonitor snapshots', () => {
       missed: 1,
       lostCount: 0,
     }));
-    expect(sourceFilter.whereNull).toHaveBeenCalledWith('discovery_source');
-    expect(sourceFilter.orWhere).toHaveBeenCalledWith('discovery_source', 'dataforseo');
-    // the DataForSEO row is the only loss candidate — first miss counted, not lost
+    // the DataForSEO row is the only loss candidate — first miss counted, not lost; the GSC row is never a candidate
     expect(missUpdate.whereIn).toHaveBeenCalledWith('id', ['dataforseo-link']);
+    expect(missUpdate.whereIn).not.toHaveBeenCalledWith('id', expect.arrayContaining(['gsc-link']));
     expect(missUpdate.increment).toHaveBeenCalledWith('miss_count', 1);
   });
 });
