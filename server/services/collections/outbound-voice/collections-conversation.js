@@ -732,8 +732,11 @@ class CollectionsConversation {
     const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), invoices));
     let holdActive = false;
     try {
-      const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('service_pause_reason');
-      holdActive = String(row?.service_pause_reason || '') === 'nonpayment_hold';
+      // service_paused_at is the pause STATE; the reason alone can linger on
+      // a resumed customer (gh r2) — both must hold before she may say
+      // "future service is paused".
+      const row = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('service_pause_reason', 'service_paused_at');
+      holdActive = String(row?.service_pause_reason || '') === 'nonpayment_hold' && Boolean(row?.service_paused_at);
     } catch (err) {
       logger.warn(`[collections-voice] service-hold read failed callSid=${this.callSid}: ${err.message} — no consequence`);
     }
@@ -763,6 +766,25 @@ class CollectionsConversation {
     const covered = new Set(payLinkInvoiceIds);
     const payLinkCoversAccount = invoices.length > 0 && invoices.every((inv) => covered.has(String(inv.id)));
     return { tier, register: registerForTier(tier), holdActive, consequenceDueAt, payLinkInvoiceIds, payLinkCoversAccount };
+  }
+
+  // The FRESH eligible set → balance, link anchor, register/hold/deadline
+  // and pay-link scope, in one place (disclosure, send time, credit-cover
+  // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
+  // is updated — the caller discloses/sends nothing on a partial account.
+  async _refreshBalance() {
+    const { loadEligibleInvoices } = require('../contact-policy');
+    let incomplete = null;
+    const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+    if (incomplete) return { incomplete, fresh };
+    this._ctx.balance = {
+      total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+      count: fresh.length,
+      invoices: fresh,
+    };
+    this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
+    Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
+    return { incomplete: null, fresh };
   }
 
   _ensureSystemBlocks() {
@@ -1087,24 +1109,15 @@ class CollectionsConversation {
     // credit, or payer reassignment landing meanwhile must not be
     // contradicted. Fail closed: an unreadable balance discloses nothing.
     try {
-      const { loadEligibleInvoices } = require('../contact-policy');
       // A read that DROPPED an unprovable row or hit the bound understates
       // the account (gh r1): never present the survivors as "the total".
-      let incomplete = null;
-      const fresh = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+      const { incomplete } = await this._refreshBalance();
       if (incomplete) {
         logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
         return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
       }
-      this._ctx.balance = {
-        total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
-        count: fresh.length,
-        invoices: fresh,
-      };
-      this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
       // Register / hold / deadline from the FRESH set (hook P1) — and the
       // prompt follows the register if it moved during verification.
-      Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
       this._ensureSystemBlocks();
     } catch (err) {
       logger.error(`[collections-voice] disclosure-time balance read failed callSid=${this.callSid}: ${err.message}`);
@@ -1148,7 +1161,7 @@ class CollectionsConversation {
     const ordered = orderByDue(b.invoices || []);
     const nameOf = (inv) => {
       const label = inv.title || inv.service_type || 'service';
-      const when = inv.service_date || inv.due_date;
+      const when = inv.service_date || dueValueOf(inv); // due_date, else created_at — the clock's own fallback
       return `${label}${when ? ` on ${String(when).slice(0, 10)}` : ''}`;
     };
     const lines = ordered.map((inv) => {
@@ -1459,6 +1472,19 @@ class CollectionsConversation {
       return 'The pay-link text is not available. Offer the office number for payment instead.';
     }
     if (this.payLinkSent) return 'Already sent this call — do not send again.';
+    // Scope re-proven at SEND time (gh r2): a sibling paid, stopped, or
+    // claimed by a live PaymentIntent since disclosure must be neither
+    // promised nor recorded as contacted. Fail closed on an unreadable set.
+    try {
+      const { incomplete } = await this._refreshBalance();
+      if (incomplete) {
+        logger.warn(`[collections-voice] send-time balance read incomplete callSid=${this.callSid}: ${incomplete} — not sending`);
+        return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
+      }
+    } catch (err) {
+      logger.error(`[collections-voice] send-time balance read failed callSid=${this.callSid}: ${err.message}`);
+      return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
+    }
     const invoiceId = this._ctx.invoiceId;
     if (!invoiceId) return 'No sendable invoice. Offer the office number instead.';
 
@@ -1542,29 +1568,21 @@ class CollectionsConversation {
         // retry and suppress other outreach. never_contacted rows are
         // excluded from the policy's recent-contact read.
         await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: 'covered_by_credit', never_contacted: true });
-        let remaining;
-        let incomplete = null;
+        let refreshed;
         try {
-          const { loadEligibleInvoices } = require('../contact-policy');
-          remaining = await loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+          refreshed = await this._refreshBalance();
         } catch (err) {
           logger.error(`[collections-voice] balance re-read after credit cover failed callSid=${this.callSid}: ${err.message}`);
           return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be checked. Say the office will follow up — do NOT say the account is settled.';
         }
-        if (incomplete) {
-          logger.warn(`[collections-voice] balance re-read after credit cover incomplete callSid=${this.callSid}: ${incomplete}`);
+        if (refreshed.incomplete) {
+          logger.warn(`[collections-voice] balance re-read after credit cover incomplete callSid=${this.callSid}: ${refreshed.incomplete}`);
           return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be verified. Say the office will follow up — do NOT say the account is settled.';
         }
+        const remaining = refreshed.fresh;
         if (!remaining.length) {
           return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
         }
-        this._ctx.balance = {
-          total: remaining.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
-          count: remaining.length,
-          invoices: remaining,
-        };
-        this._ctx.invoiceId = linkAnchorOf(remaining)?.id || null;
-        Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, remaining));
         this.payLinkSent = false;
         return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;
       }

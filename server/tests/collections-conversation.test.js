@@ -1306,7 +1306,7 @@ describe('account-level disclosure + registers', () => {
     expect(convo._ctx.payLinkInvoiceIds).toEqual(['inv-mid']);
     // Nothing sendable ⇒ no link target, the office number instead.
     const legacyOnly = [mixed[0]];
-    loadEligibleInvoices.mockResolvedValueOnce(legacyOnly).mockResolvedValueOnce(legacyOnly);
+    loadEligibleInvoices.mockResolvedValueOnce(legacyOnly).mockResolvedValueOnce(legacyOnly).mockResolvedValueOnce(legacyOnly); // init, disclosure, send-time
     setDb();
     const { convo: c2 } = makeConvo();
     await c2._contextReady;
@@ -1317,6 +1317,58 @@ describe('account-level disclosure + registers', () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
     expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/No sendable invoice/);
+  });
+
+  test('the pay-link scope is re-proven at SEND time — a sibling that left the bundle is neither promised nor recorded', async () => {
+    process.env.GATE_VOICE_LATE_PAYMENT_PAYLINK = 'true';
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const PayCombined = require('../services/pay-combined');
+    const two = [
+      { id: 'inv-old', title: 'Lawn Care', status: 'overdue', due_date: '2026-07-29', total: '44.55', credit_applied: 0, stripe_payment_intent_id: 'pi_old' },
+      { id: 'inv-new', title: 'Pest Control', status: 'sent', due_date: '2026-08-24', total: '105.30', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two).mockResolvedValueOnce(two); // init, disclosure, send-time
+    PayCombined.combinedEligibleSiblings.mockResolvedValueOnce([{ id: 'inv-new' }]).mockResolvedValueOnce([{ id: 'inv-new' }]); // init + disclosure: full bundle
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    expect(await convo._toolGetBalance()).toMatch(/it opens the full account balance/);
+    // …then the sibling acquires a live PaymentIntent: pay-combined drops it (mock default null).
+    convo._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
+    expect(out).toMatch(/The payment link for the oldest invoice was texted/);
+    expect(out).not.toMatch(/full account balance/);
+    expect(ContactLedger.recordContact).toHaveBeenCalledWith(expect.objectContaining({ invoiceIds: ['inv-old'] }));
+    expect(convo._ctx.payLinkCoversAccount).toBe(false);
+    // An UNREADABLE set at send time sends nothing at all.
+    loadEligibleInvoices.mockResolvedValueOnce(two).mockResolvedValueOnce(two);
+    setDb();
+    const { convo: c2 } = makeConvo();
+    await c2._contextReady;
+    c2.verified = true;
+    await c2._toolGetBalance();
+    loadEligibleInvoices.mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('payer resolve failed'); return two; });
+    c2._turns.push({ role: 'caller', text: 'yes text it', at: Date.now() });
+    InvoiceService.sendViaSMS.mockClear();
+    expect(await c2._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' })).toMatch(/could not be re-checked right now — do not send the link/);
+    expect(InvoiceService.sendViaSMS).not.toHaveBeenCalled();
+    expect(c2.payLinkSent).toBe(false);
+  });
+
+  test('a legacy invoice with neither service_date nor due_date is named by its created_at (the clock\'s own fallback)', async () => {
+    const legacy = [
+      { id: 'l1', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-06-10T12:00:00Z', total: '10.00', credit_applied: 0 },
+      { id: 'l2', title: 'Pest Control', status: 'overdue', due_date: null, created_at: '2026-07-01T12:00:00Z', total: '12.00', credit_applied: 0 },
+    ];
+    loadEligibleInvoices.mockResolvedValueOnce(legacy).mockResolvedValueOnce(legacy);
+    setDb();
+    const { convo } = makeConvo();
+    await convo._contextReady;
+    convo.verified = true;
+    const out = await convo._toolGetBalance();
+    expect(out).toMatch(/Pest Control on 2026-06-10: \$10\.00/);
+    expect(out).toMatch(/Pest Control on 2026-07-01: \$12\.00/);
   });
 
   test('an INCOMPLETE disclosure-time read discloses nothing — never a partial "total", never "settled"', async () => {
@@ -1361,9 +1413,13 @@ describe('account-level disclosure + registers', () => {
     let r = await disclose(firmSet);
     expect(r.convo._ctx.register).toBe('firm');
     expect(r.out).toMatch(/No consequence is authorized on this call/);
-    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold' } });
+    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: '2026-08-01T12:00:00Z' } });
     expect(r.convo._ctx.holdActive).toBe(true);
     expect(r.out).toMatch(/AUTHORIZED consequence: future service is paused until the account is current/);
+    // A lingering reason on a RESUMED customer (service_paused_at null) is no hold.
+    r = await disclose(firmSet, { customer: { ...CUSTOMER, service_pause_reason: 'nonpayment_hold', service_paused_at: null } });
+    expect(r.convo._ctx.holdActive).toBe(false);
+    expect(r.out).toMatch(/No consequence is authorized on this call/);
     r = await disclose(finalSet);
     expect(r.convo._ctx.register).toBe('final');
     expect(r.out).toMatch(/No consequence is authorized/);
@@ -1429,8 +1485,10 @@ describe('prb-r18', () => {
     const { convo } = makeConvo();
     await verifyAndDisclose(convo);
     convo._turns.push({ role: 'caller', text: 'yes please text it', at: Date.now() });
+    const rest = [{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-08-01', total: '30.00', credit_applied: 0, status: 'overdue' }];
+    // Each attempt reads twice: the send-time re-proof, then the post-credit remainder.
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
-    loadEligibleInvoices.mockResolvedValueOnce([{ id: 'inv-2', title: 'Lawn Care', due_date: '2026-08-01', total: '30.00', credit_applied: 0, status: 'overdue' }]);
+    loadEligibleInvoices.mockResolvedValueOnce([...rest, { id: 'inv-1', title: 'Pest', due_date: '2026-07-20', total: '258.00', credit_applied: 0, status: 'overdue' }]).mockResolvedValueOnce(rest);
     const out = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
     expect(out).toMatch(/\$30\.00 across 1 invoice is still open/);
     expect(out).not.toMatch(/settled/);
@@ -1438,7 +1496,7 @@ describe('prb-r18', () => {
     expect(convo._ctx.invoiceId).toBe('inv-2'); // re-anchored
     // Nothing left ⇒ settled, latch stays closed.
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
-    loadEligibleInvoices.mockResolvedValueOnce([]);
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockResolvedValueOnce([]);
     const again = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
     expect(again).toMatch(/account is settled/);
     expect(convo.payLinkSent).toBe(true);
@@ -1449,14 +1507,14 @@ describe('prb-r18', () => {
     // An INCOMPLETE remainder read is never "settled" either.
     convo.payLinkSent = false;
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
-    loadEligibleInvoices.mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('payer resolve failed'); return []; });
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockImplementationOnce(async (id, { onIncomplete }) => { onIncomplete('payer resolve failed'); return []; });
     const partial = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
     expect(partial).toMatch(/could not be verified/);
     expect(partial).toMatch(/do NOT say the account is settled/);
     // An unreadable remainder is never "settled" either.
     convo.payLinkSent = false;
     InvoiceService.sendViaSMS.mockResolvedValueOnce({ covered_by_credit: true });
-    loadEligibleInvoices.mockRejectedValueOnce(new Error('db down'));
+    loadEligibleInvoices.mockResolvedValueOnce(rest).mockRejectedValueOnce(new Error('db down')); // send-time ok, post-credit read fails
     const unsure = await convo._toolSendPayLink({ customer_agreement_verbatim: 'yes text it' });
     expect(unsure).toMatch(/could not be checked/);
     expect(unsure).toMatch(/do NOT say the account is settled/);
