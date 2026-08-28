@@ -1690,17 +1690,16 @@ function hammingDistance(a, b) {
 // returns base64 for files < 1 MB — every hero/body WebP is far under). Null
 // when unavailable; callers then treat the image as unverifiable for the
 // near-duplicate check and regenerate rather than reuse blind.
+// Only a MISSING or unreadable asset is null (the contents API answers 404
+// with null): an operational failure (GitHub 5xx, network) is thrown, not
+// swallowed — callers turn null into a deterministic park, and a transient
+// outage must instead propagate so the runner retries the publish.
 async function committedImageBuffer(repoPath, getFile = (path) => gh.getFile(path)) {
-  try {
-    const file = await getFile(repoPath);
-    const b64 = file?.raw?.content;
-    if (!b64) return null;
-    const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
-    return buffer.length ? buffer : null;
-  } catch (err) {
-    logger.warn(`[astro-publisher] could not read committed image ${repoPath}: ${err.message}`);
-    return null;
-  }
+  const file = await getFile(repoPath);
+  const b64 = file?.raw?.content;
+  if (!b64) return null;
+  const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
+  return buffer.length ? buffer : null;
 }
 
 // Picture-level half of the body-image contract, shared with remediation:
@@ -2861,6 +2860,19 @@ async function publishRefresh(draft, brief = {}) {
   const branchSlug = slugify(filePath.replace(/^src\/content\//, '').replace(/\.mdx?$/, '').replace(/\//g, ' '));
   const branch = `content/refresh-${branchSlug}-${shortId()}`;
   await gh.createBranch(branch);
+  // Optimistic lock on the multi-file path: the tree write replaces paths
+  // unconditionally (no per-file SHA like putFile), and image generation
+  // ran BEFORE the branch was cut — a main-branch edit landing in between
+  // would be carried into the branch and silently overwritten by markdown
+  // diffed against the older read (then auto-merged). Re-read the target on
+  // the fresh branch and require the SHA the draft was diffed against; a
+  // mismatch is transient — the run retries against the new live content.
+  if (refreshImages.files.length) {
+    const onBranch = await gh.getFile(filePath, branch);
+    if (!onBranch || onBranch.sha !== existing.sha) {
+      throw new Error(`refresh target ${filePath} changed since it was read (expected ${existing.sha}, found ${onBranch?.sha || 'missing'} on ${branch}) — retry against the live content`);
+    }
+  }
   // New image bytes ride the SAME commit as the post (atomic, like the
   // autonomous lane); with nothing to add the single-file put stays.
   const fileCommit = refreshImages.files.length

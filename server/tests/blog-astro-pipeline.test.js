@@ -3969,6 +3969,46 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(sections.filter((sec) => !sec.intro).map((sec) => [sec.heading, sec.hasImage === true])).toEqual([['A', true], ['B', false]]);
   });
 
+  test('refresh lane: the multi-file commit keeps the optimistic lock — a target whose SHA moved on the fresh branch throws a transient error and nothing is committed (hook P0)', async () => {
+    const heroSrc = '/images/2025/12/shrub-diseases.webp';
+    const liveFm = validFrontmatter({ slug: '/shrub-diseases-sarasota-fl/', title: 'Shrub Diseases', canonical: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', hero_image: { src: heroSrc, alt: 'hero' }, og_image: heroSrc });
+    const liveBody = '## Hibiscus\n\nHibiscus prose.\n\n## Oleander\n\nOleander prose.\n';
+    const liveMd = fmModule.stringify(liveFm, liveBody);
+    const heroWebp = await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[4].split(',')[1], 'base64'), { width: 1200 });
+    gh.getFile.mockImplementation(async (path, ref) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      // main read → sha 'live'; the fresh branch already carries a newer edit → sha 'moved'.
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: liveMd, sha: ref ? 'moved' : 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      return null;
+    });
+    const draft = { type: 'draft', page_url: 'https://www.wavespestcontrol.com/blog/shrub-diseases-sarasota-fl/', frontmatter: {}, body: liveBody.replace('Oleander prose.', 'Oleander prose, refreshed.') };
+    let thrown;
+    try { await AstroPublisher.publishRefresh(draft, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/changed since it was read/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.putFile).not.toHaveBeenCalled();
+    expect(gh.getFile).toHaveBeenCalledWith('src/content/blog/shrub-diseases-sarasota-fl.md', expect.stringMatching(/^content\/refresh-/));
+  });
+
+  test('committedImageBuffer: a 404 (null) is a missing asset; an operational read error propagates so the runner retries instead of parking (hook P1)', async () => {
+    const { committedImageBuffer, assertDistinctPictures } = AstroPublisher._internals;
+    expect(await committedImageBuffer('public/images/blog/x/gone.webp', async () => null)).toBeNull();
+    await expect(committedImageBuffer('public/images/blog/x/a.webp', async () => { throw new Error('GitHub 503'); })).rejects.toThrow('GitHub 503');
+    await expect(assertDistinctPictures({ srcs: ['/images/blog/x/a.webp'], heroSrc: '/images/blog/x/hero.webp', getFile: async () => { throw new Error('GitHub 503'); } })).rejects.toThrow('GitHub 503');
+    // Through the publisher: a draft-authored image whose bytes fail to READ (not a 404) is not BLOG_BODY_IMAGES_FAILED.
+    gh.getFile.mockImplementation(async (path) => {
+      if (path.startsWith('public/images/blog/pest-control/drywood-frass-venice/body-')) throw new Error('GitHub 502');
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishOrUpdatePage(draft(`${article}\n\n![a](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n\n![b](/images/blog/pest-control/drywood-frass-venice/body-2.webp)\n`), { action_type: 'new_supporting_blog' }); } catch (err) { thrown = err; }
+    expect(thrown?.message).toContain('GitHub 502');
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.createBranch).not.toHaveBeenCalled();
+  });
+
   test('bodyImageRefs: an angle-bracket destination is normalized to the enclosed path (spaces allowed); validateBodyImageRefs accepts it when committed (GH r10)', async () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![detail](</images/blog/foo/body-1.webp>)\n![spaced](</images/blog/foo/body 2.webp> "t")\n![plain](/images/blog/foo/body-3.webp)');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/foo/body-1.webp', '/images/blog/foo/body 2.webp', '/images/blog/foo/body-3.webp']);
