@@ -325,12 +325,13 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  * left absent — the report shows no plan rather than one that was never
  * emailed. None of these throw — a snapshot problem must never block a send.
  */
-// The hash covers the plan AND every snapshot input that changes rendered
-// copy (runMinutes drives "10 minutes more than you run now"), so one email
-// can never authenticate a row decided from different inputs.
-function decisionHash(plan, decisionInputs = {}) {
+// The hash covers EVERYTHING persisted on the row that shapes copy or
+// premise binding — the plan, every decision input (runtime, home, county,
+// forecast, targets…) and the restriction — so one email can never
+// authenticate a row decided from different inputs or a different home.
+function decisionHash(plan, decisionInputs = {}, restriction = null) {
   return crypto.createHash('sha1')
-    .update(JSON.stringify({ plan, runMinutes: decisionInputs?.runMinutes ?? null }))
+    .update(JSON.stringify({ plan, decisionInputs: decisionInputs || {}, restriction: restriction || null }))
     .digest('hex');
 }
 
@@ -349,7 +350,7 @@ const CLAIM_LEASE_SECONDS = Math.max(1, Math.round(QUEUED_IN_FLIGHT_MS / 1000));
  */
 async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan, claimToken = null } = {}) {
   if (!customerId || !weekEnding || !plan) return { claimed: false, hash: null };
-  const hash = decisionHash(plan, decisionInputs);
+  const hash = decisionHash(plan, decisionInputs, restriction);
   const token = claimToken || crypto.randomBytes(16).toString('hex');
   try {
     const row = {
@@ -388,11 +389,13 @@ async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), 
   }
 }
 
-async function markWeekPlanSent({ customerId, weekEnding, decisionHash: hash, sentAt = new Date() } = {}) {
+async function markWeekPlanSent({ customerId, weekEnding, decisionHash: hash, claimToken = null, sentAt = new Date() } = {}) {
   if (!hash) return false;
   try {
+    // Hash AND (when the caller holds one) claim token: the row stamped is
+    // the exact decision this worker claimed and emailed.
     const n = await db('irrigation_week_plans')
-      .where({ customer_id: customerId, week_ending: weekEnding, decision_hash: hash })
+      .where({ customer_id: customerId, week_ending: weekEnding, decision_hash: hash, ...(claimToken ? { claim_token: claimToken } : {}) })
       .whereNull('sent_at')
       .update({ sent_at: sentAt, updated_at: db.fn.now() });
     return n > 0;

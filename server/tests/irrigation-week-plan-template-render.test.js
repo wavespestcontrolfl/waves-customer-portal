@@ -4,7 +4,6 @@
  * the rendered HTML for the ui-verify screenshot pass.
  */
 jest.mock('../models/db', () => { const m = jest.fn(); m.raw = jest.fn((e) => e); m.fn = { now: () => 'now()' }; return m; });
-jest.mock('../services/sendgrid-client', () => ({ send: jest.fn(), serviceGroupId: jest.fn(() => 202) }), { virtual: true });
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 

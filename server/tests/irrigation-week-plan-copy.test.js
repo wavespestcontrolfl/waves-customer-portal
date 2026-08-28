@@ -278,8 +278,11 @@ describe('snapshot lifecycle — exactness contract', () => {
     const plan = { action: 'hold', reasons: [] };
     const claim = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 }, claimToken: 'tok-1' });
     expect(claim.claimed).toBe(true);
-    expect(claim.hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, runMinutes: 20 })).digest('hex'));
-    expect(_private.decisionHash(plan, { runMinutes: 25 })).not.toBe(claim.hash);
+    // Hash covers plan + ALL decision inputs + restriction.
+    expect(claim.hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, decisionInputs: { runMinutes: 20 }, restriction: POLICY })).digest('hex'));
+    expect(_private.decisionHash(plan, { runMinutes: 20, home: { addressLine1: 'elsewhere' } }, POLICY)).not.toBe(claim.hash);
+    expect(_private.decisionHash(plan, { runMinutes: 20 }, { ...POLICY, maxDaysPerWeek: 2 })).not.toBe(claim.hash);
+    expect(_private.decisionHash(plan, { runMinutes: 25 }, POLICY)).not.toBe(claim.hash);
     expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
     expect(calls.merged.decision_hash).toBe(claim.hash);
     expect(calls.merged.claim_token).toBe('tok-1');
@@ -300,6 +303,9 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(false);
     expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash })).toBe(true);
     expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash });
+    // With a claim token the stamp is scoped to the claimant's own row too.
+    expect(await markWeekPlanSent({ customerId: 'c1', weekEnding: '2026-08-23', decisionHash: claim.hash, claimToken: 'tok-1' })).toBe(true);
+    expect(calls.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-23', decision_hash: claim.hash, claim_token: 'tok-1' });
     expect(calls.whereNull).toBe('sent_at');
     expect(calls.update.sent_at).toBeInstanceOf(Date);
     // Discard is scoped to the claimant's own lease — no token, no delete.

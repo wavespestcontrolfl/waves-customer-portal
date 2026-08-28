@@ -1230,7 +1230,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
           // sent+deduped+providerAttempted). Pre-send write may have failed
           // transiently — one more try, then stamp by this decision's hash.
           const hash = snapshotArgs.decisionHash || (await persistWeekPlan(snapshotArgs)).hash;
-          if (hash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash });
+          if (hash) await markWeekPlanSent({ customerId: customer.id, weekEnding, decisionHash: hash, claimToken: snapshotArgs.claimToken });
         } else if (result.deduped) {
           // Deduped without a provider attempt: the durable record decides,
           // and only the row it names is stamped.
