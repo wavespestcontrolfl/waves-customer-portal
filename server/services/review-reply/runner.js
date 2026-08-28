@@ -1190,11 +1190,20 @@ function manualReplyCloseFields(conn = db) {
   };
 }
 
+// A reconciliation park (google_uncertain / persist_failed) may have OUR
+// reply live on Google; the next sync recognises it only through that parked
+// state. Dismiss must refuse such rows (codex r70) — the dismiss routes add
+// this predicate — and the cancel CASE below never rewrites them either.
+const RECONCILE_PARK_SQL = "(auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed'))";
+function whereNoReconcilePark(qb) {
+  qb.whereRaw(`NOT ${RECONCILE_PARK_SQL}`);
+}
+
 function dismissCancelFields(conn = db) {
-  const pending = "('queued','drafted','parked','failed')";
+  const pending = `(auto_reply_status IN ('queued','drafted','parked','failed') AND NOT ${RECONCILE_PARK_SQL})`;
   return {
-    auto_reply_status: conn.raw(`CASE WHEN auto_reply_status IN ${pending} THEN 'skipped' ELSE auto_reply_status END`),
-    auto_reply_reason: conn.raw(`CASE WHEN auto_reply_status IN ${pending} THEN 'dismissed' ELSE auto_reply_reason END`),
+    auto_reply_status: conn.raw(`CASE WHEN ${pending} THEN 'skipped' ELSE auto_reply_status END`),
+    auto_reply_reason: conn.raw(`CASE WHEN ${pending} THEN 'dismissed' ELSE auto_reply_reason END`),
     auto_reply_claimed_until: null,
   };
 }
@@ -1488,6 +1497,7 @@ module.exports = {
   postNow,
   skipAutoReply,
   dismissCancelFields,
+  whereNoReconcilePark,
   manualReplyCloseFields,
   whereNoLivePublishClaim,
   requeueFieldsOnIdentity,

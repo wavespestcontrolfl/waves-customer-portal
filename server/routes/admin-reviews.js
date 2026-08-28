@@ -504,9 +504,12 @@ router.post('/:id/dismiss', async (req, res, next) => {
       .whereNull('missing_since')
       // Never under an in-flight automatic publish (mirrors Skip).
       .modify(AutoReply.whereNoLivePublishClaim)
+      // Never a reconciliation park: our reply may be live on Google and
+      // only that parked state lets the next sync claim it (codex r70).
+      .modify(AutoReply.whereNoReconcilePark)
       .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     if ((Array.isArray(updated) ? updated.length : updated) === 0) {
-      return res.status(409).json({ error: 'This review cannot be dismissed right now — it was removed from Google (retained as evidence) or a reply is being posted this moment; try again in a minute.' });
+      return res.status(409).json({ error: 'This review cannot be dismissed right now — it was removed from Google (retained as evidence), a reply is being posted this moment, or a Google result is still being reconciled; try again after the next sync.' });
     }
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -524,6 +527,8 @@ router.post('/dismiss-batch', async (req, res, next) => {
       .whereNull('missing_since')
       // Rows under an in-flight automatic publish are skipped, like stamped ones.
       .modify(AutoReply.whereNoLivePublishClaim)
+      // …and so are reconciliation parks (a PUT may be live; codex r70).
+      .modify(AutoReply.whereNoReconcilePark)
       .update({ dismissed: true, ...AutoReply.dismissCancelFields(db) });
     res.json({ success: true, dismissed: Array.isArray(dismissed) ? dismissed.length : dismissed });
   } catch (err) { next(err); }

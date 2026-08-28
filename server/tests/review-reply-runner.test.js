@@ -402,6 +402,11 @@ describe('processDueAutoReplies — state machine', () => {
     expect(f.auto_reply_claimed_until).toBeNull();
     expect(f.auto_reply_status.sql).toContain("THEN 'skipped'");
     expect(f.auto_reply_reason.sql).toContain("THEN 'dismissed'");
+    // codex r70: reconciliation parks are never rewritten by a dismiss.
+    expect(f.auto_reply_status.sql).toContain("NOT (auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed'))");
+    const qb = { whereRaw: jest.fn() };
+    Runner.whereNoReconcilePark(qb);
+    expect(qb.whereRaw).toHaveBeenCalledWith("NOT (auto_reply_status = 'parked' AND auto_reply_reason IN ('google_uncertain','persist_failed'))");
   });
 
   test('verifier reject → parked, no draft text offered, action bell', async () => {

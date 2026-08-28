@@ -148,6 +148,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, your pets were none the wiser after the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r63: "didn't miss a beat", fractional re-entry intervals, invented pest names.
     expect(verify(good("Hello there, your pets didn't miss a beat after the pest treatment."), gpets)).toBe('banned_phrase');
+    // codex r70: lost-momentum idioms + odd-suffixed durations.
+    expect(verify(good('Hello there, your pets never lost momentum after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids lost no steam after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after twenty-odd minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad access resumed after 30-some minutes following the pest treatment.'), gpets)).toBe('banned_phrase');
     // codex r69: outcome → duration → treatment ordering + fabricated conversational contact.
     expect(verify(good('Hello there, we are glad access resumed a half-hour after the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad everyone was back inside forty minutes after the pest treatment.'), gpets)).toBe('banned_phrase');
