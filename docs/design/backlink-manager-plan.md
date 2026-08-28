@@ -536,12 +536,18 @@ here, and how?"** and write one or more `seo_link_acquisition_paths` rows.
   `*_cost_cents` field** — the model never emits an amount: it returns the quoted price and
   renewal text verbatim (`price_text`, `renewal_price_text`, each with the page URL it was read
   from) and the investigator derives `estimated_cost_cents` / `renewal_cost_cents`
-  deterministically: a **currency gate first** — the quote must carry an explicit USD marker
-  (`$` with no non-US prefix, `US$`, `USD`; `€`, `£`, `CAD`, `A$`, `C$`, `MXN`, any other ISO
-  code or symbol ⇒ `currency='foreign'`, cents null; NO marker ⇒ `currency='unknown'`, cents null) — then the shipped
+  deterministically: a **currency gate first** — `currency='USD'` requires an AUTHORITATIVE
+  USD code: `USD`/`US$` in the quote itself, OR the checkout/processor metadata the
+  investigator observed (`priceCurrency`/`currency` in the offer JSON-LD or the processor's
+  session/`currency` field, recorded in `investigation.currency_evidence`); a **bare `$` is
+  NOT proof of USD** (Canadian, Australian and other merchants show local prices with the same
+  symbol) and yields `currency='unknown'` — price-entry card, never automation; `€`, `£`,
+  `CAD`, `A$`, `C$`, `MXN`, any other ISO code or non-USD symbol ⇒ `currency='foreign'`, cents
+  null; no marker ⇒ `currency='unknown'`, cents null. The same authoritative USD check is
+  repeated against the LIVE checkout before reservation and again before submit (§6.3) — then the shipped
   `price-scan/extract.parsePriceText()` (strict: a range, a percentage, a promo badge or an
   empty string parses to null; it does not validate currency, which is why the gate precedes
-  it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown'))
+  it) → `Math.round(n * 100)` integer cents. `currency` (NOT NULL, CHECK IN ('USD','unknown','foreign') — the ONE enum, identical in the migration, the investigator JSON schema and the tests)
   is a column on the path, copied into every approval `terms_snapshot` and stamped on every
   purchase row; §6.3's validity step returns INVALID for any `payment_required` path whose
   `currency ≠ 'USD'` (no conversion is ever performed — a non-USD listing is an owner
@@ -688,8 +694,13 @@ if path.acquisition_type not in OUTREACH_TYPES:
         else (AUTO_ACCOUNT if auto_account_creation === true else OWNER_ACCOUNT) if path.account_required
         else (AUTO_FREE if auto_free_acquisition === true else OWNER_FREE)
 
-# 2b. PAYMENT dimension — for EVERY paid path, independent of 2a/2c
-if path.payment_required:
+# 2b. PAYMENT dimension — for EVERY paid path, independent of 2a/2c.
+#     CLOSED to step 1's result: if step 1 already assigned the payment dimension (OWNER_INPUT_REQUIRED /
+#     OWNER_MANUAL_PAYMENT for a missing, non-positive, unsafe or non-USD amount) this block is SKIPPED —
+#     it never re-assigns. The automatic branch is additionally guarded on its own inputs, so even a
+#     bug in the skip cannot promote a null amount (`null <= cap` is true in JS): 
+if path.payment_required and payment is unassigned:
+    assert Number.isSafeInteger(amount_cents) and amount_cents > 0 and path.currency === 'USD'  # else → OWNER_MANUAL_PAYMENT, never AUTO
     payment =
         OWNER_MANUAL_PAYMENT if not valid(path.merchant_binding)                                            # no resolvable recipient identity: automated purchase flow closed
         else AUTO_PAID_WITHIN_POLICY if configured(max_auto_purchase_cents) and configured(monthly_paid_budget_cents)
