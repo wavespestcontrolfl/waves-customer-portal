@@ -24,6 +24,7 @@
  * finds the same rows; the note is appended once per distinct migration).
  */
 const TAG = '[20260828000001]';
+const DEDUPE_KEY = 'pest-renewal-price-unverified-20260828';
 const NOTE = ' — RENEWAL PRICE UNVERIFIED (2026-08-28 migration): this self-booked pest plan has a repriced first visit and renews at that price until the per-visit amount is set via Edit appointment → apply to following';
 
 exports.up = async function up(knex) {
@@ -60,7 +61,7 @@ exports.up = async function up(knex) {
         body: `${unproven.length} self-booked pest plan(s) have a repriced first visit and renew at that price until reconciled. Open each series and set the per-visit amount via Edit appointment → apply to following.`,
         icon: null,
         link: '/admin/schedule',
-        metadata: JSON.stringify({ dedupeKey: 'pest-renewal-price-unverified-20260828', scheduled_service_ids: ids, customer_ids: [...new Set(unproven.map((r) => String(r.customer_id)))] }),
+        metadata: JSON.stringify({ dedupeKey: DEDUPE_KEY, scheduled_service_ids: ids, customer_ids: [...new Set(unproven.map((r) => String(r.customer_id)))] }),
       });
     }
   }
@@ -72,4 +73,11 @@ exports.down = async function down(knex) {
   await knex('scheduled_services')
     .whereRaw('notes LIKE ?', [`%${NOTE}%`])
     .update({ notes: knex.raw('REPLACE(notes, ?, ?)', [NOTE, '']) });
+  // The bell goes with the notes, so a rollback + re-apply never leaves two
+  // (pre-push P1).
+  if (await knex.schema.hasTable('notifications')) {
+    await knex('notifications')
+      .whereRaw("metadata ->> 'dedupeKey' = ?", [DEDUPE_KEY])
+      .del();
+  }
 };

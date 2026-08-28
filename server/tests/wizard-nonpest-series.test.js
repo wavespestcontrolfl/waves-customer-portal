@@ -1258,7 +1258,10 @@ describe('resolveSeriesExtensionPriceTemplate — anchored marker over a structu
     expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'anchored_split_per_visit'\)/);
     expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'estimated_price'\)/);
     expect(m).toMatch(/NOT jsonb_exists\(p\.recurring_template_overrides, 'primary_line_price'\)/);
-    expect(m).toMatch(/dedupeKey: 'pest-renewal-price-unverified-20260828'/);
+    expect(m).toMatch(/const DEDUPE_KEY = 'pest-renewal-price-unverified-20260828';/);
+    expect(m).toMatch(/metadata: JSON\.stringify\(\{ dedupeKey: DEDUPE_KEY,/);
+    // down removes the bell with the notes (pre-push P1: no duplicate on re-apply).
+    expect(m).toMatch(/whereRaw\("metadata ->> 'dedupeKey' = \?", \[DEDUPE_KEY\]\)\n\s*\.del\(\);/);
     expect(m).not.toMatch(/anchored_split_per_visit', /);
     expect(m).not.toMatch(/UPDATE scheduled_services t/);
     expect(m).not.toMatch(/jsonb_build_object/);
