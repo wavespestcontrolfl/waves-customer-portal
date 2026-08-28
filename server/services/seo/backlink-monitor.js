@@ -278,6 +278,23 @@ class BacklinkMonitor {
         .whereNotIn('id', lostLinks.map(l => l.id).concat(['00000000-0000-0000-0000-000000000000']))
         .select('id', 'source_url', 'target_url', 'source_domain', 'domain_rating', 'anchor_text', 'severity', 'link_type', 'lost_reason');
       if (owed.length) logger.info(`Backlink scan: ${owed.length} earlier verified loss(es) still owed a recovery evaluation`);
+      // The 90-day window is a bound on outreach relevance, not a silent drop:
+      // an unevaluated loss that ages past it (queue kept erroring, or deferred
+      // behind a sibling link that stayed up) gets an explicit TERMINAL verdict
+      // — stamped + ledgered as aged out — so nothing sits owed forever.
+      const aged = await db('seo_backlinks')
+        .where('status', 'lost')
+        .whereNull('recovery_queued_at')
+        .where((qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo'))
+        .whereRaw("lost_at <= now() - interval '90 days'")
+        .select('id');
+      if (aged.length) {
+        await db.transaction(async (trx) => {
+          await trx('seo_backlinks').whereIn('id', aged.map(a => a.id)).update({ recovery_queued_at: now });
+          for (const a of aged) await this.recordEvent(a.id, 'recovery_aged_out', { after_days: 90 }, trx);
+        });
+        logger.info(`Backlink scan: ${aged.length} unevaluated loss(es) older than 90 days aged out of recovery (stamped)`);
+      }
       const rollup = await this.domainLevelLosses(lostLinks.concat(owed));
       lostDomains = rollup.filter(d => !d.stillLinking);
       // Stamping (recovery_queued_at) is a DOMAIN-level terminal verdict:

@@ -47,12 +47,15 @@ const activeRow = (over = {}) => ({
   miss_count: 0, is_dofollow: true, severity: 'clean', link_type: null, ...over,
 });
 
-function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false, owed = [] } = {}) {
+function scanWith({ items = [], total = items.length, active = [], existingByUrl = {}, stillActiveDomain = false, owed = [], aged = [] } = {}) {
   dataforseo.getBacklinks.mockResolvedValue({ tasks: [{ result: [{ items, total_count: total }] }] });
   const events = [], updates = [], increments = [], inserts = [], prospectOps = [];
   makeDb({
     seo_backlinks: (op, st) => {
-      if (op === 'select') return st.nulls.includes('recovery_queued_at') ? owed : active;
+      if (op === 'select') {
+        if (st.raws.some(r => /lost_at <= now\(\)/.test(r[0]))) return aged; // aged-out sweep
+        return st.nulls.includes('recovery_queued_at') ? owed : active;
+      }
       if (op === 'first') {
         // per-link upsert lookup: CANONICAL source (comparable SQL) + canonical target
         const srcRaw = st.raws.find(r => /source_url/.test(r[0]) && /split_part/.test(r[0]));
@@ -170,6 +173,21 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(recovery).toHaveBeenCalledWith([expect.objectContaining({ domain: 'blog.example', lost_reason: 'link_removed', domain_rating: 45, alertable: true })]);
     // recovery reported a terminal outcome → the row is stamped so it is not swept again
     expect(updates.find(u => u.patch.recovery_queued_at)).toBeUndefined(); // stamp goes through whereIn, captured below
+  });
+
+  test('an unevaluated verified loss older than 90 days is aged out: stamped terminal + recovery_aged_out ledger row, in one transaction', async () => {
+    const log = [];
+    const { events } = scanWith({ items: [], total: 0, active: [], aged: [{ id: 'old-a' }, { id: 'old-b' }] });
+    const origImpl = db.getMockImplementation();
+    db.mockImplementation((table) => { const b = origImpl(table); const u = b.update; b.update = jest.fn((p) => { log.push({ table, ins: b.whereIn.mock.calls.map(c => c[1]).flat(), patch: p }); return u(p); }); return b; });
+    await BacklinkMonitor.scan({ exclusive: passthrough, crawlFn: jest.fn(), now: new Date('2026-08-30T07:30:00Z') });
+    const stamp = log.find(l => l.patch.recovery_queued_at);
+    expect(stamp.ins).toEqual(['old-a', 'old-b']);
+    expect(events).toEqual([
+      expect.objectContaining({ backlink_id: 'old-a', event_type: 'recovery_aged_out', detail: JSON.stringify({ after_days: 90 }) }),
+      expect.objectContaining({ backlink_id: 'old-b', event_type: 'recovery_aged_out', detail: JSON.stringify({ after_days: 90 }) }),
+    ]);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 
   test('recovery stamping: terminal outcomes stamp recovery_queued_at; errors AND deferred (stale live board row) are left for the next scan', async () => {
@@ -362,8 +380,9 @@ describe('BacklinkMonitor verified loss detection', () => {
     expect(events).toEqual([expect.objectContaining({ backlink_id: 'bl-9', event_type: 'recovered' })]);
     // the un-pitched lost_recovery prospect for this link is resolved, not left for the drafter
     const resolve = prospectOps.find(o => o.op === 'update');
-    expect(resolve.wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
-    expect(resolve.raws[0][0]).toMatch(/lost_recovery/);
+    expect(resolve.wheres[0][0]).toEqual({ status: 'prospect' });
+    expect(resolve.raws[0]).toEqual([expect.stringMatching(/target_domain/), ['blog.example']]);
+    expect(resolve.raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/);
     expect(resolve.payload).toEqual(expect.objectContaining({ status: 'live', live_url: 'https://blog.example/post', backlink_id: 'bl-9', outreach_status: 'none' }));
     // prospect closure and the lost→active flip share ONE transaction
     expect(db.transaction).toHaveBeenCalledTimes(1);
@@ -489,7 +508,7 @@ describe('lost-link recovery', () => {
   test('skips in-flight / rejected board rows and domains the scorer classifies as signup-lane', async () => {
     const inserts = [];
     const rows = { 'dup.example': { id: 'p', status: 'prospect' }, 'no.example': { id: 'r', status: 'rejected' } };
-    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return rows[st.wheres[0][0].target_domain] || null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return rows[st.raws.find(r => /target_domain/.test(r[0]))?.[1]?.[0]] || null; if (op === 'insert') { inserts.push(st.payload); return [1]; } } });
     const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'directory', gate: { ok: true, lane: 'signup' } }]) };
     const r = await recovery.queueLostDomains([{ ...loss, domain: 'dup.example' }, { ...loss, domain: 'no.example' }, { ...loss, domain: 'dir.example' }], { scorer });
     expect(r.queued).toBe(0);
@@ -533,12 +552,29 @@ describe('lost-link recovery', () => {
   });
 
   test('a throwing row does not abort the rest of the batch', async () => {
-    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') { if (st.wheres[0][0].target_domain === 'boom.example') throw new Error('db down'); return null; } if (op === 'insert') return [1]; } });
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') { if (st.raws.find(r => /target_domain/.test(r[0]))?.[1]?.[0] === 'boom.example') throw new Error('db down'); return null; } if (op === 'insert') return [1]; } });
     const scorer = { scoreCandidates: jest.fn(async () => [{ intent_class: 'resource', gate: { ok: true, lane: 'outreach' } }]) };
     const r = await recovery.queueLostDomains([{ ...loss, domain: 'boom.example' }, { ...loss, domain: 'fine.example' }], { scorer });
     expect(r.queued).toBe(1);
     expect(r.reasons).toEqual([{ domain: 'boom.example', reason: 'error: db down' }]);
     expect(r.results.map(x => x.outcome)).toEqual(['error', 'queued']);
+  });
+
+  test('board lookups match target_domain by canonical host: www./URL/mixed-case spellings compile to one binding and one expression', () => {
+    const { TARGET_DOMAIN_CANONICAL_SQL } = recovery._test;
+    const knex = require('knex')({ client: 'pg' });
+    const c = knex('seo_link_prospects').whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, ['blog.example']).toSQL().toNative();
+    expect(c.bindings).toEqual(['blog.example']);
+    expect(c.sql).toMatch(/lower\(btrim\(target_domain\)\)/);
+    expect(c.sql).toMatch(/\^\(www\|mail\)\\\./);
+  });
+
+  test('every board lookup in queueOne goes through the canonical target_domain expression (in-flight probe + exact-page)', async () => {
+    const raws = [];
+    makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') raws.push(st.raws.find(r => /target_domain/.test(r[0]))); return null; } });
+    await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn(async () => [null]) } }).catch(() => {});
+    expect(raws.length).toBeGreaterThanOrEqual(2);
+    for (const r of raws) expect(r).toEqual([expect.stringMatching(/split_part.*target_domain/), ['blog.example']]);
   });
 
   test('a domain with an in-flight row for ANOTHER Waves page is not queued again (no parallel outreach to one inbox)', async () => {
@@ -582,7 +618,8 @@ describe('lost-link recovery', () => {
     // sibling target page (domainLevelLosses queues ONE representative per domain).
     const r = await recovery.resolveRecoveredLink({ id: 'bl-1', source_url: 'https://blog.example/post', source_domain: 'www.blog.example', target_url: 'https://wavespestcontrol.com/x/?u=1' }, new Date('2026-09-06T08:00:00Z'));
     expect(r).toEqual({ resolved: 2 });
-    expect(ops[0].wheres[0][0]).toEqual({ target_domain: 'blog.example', status: 'prospect' });
+    expect(ops[0].wheres[0][0]).toEqual({ status: 'prospect' });
+    expect(ops[0].raws[0]).toEqual([expect.stringMatching(/^split_part\(split_part\(.*lower\(btrim\(target_domain\)\).*'\/', 1\), ':', 1\) = \?$/), ['blog.example']]); // canonical host, never the raw spelling
     expect(ops[0].ins).toEqual([]); // no target_page predicate — domain scope, same as the queue side
     expect(ops[0].raws.map(r => r[0]).join(' ')).toMatch(/lost_recovery/); // still only recovery rows, never a cold prospect
     // only unsent rows: none/drafted and outreach_sent_at IS NULL — sending/sent are left for reconciliation

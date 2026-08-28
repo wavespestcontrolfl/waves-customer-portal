@@ -33,6 +33,12 @@ const STALE_WHEN_DOMAIN_DARK = new Set(['live', 'indexed']);
 function normalizeDomain(d) {
   return String(d || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/^(www|mail)\./, '').replace(/[/:].*$/, '');
 }
+// SQL twin of normalizeDomain() for the board's target_domain column, which the
+// admin route stores verbatim (www.example.com, a full URL, mixed case): every
+// board lookup here compares the canonical host, never the raw spelling. No
+// bare '?' (knex binding slot).
+const TARGET_DOMAIN_CANONICAL_SQL = "split_part(split_part(regexp_replace(regexp_replace(regexp_replace(lower(btrim(target_domain)), '^https://', ''), '^http://', ''), '^(www|mail)\\.', ''), '/', 1), ':', 1)";
+const byDomain = (q, domain) => q.whereRaw(`${TARGET_DOMAIN_CANONICAL_SQL} = ?`, [domain]);
 
 // Canonical board form of a Waves target page. The board's unique key is
 // textual (target_domain, target_page) and existing rows use both
@@ -104,7 +110,7 @@ async function queueOne(loss, out, scoreMod) {
     // domain scope when any link returns): if the domain already has a row in
     // flight for ANY Waves page, a second claimable prospect would start parallel
     // outreach to the same inbox. Suppress; the existing row is the conversation.
-    const inFlight = await db('seo_link_prospects').where({ target_domain: domain })
+    const inFlight = await byDomain(db('seo_link_prospects'), domain)
       .whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
     if (inFlight && IN_FLIGHT_STATUSES.has(inFlight.status)) {
       const where = inFlight.target_page ? ` for ${targetPathOf(inFlight.target_page)}` : '';
@@ -127,7 +133,7 @@ async function queueOne(loss, out, scoreMod) {
     // it to 'lost' when the inbound link disappears — that EXACT-page row is
     // REOPENED as a fresh prospect (the worker only claims status='prospect').
     // Rows rejected by the owner are left alone.
-    const exists = await db('seo_link_prospects').where({ target_domain: domain }).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
+    const exists = await byDomain(db('seo_link_prospects'), domain).whereIn('target_page', targetPageVariants(loss.target_url)).first('id', 'status', 'notes', 'link_type');
     if (exists && exists.status === 'lost' && NON_OUTREACH_TYPES.has(exists.link_type)) {
       // A lost signup-lane placement (citation/directory/social) is not an
       // outreach target; reopening it would hand it to the citation runner.
@@ -290,8 +296,8 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   // operator's reconciliation, not ours.
   // `trx`: the monitor joins this to the backlink's lost→active flip so the
   // two commit (or roll back) together.
-  const n = await (trx || db)('seo_link_prospects')
-    .where({ target_domain: domain, status: 'prospect' })
+  const n = await byDomain((trx || db)('seo_link_prospects'), domain)
+    .where({ status: 'prospect' })
     .whereRaw("(source = 'lost_recovery' OR COALESCE(quality_signals->>'lost_recovery', 'false') = 'true')")
     .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
     .whereNull('outreach_sent_at')
@@ -311,4 +317,4 @@ async function resolveRecoveredLink(backlink, now = new Date(), { trx } = {}) {
   return { resolved: n || 0 };
 }
 
-module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf, targetPageVariants } };
+module.exports = { queueLostDomains, resolveRecoveredLink, _test: { normalizeDomain, targetPageOf, targetPageVariants, TARGET_DOMAIN_CANONICAL_SQL } };
