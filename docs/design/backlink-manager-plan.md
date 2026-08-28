@@ -611,6 +611,7 @@ if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shi
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
+if path.legal_attestation and not validLegalTermsHash(path.legal_terms_hash) → INVALID   # 64 lowercase hex chars; an attestation with no bound agreement text is never actionable (§3.2)
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
 #     is the owner's explicit "Acquire anyway" click, which does NOT stamp an authority: it
@@ -674,7 +675,8 @@ return { execution | communication, payment? }   # the complete set; a paid memb
 ```
 The function is pure and unit-tested with a table of (path, domain, policy) → level cases,
 including one per policy floor proving DENY beats every AUTO_* and OWNER_* branch, one per
-required signal proving null / NaN / undefined → INVALID, one proving a waived OWNER_HUMAN_STEP
+required signal proving null / NaN / undefined → INVALID, one proving `legal_attestation=true`
+with a null/malformed `legal_terms_hash` → INVALID, one proving a waived OWNER_HUMAN_STEP
 dimension is still recorded as OWNER_HUMAN_STEP (unleasable), and one proving a floor waiver is
 refused on INVALID (an unenriched or uninvestigated domain, or invalid money, can never be
 acted on by anyone until enrichment and investigation have run).
