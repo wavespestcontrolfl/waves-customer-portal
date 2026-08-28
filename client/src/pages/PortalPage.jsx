@@ -99,7 +99,8 @@ async function shareLink(rawUrl, title) {
   try {
     if (isNativeApp() && canShareNative()) { await shareUrlNative(url, title); return; }
     if (typeof navigator !== 'undefined' && navigator.share) { await navigator.share({ title, url }); return; }
-    await navigator.clipboard?.writeText(url);
+    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable');
+    await navigator.clipboard.writeText(url);
     showCustomerAlert('Link copied.');
   } catch (err) {
     if (err?.name !== 'AbortError') showCustomerAlert('Could not share this link. Please try again.');
@@ -5851,7 +5852,10 @@ function BillingTab({ customer, refreshCustomer }) {
     setBillingPrefsStatus(null);
     api.updateNotificationPrefs({
       billingEmail: billingEmail || '',
-      paymentConfirmationSms: true,
+      // paymentConfirmationSms is no longer sent: the on/off switch is gone
+      // (owner 08-28 — receipts are for everyone), and a blanket `true` on
+      // every unrelated save would silently flip a stored opt-out (pre-push
+      // P1). The stored value stands until the server side retires the flag.
       // No email on file (or email messages opted out portal-wide) → the
       // dropdowns render locked to Text; persist what is shown so an
       // SMS-suppressing 'email' choice can't linger with no deliverable
