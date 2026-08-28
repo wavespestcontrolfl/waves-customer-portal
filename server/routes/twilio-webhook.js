@@ -825,11 +825,15 @@ router.post('/sms', async (req, res) => {
       direction: 'inbound', from_phone: From, to_phone: To,
       message_body: Body, twilio_sid: MessageSid, status: 'received',
       message_type: messageType,
+      // Courtesy closers are read on arrival in the legacy log too, so the
+      // sms_log-backed unread counts agree with the unified messages row.
+      ...(courtesyOnly ? { is_read: true } : {}),
       metadata: JSON.stringify({
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
         media: inboundMedia,
+        ...(courtesyOnly ? { courtesyOnly: true } : {}),
       }),
     }).returning(['id', 'created_at']);
     // The inbound message is now durably recorded — releasing the claim on a
