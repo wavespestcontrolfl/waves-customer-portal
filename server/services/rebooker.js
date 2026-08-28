@@ -243,10 +243,15 @@ function priorStillCurrent(prior, service) {
 }
 // A derived-key match whose anchor has since changed is a STALE retry: it
 // must never fall through and apply its old window as a single edit.
-async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null, expect = null) {
+// `observed` (optional out-param): receives the newest committed row the
+// lookup saw (or null) BEFORE any decision, so a later transactional
+// conflict can tell a row committed concurrently with this attempt from
+// the row this attempt already judged (see findConcurrentSeriesMoveWinner).
+async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }, service = null, newDate = null, expect = null, observed = null) {
   const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: key, status: 'committed' });
   if (derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
   const prior = await q.orderBy('created_at', 'desc').first();
+  if (observed) observed.row = prior || null;
   if (!prior) return null;
   // A client key bound to a DIFFERENT request (other target date, other
   // window, a clear) is a caller bug, never a silent replay of the earlier
@@ -278,6 +283,29 @@ async function findPriorSeriesMove(conn, serviceId, { key, derived, requestKey }
     });
   }
   return prior;
+}
+
+// After a transactional conflict (CAS 409 / unique 23505): the row this
+// attempt may replay is ONLY the concurrent winner of the SAME request —
+// committed after the row the pre-transaction lookup already judged (an
+// older row under this key is that judged row: superseded, or the
+// A→B row a legitimate C→B return move deliberately walked past), bound
+// to this exact request, and with the anchor still sitting where it left
+// it (a fresh read — the pre-move snapshot is stale by definition here).
+// Anything else means the caller's move did NOT happen: the real error
+// propagates instead of a success report for a slot the anchor never
+// reached.
+async function findConcurrentSeriesMoveWinner(conn, serviceId, opKey, observedPrior) {
+  const q = conn('series_moves').where({ anchor_service_id: serviceId, operation_key: opKey.key, status: 'committed' });
+  if (opKey.derived) q.where('created_at', '>', new Date(Date.now() - SERIES_RETRY_HORIZON_MS));
+  if (observedPrior?.created_at) q.where('created_at', '>', observedPrior.created_at);
+  const winner = await q.orderBy('created_at', 'desc').first();
+  if (!winner) return null;
+  if (observedPrior && String(winner.id) === String(observedPrior.id)) return null;
+  if (opKey.requestKey && winner.request_key && winner.request_key !== opKey.requestKey) return null;
+  const fresh = await conn('scheduled_services').where({ id: serviceId }).first('id', 'scheduled_date', 'window_start', 'window_end');
+  if (!fresh || !priorStillCurrent(winner, fresh)) return null;
+  return winner;
 }
 
 // Idempotent post-commit cleanup a replay of a committed move must still
@@ -1317,8 +1345,9 @@ class SmartRebooker {
     // (the anchor then sits elsewhere) is a different action.
     const opKey = seriesOperationKey(serviceId, newDate, newWindow, options);
     const operationKey = opKey.key;
+    const observedPrior = { row: null };
     {
-      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expectAnchor || null);
+      const prior = await findPriorSeriesMove(db, serviceId, opKey, service, newDate, options.expectAnchor || null, observedPrior);
       if (prior) {
         await replaySeriesMoveCleanup(prior);
         return replaySeriesMoveResult(prior, newDate);
@@ -2031,14 +2060,17 @@ class SmartRebooker {
     }).catch(async (err) => {
       // Two concurrent identical operations: the loser usually fails an
       // appointment CAS (SLOT_TAKEN) before it ever reaches the unique
-      // series_moves insert (23505). On ANY transactional conflict, look for
-      // the winner's committed row under this key and replay it — the
-      // caller's action did happen — instead of reporting a failure for a
-      // move that committed. The still-current check is skipped on purpose:
-      // this pass's pre-move snapshot is stale by definition here.
+      // series_moves insert (23505). On a transactional conflict, replay
+      // ONLY a row proven to be this attempt's concurrent winner (committed
+      // after the row the pre-trx lookup judged, same request, anchor now
+      // where it left it) — the caller's action did happen. A slot conflict
+      // or concurrent edit with no such winner is a real failure: an older
+      // row under this key (the A→B row behind a C→B return move) must
+      // never be reported as this attempt's success while the anchor sits
+      // elsewhere.
       if (err?.code === '23505' || err?.statusCode === 409) {
-        const prior = await findPriorSeriesMove(db, serviceId, opKey).catch(() => null);
-        if (prior) return { replayedFrom: prior };
+        const winner = await findConcurrentSeriesMoveWinner(db, serviceId, opKey, observedPrior.row).catch(() => null);
+        if (winner) return { replayedFrom: winner };
       }
       await recordFailedSeriesMove(failedMoveFields, err);
       throw err;

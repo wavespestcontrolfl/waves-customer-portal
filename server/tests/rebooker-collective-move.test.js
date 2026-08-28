@@ -101,7 +101,7 @@ function anchorRow(overrides = {}) {
 
 // Series harness (mirrors rebooker-live-reschedule-override): sibling SELECT,
 // same-series clash probe, then one UPDATE chain per sibling in order.
-function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null } = {}) {
+function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, updateResults = null, freshAnchor = null } = {}) {
   const anchorLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const parentLookup = chain({ first: jest.fn().mockResolvedValue(anchor) });
   const siblingsQuery = chain({ select: jest.fn().mockResolvedValue(siblings) });
@@ -126,6 +126,8 @@ function wireSeriesMocks(siblings, { anchor = anchorRow(), priorMove = null, upd
   db.transaction = jest.fn(async (callback) => callback(trx));
 
   const dbQueries = [anchorLookup, parentLookup];
+  // The catch-side winner fence re-reads the anchor after a conflict.
+  if (freshAnchor) dbQueries.push(chain({ first: jest.fn().mockResolvedValue(freshAnchor) }));
   const escalationCount = chain({ first: jest.fn().mockResolvedValue({ count: '0' }) });
   const priorLookup = chain({ first: jest.fn().mockResolvedValue(priorMove) });
   // Non-replay tests: the (always-run) prior lookup finds nothing.
@@ -591,12 +593,44 @@ describe('rescheduleSeries — one recorded operation', () => {
   });
 
   test('the LOSER of two concurrent identical operations (CAS 409 before the unique insert) replays the winner instead of failing', async () => {
-    const winner = { id: 'sm-winner', new_date: TARGET, result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [] } };
-    // Prior lookup: nothing BEFORE the trx, the winner's row AFTER the CAS miss.
-    const { seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], { updateResults: [[{ updated_at: 's' }], []] });
+    const winner = {
+      id: 'sm-winner', new_date: TARGET, request_key: `svc-1:${TARGET}:09:00:11:00`,
+      result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
+    };
+    // Prior lookup: nothing BEFORE the trx, the winner's row AFTER the CAS
+    // miss — and the anchor now sits where the winner left it.
+    const { seriesMovesDb } = wireSeriesMocks([sib('svc-1', BASE), sib('svc-2', SIB1)], {
+      updateResults: [[{ updated_at: 's' }], []],
+      freshAnchor: anchorRow({ scheduled_date: TARGET, window_start: '09:00:00', window_end: '11:00:00' }),
+    });
     seriesMovesDb.first.mockResolvedValueOnce(undefined).mockResolvedValueOnce(winner);
     const result = await SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', ADMIN_OPTS);
     expect(result).toMatchObject({ replayed: true, seriesMoveId: 'sm-winner', occurrencesRescheduled: 2 });
+    expect(seriesMovesDb.insert).not.toHaveBeenCalled();
+  });
+
+  test('a conflict on a return move (A→B, B→C, C→B) never replays the OLD A→B row: only a concurrent winner with the anchor on the slot counts', async () => {
+    const C = dayOffset(20);
+    const oldRow = {
+      id: 'sm-old', created_at: new Date(Date.now() - 60 * 1000), original_date: BASE, new_date: TARGET, request_key: `svc-1:${TARGET}:09:00:11:00`,
+      result: { success: true, newDate: TARGET, occurrencesRescheduled: 2, rescheduledOccurrences: [{ id: 'svc-1', date: TARGET, windowStart: '09:00', windowEnd: '11:00' }] },
+    };
+    // Pre-trx lookup sees the A→B row; the request was observed at C, so the
+    // return move proceeds — then its CAS misses (slot conflict) and the
+    // catch-side lookup finds only that same old row, anchor still at C.
+    const { priorLookup, seriesMovesDb } = wireSeriesMocks([sib('svc-1', C), sib('svc-2', SIB1)], {
+      anchor: anchorRow({ scheduled_date: C }),
+      priorMove: oldRow,
+      updateResults: [[{ updated_at: 's' }], []],
+      freshAnchor: anchorRow({ scheduled_date: C }),
+    });
+    priorLookup.first.mockResolvedValueOnce(oldRow).mockResolvedValueOnce(oldRow);
+    await expect(SmartRebooker.rescheduleSeries('svc-1', TARGET, { start: '09:00', end: '11:00' }, 'admin', 'admin', {
+      ...ADMIN_OPTS, expectAnchor: { scheduled_date: C, window_start: '09:00:00' },
+    })).rejects.toMatchObject({ statusCode: 409 });
+    // The catch-side lookup fences on the judged row's commit time.
+    expect(priorLookup.where).toHaveBeenCalledWith('created_at', '>', oldRow.created_at);
+    expect(priorLookup.insert).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed' }));
     expect(seriesMovesDb.insert).not.toHaveBeenCalled();
   });
 
@@ -715,8 +749,11 @@ describe('caller wiring (source)', () => {
     expect(terminal).toBeGreaterThan(rearm);
   });
 
-  test('SMS-reply effects run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
-    expect(read('../services/reschedule-sms.js')).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
+  test('SMS-reply effects — the customer confirmation included — run through the durable shared pass; the 15-minute cron reconciles dead passes', () => {
+    const sms = read('../services/reschedule-sms.js');
+    expect(sms).toContain("const { applySeriesMoveEffects } = require('../routes/admin-dispatch');");
+    expect(sms).toContain("{ sourceSurface: 'sms_reply', notifyRequested: true }");
+    expect(sms).not.toContain('notify: false');
     expect(read('../index.js')).toContain("runExclusive('series-move-effects-reconcile'");
   });
 

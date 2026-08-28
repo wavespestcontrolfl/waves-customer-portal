@@ -179,10 +179,16 @@ class RescheduleSMS {
     let smsMoveResult = null;
     if (selectedOption && !alreadyOnSlot) {
       try {
+        // notifyRequested: a date reply on a cadence visit shifts the future
+        // series through the collective choke point, and the customer's
+        // confirmation of THAT move is the durable series text below (the
+        // series_moves row records it, so the reconciler can finish it).
+        // A single move ignores the flag and keeps this path's own
+        // confirmation send.
         smsMoveResult = await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
           selectedOption.window, pending.reason_code, 'customer_sms',
-          { sourceSurface: 'sms_reply', notifyRequested: false },
+          { sourceSurface: 'sms_reply', notifyRequested: true },
         );
       } catch (err) {
         // The offer was computed without a route check — rebooker can now
@@ -207,8 +213,10 @@ class RescheduleSMS {
       // syncRescheduleReminder in routes/admin-dispatch.js). sendNotification
       // false: the confirmation SMS below is the customer notice;
       // coverDueWindows keeps the 15-min cron from firing a duplicate
-      // day-before text for a window that notice already covers.
-      if (selectedOption) {
+      // day-before text for a window that notice already covers. A series
+      // move syncs every occurrence (the anchor included) inside the shared
+      // effects pass below instead.
+      if (selectedOption && !smsMoveResult?.seriesMoveId) {
         try {
           const AppointmentReminders = require('./appointment-reminders');
           await AppointmentReminders.handleReschedule(
@@ -219,33 +227,49 @@ class RescheduleSMS {
         } catch (err) {
           logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
         }
-        // A date reply on a cadence visit shifted the future series through
-        // the collective choke point: the sibling effects (per-occurrence
-        // reminder sync — no due-window cover, the confirmation below
-        // describes the anchor only — the windowless-sibling operator card,
-        // board broadcasts) run through the shared, DURABLE effects pass
-        // keyed on the series_moves row: a worker that dies here leaves
-        // unstamped markers that the 15-minute reconciler finishes, instead
-        // of an in-memory effects path the next webhook can never recover
-        // (the pending offer is already marked responded above). notify
-        // stays false: this reply's own confirmation is the customer text.
-        if (smsMoveResult?.seriesMoveId) {
-          try {
-            const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
-            await applySeriesMoveEffects({
-              result: smsMoveResult,
-              serviceId: pending.scheduled_service_id,
-              newDate: selectedOption.date,
-              newWindow: selectedOption.window,
-              notify: false,
-              actorId: null,
-              reasonText: null,
-            });
-          } catch (err) {
-            logger.error(`[reschedule-sms] series effects failed for ${pending.scheduled_service_id} (reconciler will retry): ${err.message}`);
-          }
-        }
       }
+    }
+
+    // A date reply on a cadence visit shifted the future series through the
+    // collective choke point. EVERY post-commit effect — the customer's
+    // confirmation (the appointment_series_rescheduled text: new start plus
+    // "your recurring appointments" — the single confirmation copy below
+    // would misdescribe a series shift), per-occurrence reminder sync with
+    // due-window cover, reminder close / re-arm, the windowless-sibling
+    // operator card, board broadcasts — runs through the shared, DURABLE
+    // effects pass keyed on the series_moves row (notify_requested recorded
+    // on the row). A worker that dies anywhere after the commit — including
+    // before the confirmation went out — leaves unstamped markers the
+    // 15-minute reconciler finishes; nothing here is a parallel send the
+    // next webhook could never recover (the pending offer is already marked
+    // responded above).
+    if (selectedOption && smsMoveResult?.seriesMoveId) {
+      let effects = null;
+      try {
+        const { applySeriesMoveEffects } = require('../routes/admin-dispatch');
+        effects = await applySeriesMoveEffects({
+          result: smsMoveResult,
+          serviceId: pending.scheduled_service_id,
+          newDate: selectedOption.date,
+          newWindow: selectedOption.window,
+          notify: true,
+          actorId: null,
+          reasonText: null,
+        });
+      } catch (err) {
+        logger.error(`[reschedule-sms] series effects failed for ${pending.scheduled_service_id} (reconciler will retry): ${err.message}`);
+      }
+      await db('reschedule_log').where({ id: pending.id }).update({
+        new_date: selectedOption.date,
+        new_window: `${selectedOption.window.start}-${selectedOption.window.end}`,
+      });
+      return {
+        handled: true,
+        action: 'rescheduled',
+        newDate: selectedOption.date,
+        smsSent: effects?.notificationSent === true,
+        seriesMoveId: smsMoveResult.seriesMoveId,
+      };
     }
 
     if (selectedOption) {
