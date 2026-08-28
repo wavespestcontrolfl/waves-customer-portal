@@ -685,6 +685,23 @@ describe('lost-link recovery', () => {
     expect(targetPageVariants('https://www.wavespestcontrol.com/?ref=x')).toContain('https://wavespestcontrol.com/');
   });
 
+  test('reopen runs under the shared domain lock and repeats the domain-wide in-flight probe: a row filed concurrently for another page wins, the lost row is NOT reopened', async () => {
+    let probes = 0; const raws = []; const updates = [];
+    makeDb({ seo_link_prospects: (op, st) => {
+      if (op === 'first' && st.ins.some(i => i[0] === 'status')) { probes++; return probes === 1 ? null : { id: 'p-new', status: 'prospect', target_page: 'https://www.wavespestcontrol.com/other/' }; }
+      if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource' };
+      if (op === 'update') { updates.push(st); return 1; }
+      return null;
+    } });
+    db.raw = jest.fn((sql, bind) => { raws.push([sql, bind]); return { __raw: sql, bind }; });
+    const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });
+    expect(r).toEqual(expect.objectContaining({ queued: 0, skipped: 1, reasons: [{ domain: 'blog.example', reason: 'already on board (concurrent prospect for /other/)' }] }));
+    expect(updates).toEqual([]); // nothing reopened
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    expect(raws).toContainEqual(['SELECT pg_advisory_xact_lock(hashtext(?))', ['lost_recovery:blog.example']]);
+    expect(probes).toBe(2);
+  });
+
   test('reopen is conditional on the row still being lost (0-row update = skip)', async () => {
     makeDb({ seo_link_prospects: (op, st) => { if (op === 'first') return { id: 'p-lost', status: 'lost', notes: null, link_type: 'resource' }; if (op === 'update') { expect(st.wheres[0][0]).toEqual({ id: 'p-lost', status: 'lost' }); return 0; } } });
     const r = await recovery.queueLostDomains([loss], { scorer: { scoreCandidates: jest.fn() } });

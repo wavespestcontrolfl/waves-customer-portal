@@ -151,28 +151,42 @@ async function queueOne(loss, out, scoreMod) {
       // the worker claims only OUTREACH_TYPES — a reopen must leave a claimable type.
       const reopenType = OUTREACH_TYPES.has(exists.link_type) ? exists.link_type
         : OUTREACH_TYPES.has(loss.link_type) ? loss.link_type : 'resource';
-      // Conditional on status='lost': the daily verifier can restore the row to
-      // live between our read and this write — a 0-row update means it is no
-      // longer lost and must not be reopened for outreach.
-      const reopened = await db('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
-        status: 'prospect',
-        priority: 'high',
-        link_type: reopenType,
-        claimed_at: null, claimed_by: null,
-        attempts: 0,
-        // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
-        // (an append-only ledger dailySendCount also counts): a resend of this
-        // reopened row stamps its own outreach_attempted_at, so every attempt
-        // inside one trailing-24h window counts against the cap — however many
-        // times the row is recovered, lost and reopened.
-        outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
-        quality_signals: db.raw(
-          "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
-          [loss.lost_reason || 'unknown'],
-        ),
-        notes: exists.notes ? `${exists.notes}\n${note}` : note,
-        updated_at: new Date(),
+      // Under the shared per-domain board lock, with the domain-wide in-flight
+      // probe REPEATED under it: another writer (admin/strategy/promoter — they
+      // all take this lock) may have filed an in-flight row for this domain on
+      // another page since the probe above; reopening beside it would leave two
+      // claimable prospects for one inbox. Conditional on status='lost' too: the
+      // daily verifier can restore the row to live between our read and this
+      // write — a 0-row update means it is no longer lost, not reopened.
+      const reopened = await db.transaction(async (trx) => {
+        await lockProspectDomain(trx, domain);
+        const raced = await byDomain(trx('seo_link_prospects'), domain).whereIn('status', [...IN_FLIGHT_STATUSES]).first('id', 'status', 'target_page');
+        if (raced && IN_FLIGHT_STATUSES.has(raced.status)) return { raced };
+        return trx('seo_link_prospects').where({ id: exists.id, status: 'lost' }).update({
+          status: 'prospect',
+          priority: 'high',
+          link_type: reopenType,
+          claimed_at: null, claimed_by: null,
+          attempts: 0,
+          // The prior attempt is APPENDED to quality_signals.prior_outreach_attempts
+          // (an append-only ledger dailySendCount also counts): a resend of this
+          // reopened row stamps its own outreach_attempted_at, so every attempt
+          // inside one trailing-24h window counts against the cap — however many
+          // times the row is recovered, lost and reopened.
+          outreach_status: 'none', outreach_send_token: null, outreach_sent_at: null, outreach_attempted_at: null,
+          quality_signals: trx.raw(
+            "jsonb_set(jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(quality_signals, '{}'::jsonb), '{lost_recovery}', 'true'::jsonb, true), '{lost_reason}', to_jsonb(?::text), true), '{prior_outreach_sent_at}', COALESCE(to_jsonb(outreach_sent_at), COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_sent_at', 'null'::jsonb), true), '{prior_outreach_attempts}', CASE WHEN jsonb_typeof(COALESCE(quality_signals, '{}'::jsonb) -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END || COALESCE(to_jsonb(outreach_attempted_at), '[]'::jsonb), true), '{prior_attempts}', to_jsonb(COALESCE(attempts, 0)), true)",
+            [loss.lost_reason || 'unknown'],
+          ),
+          notes: exists.notes ? `${exists.notes}\n${note}` : note,
+          updated_at: new Date(),
+        });
       });
+      if (reopened && reopened.raced) {
+        out.skipped++;
+        out.reasons.push({ domain, reason: `already on board (concurrent ${reopened.raced.status}${reopened.raced.target_page ? ` for ${targetPathOf(reopened.raced.target_page)}` : ''})` });
+        return;
+      }
       if (!reopened) {
         out.skipped++;
         out.reasons.push({ domain, reason: 'board row no longer lost (restored concurrently)' });
