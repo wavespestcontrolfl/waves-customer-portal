@@ -386,12 +386,13 @@ describe('capture_lead (Phase 0 floor, unchanged)', () => {
       createLeadFromExtraction.mockResolvedValue({ leadId: null, customerId: 'c-1', created: false });
       surfaceEstimateRequestForCustomer.mockClear();
       surfaceEstimateRequestForCustomer.mockResolvedValue({ persisted: true, suppressed: false });
-      const first = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', address_line1: '12 Shell Dr' }, ctx);
+      const first = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, first_name: 'Pat', last_name: 'Lee', address_line1: '12 Shell Dr', requested_service: 'mosquito', pain_points: 'bites on the lanai' }, ctx);
       expect(first).toMatch(/still missing: email/);
       expect(surfaceEstimateRequestForCustomer).not.toHaveBeenCalled();
       const second = await executeTool('capture_lead', { call_summary: 'price?', estimate_requested: true, email: 'pat@example.com' }, ctx);
       expect(second).toMatch(/IS on the office queue/);
-      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr' }), expect.anything());
+      // every field from the FIRST capture survives the retry, including the service context
+      expect(surfaceEstimateRequestForCustomer).toHaveBeenCalledWith('c-1', expect.objectContaining({ first_name: 'Pat', last_name: 'Lee', email: 'pat@example.com', address_line1: '12 Shell Dr', requested_service: 'mosquito', pain_points: 'bites on the lanai' }), expect.anything());
       expect(ctx.markCaptured).toHaveBeenLastCalledWith(expect.objectContaining({ holdOpen: false }));
     });
 

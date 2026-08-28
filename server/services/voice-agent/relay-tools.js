@@ -850,6 +850,11 @@ async function executeTool(name, input = {}, ctx = {}) {
         address_line1: extracted.address_line1 || priorEstimateFields.address_line1 || null,
         city: extracted.city || priorEstimateFields.city || null,
         zip: extracted.zip || priorEstimateFields.zip || null,
+        // Service context accumulates too (hook P1): a retry that only adds
+        // the email must not file a card that has forgotten what they asked
+        // about.
+        requested_service: extracted.requested_service || priorEstimateFields.requested_service || null,
+        pain_points: extracted.pain_points || priorEstimateFields.pain_points || null,
       };
       if (typeof ctx.noteEstimateFields === 'function') ctx.noteEstimateFields(estimateFields);
       const estimateMissing = estimateRequested
