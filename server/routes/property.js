@@ -6,6 +6,7 @@ const { authenticate } = require('../middleware/auth');
 const logger = require('../services/logger');
 const AccountMembershipEmail = require('../services/account-membership-email');
 const TermiteStations = require('../services/termite-stations');
+const { hasRecurringLawnEvidence } = require('../services/irrigation-weekly-email');
 
 // Cap the JSON body for this route family. The global limit is generous;
 // property preferences never need more than a few KB.
@@ -39,7 +40,6 @@ const prefsSchema = Joi.object({
   contactPreference: shortText,
   blackoutStart: Joi.date().allow(null, ''),
   blackoutEnd: Joi.date().allow(null, ''),
-  irrigationSystem: Joi.boolean(),
   irrigationControllerLocation: shortText,
   irrigationZones: Joi.number().integer().min(0).max(100).allow(null),
   irrigationInchesPerWeek: Joi.number().min(0).max(5).precision(2).allow(null),
@@ -176,14 +176,50 @@ function customerHasLawnCare(customer = {}) {
   return ['Silver', 'Gold', 'Platinum'].includes(tier) || !!String(customer.lawn_type || '').trim();
 }
 
+// Weekly Inches eligibility. The tier / lawn_type shortcut misses standalone
+// lawn-plan customers with no turf type on file, so fall back to the same
+// recurring-lawn-service evidence the Monday irrigation email qualifies on
+// (2026-08-27: a lawn customer had no Inches field on the day of her
+// service). Used by BOTH the GET (render gate) and the PUT (store gate) so
+// the field can never render and then be silently dropped on save.
+async function customerQualifiesForLawnInches(customer = {}) {
+  if (customerHasLawnCare(customer)) return true;
+  try {
+    return await hasRecurringLawnEvidence(customer.id);
+  } catch (err) {
+    logger.warn(`[property] lawn evidence lookup failed for ${customer.id}: ${err.message}`);
+    return false;
+  }
+}
+
+// Irrigation is ON by default (owner ruling 2026-08-27: no toggle). Any
+// irrigation entry the customer makes describes a system that exists, so a
+// write to one of these columns stamps irrigation_system = true — the report
+// and weekly email still read the column and would otherwise suppress a
+// derived figure behind a false the old toggle left in the row.
+function hasIrrigationValue(field, value) {
+  if (value == null) return false;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) && value > 0;
+  return String(value).trim() !== '';
+}
+
+const IRRIGATION_INPUT_FIELDS = [
+  'irrigation_controller_location', 'irrigation_zones', 'irrigation_inches_per_week',
+  'irrigation_run_minutes', 'irrigation_schedule_notes', 'watering_days',
+  'irrigation_system_type', 'rain_sensor', 'irrigation_issues',
+];
+
 // =========================================================================
 // GET /api/property/preferences
 // =========================================================================
 router.get('/preferences', async (req, res, next) => {
   try {
-    let prefs = await db('property_preferences')
-      .where({ customer_id: req.customerId })
-      .first();
+    const [prefs, hasLawnCare] = await Promise.all([
+      db('property_preferences').where({ customer_id: req.customerId }).first(),
+      customerQualifiesForLawnInches(req.customer),
+    ]);
 
     if (!prefs) {
       // Return empty defaults
@@ -194,7 +230,7 @@ router.get('/preferences', async (req, res, next) => {
           petCount: 0, petDetails: '', petsSecuredPlan: '', petsStructured: [],
           preferredDay: 'no_preference', preferredTime: 'no_preference', contactPreference: 'text',
           blackoutStart: null, blackoutEnd: null,
-          irrigationSystem: false, irrigationControllerLocation: '', irrigationZones: null,
+          irrigationSystem: true, irrigationControllerLocation: '', irrigationZones: null,
           irrigationInchesPerWeek: null, irrigationRunMinutes: null,
           irrigationScheduleNotes: '', wateringDays: [], irrigationSystemType: [],
           rainSensor: false, irrigationIssues: '',
@@ -205,6 +241,7 @@ router.get('/preferences', async (req, res, next) => {
           accessNotes: '', specialInstructions: '',
           updatedAt: null,
         },
+        hasLawnCare,
       });
     }
 
@@ -224,8 +261,11 @@ router.get('/preferences', async (req, res, next) => {
       if (!fields[jc]) fields[jc] = [];
     }
     const camelFields = transformKeys(fields, snakeToCamel);
+    // Rows written before the toggle was retired carry the old false
+    // default; the portal has no toggle any more, so present ON.
+    camelFields.irrigationSystem = true;
 
-    res.json({ preferences: camelFields });
+    res.json({ preferences: camelFields, hasLawnCare });
   } catch (err) {
     next(err);
   }
@@ -249,9 +289,14 @@ router.put('/preferences', async (req, res, next) => {
         updates[field] = snakeBody[field];
       }
     }
-    if ('irrigation_inches_per_week' in updates && !customerHasLawnCare(req.customer)) {
+    if ('irrigation_inches_per_week' in updates && !(await customerQualifiesForLawnInches(req.customer))) {
       delete updates.irrigation_inches_per_week;
     }
+    // Stamped on the row, not on `updates`: the account-updated email lists
+    // what the customer changed, and the stamp is not a customer edit.
+    const stampIrrigationOn = IRRIGATION_INPUT_FIELDS.some((f) => hasIrrigationValue(f, updates[f]))
+      ? { irrigation_system: true }
+      : {};
 
     // Normalize irrigation system type to an array (accepts legacy scalar)
     if ('irrigation_system_type' in updates) {
@@ -278,11 +323,12 @@ router.put('/preferences', async (req, res, next) => {
     if (existing) {
       await db('property_preferences')
         .where({ customer_id: req.customerId })
-        .update({ ...updates, updated_at: db.fn.now() });
+        .update({ ...updates, ...stampIrrigationOn, updated_at: db.fn.now() });
     } else {
       await db('property_preferences').insert({
         customer_id: req.customerId,
         ...updates,
+        ...stampIrrigationOn,
       });
     }
 
@@ -470,4 +516,8 @@ module.exports._private = {
   propertyChangeItems,
   displayPrefValue,
   prefsSchema,
+  customerHasLawnCare,
+  customerQualifiesForLawnInches,
+  hasIrrigationValue,
+  IRRIGATION_INPUT_FIELDS,
 };

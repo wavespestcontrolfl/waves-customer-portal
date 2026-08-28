@@ -10,6 +10,9 @@
  *   mixed  spray+rotor → declines with the mixed-rates explanation
  *   notype no head type → asks for system type
  *   inches explicit weekly inches → derived figure defers to it
+ *   lawnplan standalone lawn-plan customer: no tier, no turf type, nothing
+ *          entered yet — Inches must still render (server hasLawnCare) and
+ *          the card must be open with no toggle (2026-08-27 bug)
  *
  * Demo persona is fictional (Jordan Rivera) — never real customer data.
  */
@@ -57,20 +60,25 @@ const STATES = {
   mixed: { irrigationSystemType: ['spray', 'rotor'] },
   notype: { irrigationSystemType: [] },
   inches: { irrigationInchesPerWeek: 1.25 },
+  lawnplan: {
+    irrigationZones: null, irrigationControllerLocation: '', irrigationRunMinutes: null,
+    wateringDays: [], irrigationSystemType: [], rainSensor: false, irrigationScheduleNotes: '',
+  },
 };
 
 const PREFS = { ...BASE_PREFS, ...(STATES[state] || {}) };
 
-api.getPropertyPreferences = async () => ({ preferences: PREFS });
+// The real GET carries the server's lawn eligibility alongside the row.
+api.getPropertyPreferences = async () => ({ preferences: PREFS, hasLawnCare: true });
 api.updatePropertyPreferences = async (patch) => ({ preferences: { ...PREFS, ...patch } });
 
 const customer = {
   id: 'cust-demo-1',
-  tier: 'Silver',
+  tier: state === 'lawnplan' ? null : 'Silver',
   firstName: 'Jordan',
   lastName: 'Rivera',
   address: { line1: '123 Sample Lane', city: 'Bradenton', state: 'FL', zip: '34205' },
-  property: { lawnType: 'St. Augustine', propertySqFt: 6200, bedSqFt: 450 },
+  property: { lawnType: state === 'lawnplan' ? '' : 'St. Augustine', propertySqFt: 6200, bedSqFt: 450 },
 };
 
 ReactDOM.createRoot(document.getElementById('root')).render(

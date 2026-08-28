@@ -701,6 +701,25 @@ function recurringLawnEvidenceFilter(todayET, lawnServiceCutoff) {
   };
 }
 
+// Does ONE customer carry the recurring-lawn evidence above? The portal's
+// Weekly Inches field (and the PUT that stores it) gate on this — the same
+// predicate the Monday sweep uses to decide who gets the irrigation email,
+// so a customer the email asks for inches can always enter them. The
+// tier / lawn_type shortcut in routes/property.js stays as a fast path;
+// this is the authoritative fallback for standalone lawn-plan customers
+// with no turf type on file (2026-08-27: a lawn customer's portal showed
+// no Inches field on the day of her service).
+async function hasRecurringLawnEvidence(customerId, { now = new Date() } = {}) {
+  if (!customerId) return false;
+  const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
+  const todayET = etDateString(now);
+  const row = await db('customers as c')
+    .where('c.id', customerId)
+    .where(recurringLawnEvidenceFilter(todayET, lawnServiceCutoff))
+    .first('c.id');
+  return !!row;
+}
+
 async function findEligibleCustomers({ now = new Date() } = {}) {
   const lawnServiceCutoff = etDateString(addETDays(now, -LAWN_SERVICE_RECENCY_DAYS));
   const todayET = etDateString(now);
@@ -1225,6 +1244,7 @@ module.exports = {
   findUnstampedRecurringLawnMembers,
   findEligibleCustomers,
   findLawnEmailAudienceGaps,
+  hasRecurringLawnEvidence,
   fetchUpcomingWeekRainForecast,
   TEMPLATE_CUT_BACK,
   TEMPLATE_ADD_WATER,
