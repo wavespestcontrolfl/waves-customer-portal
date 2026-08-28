@@ -714,10 +714,13 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
  */
 async function processDueAutoReplies({ limit = DEFAULT_BATCH } = {}) {
   const cfg = config();
-  const stats = { mode: cfg.mode, enqueued: 0, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
+  const stats = { mode: cfg.mode, enqueued: 0, bellsRetried: 0, claimed: 0, posted: 0, drafted: 0, parked: 0, skipped: 0, retry: 0, errors: 0 };
+  // The failed-bell sweep runs regardless of the posting mode (codex r53):
+  // a bell_failed stamp left while the lane was on must still be re-rung
+  // after the gate is switched off.
+  stats.bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
   if (cfg.mode === 'off') return stats;
   stats.enqueued = await enqueueMissedReviews({ cfg }).catch((err) => { logger.warn(`[review-auto-reply] catch-up enqueue failed: ${err.message}`); return 0; });
-  stats.bellsRetried = await retryFailedEditedBells().catch((err) => { logger.warn(`[review-auto-reply] bell retry sweep failed: ${err.message}`); return 0; });
   const rows = await claimDueRows({ limit });
   stats.claimed = rows.length;
   if (!rows.length) return stats;

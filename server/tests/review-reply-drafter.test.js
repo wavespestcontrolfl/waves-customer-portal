@@ -137,6 +137,9 @@ describe('verifyReplyText — public-surface safety net', () => {
     const gpets = grounding({ text: 'Great pest treatment. We have pets.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hello there, we are glad the treatment agreed with your pets.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
+    // codex r53: "easy on your pets".
+    expect(verify(good('Hello there, we are glad the pest treatment was easy on your pets.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the product is gentle enough on the kids.'), gpets)).toBe('banned_phrase');
     // codex r50: experienced / had / suffered no problems.
     const gp = grounding({ text: 'Marcus fixed our ant problems and the pets were fine.', topics: ['pest'] });
     expect(verify(good('Hi Dana, we are glad your pets experienced no problems afterward.'), gp)).toBe('banned_phrase');

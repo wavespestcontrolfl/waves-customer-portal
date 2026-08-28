@@ -138,6 +138,8 @@ const BANNED_RE = new RegExp([
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
   // "<protected subject> sailed | breezed | came | got | made it through …" (codex r52).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:sail|breez|cruis|coast|came|come|got|get|made\\s+it|went|go|pull|power|walk)\\w*\\s+(?:right\\s+|straight\\s+)?through\\b', '\\b(?:sailed|breezed|cruised|coasted)\\s+(?:right\\s+)?through\\b',
+  // "easy | gentle | light | kind | soft | mild | nice on <protected subject>" (codex r53).
+  '\\b(?:easy|easier|easiest|light|lighter|kind|kinder|soft|softer|gentle|gentler|mild|milder|nice|nicer|good|better|fine|ok|okay)\\s+(?:enough\\s+)?on\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|skin|lungs|noses|eyes|paws)\\b',
   // "agreed with / sat well with / suited / got along with <protected
   // subject>" tolerance framing (codex r51).
   '\\b(?:agree|agreed|agrees|agreeing|sat\\s+well|sits\\s+well|sit\\s+well|went\\s+down\\s+well|goes\\s+down\\s+well|go\\s+down\\s+well|suit|suited|suits|got\\s+along|get\\s+along|gets\\s+along|got\\s+on|get\\s+on|gets\\s+on|work|worked|works)\\s+(?:[\\w-]+\\s+){0,3}?(?:with|for|around)\\s+(?:[\\w-]+\\s+){0,2}?(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone)\\b',

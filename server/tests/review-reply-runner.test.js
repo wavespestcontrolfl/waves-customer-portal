@@ -767,6 +767,18 @@ describe('processDueAutoReplies — state machine', () => {
     mockNotify.mockReset().mockResolvedValue({});
   });
 
+  test('the failed-bell sweep runs even when the gate is off (codex r53)', async () => {
+    delete process.env.GATE_REVIEW_AUTO_REPLY;
+    mockNotify.mockReset().mockResolvedValue({ id: 'n1' });
+    state.rows = [row({ id: 'off', auto_reply_status: 'parked', auto_reply_reason: 'review_edited_after_post', review_reply: 'Our reply', auto_reply_error: 'bell_failed:review_edited_after_post:edit' })];
+    const stats = await Runner.processDueAutoReplies();
+    expect(stats.mode).toBe('off');
+    expect(stats.bellsRetried).toBe(1);
+    expect(stats.claimed).toBe(0);
+    expect(state.rows[0].auto_reply_error).toBeNull();
+    mockNotify.mockReset().mockResolvedValue({});
+  });
+
   test('an Agent Ops draft is machine-authored: Post now re-verifies it, a failing verdict surfaces a canonical replacement (codex r46)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const agentText = 'I am sorry to hear that. Regards, Waves';

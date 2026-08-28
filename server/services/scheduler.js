@@ -5472,6 +5472,7 @@ function initScheduledJobs() {
       await runExclusive('review-auto-reply', async () => {
         const { processDueAutoReplies } = require('./review-reply/runner');
         const stats = await processDueAutoReplies();
+        if (stats.bellsRetried > 0) logger.info(`Review auto-reply: re-rang ${stats.bellsRetried} failed bell(s)`);
         if (stats.claimed > 0) {
           logger.info(`Review auto-reply (${stats.mode}): ${stats.claimed} claimed, ${stats.posted} posted, ${stats.drafted} drafted, ${stats.parked} parked, ${stats.skipped} skipped, ${stats.retry} retry, ${stats.errors} errors`);
         }
