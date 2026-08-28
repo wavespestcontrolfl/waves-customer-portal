@@ -497,8 +497,8 @@ function appendLanguageVestibule(twiml, { greetingUrl, vestibule }) {
 // the Gather markup.
 function vestibuleInnerXml({ greetingUrl, vestibule }) {
   const tmp = new VoiceResponse();
-  if (!appendLanguageVestibule(tmp, { greetingUrl, vestibule })) return '';
-  return tmp.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '');
+  appendLanguageVestibule(tmp, { greetingUrl, vestibule }); // bare <Play> when no vestibule
+  return tmp.toString().replace(/^<\?xml[^>]*\?>/, '').replace(/^<Response>/, '').replace(/<\/Response>$/, '').replace(/^<Response\/>$/, '');
 }
 
 // Spanish relay leg for a caller who pressed 2: the SAME Sandy relay session
@@ -943,16 +943,18 @@ router.post('/voice', async (req, res) => {
             .update({ answered_by: 'ai_agent', updated_at: new Date() })
             .catch(() => {});
           if (handoffKind === 'relay') {
-            // ConversationRelay's welcomeGreeting carries the FL §934.03 +
-            // automated-assistant disclosure, so no separate greeting MP3 here.
-            // CallSid binds the upgrade token to THIS call (relay-protocol):
-            // the ws endpoint accepts no reusable credential.
-            // Vestibule (when offered) precedes the <Connect> — same builder as
-            // every other path, spliced into the hand-built relay XML.
+            // The greeting MP3 (= the FL §934.03 recorded-line notice) plays
+            // BEFORE the relay on this path too (owner ruling 2026-08-28: the
+            // relay greeting is Sandy's opener, not the notice). With the
+            // vestibule offered it sits inside the Gather; otherwise a bare
+            // <Play> — same builder as every other path, spliced into the
+            // hand-built relay XML. CallSid binds the upgrade token to THIS
+            // call (relay-protocol): the ws endpoint accepts no reusable
+            // credential.
             const relayXml = buildRelayTwiML({
               wsUrl: routingConfig.agentEndpoint.trim(), callSid: CallSid, action: RELAY_COMPLETE_ACTION,
             });
-            const inner = vestibuleInnerXml({ greetingUrl: null, vestibule });
+            const inner = vestibuleInnerXml({ greetingUrl, vestibule });
             return res.type('text/xml').send(inner ? relayXml.replace('<Response>', `<Response>${inner}`) : relayXml);
           }
           const agentTwiml = new VoiceResponse();

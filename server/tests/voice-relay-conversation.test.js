@@ -286,26 +286,19 @@ describe('RelayConversation — explicit end after capture', () => {
     const { buildRelayTwiML } = require('../services/voice-agent/relay-protocol');
     afterEach(() => { delete process.env.VOICE_RELAY_GREETING; });
 
-    test('a NEGATED disclosure never passes verbatim — the canonical line is appended', () => {
-      process.env.VOICE_RELAY_GREETING = 'Hi! This call is not recorded and you are speaking with a human assistant.';
+    test('an override claiming to be human never passes — the canonical opener speaks', () => {
+      process.env.VOICE_RELAY_GREETING = 'Hi! You are speaking with a human assistant.';
       const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
-      expect(xml).toMatch(/this call may be recorded/i);
-      expect(xml).toMatch(/automated assistant/i);
+      expect(xml).not.toMatch(/human assistant/i);
+      expect(xml).toMatch(/Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?/);
     });
 
-    test('an affirmative override that states BOTH is left exactly as written', () => {
-      const good = 'Thanks for calling Waves! This call may be recorded and you are speaking with our automated assistant.';
+    test('an honest override is left exactly as written — nothing appended', () => {
+      const good = 'Thanks for calling Waves! This is Sandy.';
       process.env.VOICE_RELAY_GREETING = good;
       const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
       expect(xml).toContain(good);
-      expect(xml).not.toMatch(/Just so you know/);
-    });
-
-    test('a greeting missing the automated-assistant half gets it appended', () => {
-      process.env.VOICE_RELAY_GREETING = 'Thanks for calling Waves! This call may be recorded.';
-      const xml = buildRelayTwiML({ wsUrl: 'wss://portal.example.com/ws/voice-agent' });
-      expect(xml).toMatch(/Just so you know/);
-      expect(xml).toMatch(/automated assistant/i);
+      expect(xml).not.toMatch(/Just so you know|automated assistant|may be recorded/);
     });
   });
 

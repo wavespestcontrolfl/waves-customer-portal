@@ -9,7 +9,7 @@ jest.mock('../models/db', () => jest.fn());
 
 const { isSpanish, copy, COPY, LANGUAGE_ADDENDUM_ES } = require('../services/voice-agent/relay-language');
 const { buildBasePrompt, SYSTEM_PROMPT } = require('../services/voice-agent/relay-conversation');
-const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, DISCLOSURE_SUFFIX_ES, defaultWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
+const { spanishWelcomeGreeting, DEFAULT_WELCOME_GREETING_ES, defaultWelcomeGreeting } = require('../services/voice-agent/relay-protocol');
 
 afterEach(() => { delete process.env.VOICE_RELAY_GREETING_ES; delete process.env.VOICE_RELAY_GREETING; delete process.env.VOICE_AGENT_NAME; });
 
@@ -46,34 +46,28 @@ test('deterministic closes: English strings are the prior literals verbatim; Spa
 });
 
 describe('Spanish greeting validation arms', () => {
-  test('default carries both disclosure halves and the agent name', () => {
+  test('default keeps a one-clause recorded-line notice (the English MP3 may have been cut by the key press) and NO AI mention', () => {
     expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
+    expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/puede ser grabada/);
+    expect(DEFAULT_WELCOME_GREETING_ES).not.toMatch(/automatizad|asistente|IA\b/);
     process.env.VOICE_AGENT_NAME = 'Marisol';
-    expect(spanishWelcomeGreeting()).toContain('soy Marisol');
+    expect(spanishWelcomeGreeting()).toContain('habla Marisol');
   });
-  test('a complete affirmative override is used verbatim', () => {
-    process.env.VOICE_RELAY_GREETING_ES = 'Hola, esta llamada puede ser grabada y habla con un asistente automatizado. ¿Cómo puedo ayudarle?';
+  test('an override that states the recording is used verbatim; one without it gets the Spanish recording clause appended', () => {
+    process.env.VOICE_RELAY_GREETING_ES = 'Hola, esta llamada puede ser grabada. ¿Cómo puedo ayudarle?';
     expect(spanishWelcomeGreeting()).toBe(process.env.VOICE_RELAY_GREETING_ES);
-  });
-  test('an incomplete override gets the Spanish suffix — never the English one', () => {
     process.env.VOICE_RELAY_GREETING_ES = 'Hola, gracias por llamar a Waves.';
-    const g = spanishWelcomeGreeting();
-    expect(g).toBe(`Hola, gracias por llamar a Waves. ${DISCLOSURE_SUFFIX_ES}`);
-    expect(g).not.toMatch(/may be recorded|automated assistant/);
+    expect(spanishWelcomeGreeting()).toBe('Hola, gracias por llamar a Waves. Esta llamada puede ser grabada.');
   });
   test.each([
-    'Esta llamada no es grabada y habla con un asistente automatizado.',
-    'Esta llamada puede ser grabada y está hablando con una persona real.',
-    'Nunca grabamos; soy un asistente automatizado.',
-  ])('a negated / human-claiming override is discarded: %s', (bad) => {
+    'Esta llamada no es grabada. ¿Cómo puedo ayudarle?',
+    'Hola, está hablando con una persona real.',
+  ])('a negated-recording or human-claiming override is discarded: %s', (bad) => {
     process.env.VOICE_RELAY_GREETING_ES = bad;
     expect(spanishWelcomeGreeting()).toBe(DEFAULT_WELCOME_GREETING_ES);
   });
-  test('the English validator still treats Spanish copy as incomplete (why the Spanish arms exist)', () => {
-    process.env.VOICE_RELAY_GREETING = DEFAULT_WELCOME_GREETING_ES;
-    expect(defaultWelcomeGreeting()).not.toBe(DEFAULT_WELCOME_GREETING_ES);
-    expect(defaultWelcomeGreeting()).toContain('may be recorded');
+  test('the English opener never carries a notice', () => {
     delete process.env.VOICE_RELAY_GREETING;
-    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Sandy\..*automated assistant\. How can I help you this (morning|afternoon|evening)\?$/);
+    expect(defaultWelcomeGreeting()).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
   });
 });

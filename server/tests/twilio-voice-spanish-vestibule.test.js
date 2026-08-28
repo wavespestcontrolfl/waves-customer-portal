@@ -88,12 +88,15 @@ describe('appendLanguageVestibule — the one implementation', () => {
     expect(twiml.toString()).not.toContain('<Play>');
     expect(twiml.toString()).toContain(SPANISH_MENU_PROMPT);
   });
-  test('vestibuleInnerXml is the same builder unwrapped (no second copy of the markup)', () => {
+  test('vestibuleInnerXml is the same builder unwrapped (no second copy of the markup); with no vestibule it is the bare greeting <Play>', () => {
     const twiml = new VoiceResponse();
-    appendLanguageVestibule(twiml, { greetingUrl: null, vestibule: VEST });
-    const inner = vestibuleInnerXml({ greetingUrl: null, vestibule: VEST });
+    appendLanguageVestibule(twiml, { greetingUrl: GREETING, vestibule: VEST });
+    const inner = vestibuleInnerXml({ greetingUrl: GREETING, vestibule: VEST });
     expect(`<?xml version="1.0" encoding="UTF-8"?><Response>${inner}</Response>`).toBe(twiml.toString());
-    expect(vestibuleInnerXml({ greetingUrl: GREETING, vestibule: null })).toBe('');
+    // AI-answers-first relay path: the greeting MP3 (= the recorded-line notice)
+    // precedes the <Connect> even without the vestibule (owner ruling 2026-08-28).
+    expect(vestibuleInnerXml({ greetingUrl: GREETING, vestibule: null })).toBe(`<Play>${GREETING}</Play>`);
+    expect(vestibuleInnerXml({ greetingUrl: null, vestibule: null })).toBe('');
   });
 });
 
@@ -128,8 +131,8 @@ describe('Spanish relay leg', () => {
     expect(xml).toContain('<Parameter name="lang" value="es" />');
     expect(xml).not.toMatch(/<ConversationRelay [^>]*voice=/); // Twilio's default es-US voice
     expect(xml).toContain('url="wss://portal.example.com/ws/voice-agent?callSid=CA123&amp;t=');
-    expect(xml).toContain('esta llamada puede ser grabada');
-    expect(xml).toContain('asistente automatizado');
+    expect(xml).toContain('Esta llamada puede ser grabada');
+    expect(xml).not.toMatch(/automatizado|asistente/);
     expect(SPANISH_LANGUAGE).toBe('es-US');
   });
   test('an owner-configured Spanish voice is emitted', () => {
@@ -138,7 +141,7 @@ describe('Spanish relay leg', () => {
   });
   test('the default Spanish greeting is the disclosure', () => {
     expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/grabada/);
-    expect(DEFAULT_WELCOME_GREETING_ES).toMatch(/asistente automatizado/);
+    expect(DEFAULT_WELCOME_GREETING_ES).not.toMatch(/asistente automatizado/);
   });
 });
 
