@@ -300,15 +300,20 @@ catch-up** — the same function under `runExclusive('link-registry-catchup')` o
 6-hourly scheduler tick, unconditionally, whether or not the runner gate is on — so a legacy
 row written by an OLD pod during the rolling deploy (after the migration, after the new pod's
 boot catch-up, before the old pod drains) is picked up within 6h by a pod that never runs the
-runner, never lost. The catch-up is removed only by the step-2 contract migration, after the
-legacy table is dropped. The same deploy moves `recordAttempt` and every reader of
+runner, never lost. ONE cleanup milestone: the catch-up and the legacy table are removed
+TOGETHER by a later cleanup migration after step 5 (see below) — never by the step-2
+contract migration, which touches only the placement unique index. The same deploy moves `recordAttempt` and every reader of
 `seo_signup_attempts` to `seo_link_attempts`; there is no dual-write. (Today the runner is
 gated OFF in prod with 0 legacy attempts, so the race is theoretical — the catch-up makes the
 cutover correct regardless.) Mapping — `blocked_account` →
 `needs_owner`, `blocked_payment` → `needs_owner`, `blocked_price_changed` → `price_changed`,
 `blocked_captcha` → `captcha`, `submitted` → `placed`, `failed`/`error` → `failed`, anything
-else → `failed` — with the verbatim legacy outcome kept in `detail.legacy_outcome` and
-`provider='deterministic_runner'`, so historical attempts and costs appear in the Outcomes/
+else → `failed`; `action` (NOT NULL) = `submit` for every legacy row (the legacy runner only
+ever recorded whole submission attempts; the verbatim legacy step, if any, goes to
+`detail.legacy_step`); `cost_cents` = the legacy cost (`t.decimal('cost_usd')`) converted
+deterministically as `Math.round(Number(cost) * 100)` when it is a finite number, else null
+(never a float column, never truncation) — with the verbatim legacy outcome kept in
+`detail.legacy_outcome` and `provider='deterministic_runner'`, so historical attempts and costs appear in the Outcomes/
 provider reports and the CHECK enum holds. `seo_signup_attempts` is then left in place with
 no writer, as read-only history; the catch-up and the legacy table are removed together by a
 later cleanup migration once step 5's provider work no longer needs to compare against it.
