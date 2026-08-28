@@ -30,6 +30,9 @@ describe('renderWeekPlanEmail', () => {
     expect(copy.plan_note).toContain('Minutes assume typical spray heads rates');
     expect(copy.restriction_note).toContain('one day a week');
     expect(copy.restriction_note).toContain('through 2026-10-01');
+    expect(copy.restriction_note).toContain('Water on your assigned day only.');
+    expect(_private.restrictionNote({ ...ONE_DAY, maxDaysPerWeek: 2 })).toContain('2 days a week');
+    expect(_private.restrictionNote({ ...ONE_DAY, maxDaysPerWeek: 2 })).toContain('Water on your assigned days only.');
     const text = allText(copy);
     expect(text).not.toMatch(/each zone\b/);
     expect(text).not.toMatch(/controller/i);
@@ -170,7 +173,7 @@ describe('decideWeekPlan (server glue)', () => {
 
 describe('snapshot lifecycle — exactness contract', () => {
   const db = require('../models/db');
-  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan } = require('../services/irrigation-week-plan');
+  const { loadCurrentWeekPlan, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, _private } = require('../services/irrigation-week-plan');
   const NOW = new Date('2026-08-27T16:00:00Z'); // Thursday → week ending Sunday 2026-08-23
   const POLICY = { maxDaysPerWeek: 1, expiresOn: '2026-10-01', label: 'SWFWMD Modified Phase III water shortage order', county: 'Manatee' };
   const row = (restriction, extra = {}) => ({ week_ending: '2026-08-23', plan_as_of: NOW, sent_at: NOW, weather_inputs: JSON.stringify({ runMinutes: 20, county: 'Manatee' }), restriction_policy: JSON.stringify(restriction), week_plan: JSON.stringify({ action: 'run', reasons: [] }), ...extra });
@@ -197,6 +200,14 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: new Date('2026-10-05T12:00:00Z') })).toBeNull(); // policy expired since Monday
   });
 
+  test('a render pinned to the signature\'s snapshot accepts only that sent_at; pinned-none renders no plan', async () => {
+    stubSelect(row(POLICY));
+    expect((await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString() })).plan.action).toBe('run');
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: new Date('2026-08-24T12:00:00Z').toISOString() })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null })).toBeNull();
+    expect((await loadCurrentWeekPlan('c1', { now: NOW })).plan.action).toBe('run'); // unpinned = live
+  });
+
   test('persist replaces only an UNSENT row and returns the decision hash; mark-sent binds to that hash; discard deletes only unsent', async () => {
     const calls = {};
     db.mockImplementation(() => ({
@@ -212,7 +223,9 @@ describe('snapshot lifecycle — exactness contract', () => {
     }));
     const plan = { action: 'hold', reasons: [] };
     const hash = await persistWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23', plan, restriction: POLICY, decisionInputs: { runMinutes: 20 } });
-    expect(hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify(plan)).digest('hex'));
+    // Hash covers plan + the inputs that change rendered copy (runMinutes).
+    expect(hash).toBe(require('crypto').createHash('sha1').update(JSON.stringify({ plan, runMinutes: 20 })).digest('hex'));
+    expect(_private.decisionHash(plan, { runMinutes: 25 })).not.toBe(hash);
     expect(calls.conflict).toEqual(['customer_id', 'week_ending']);
     expect(calls.merged.decision_hash).toBe(hash);
     expect(calls.whereNull).toBe('irrigation_week_plans.sent_at'); // a SENT row is never replaced

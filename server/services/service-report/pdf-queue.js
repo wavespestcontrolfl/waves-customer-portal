@@ -169,7 +169,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
   let tnRenderedSignature = '-tn0';
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const renderSignature = visibilitySignature;
-    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin });
+    const data = await buildReportV1Data(service, reportToken, knex, { pestPressureConfig, pinnedLawnAssessmentId: effectivePin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt });
     tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
     renderedData = data;
     // Queued PDFs are cached snapshots — live-only schedule fields

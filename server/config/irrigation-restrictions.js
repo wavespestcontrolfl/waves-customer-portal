@@ -53,11 +53,18 @@ const CITY_COUNTY = Object.freeze({
  * fertilizer ordinances), else a whole-county service city, else null
  * (coverage cannot be established).
  */
-function resolveRestrictionCounty({ county = null, city = null } = {}) {
-  const c = String(county || '').trim().replace(/\s+county$/i, '');
+function resolveRestrictionCounty({ county = null, profileCity = null, city = null } = {}) {
+  // Same stale-profile guard as waveguard-plan-engine getApplicableOrdinances:
+  // the 1:1 turf profile describes the home it was written for, so when its
+  // own city context DIVERGES from the customer's current city (moved
+  // customer, stale profile) its county is dropped and the current city
+  // decides — never the old property's order.
+  const pCity = String(profileCity || '').trim().toLowerCase();
+  const cCity = String(city || '').trim().toLowerCase();
+  const profileDiverges = !!pCity && !!cCity && pCity !== cCity;
+  const c = profileDiverges ? '' : String(county || '').trim().replace(/\s+county$/i, '');
   if (c) return c.charAt(0).toUpperCase() + c.slice(1).toLowerCase();
-  const key = String(city || '').trim().toLowerCase();
-  return CITY_COUNTY[key] || null;
+  return CITY_COUNTY[cCity] || null;
 }
 
 function coversCounty(policy, county) {

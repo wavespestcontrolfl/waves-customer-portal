@@ -115,7 +115,7 @@ function restrictionNote(restriction) {
   }
   const dayWord = days === 1 ? 'one day' : `${days} days`;
   const hours = restriction.hoursNote ? `, ${restriction.hoursNote}` : '';
-  return `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned day only.`;
+  return `${restriction.label}: lawn watering is limited to ${dayWord} a week${hours}, through ${restriction.expiresOn}. Water on your assigned ${days === 1 ? 'day' : 'days'} only.`;
 }
 
 function comparisonClause(plan, runMinutes) {
@@ -276,13 +276,18 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
  * left absent — the report shows no plan rather than one that was never
  * emailed. None of these throw — a snapshot problem must never block a send.
  */
-function decisionHash(plan) {
-  return crypto.createHash('sha1').update(JSON.stringify(plan)).digest('hex');
+// The hash covers the plan AND every snapshot input that changes rendered
+// copy (runMinutes drives "10 minutes more than you run now"), so one email
+// can never authenticate a row decided from different inputs.
+function decisionHash(plan, decisionInputs = {}) {
+  return crypto.createHash('sha1')
+    .update(JSON.stringify({ plan, runMinutes: decisionInputs?.runMinutes ?? null }))
+    .digest('hex');
 }
 
 async function persistWeekPlan({ customerId, weekEnding, planAsOf = new Date(), decisionInputs = {}, restriction = null, plan } = {}) {
   if (!customerId || !weekEnding || !plan) return null;
-  const hash = decisionHash(plan);
+  const hash = decisionHash(plan, decisionInputs);
   try {
     const row = {
       customer_id: customerId,
@@ -360,6 +365,20 @@ async function weekPlanDeliveryState(idempotencyKey) {
   }
 }
 
+/** A SENT snapshot already exists for this customer-week (the weekly email went out). */
+async function hasSentWeekPlan({ customerId, weekEnding } = {}) {
+  try {
+    const row = await db('irrigation_week_plans')
+      .where({ customer_id: customerId, week_ending: weekEnding })
+      .whereNotNull('sent_at')
+      .first('id');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[irrigation-week-plan] sent-check failed for ${customerId}/${weekEnding}: ${err.message}`);
+    return true; // unknown → do not send a second, possibly different, plan
+  }
+}
+
 async function discardUnsentWeekPlan({ customerId, weekEnding } = {}) {
   try {
     await db('irrigation_week_plans')
@@ -386,8 +405,14 @@ function samePolicy(a, b) {
  * so the report shows nothing rather than a stale legal instruction.
  * Null when there is no such snapshot.
  */
-async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
+async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt } = {}) {
   if (!customerId) return null;
+  // A render pinned to the cache-signature lookup's answer: the snapshot
+  // counts only if it is the SAME one that lookup saw (its sent_at), so a
+  // Monday stamp landing between the two reads can't cache a plan under a
+  // "plan=none" key (or vice versa).
+  const pinned = pinnedSentAt !== undefined;
+  if (pinned && pinnedSentAt === null) return null;
   try {
     const weekEnding = lastCompletedWeekEndingET(now);
     const row = await db('irrigation_week_plans')
@@ -399,6 +424,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date() } = {}) {
     const restriction = parse(row.restriction_policy) || null;
     const decisionInputs = parse(row.weather_inputs) || {};
     if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null }))) return null;
+    if (pinned && new Date(row.sent_at).toISOString() !== pinnedSentAt) return null;
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
@@ -421,6 +447,7 @@ module.exports = {
   renderWeekPlanReport,
   persistWeekPlan,
   markWeekPlanSent,
+  hasSentWeekPlan,
   discardUnsentWeekPlan,
   weekPlanDeliveryState,
   planCategory,

@@ -64,5 +64,10 @@ describe('jurisdiction', () => {
     expect(resolveRestrictionCounty({ city: 'North Port' })).toBe('Sarasota');
     expect(resolveRestrictionCounty({ city: 'Englewood' })).toBeNull(); // straddles counties
     expect(resolveRestrictionCounty({})).toBeNull();
+    // Stale profile (same guard as the plan engine): profile city ≠ customer
+    // city → the profile's county is dropped; the current city decides.
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Port Charlotte' })).toBe('Charlotte');
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Bradenton' })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: null, city: 'Port Charlotte' })).toBe('Manatee'); // no profile city context → keep
   });
 });

@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory } = require('./irrigation-week-plan');
 const { resolveRestrictionCounty } = require('../config/irrigation-restrictions');
 const { fetchServiceWeekWeather } = require('./service-report/application-conditions');
 const { grassTypeLabel, normalizeGrassType } = require('./lawn-grass-context');
@@ -871,6 +871,7 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       // own report displays that very number.
       'c.city',
       'tp.county as turf_county',
+      'tp.municipality as turf_city',
       'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
       'tp.irrigation_type as turf_irrigation_type',
       // LATEST non-null reading, and its value is passed through EVEN IF ZERO
@@ -1014,7 +1015,7 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, city: customer.city }),
+        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city }),
         now: planAsOf,
       };
       // Decide from last week's balance FIRST — the forecast only fills an
@@ -1057,6 +1058,14 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // nothing. Otherwise write THIS decision (replacing only an unsent
         // row) and stamp it after the provider accepts.
         snapshotArgs = { customerId: customer.id, weekEnding, planAsOf, decisionInputs: decision.decisionInputs, restriction: decision.restriction, plan: p, idempotencyKey };
+        // One plan per customer-week. A SENT snapshot with a different
+        // idempotency key (the customer changed email mid-week) means the
+        // week's email already went out — never send a second, possibly
+        // different, plan to the new address.
+        if (await hasSentWeekPlan({ customerId: customer.id, weekEnding })) {
+          summary.deduped += 1;
+          continue;
+        }
         const prior = await weekPlanDeliveryState(idempotencyKey);
         if (prior.state === 'sent') {
           // Delivered by an earlier run: stamp exactly the row its record

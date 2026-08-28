@@ -199,7 +199,8 @@ function mapWater(waterContext, waterSnapshot = null) {
       // 0 (or null) reads as no usable schedule (mirrors buildIrrigationAdvice's
       // `irrigation <= 0 = missing`), so the CTA must stay up.
       scheduleOnFile: (num(waterSnapshot.irrigation_inches_per_week) || 0) > 0,
-      weekPlan: null,
+      // The sent plan is independent of which rainfall source the card uses.
+      weekPlan: (waterContext && waterContext.weekPlan) || null,
     };
   }
   if (!waterContext) return null;

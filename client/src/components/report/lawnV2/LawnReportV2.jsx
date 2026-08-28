@@ -697,8 +697,17 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {/* This week's watering plan (server-gated): the same decision the Monday
           email sent, so the card and the inbox never disagree. */}
+      {/* Treatment aftercare outranks the weekly plan (lawn-diagnostic-plan:
+          the post-application label directive wins first) — when today's
+          visit carries a watering instruction, the plan is qualified as
+          what to return to afterwards, never a competing instruction. */}
       {water.weekPlan && water.weekPlan.title ? (
         <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
+          {aftercare && aftercare.watering ? (
+            <div data-testid="lawn-week-plan-aftercare-note" style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
+              Today’s treatment comes first — follow the after-visit watering note below, then pick this week’s plan back up.
+            </div>
+          ) : null}
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{water.weekPlan.title}</div>
           {water.weekPlan.detail ? <div style={{ marginTop: 3 }}>{water.weekPlan.detail}</div> : null}
         </div>

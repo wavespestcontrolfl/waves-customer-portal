@@ -334,6 +334,9 @@ async function buildServiceReportV1ResponseData(service, token, {
   pestPressureConfig,
   staffViewer = false,
   pinnedLawnAssessmentId = null,
+  // The week-plan snapshot the cache signature saw (ISO sent_at | null);
+  // undefined leaves the render unpinned (live snapshot).
+  pinnedWeekPlanSentAt,
   // OPT-IN, and only the /data render path opts in (codex #3367 PR r15).
   // Composing the offer runs the whole ownership → property → estimate →
   // pricing pipeline plus a referral-settings read. The Q&A endpoint calls
@@ -352,7 +355,7 @@ async function buildServiceReportV1ResponseData(service, token, {
   // Summary narrative) can exclude the live-only next appointment from
   // pdf/static text — the field-level strip below can't reach prose.
   const data = await buildReportV1Data(service, token, db, {
-    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId,
+    pestPressureConfig, staffViewer, mode, pinnedLawnAssessmentId, pinnedWeekPlanSentAt,
   });
   if (service?.report_template_version !== 'service_report_v1') return data;
 
@@ -1877,7 +1880,7 @@ router.get('/:token', async (req, res, next) => {
         for (let attempt = 0; attempt < 2; attempt += 1) {
           const renderSignature = visibilitySignature;
           const data = await buildServiceReportV1ResponseData(service, req.params.token, {
-            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin,
+            mode: 'pdf', pestPressureConfig, pinnedLawnAssessmentId: canonicalPin, pinnedWeekPlanSentAt: canonical.weekPlanSentAt,
           });
           tnRenderedSignature = data?.treatmentNarrativeRenderedSignature || '-tn0';
           renderedData = data;

@@ -2026,6 +2026,10 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   // failed prefs read stamps random so the cache re-renders instead of
   // serving stale (same fail-open-to-rerender posture as the outer catch).
   let irrigationStamp;
+  // The week-plan snapshot this signature describes (ISO sent_at, or null);
+  // callers pass it back as pinnedWeekPlanSentAt so the render uses exactly
+  // the plan the cache key was computed from.
+  let weekPlanSentAt = null;
   try {
     const prefs = await knex('property_preferences')
       .where({ customer_id: service.customer_id })
@@ -2041,7 +2045,8 @@ async function resolveCanonicalLawnRender(service, knex = db) {
       // loadCurrentWeekPlan already returns null once the policy it was
       // decided under is no longer in force, so its identity is the stamp.
       const snapshot = await loadCurrentWeekPlan(service.customer_id);
-      irrigationStamp += `:plan=${snapshot?.sentAt ? new Date(snapshot.sentAt).toISOString() : 'none'}`;
+      weekPlanSentAt = snapshot?.sentAt ? new Date(snapshot.sentAt).toISOString() : null;
+      irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
     }
   } catch {
     irrigationStamp = `err${crypto.randomBytes(4).toString('hex')}`;
@@ -2050,7 +2055,7 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true });
   if (!assessment?.id) {
     const bare = crypto.createHash('sha1').update(`none|${irrigationStamp}`).digest('hex').slice(0, 12);
-    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}` };
+    return { pin: PIN_NO_ASSESSMENT, signature: `-la${LAWN_RENDER_STRATEGY}0${bare}`, weekPlanSentAt };
   }
 
   const recs = typeof assessment.recommendations === 'string'
@@ -2060,7 +2065,7 @@ async function resolveCanonicalLawnRender(service, knex = db) {
     .update(`${assessment.id}|${recs}|${assessment.ai_summary || ''}|${assessment.updated_at ? new Date(assessment.updated_at).toISOString() : ''}|${irrigationStamp}`)
     .digest('hex')
     .slice(0, 12);
-  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}` };
+  return { pin: assessment.id, signature: `-la${LAWN_RENDER_STRATEGY}${stamp}`, weekPlanSentAt };
 }
 
 // Signature-only entry point for CACHE-LOOKUP sites, which must never throw —
@@ -2251,7 +2256,7 @@ async function freezeLawnWeekWeather(serviceRecordId, weekWeather, knex = db) {
   }
 }
 
-async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null } = {}) {
+async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { pinnedAssessmentId = null, pinnedWeekPlanSentAt } = {}) {
   if (serviceLine !== 'lawn') return null;
   // Pinned-empty is unconditional: the attachment provably carries no lawn
   // section, which is exactly what the fence sealed.
@@ -2587,7 +2592,7 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
   // never be built from a historical report's weather and season.
   waterContext.weekPlan = null;
   if (featureGates.isEnabled('irrigationWeekPlan')) {
-    const snapshot = await loadCurrentWeekPlan(service.customer_id);
+    const snapshot = await loadCurrentWeekPlan(service.customer_id, { pinnedSentAt: pinnedWeekPlanSentAt });
     if (snapshot?.plan) {
       // Compare against the runtime Monday's decision saw, never today's prefs.
       waterContext.weekPlan = renderWeekPlanReport(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null });
@@ -3001,6 +3006,8 @@ async function buildReportV1Data(service, token, knex = db, options = {}) {
 
   const lawnAssessment = await buildLawnAssessmentReportData(service, serviceLine, knex, {
     pinnedAssessmentId: opts.pinnedLawnAssessmentId || null,
+    // undefined = unpinned (live snapshot); null = the signature saw none.
+    pinnedWeekPlanSentAt: opts.pinnedWeekPlanSentAt,
   });
   // Render-time treatment reconciliation (codex P1 r19): the completion SMS
   // links this report immediately — a customer can open it BEFORE the
