@@ -176,6 +176,7 @@ t.timestamp('superseded_at');
 ```js
 t.uuid('domain_id').references('seo_link_domains.id');
 t.uuid('path_id').references('seo_link_acquisition_paths.id');
+t.string('parked_from_status');  // the status a row held before parking as awaiting_owner/watching; restored on approval/resume (§7)
 t.uuid('credential_id');         // → seo_link_credentials: the account this placement acts under (explicit; never inferred from domain)
 t.uuid('pending_path_id');       // → seo_link_acquisition_paths: the replacement path a superseded placement will be repointed to once its open post-exposure purchase settles (§3.2)
 t.string('location_key').notNullable().defaultTo('-'); // GBP location for per-location signup placements (Bradenton, Sarasota, …); '-' = not location-scoped. Replaces the runner's quality_signals.location identity (backfilled). Unique key becomes (target_domain, target_page, location_key); findPlacementRow takes the location; outreach lanes always '-'
@@ -197,7 +198,7 @@ t.string('dimension').notNullable();   // CHECK (dimension IN ('execution','paym
 t.string('level').notNullable();       // CHECK (level IN (the §6.1 enum))
 t.uuid('approval_id');                 // NULL while an OWNER_* decision is pending (the bridge writes the row, the placement parks in awaiting_owner, the click creates the approval and fills this in); REQUIRED for CLAIMABILITY of any OWNER_*/OWNER_OVERRIDE row, not for the row's existence; the referenced approval's `dimension` must equal this row's dimension (enforced in the approval transaction)
 t.text('decision_inputs_hash').notNullable(); t.integer('path_revision').notNullable(); // the hash covers only THIS dimension's inputs; path_revision = the path's revision_<dimension>
-t.string('instance_key').notNullable().defaultTo('-'); // the ACTION INSTANCE this row governs: '-' = initial acquisition/send; a renewal's renewal_period_key; 'followup' for the follow-up send — each new instance (every renewal, the follow-up) is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances
+t.string('instance_key').notNullable().defaultTo('-:1'); // the ACTION INSTANCE this row governs: `${kind}:${generation}` — kind '-' = initial acquisition/send, a renewal's renewal_period_key, or 'followup'; generation starts at 1 and the bridge opens `${kind}:${n+1}` when the previous instance ended in a NON-successful terminal outcome (`failed`/`skipped`/`send_error` reconciled as not sent) and a retry is warranted (re-investigation or owner "retry") — each new instance is a NEW row that must be decided and, if OWNER_*, freshly approved; satisfaction never carries across instances; a successful instance (`placed`/`sent`) never gets a successor of the same kind
 t.timestamp('decided_at').notNullable(); t.timestamp('satisfied_at');                  // set when THIS instance's action completed (e.g. communication '-' after `sent`) — a satisfied instance is never re-decided; the next instance starts unsatisfied
 t.unique(['prospect_id', 'dimension', 'instance_key']);
 ```
@@ -442,7 +443,9 @@ bridge → authority before any send).
   with **every required field explicit** so the schema holds without invented authority:
   `account_required=false`, `email_verification=false`, `payment_required=false`,
   `legal_attestation=false`, `agent_completable=false` (⇒ it can never receive an `AUTO_*`
-  level), `link_type` = the classified type, `confidence=0.1`, `last_investigated_at=null`
+  level), `link_type` = the classified type normalized into the CHECKed lane set (`forum`/`comment`/
+`unknown` from `classifyLinkType` → `resource` as the descriptive lane; never left outside
+the CHECK), `confidence=0.1`, `last_investigated_at=null`
   and `baseline=true` (new boolean; a baseline path is non-executable by definition — the
   §6.3 validity step already returns `INVALID` on a null `last_investigated_at`, and the
   investigator replaces it with a real path on the first pass). Idempotent via
@@ -496,7 +499,7 @@ acquisition queue without a path row with `confidence ≥ policy.min_path_confid
 ### 6.1 Levels (`authority` on path + placement)
 
 `AUTO_FREE` · `AUTO_ACCOUNT` · `AUTO_OUTREACH` · `AUTO_PAID_WITHIN_POLICY` ·
-`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
+`OWNER_FREE` · `OWNER_ACCOUNT` · `OWNER_OUTREACH` · `OWNER_PAYMENT` · `OWNER_MANUAL_PAYMENT` (payment only ever outside the system) · `OWNER_MEMBERSHIP` · `OWNER_LEGAL` · `OWNER_HUMAN_STEP` · `OWNER_OVERRIDE` · `DENY` · `INVALID`
 
 `INVALID` (data/money validity, missing investigation) is not overrideable by anyone;
 `DENY` (quality policy) is overrideable only by the owner's explicit click, which is recorded.
@@ -558,6 +561,7 @@ if path.link_type not in CLAIMABLE_LINK_TYPES → INVALID              # the shi
 if any of (account_required, email_verification, payment_required, legal_attestation, agent_completable) is not a literal boolean → INVALID
 if flags inconsistent with acquisition_type (see §3.2) → INVALID
 if path.payment_required and not (Number.isSafeInteger(amount_cents) and amount_cents > 0) → INVALID
+if path.payment_required and not valid(path.merchant_binding)  → payment = OWNER_MANUAL_PAYMENT   # no resolvable recipient identity: the automated purchase flow is closed for this path (no reservation, no card); the owner pays outside the system and records a `human` attempt — communication/execution dimensions proceed normally
 # 1b. QUALITY POLICY floors — fail-closed, evaluated before any AUTO_* or OWNER_* branch.
 #     A row that fails one is DENY regardless of who would have acted. The ONLY way past DENY
 #     is the owner's explicit "Acquire anyway" click, which does NOT stamp an authority: it
@@ -590,7 +594,8 @@ if path.payment_required:
        and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents → AUTO_PAID_WITHIN_POLICY
     else → payment = OWNER_PAYMENT
 # 2c. COMMUNICATION dimension (outreach/content types; replaces 2a for them) — evaluated in ADDITION to 2b
-if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):   # guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
+if path.acquisition_type in (resource_outreach, editorial_outreach, partnership, content_submission):
+    if path.legal_attestation and policy.legal_attestation_requires_owner → communication = OWNER_LEGAL   # a signed agreement / vendor terms is never accepted under AUTO_OUTREACH; the owner's legal approval (action outreach_send, dimension communication) is the only send authority for this path   # guest posts / content always pass the outreach mandate (draft lint, commitment checks, owner review)
     → communication = AUTO_OUTREACH if configured(auto_outreach_min_score) and configured(auto_outreach_daily_cap) and auto_outreach_daily_cap > 0
                       and score ≥ auto_outreach_min_score and a lint-clean draft EXISTS and passes §6.4 (evaluated after drafting — §7),
                       else communication = OWNER_OUTREACH (the draft goes to the existing approval queue; the auth'd send click IS the approval row,
@@ -607,7 +612,10 @@ refused on INVALID (an unenriched or uninvestigated domain, or invalid money, ca
 acted on by anyone until enrichment and investigation have run).
 
 **Bridge — how an investigated domain becomes claimable (part of step 4).** A nightly
-`link-authority` job takes every `qualified` domain with a `best_path_id` and, per domain,
+`link-authority` job takes (a) every `qualified` domain with a `best_path_id` and (b) every
+existing placement whose authority rows are STALE — their `decision_inputs_hash` or
+`path_revision_<dimension>` no longer matches the current inputs, or the policy/spend/D30
+inputs changed since `decided_at` — whatever the domain's aggregate state; and, per domain,
 inside one transaction under `claimProspectDomain`/`findPlacementRow`: chooses the Waves
 money page for the placement (scorer topic mapping → `targetPageOf`; homepage for
 listing-style paths) and, for signup-lane paths, **one placement per GBP location**
@@ -626,7 +634,9 @@ on every placement → back to `investigating`. Per-placement outcomes are store
 placement (`OWNER_*` → `awaiting_owner` + card; `DENY` → reasons + override affordance). The job is
 idempotent and re-runs the decision whenever ANY §6.3 input changes — policy, path
 revision, domain enrichment (`spam_score`, DR/traffic), `score`, path `confidence`, D30
-evidence, month spend. **A stamp is never trusted on its own:** the claim predicate and the
+evidence, month spend — for already-bridged placements too: a stale stamp is replaced (or a
+fresh owner card issued) by the next run, so a loosened policy releases queued work and a
+tightened one re-parks it, rather than leaving rows to fail closed forever at claim time. **A stamp is never trusted on its own:** the claim predicate and the
 budget reservation both re-run the pure §6.3 decision on the *current* inputs inside their
 locked transaction and refuse (409, row re-parked) unless it still supports the stamp:
 for `AUTO_*` and `OWNER_*` stamps the current result must equal the stamp; for a
@@ -929,8 +939,10 @@ together:
   gate is on (**`GATE_LINK_AUTHORITY` for ANY `AUTO_*` stamp — the kill switch is checked at
   claim and again immediately before every irreversible action: submit, send, mint — not
   only at stamping**; `GATE_SIGNUP_RUNNER` for signup lanes, `GATE_LINK_OUTREACH` for outreach,
-  `GATE_LINK_PAYMENTS` for ANY `payment_required` path — the payment-lane kill switch — and
-  additionally `GATE_LINK_AUTO_PAID` only when the stamped authority is
+  `GATE_LINK_PAYMENTS` for the PAYMENT-dimension claims only — reservation, `mode=payment`,
+  `mode=renewal`, mint and payment submit — never for a send or a free/account execution
+  step on a path that happens to be paid (communication and payment are independent), and
+  additionally `GATE_LINK_AUTO_PAID` only when the stamped payment authority is
   `AUTO_PAID_WITHIN_POLICY`; an owner-approved `OWNER_PAYMENT`/`OWNER_MEMBERSHIP` row needs
   the payments gate, not the auto-paid gate); no `submitting`/`close_pending`/
   `ambiguous` purchase exists for the placement and no `reserved` purchase is bound to another lease
@@ -965,8 +977,11 @@ together:
 - **`needs_owner` is a report OUTCOME, not a status.** The report route's outcome allowlist
   gains `needs_owner` (and `payment_ambiguous`, `ready_for_payment`, `price_changed`,
   `captcha`); `needs_owner` atomically maps the placement to `status='awaiting_owner'`
-  (+ the owner card), `claim()` excludes `awaiting_owner`/`watching`, and approval moves the
-  row back to `prospect` with the approval recorded — so an owner-gated row is neither
+  (+ the owner card) and stores the status it parked from in `parked_from_status`;
+  `claim()` excludes `awaiting_owner`/`watching`, and approval restores `parked_from_status`
+  (`prospect` for a fresh acquisition, `contacted`/`negotiating` for a paid outreach
+  placement whose payment step needed the owner — which then flows to `mode=payment`, never
+  back through the send claim) with the approval recorded — so an owner-gated row is neither
   rejected by the route nor reclaimed by another worker.
 
 ```ts
@@ -1036,7 +1051,11 @@ Implementations, in order:
 3. `human` — Adam completing a step from the owner card; recorded as an attempt like any other.
 
 Provider selection per attempt = `COALESCE(path.provider_override, policy.preferred_provider)`
-(§3.2 / §6.2 — both durable columns; payment steps always resolve to `deterministic_runner`). Outreach: `OutreachProvider` = drafter + `link-prospect-outreach`.
+for non-credentialed, non-payment steps only; **credentialed steps (account creation, email
+verification, login, authenticated resume) and payment steps always resolve to
+`deterministic_runner`** regardless of preference — a `ready_for_credentials` / `ready_for_payment`
+hand-off is therefore always picked up by the runner, never re-offered to the provider
+that cannot complete it. Outreach: `OutreachProvider` = drafter + `link-prospect-outreach`.
 
 ---
 
