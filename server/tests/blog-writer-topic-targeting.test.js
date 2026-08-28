@@ -56,6 +56,8 @@ const IDEAS = [
   { title: 'New-Construction Pest Control in Florida', keyword: 'new construction pest control', tag: 'pest control', slug: 'new-construction-pest-control-florida', city: 'Bradenton' },
   { title: 'Your New Lakewood Ranch Home Came With Taexx', keyword: 'taexx system lakewood ranch', tag: 'pest control', slug: 'lakewood-ranch-taexx', city: 'Lakewood Ranch' },
   { title: 'Ghost Ants in Sarasota Kitchens: Why They Keep Coming Back', keyword: 'ghost ants sarasota kitchen', tag: 'pest control', slug: 'ghost-ants-sarasota-kitchens', city: 'Sarasota' },
+  // Hook (PR codex r11 push): owned entity ONLY in the meta description.
+  { title: 'New-Home Pest Control in Bradenton: The First Year', keyword: 'new home pest control bradenton', tag: 'pest control', slug: 'new-home-pest-control-bradenton', city: 'Bradenton', meta_description: 'What the Taexx tubes in a new build actually do, and what they miss.' },
 ];
 
 describe('blog-writer idea lane — topic-targeting gate', () => {

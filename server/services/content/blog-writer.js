@@ -618,8 +618,10 @@ Return ONLY a JSON array, no prose: [{ "title": "", "keyword": "", "tag": "", "s
       // Owner rulings 2026-08-27: an idea built around an out-of-footprint
       // geo, statewide-only framing (an idea IS a title — judged strictly),
       // or an entity a live post already owns is rejected outright.
+      // Every persisted targeting field is judged here — the meta description
+      // is ownership evidence too (generation would block it later anyway).
       const topic = topicGate.evaluate(
-        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, category: categoryForRow({ tag }) },
+        { actionType: 'new_supporting_blog', query: keyword, title: raw.title, slug, city: city || '', category: categoryForRow({ tag }), targeting: raw.meta_description ? String(raw.meta_description).trim() : '' },
         { index: topicIndex }
       );
       if (!topic.ok) { rejected++; continue; }
