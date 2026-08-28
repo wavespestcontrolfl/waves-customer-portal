@@ -18,7 +18,7 @@
  * inclusive), label, source, hoursNote }.
  */
 const logger = require('../services/logger');
-const { etDateString } = require('../utils/datetime-et');
+const { etDateString, validCalendarDate } = require('../utils/datetime-et');
 
 const DEFAULT_POLICY = Object.freeze({
   maxDaysPerWeek: 1,
@@ -88,8 +88,13 @@ function validPolicy(p) {
   if (!p) return false;
   const days = Number(p.maxDaysPerWeek);
   if (!Number.isInteger(days) || days < 0 || days > 7) return false;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(p.expiresOn || ''))) return false;
-  if (p.effectiveFrom && !/^\d{4}-\d{2}-\d{2}$/.test(String(p.effectiveFrom))) return false;
+  // Real calendar dates, not just the shape — a mistyped 2026-02-31 must not
+  // keep legal guidance alive past its real expiry.
+  if (!validCalendarDate(p.expiresOn)) return false;
+  if (p.effectiveFrom != null && p.effectiveFrom !== '') {
+    if (!validCalendarDate(p.effectiveFrom)) return false;
+    if (String(p.effectiveFrom) > String(p.expiresOn)) return false;
+  }
   return true;
 }
 

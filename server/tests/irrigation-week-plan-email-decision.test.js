@@ -51,8 +51,17 @@ describe('weekly email decision — plan mode', () => {
     expect(d.payload.week_plan).toContain('leave the turf irrigation off for now');
   });
 
-  test('hold: a big surplus against a small cool-season target', () => {
-    const d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, rainfallInches7d: 1.5 });
+  test('hold: a big surplus against a small cool-season target (season from NOW, January)', () => {
+    // The checked-in order is not in force in January — a year-round policy
+    // is configured for this case (the fail-closed path is pinned separately).
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule' });
+    let d;
+    try {
+      d = buildWeeklyEmailDecision({ ...BASE, weekEnding: '2026-01-18', et0Inches: 0.8, rainfallInches7d: 1.5, now: new Date('2026-01-19T12:00:00Z') });
+    } finally {
+      delete process.env.IRRIGATION_RESTRICTION_POLICY;
+    }
+    expect(d.weekPlan.season).toBe('cool');
     expect(d.reason).toBe('plan_hold');
     expect(d.payload.plan_subject).toBe('Skip your turf watering this week, Sam');
   });

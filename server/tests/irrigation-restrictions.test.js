@@ -38,6 +38,10 @@ describe('currentRestrictionPolicy', () => {
     expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: '{not json' }, county: 'Manatee' })).toBeNull(); // configured-but-unusable ≠ unset
     expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 9, expiresOn: '2027-01-01' }) }, county: 'Manatee' })).toBeNull();
     expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: 'soon' }) }, county: 'Manatee' })).toBeNull();
+    // Shape-valid but not a real date, and an inverted range: both fail closed.
+    expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2026-02-31' }) }, county: 'Manatee' })).toBeNull();
+    expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, expiresOn: '2026-99-99' }) }, county: 'Manatee' })).toBeNull();
+    expect(currentRestrictionPolicy(IN_FORCE, { env: { IRRIGATION_RESTRICTION_POLICY: JSON.stringify({ maxDaysPerWeek: 2, effectiveFrom: '2026-12-01', expiresOn: '2026-09-01' }) }, county: 'Manatee' })).toBeNull();
   });
 });
 

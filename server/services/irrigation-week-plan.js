@@ -26,7 +26,8 @@ const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
-const { _private: advicePrivate } = require('./service-report/irrigation-advice');
+const { recommendedFromEt0, recommendedInchesPerWeek, _private: advicePrivate } = require('./service-report/irrigation-advice');
+const { etParts } = require('../utils/datetime-et');
 
 const { classifySeason } = advicePrivate;
 
@@ -47,13 +48,16 @@ function minutesPhrase(plan) {
 }
 
 /**
- * Build the decision from what the weekly email / report already computed.
- * `advice` is buildIrrigationAdvice()'s output for LAST week (target,
- * applied, rainKnown); the target doubles as this week's need (same month).
+ * Build the decision from what the weekly email already computed. `advice`
+ * is buildIrrigationAdvice()'s output for LAST week (applied inches, target,
+ * rainKnown) — it feeds carryover only. The plan is for the week AHEAD, so
+ * its target and season come from the ET month of `now`, not from the
+ * completed week's date (an early-April plan must not read as cool season).
  */
 function decideWeekPlan({
   advice,
-  month,
+  grassType = null,
+  et0Inches = null,
   forecastRainInches = null,
   runMinutes = null,
   wateringDays = null,
@@ -64,12 +68,15 @@ function decideWeekPlan({
   now = new Date(),
 } = {}) {
   const restriction = currentRestrictionPolicy(now, { county });
+  const planMonth = etParts(now).month;
+  const targetInchesPerWeek = recommendedFromEt0(et0Inches, grassType, planMonth)
+    ?? recommendedInchesPerWeek(grassType, planMonth);
   const plan = buildWeekPlan({
-    targetInchesPerWeek: advice?.recommendedInchesPerWeek ?? null,
+    targetInchesPerWeek,
     lastWeekAppliedInches: advice?.appliedInchesPerWeek ?? null,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     forecastRainInches,
-    season: classifySeason(month),
+    season: classifySeason(planMonth),
     restriction,
     runMinutes,
     wateringDays,
@@ -82,11 +89,14 @@ function decideWeekPlan({
   // Everything the decision was made from, for the snapshot (the report
   // renders comparisons from these, never from today's prefs).
   const decisionInputs = {
-    targetInches: advice?.recommendedInchesPerWeek ?? null,
+    targetInches: targetInchesPerWeek,
+    lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     appliedInches: advice?.appliedInchesPerWeek ?? null,
     rainKnown: advice?.rainKnown !== false,
     forecastRainInches,
-    month,
+    planMonth,
+    grassType,
+    et0Inches,
     runMinutes: runtime.runMinutes,
     wateringDays: runtime.wateringDays,
     headTypes: runtime.headTypes,
@@ -162,7 +172,10 @@ function renderWeekPlanEmail(plan, { firstName = 'there', grassLabel = 'lawn', r
     // The forecast is a 7-day total and we do not know the customer's assigned
     // day, so the copy never asserts the rain comes first — it keys the
     // decision on what has actually fallen by the permitted day.
-    actionLine = `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. When your permitted watering day comes around: if ½" or more has fallen so far this week, skip the run; if less than ½" has, run ${fallbackCycle}.`;
+    const dayLead = plan.events > 1
+      ? `On each of your ${plan.events} permitted watering days`
+      : 'When your permitted watering day comes around';
+    actionLine = `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast near your home, so leave the turf irrigation off for now. ${dayLead}: if ½" or more has fallen so far this week, skip that run; if less than ½" has, run ${fallbackCycle}.`;
   } else {
     subject = minutes ? `This week: ${minutes} per turf zone, ${name}` : `This week's watering plan, ${name}`;
     heading = `Your watering plan for this week, ${name}`;
@@ -225,7 +238,7 @@ function renderWeekPlanReport(plan, { runMinutes = null } = {}) {
   if (plan.conditionalOnForecast) {
     return {
       title: 'This week: let the rain go first',
-      detail: `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; on your permitted watering day, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
+      detail: `About ${fmtInches(plan.forecastRainInches)} of rain is in this week's forecast. Leave the turf irrigation off for now; ${plan.events > 1 ? `on each of your ${plan.events} permitted watering days` : 'on your permitted watering day'}, run one cycle${minutes ? ` of ${minutes} per turf zone` : ''} only if less than ½" has fallen so far this week.`,
     };
   }
   return {

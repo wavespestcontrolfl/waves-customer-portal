@@ -35,9 +35,17 @@ describe('irrigation.weekly_plan template', () => {
   test.each([
     ['plan_run', { irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 0.3 }],
     ['plan_conditional', { irrigationInchesPerWeek: null, rainfallInches7d: 0.6, forecastRainInches: 1.4 }],
-    ['plan_hold', { irrigationInchesPerWeek: null, rainfallInches7d: 1.5, forecastRainInches: 0.1, weekEnding: '2026-01-18', et0Inches: 0.8 }],
+    ['plan_hold', { irrigationInchesPerWeek: null, rainfallInches7d: 1.5, forecastRainInches: 0.1, weekEnding: '2026-01-18', et0Inches: 0.8, now: new Date('2026-01-19T12:00:00Z') }],
   ])('%s renders with no unresolved placeholders', (reason, water) => {
-    const decision = buildWeeklyEmailDecision({ ...BASE, ...water });
+    // January is outside the checked-in order's window — configure a
+    // year-round policy so the hold case has a legal ceiling to plan under.
+    process.env.IRRIGATION_RESTRICTION_POLICY = JSON.stringify({ maxDaysPerWeek: 1, expiresOn: '2027-12-31', label: 'test year-round rule', hoursNote: 'on your assigned day' });
+    let decision;
+    try {
+      decision = buildWeeklyEmailDecision({ ...BASE, ...water });
+    } finally {
+      delete process.env.IRRIGATION_RESTRICTION_POLICY;
+    }
     expect(decision.templateKey).toBe(TEMPLATE_WEEK_PLAN);
     expect(decision.reason).toBe(reason);
     const { template, version } = seedRows();

@@ -597,7 +597,8 @@ function buildWeeklyEmailDecision({
   if (weekPlanEnabled) {
     const { plan, restriction, decisionInputs } = decideWeekPlan({
       advice,
-      month: monthFromYmd(weekEnding),
+      grassType,
+      et0Inches,
       forecastRainInches,
       runMinutes: irrigationRunMinutes,
       wateringDays,
