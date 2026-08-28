@@ -256,7 +256,13 @@ async function invoiceCaptureNeeded(invoice) {
 async function invoiceCreditWouldFullyCover(invoice) {
   if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
-  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits');
+  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
+  // including the customer's opt-in (customers.auto_apply_account_credit,
+  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
+  // it must read as zero here too — otherwise the capture step / combined
+  // preview would show a coverage the setup path will never apply.
+  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  if (row?.auto_apply_account_credit !== true) return false;
   const credit = Number(row?.account_credits) || 0;
   return credit > 0 && credit >= invoiceAmountDue(invoice);
 }

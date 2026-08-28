@@ -6541,7 +6541,7 @@ function BillingTab({ customer, refreshCustomer }) {
                 <div style={{ fontSize: 14, fontWeight: 850, color: B.glassNavy }}>Apply my credit to invoices automatically</div>
                 <div style={{ fontSize: 12, color: muted, marginTop: 2 }}>
                   {autoApplyCredit
-                    ? 'Your credit is applied to each new invoice before anything is charged.'
+                    ? 'Your credit is applied to your open and future invoices before anything is charged.'
                     : 'Off — your credit stays on your account until you turn this on.'}
                 </div>
               </div>
