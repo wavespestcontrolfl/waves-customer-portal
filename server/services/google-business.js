@@ -1110,7 +1110,15 @@ class GoogleBusinessService {
         }
         await db('google_reviews').where({ id: existing.id }).update(upd);
         await this._reconcilePostedEdit(existing, { star_rating: review.rating || 0, review_text: review.text || null, reviewer_name: reviewerName, location_id: loc.id });
-        if (ownerReply && (!existing.review_reply || isDraftReply(existing.review_reply))) {
+        // A Places owner reply that differs from the local one goes through
+        // the canonical sync path: it fills an empty slot, replaces a
+        // "[DRAFT]", and — when the owner edited our POSTED reply directly
+        // on Google during a GBP outage — replaces the stale text and closes
+        // the automatic state (edited_on_google), so an admin editing from
+        // this page no longer works from a reply Google no longer shows. An
+        // ABSENT Places reply is still never a downgrade (the sample is not
+        // authoritative for deletions).
+        if (ownerReply && ownerReply.trim() !== String(existing.review_reply || '').trim()) {
           const { syncReplyFields, applySyncReplyFields } = require('./review-reply/runner');
           await applySyncReplyFields(existing.id, syncReplyFields(existing, { owner_reply: ownerReply }, { fnNow: db.fn.now() }), { expectedReply: existing.review_reply ?? null });
         }

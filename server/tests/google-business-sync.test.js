@@ -479,6 +479,47 @@ describe('Google Business review sync', () => {
     });
   });
 
+  test('Places fallback: an owner reply edited directly on Google replaces our POSTED auto reply and closes the auto state', async () => {
+    db.__state.rows.google_reviews.push({
+      id: 'gbp-row-1',
+      google_review_id: 'accounts/1/locations/2/reviews/rev-1',
+      gbp_review_name: 'accounts/1/locations/2/reviews/rev-1',
+      location_id: 'bradenton',
+      reviewer_name: 'Paula Placeholder',
+      star_rating: 5,
+      review_text: 'Edited text',
+      review_created_at: '2026-04-09T20:54:35Z',
+      review_reply: 'Hi Paula,\n\nGlad the ants are gone.\n\nThe 🌊 Waves Pest Control Bradenton Team',
+      reply_updated_at: '2026-04-10T00:00:00Z',
+      auto_reply_status: 'posted',
+      auto_reply_reason: null,
+    });
+    service._getClient = jest.fn(async () => null);
+    global.fetch = jest.fn(async (url) => {
+      if (String(url).includes('fields=reviews')) {
+        return { json: async () => ({ status: 'OK', result: { reviews: [{
+          author_name: 'Paula Placeholder',
+          rating: 5,
+          text: 'Edited text',
+          time: 1779307832,
+          owner_response: { text: 'Thanks Paula, the owner rewrote this on Google.' },
+        }] } }) };
+      }
+      return { json: async () => ({ status: 'OK', result: { rating: 5, user_ratings_total: 30 } }) };
+    });
+
+    await service.syncAllReviews();
+
+    const reviewRows = db.__state.rows.google_reviews.filter(r => r.reviewer_name !== '_stats');
+    expect(reviewRows).toHaveLength(1);
+    expect(reviewRows[0]).toMatchObject({
+      id: 'gbp-row-1',
+      review_reply: 'Thanks Paula, the owner rewrote this on Google.',
+      auto_reply_status: 'skipped',
+      auto_reply_reason: 'edited_on_google',
+    });
+  });
+
   test('Places fallback skips a same-name review with different content (no overwrite, no insert)', async () => {
     // Ambiguous: a different account sharing the display name, or an edit
     // the GBP feed has not caught up with — either way, defer to GBP.
