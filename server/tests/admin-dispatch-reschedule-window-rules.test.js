@@ -184,6 +184,7 @@ test('series scope hands the RAW window to the rebooker with adminWindowRules so
     expect.any(String), TARGET, { start: '10:00' }, 'admin', 'admin', {
       allowLive: true,
       adminWindowRules: true,
+      sourceSurface: 'dispatch_board',
       // Staff surface — occupancy clashes commit with a warning (owner
       // ruling 2026-08-25, rebooker.overlapAdvisory).
       overlapAdvisory: true,

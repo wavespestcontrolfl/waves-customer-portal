@@ -176,11 +176,13 @@ class RescheduleSMS {
         && withinQuotedWindow;
     }
 
+    let smsMoveResult = null;
     if (selectedOption && !alreadyOnSlot) {
       try {
-        await SmartRebooker.reschedule(
+        smsMoveResult = await SmartRebooker.reschedule(
           pending.scheduled_service_id, selectedOption.date,
-          selectedOption.window, pending.reason_code, 'customer_sms'
+          selectedOption.window, pending.reason_code, 'customer_sms',
+          { sourceSurface: 'sms_reply' },
         );
       } catch (err) {
         // The offer was computed without a route check — rebooker can now
@@ -216,6 +218,25 @@ class RescheduleSMS {
           );
         } catch (err) {
           logger.warn(`[reschedule-sms] Reminder sync failed for ${pending.scheduled_service_id}: ${err.message}`);
+        }
+        // A date reply on a cadence visit shifted the future series through
+        // the collective choke point: sync each shifted sibling's reminder
+        // to its own new date/kept window (same silent sync the web
+        // rescheduler runs — reschedule-public.js). Windowless occurrences
+        // had their reminder pre-closed in the move trx.
+        const shifted = Array.isArray(smsMoveResult?.rescheduledOccurrences) ? smsMoveResult.rescheduledOccurrences : [];
+        for (const occ of shifted) {
+          if (String(occ.id) === String(pending.scheduled_service_id) || occ.conflicted || !occ.windowStart) continue;
+          try {
+            const AppointmentReminders = require('./appointment-reminders');
+            await AppointmentReminders.handleReschedule(
+              occ.id,
+              `${String(occ.date).split('T')[0]}T${String(occ.windowStart).slice(0, 5)}`,
+              { sendNotification: false, coverDueWindows: true },
+            );
+          } catch (err) {
+            logger.warn(`[reschedule-sms] series reminder sync failed for ${occ.id}: ${err.message}`);
+          }
         }
       }
     }

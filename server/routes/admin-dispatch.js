@@ -13412,6 +13412,7 @@ router.post('/:serviceId/photo-analysis/draft', async (req, res) => {
 // RESCHEDULE ENDPOINTS
 // =========================================================================
 const SmartRebooker = require('../services/rebooker');
+const { collectiveMoveGateOn } = require('../services/rebooker');
 const { assertAdminAppointmentWindow } = require('../services/scheduling/window-rules');
 const ForecastAnalyzer = require('../services/forecast-analyzer');
 
@@ -13992,6 +13993,185 @@ router.post('/:serviceId/rain-out', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Post-commit effects of a COMMITTED series move, shared by every staff
+// surface that lands one (dispatch drag, edit modal, a choke-point delegation
+// from a single-visit call): the schedule_conflict card for occurrences that
+// went windowless, each occurrence's reminder sync with its guard snapshot
+// captured IMMEDIATELY after (an awaited board broadcast between a sync and
+// its capture would capture a concurrent dispatcher's newer reschedule as
+// "ours" and a later SMS failure would re-arm against it — double-texting
+// the customer), board broadcasts only after every sync→capture pair, then
+// ONE appointment_series_rescheduled text. Every effect is keyed on the
+// series_moves row (rebooker.rescheduleSeries): a replayed operation (same
+// operation_key) or a retried effects pass finds the marker stamped and
+// skips, so a retry can never double-text or double-card.
+// `notify` is explicit and suppresses ONLY the immediate customer text —
+// reminder re-sync, tracker refresh and board broadcasts always run.
+async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, notify, actorId, reasonText }) {
+  const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
+  const seriesMoveId = result.seriesMoveId || null;
+  let markers = null;
+  if (seriesMoveId) {
+    try {
+      markers = await db('series_moves').where({ id: seriesMoveId })
+        .first('notified_at', 'conflict_card_at', 'reminders_synced_at');
+    } catch (err) {
+      logger.warn(`[dispatch] series_moves marker read failed for ${seriesMoveId}: ${err.message}`);
+    }
+  }
+  const stampMarker = async (col, extra = {}) => {
+    if (!seriesMoveId) return;
+    try {
+      await db('series_moves').where({ id: seriesMoveId }).whereNull(col).update({ [col]: db.fn.now(), ...extra });
+    } catch (err) {
+      logger.warn(`[dispatch] series_moves ${col} stamp failed for ${seriesMoveId}: ${err.message}`);
+    }
+  };
+  // Occurrences the rebooker committed WITHOUT a window (their projected
+  // window held a seeded placeholder beyond the clash horizon): date and
+  // tech are kept; the operator sets a time from dispatch. Those rows often
+  // land outside the reloaded week view — surface them in the response AND
+  // ring the bell so a series move can't silently leave untimed visits.
+  const conflicts = occurrences
+    .filter((occ) => occ.conflicted)
+    .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
+  if (conflicts.length && !markers?.conflict_card_at) {
+    try {
+      const NotificationService = require('../services/notification-service');
+      const notif = await NotificationService.notifyAdmin(
+        'schedule_conflict',
+        'Series move left visits without a time window',
+        `A series move shifted ${conflicts.length} future visit(s) onto already-booked windows; they kept their date and technician but have NO time window (${conflicts.map((c) => c.date).join(', ')}). Set a time from dispatch.`,
+        { metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts } }
+      );
+      if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
+      else await stampMarker('conflict_card_at');
+    } catch (err) {
+      logger.error(`[dispatch] schedule_conflict notification failed for ${serviceId}: ${err.message}`);
+    }
+  }
+  const seriesReminderGuards = [];
+  let seriesGuardSnapshotFailed = false;
+  if (!markers?.reminders_synced_at) {
+    for (const occurrence of occurrences) {
+      await syncRescheduleReminder(
+        occurrence.id,
+        occurrence.date,
+        { start: occurrence.windowStart, end: occurrence.windowEnd },
+        { willNotify: notify },
+      );
+      const occurrenceGuards = await captureReminderGuards(occurrence.id);
+      if (Array.isArray(occurrenceGuards)) {
+        seriesReminderGuards.push(...occurrenceGuards);
+      } else {
+        // Per-occurrence snapshot read failed — degrade the WHOLE set to the
+        // unguarded fallback below. rearmRescheduleReminderWindows' failure
+        // marker is all-or-nothing; a partially-guarded list would silently
+        // skip the re-arm for the failed occurrence, and silence is worse
+        // than a possible duplicate.
+        seriesGuardSnapshotFailed = true;
+      }
+    }
+    for (const occurrence of occurrences) {
+      try {
+        await emitDispatchJobUpdate({ jobId: occurrence.id, actorId });
+      } catch (err) {
+        logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
+      }
+    }
+    await stampMarker('reminders_synced_at');
+  }
+
+  let notificationSent = false;
+  let notificationError = null;
+  if (notify && markers?.notified_at) {
+    notificationSent = true;
+  } else if (notify) {
+    const svc = await db('scheduled_services')
+      .where('scheduled_services.id', serviceId)
+      .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+      .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
+      .first();
+    if (!svc?.phone) {
+      notificationError = 'Customer phone unavailable';
+    } else {
+      const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
+        .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+      // The anchor's landing window (the caller's, or its own kept window on
+      // a date-only move) — window_text quotes the 2-hour arrival promise
+      // from that start, never the job-duration block (see sms-time-format).
+      const anchorOcc = occurrences.find((occ) => String(occ.id) === String(serviceId));
+      const startForText = anchorOcc?.windowStart || parseRescheduleWindow(newWindow).start;
+      const arrivalRange = arrivalWindowRange(startForText);
+      const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
+      try {
+        const body = await renderRequiredTemplate('appointment_series_rescheduled', {
+          first_name: svc.first_name || 'there',
+          start_date: displayDate,
+          window_text: windowText,
+        }, {
+          workflow: 'dispatch_series_reschedule',
+          entity_type: 'scheduled_service',
+          entity_id: serviceId,
+        });
+        const msg = await sendCustomerMessage({
+          to: svc.phone,
+          body,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'appointment',
+          customerId: svc.customer_id,
+          identityTrustLevel: 'phone_matches_customer',
+          // Authenticated staff explicitly asked to notify the customer of
+          // the series move — exempt from the 8AM-8PM send window like the
+          // neighboring rain-out and quick-move actions (nothing re-enqueues
+          // this exact message; a held night send would silently drop the
+          // notice for a next-morning move).
+          operatorInitiated: true,
+          metadata: { original_message_type: 'reschedule_series_confirmation', reasonText, seriesMoveId },
+        });
+        notificationSent = !(msg?.blocked || msg?.sent === false);
+        if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
+        if (notificationSent) {
+          await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
+          await stampMarker('notified_at', { customer_notified: true });
+        }
+      } catch (err) {
+        notificationError = err.message;
+        logger.warn(`[dispatch] Series reschedule committed for ${serviceId}, but SMS notification failed: ${err.message}`);
+      }
+    }
+    if (!notificationSent && !markers?.reminders_synced_at) {
+      // Fallback scope for a failed guard snapshot: each occurrence's NEW
+      // time, recomputed exactly as syncRescheduleReminder stamped it above.
+      const guardsForRearm = seriesGuardSnapshotFailed
+        ? { failed: true, guards: seriesReminderGuards }
+        : seriesReminderGuards;
+      await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
+        scheduledServiceId: occurrence.id,
+        appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
+      })));
+    }
+  }
+  return { notificationSent, notificationError, conflicts, seriesMoveId };
+}
+
+// GET /api/admin/dispatch/:serviceId/series-move-preview?newDate=YYYY-MM-DD
+// The server contract a surface renders before a collective move ("Move
+// visit + N future visits") — counts come from the rebooker's own sibling
+// selection and projector, never from the client.
+router.get('/:serviceId/series-move-preview', async (req, res, next) => {
+  try {
+    const newDate = validScheduleDate(req.query.newDate);
+    if (!newDate) return res.status(400).json({ error: 'newDate must be a valid upcoming YYYY-MM-DD date' });
+    const preview = await SmartRebooker.previewSeriesMove(req.params.serviceId, newDate);
+    res.json({ ...preview, enabled: collectiveMoveGateOn() });
+  } catch (err) {
+    if (err?.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
+});
+
 // POST /api/admin/dispatch/:serviceId/reschedule
 // A reschedule to a date already in the past is always a mistake (a
 // week-off click in the calendar UI) — and the customer notice would
@@ -14010,6 +14190,11 @@ function pastRescheduleDateError(newDate) {
 router.post('/:serviceId/reschedule', async (req, res, next) => {
   try {
     const { newWindow, reasonCode, reasonText, notifyCustomer, scope } = req.body;
+    // Client-minted idempotency key for the series operation (see
+    // rebooker.rescheduleSeries operationKey) — optional, string only.
+    const operationKey = typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
+      ? req.body.operationKey
+      : null;
 
     const pastDateError = pastRescheduleDateError(req.body.newDate);
     if (pastDateError) {
@@ -14036,6 +14221,8 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
         adminWindowRules: true,
+        sourceSurface: 'dispatch_board',
+        ...(operationKey ? { operationKey } : {}),
         // Staff surface: occupancy clashes commit with a warning instead of
         // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
         overlapAdvisory: true,
@@ -14051,138 +14238,22 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
           }
           : {}),
       });
-      const occurrences = Array.isArray(result.rescheduledOccurrences) ? result.rescheduledOccurrences : [];
-      // The rebooker unassigns any shifted sibling whose kept tech would
-      // double-book its recomputed date (occ.conflicted). Those rows often
-      // land outside the reloaded week view — surface them in the response
-      // AND ring the bell so a dispatcher's series drag can't silently
-      // strand unassigned visits.
-      const unassignedConflicts = occurrences
-        .filter((occ) => occ.conflicted)
-        .map((occ) => ({ id: occ.id, date: String(occ.date).split('T')[0] }));
-      if (unassignedConflicts.length) {
-        try {
-          const NotificationService = require('../services/notification-service');
-          const notif = await NotificationService.notifyAdmin(
-            'schedule_conflict',
-            'Series move left visits unassigned',
-            `A series reschedule shifted ${unassignedConflicts.length} future visit(s) onto already-booked windows; they were left UNASSIGNED (${unassignedConflicts.map((c) => c.date).join(', ')}). Reassign from dispatch.`,
-            { metadata: { scheduledServiceId: req.params.serviceId, conflicts: unassignedConflicts } }
-          );
-          if (!notif) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${req.params.serviceId}: ${JSON.stringify(unassignedConflicts)}`);
-        } catch (err) {
-          logger.error(`[dispatch] schedule_conflict notification failed for ${req.params.serviceId}: ${err.message}`);
-        }
-      }
-      // Sync each occurrence's reminder and snapshot its guard IMMEDIATELY
-      // after — capture must sit adjacent to its own sync, before ANY awaited
-      // board broadcast. A snapshot taken after the emits would capture a
-      // concurrent dispatcher's newer reschedule of an occurrence as "our"
-      // state, and a later SMS failure would then re-arm against it —
-      // clearing the newer reschedule's covered flags and double-texting the
-      // customer (the guard exists precisely so zero rows match in that case).
-      const seriesReminderGuards = [];
-      let seriesGuardSnapshotFailed = false;
-      for (const occurrence of occurrences) {
-        await syncRescheduleReminder(
-          occurrence.id,
-          occurrence.date,
-          { start: occurrence.windowStart, end: occurrence.windowEnd },
-          { willNotify: notifyCustomer !== false },
-        );
-        const occurrenceGuards = await captureReminderGuards(occurrence.id);
-        if (Array.isArray(occurrenceGuards)) {
-          seriesReminderGuards.push(...occurrenceGuards);
-        } else {
-          // Per-occurrence snapshot read failed — degrade the WHOLE set to
-          // the unguarded fallback below. rearmRescheduleReminderWindows'
-          // failure marker is all-or-nothing (same semantics as the previous
-          // single whole-series snapshot query failing); a partially-guarded
-          // list would silently skip the re-arm for the failed occurrence,
-          // and silence is worse than a possible duplicate.
-          seriesGuardSnapshotFailed = true;
-        }
-      }
-      // Board broadcasts only AFTER every sync→capture pair — an awaited emit
-      // between a sync and its capture would reopen the snapshot gap above.
-      for (const occurrence of occurrences) {
-        try {
-          await emitDispatchJobUpdate({ jobId: occurrence.id, actorId: req.technicianId });
-        } catch (err) {
-          logger.error(`[dispatch] series reschedule board broadcast failed for ${occurrence.id}: ${err.message}`);
-        }
-      }
-
-      let notificationSent = false;
-      let notificationError = null;
-      if (notifyCustomer !== false) {
-        const svc = await db('scheduled_services')
-          .where('scheduled_services.id', req.params.serviceId)
-          .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-          .select('scheduled_services.*', 'customers.first_name', 'customers.phone', 'customers.id as customer_id')
-          .first();
-        if (!svc?.phone) {
-          notificationError = 'Customer phone unavailable';
-        } else {
-          const displayDate = new Date(String(newDate).split('T')[0] + 'T12:00:00')
-            .toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
-          const win = parseRescheduleWindow(newWindow);
-          // window_text quotes the 2-hour arrival promise from the new start.
-          // win.end is the job-duration block the dispatcher sized the visits
-          // with — never the customer-facing window (see sms-time-format).
-          const arrivalRange = arrivalWindowRange(win.start);
-          const windowText = arrivalRange ? `, ${formatSmsTimeRange(arrivalRange)}` : '';
-          try {
-            const body = await renderRequiredTemplate('appointment_series_rescheduled', {
-              first_name: svc.first_name || 'there',
-              start_date: displayDate,
-              window_text: windowText,
-            }, {
-              workflow: 'dispatch_series_reschedule',
-              entity_type: 'scheduled_service',
-              entity_id: req.params.serviceId,
-            });
-            const msg = await sendCustomerMessage({
-              to: svc.phone,
-              body,
-              channel: 'sms',
-              audience: 'customer',
-              purpose: 'appointment',
-              customerId: svc.customer_id,
-              identityTrustLevel: 'phone_matches_customer',
-              // Authenticated dispatcher explicitly asked to notify the
-              // customer of the series move — exempt from the 8AM-8PM send
-              // window like the neighboring rain-out and quick-move actions
-              // (nothing re-enqueues this exact message; a held night send
-              // would silently drop the notice for a next-morning move).
-              operatorInitiated: true,
-              metadata: { original_message_type: 'reschedule_series_confirmation', reasonText },
-            });
-            notificationSent = !(msg?.blocked || msg?.sent === false);
-            if (!notificationSent) notificationError = msg?.code || msg?.reason || 'blocked';
-            if (notificationSent) {
-              await markRescheduleReminderNotified(occurrences.map((occurrence) => occurrence.id));
-            }
-          } catch (err) {
-            notificationError = err.message;
-            logger.warn(`[dispatch] Series reschedule committed for ${req.params.serviceId}, but SMS notification failed: ${err.message}`);
-          }
-        }
-        if (!notificationSent) {
-          // Fallback scope for a failed guard snapshot: each occurrence's NEW
-          // time, recomputed exactly as syncRescheduleReminder stamped it above.
-          const guardsForRearm = seriesGuardSnapshotFailed
-            ? { failed: true, guards: seriesReminderGuards }
-            : seriesReminderGuards;
-          await rearmRescheduleReminderWindows(guardsForRearm, occurrences.map((occurrence) => ({
-            scheduledServiceId: occurrence.id,
-            appointmentTime: parseETDateTime(rescheduleReminderTime(occurrence.date, { start: occurrence.windowStart, end: occurrence.windowEnd })),
-          })));
-        }
-      }
-
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: req.params.serviceId,
+        newDate,
+        newWindow,
+        notify: notifyCustomer !== false,
+        actorId: req.technicianId,
+        reasonText,
+      });
       const { rescheduledOccurrences, ...response } = result;
-      return res.json({ ...response, notificationSent, notificationError, unassignedConflicts });
+      return res.json({
+        ...response,
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+        unassignedConflicts: effects.conflicts,
+      });
     }
 
     // Staff-initiated reschedules may override live lifecycle states
@@ -14224,7 +14295,31 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
     // Staff surface: occupancy clashes commit with a warning instead of
     // 409ing (owner ruling 2026-08-25 — see rebooker.overlapAdvisory).
     rescheduleOptions.overlapAdvisory = true;
+    rescheduleOptions.sourceSurface = 'dispatch_board';
+    if (operationKey) rescheduleOptions.operationKey = operationKey;
     const result = await SmartRebooker.reschedule(req.params.serviceId, newDate, effectiveWindow, reasonCode || 'admin', 'admin', rescheduleOptions);
+    if (result.seriesMoveId) {
+      // The collective choke point (GATE_ADMIN_COLLECTIVE_MOVE) turned this
+      // date move into a series move regardless of the scope the client sent
+      // — the server enforces the ruling; the client only describes it.
+      // Series effects, not the single-visit notice.
+      const effects = await applySeriesMoveEffects({
+        result,
+        serviceId: req.params.serviceId,
+        newDate,
+        newWindow: effectiveWindow,
+        notify: notifyCustomer !== false,
+        actorId: req.technicianId,
+        reasonText,
+      });
+      const { rescheduledOccurrences, ...response } = result;
+      return res.json({
+        ...response,
+        notificationSent: effects.notificationSent,
+        notificationError: effects.notificationError,
+        unassignedConflicts: effects.conflicts,
+      });
+    }
     await syncRescheduleReminder(req.params.serviceId, newDate, effectiveWindow, { willNotify: notifyCustomer !== false });
     try {
       await emitDispatchJobUpdate({ jobId: req.params.serviceId, actorId: req.technicianId });
@@ -15462,6 +15557,7 @@ module.exports = router;
 // its failed-send compensation is the same guarded re-arm this route uses
 // (never a diverging local copy).
 module.exports.captureReminderGuards = captureReminderGuards;
+module.exports.applySeriesMoveEffects = applySeriesMoveEffects;
 module.exports.rearmRescheduleReminderWindows = rearmRescheduleReminderWindows;
 module.exports._test = {
   completionSuppressorInvoiceLookup,

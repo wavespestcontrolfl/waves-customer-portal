@@ -359,10 +359,12 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../routes/admin-dispatch.js'), 'utf8');
 
-  // Series block: the scope === 'series' branch, up to the single-path
-  // rebooker call that follows it.
-  const seriesStart = src.indexOf("if (scope === 'series') {");
-  const seriesEnd = src.indexOf('await SmartRebooker.reschedule(req.params.serviceId', seriesStart);
+  // Series block: the shared post-commit helper every staff surface runs
+  // after a committed series move (applySeriesMoveEffects), up to the
+  // preview route that follows it. The single-path rebooker call sits after
+  // both in the reschedule route.
+  const seriesStart = src.indexOf('async function applySeriesMoveEffects(');
+  const seriesEnd = src.indexOf("router.get('/:serviceId/series-move-preview'", seriesStart);
   const seriesBlock = src.slice(seriesStart, seriesEnd);
 
   test('blocks located', () => {
@@ -398,7 +400,7 @@ describe('reschedule route sync→capture→emit ordering (source)', () => {
     // notice (and its guarded snapshot semantics) live inside
     // sendRescheduleNoticeForVisit, which captures its own guards, rechecks
     // the slot at the provider handoff, and re-arms on any non-send.
-    const single = src.slice(seriesEnd);
+    const single = src.slice(src.indexOf('await SmartRebooker.reschedule(req.params.serviceId', seriesEnd));
     const syncIdx = single.indexOf('await syncRescheduleReminder(req.params.serviceId');
     const helperIdx = single.indexOf('sendRescheduleNoticeForVisit(');
     expect(syncIdx).toBeGreaterThan(-1);

@@ -713,6 +713,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
+            sourceSurface: 'customer_web',
           }
         )
         : await SmartRebooker.reschedule(
@@ -721,7 +722,10 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
           newWindow,
           'customer_request',
           'customer_self_serve',
-          { technicianId: slot.technician_id }
+          // This page discloses its series scope to the customer (the
+          // seriesScopeMismatch consent pin above) and decides it here —
+          // the collective choke point must not widen a disclosed single move.
+          { technicianId: slot.technician_id, seriesPolicy: 'single' }
         );
     } catch (err) {
       if (err?.statusCode) {

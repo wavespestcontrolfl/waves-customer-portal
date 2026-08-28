@@ -110,6 +110,7 @@ function wireRescheduleMocks(svc) {
     if (table === 'scheduled_services') return trxScheduled;
     if (table === 'job_status_history') return historyInsert;
     if (table === 'reschedule_log') return logInsert;
+    if (table === 'series_moves') return chain();
     throw new Error(`Unexpected trx table ${table}`);
   });
   trx.raw = rawFactory('trx.raw');
@@ -435,6 +436,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -493,6 +495,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -557,6 +560,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       if (table === 'appointment_reminders') return reminderQueue.shift();
       throw new Error(`Unexpected trx table ${table}`);
     });
@@ -634,6 +638,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return historyInsert;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -688,6 +693,7 @@ describe('rescheduleSeries — shared occupancy conflict gate + lock order', () 
       if (table === 'scheduled_services') return scheduledQueue.shift();
       if (table === 'job_status_history') return chain();
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');

@@ -336,6 +336,19 @@ const gates = {
   // when it flips.
   editApptPriceServiceScope: process.env.GATE_EDIT_APPT_PRICE_SERVICE_SCOPE === 'true',
 
+  // Collective series moves on every staff surface (owner rulings 2026-07-30
+  // + 2026-08-28): with the gate on, ANY date move of a cadence visit that
+  // reaches SmartRebooker.reschedule — dispatch drag, the Edit appointment
+  // modal, an SMS date reply, a choke-point delegation from any future caller
+  // — shifts the customer's future sister visits by the same delta (date
+  // only: siblings keep window/status/tech; manual date exceptions shift by
+  // the delta instead of regenerating). Auto-dispatch nudges are excluded by
+  // construction. Read directly in rebooker.js (collectiveMoveGateOn) — this
+  // entry keeps the flip checklist honest; series_moves rows are the
+  // telemetry to review before un-gating. Kill switch: unset. Gate off: the
+  // drag confirm's explicit "Reschedule series" button still works as before.
+  adminCollectiveMove: process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true',
+
   // Customer duplicate auto-merge (customer-dedupe.js green tier). An
   // auto-WRITER — merges shell duplicate rows into their real customer on the
   // nightly cron — so like dataHygieneAutoApply it is opt-in in EVERY

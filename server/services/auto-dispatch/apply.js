@@ -119,7 +119,12 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
     technician_id: fresh.technician_id,
   };
 
-  // Canonical move — transactional, overlap-checked, silent.
+  // Canonical move — transactional, overlap-checked, silent. ALWAYS a
+  // single-row move: an optimizer nudge is placement, not intent, so it must
+  // never shift the customer's future series (a -7d nudge would drag every
+  // later visit -7d and compound on the next run) — hard-coded here, not a
+  // caller convention (owner ruling 2026-08-28).
+  options.seriesPolicy = 'single';
   await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options);
 
   // reschedule() forces status→'confirmed'. The recurring-lifecycle code counts

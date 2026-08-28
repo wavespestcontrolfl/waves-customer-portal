@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../models/db');
 const RULES = require('../config/reschedule-rules');
 const logger = require('./logger');
@@ -122,6 +123,68 @@ const RESCHEDULABLE_STATUSES = new Set(['pending', 'confirmed', 'rescheduled']);
 // the visit while the tech is on site). Terminal states (completed /
 // cancelled / skipped) stay non-reschedulable on every path.
 const LIVE_OVERRIDE_STATUSES = new Set(['en_route', 'on_site']);
+
+// Collective series moves (owner rulings 2026-07-30 "the schedule follows the
+// last treatment" + 2026-08-28 "any and all recurring appts move with their
+// sister appts"): once GATE_ADMIN_COLLECTIVE_MOVE is on, EVERY date move of a
+// cadence visit that reaches reschedule() shifts its future siblings too —
+// the choke point in reschedule() delegates to rescheduleSeries, so each
+// caller (dispatch drag, edit modal, SMS reply, IB tool, …) inherits the rule
+// instead of re-implementing it. Callers whose moves are NOT intent
+// (auto-dispatch nudges) or that govern series scope themselves (rain-out's
+// post-series fallback, the customer web page's disclosed scope) pass
+// options.seriesPolicy = 'single'. Kill = unset the gate.
+function collectiveMoveGateOn() {
+  return process.env.GATE_ADMIN_COLLECTIVE_MOVE === 'true';
+}
+
+function dateOnly(v) {
+  if (v == null || v === '') return null;
+  return String(v instanceof Date ? v.toISOString() : v).slice(0, 10);
+}
+
+// Whole calendar days between two YYYY-MM-DD strings (UTC-anchored so DST
+// never yields a fractional day) — the delta a date exception shifts by.
+function calendarDaysBetween(fromStr, toStr) {
+  const [fy, fm, fd] = String(fromStr).split('-').map(Number);
+  const [ty, tm, td] = String(toStr).split('-').map(Number);
+  return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000);
+}
+
+// Everything a later Undo needs to put a row back exactly as it was (restore
+// recorded state, never a negative delta) — plus updated_at, the version stamp
+// that lets Undo refuse a row somebody edited after the move.
+const SERIES_MOVE_SNAPSHOT_COLUMNS = [
+  'scheduled_date', 'window_start', 'window_end', 'status', 'technician_id',
+  'route_order', 'time_window', 'window_display', 'track_token_expires_at',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'updated_at',
+];
+function snapshotRow(row) {
+  const out = {};
+  for (const col of SERIES_MOVE_SNAPSHOT_COLUMNS) {
+    const v = row[col];
+    out[col] = v instanceof Date
+      ? (col === 'scheduled_date' ? v.toISOString().slice(0, 10) : v.toISOString())
+      : (v === undefined ? null : v);
+  }
+  return out;
+}
+
+// Telemetry + audit for a series shift that did NOT commit (written outside
+// the rolled-back transaction, best-effort): the un-gate review reads
+// rollback/failure counts from the same table as the successes.
+async function recordFailedSeriesMove(fields, err) {
+  try {
+    await db('series_moves').insert({
+      id: crypto.randomUUID(),
+      ...fields,
+      status: 'failed',
+      error: String(err?.message || err).slice(0, 2000),
+    });
+  } catch (recordErr) {
+    logger.warn(`[rebooker] failed series_moves record not written for ${fields.anchor_service_id}: ${recordErr.message}`);
+  }
+}
 
 // Tracker-lifecycle rewind applied when a live job is force-rescheduled.
 // track_state returns to 'scheduled' so En Route can fire again on the
@@ -333,6 +396,100 @@ function parseWindow(w) {
   return { start: m[1], end: m[2] };
 }
 
+// The per-occurrence date projection a series shift writes — shared by
+// rescheduleSeries (inside its transaction) and previewSeriesMove (read-only
+// counts for the surfaces), so what a surface previews is exactly what the
+// move probes and writes.
+async function makeSeriesProjector({ service, parent, newDate, seriesDateStr }) {
+  const pattern = parent.recurring_pattern;
+  const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
+  // Seasonal series keep their seeded weekend/season contract on re-anchor
+  // (codex r15 P2): conversion seeds seasonal series with skip_weekends,
+  // but a weekend anchor (public availability can offer weekends) would
+  // otherwise project every later occurrence onto weekends — and a shifted
+  // date can cross the season edge (Oct 31 Sat → Nov 2). The customer's
+  // picked anchor date itself is honored as-is; only projected siblings
+  // shift. Scoped to seasonal so every other cadence keeps its
+  // long-standing unshifted re-anchor behavior.
+  // B6: the projected siblings honor the customer's LIVE weekday
+  // preference alongside the operator-set series flag — the flag alone
+  // is operator provenance; the preference is never persisted onto rows.
+  const seriesSkipWeekends = !!parent.skip_weekends
+    || await customerPrefersNoWeekends(db, parent.customer_id);
+  const projectSeriesDate = (raw) => {
+    let out = String(raw).split('T')[0];
+    // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
+    // the old seasonal-only scoping predates the ruling): a weekend-
+    // averse customer re-anchoring a quarterly/monthly series must not
+    // get weekend siblings. The customer's picked anchor date itself is
+    // honored as-is; only projected siblings shift.
+    if (seriesSkipWeekends) {
+      const at = parseETDateTime(`${out}T12:00`);
+      const { dayOfWeek } = etParts(at);
+      if (dayOfWeek === 0 || dayOfWeek === 6) {
+        const back = parent.weekend_shift === 'back';
+        const delta = back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1);
+        out = etDateString(addETDays(at, delta));
+      }
+    }
+    if (pattern !== SEASONAL_FEB_OCT) return out;
+    // No blackout layer is threaded here, so the clamp can only exhaust
+    // on 75 straight in-season weekend days — impossible. The || keeps
+    // this caller's legacy always-a-date contract if that ever changes
+    // (its write sites are not null-safe).
+    return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
+  };
+  const opts = {
+    ...(isMonthBasedPattern
+      ? recurrenceOrdinalOptions(newDate)
+      : {
+          nth: parent.recurring_nth,
+          weekday: parent.recurring_weekday,
+        }),
+    intervalDays: parent.recurring_interval_days,
+  };
+  // Weekend shifts can COLLAPSE consecutive occurrences onto one weekday
+  // (a daily series re-anchored Friday maps Sat+Sun+Mon all to Monday; a
+  // 2-day cadence anchored Thursday maps Sat and Mon both to Monday) — a
+  // plan must never write two of its own visits on one date (codex
+  // #3509). Project each occurrence ONCE, memoized, advancing a collided
+  // date day-by-day (still honoring the weekend rule and the season
+  // clamp) — the collision probe and the write loop below read this same
+  // mapping, so what gets probed is exactly what gets written.
+  // Anchor delta (calendar days) — what a date EXCEPTION shifts by instead
+  // of being regenerated from cadence (owner ruling 2026-08-28: "Nov 17
+  // because the customer is traveling" survives "Sep 10 → Sep 15"). The
+  // weekend/season rules still apply to the shifted date.
+  const deltaDays = calendarDaysBetween(dateOnly(service.scheduled_date), seriesDateStr);
+  const pureCadenceDate = (occurrenceIndex) => projectSeriesDate(
+    nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts),
+  );
+  const projectedByOccurrence = new Map();
+  const projectOccurrenceDate = (occurrenceIndex, sib = null) => {
+    if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
+    let out = occurrenceIndex === 0
+      ? String(newDate).split('T')[0]
+      : (sib && sib.date_exception === true
+        ? projectSeriesDate(etDateString(addETDays(parseETDateTime(`${dateOnly(sib.scheduled_date)}T12:00`), deltaDays)))
+        : pureCadenceDate(occurrenceIndex));
+    const used = new Set(projectedByOccurrence.values());
+    for (let guard = 0; guard < 31 && used.has(out); guard++) {
+      let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
+      if (seriesSkipWeekends) {
+        const { dayOfWeek } = etParts(at);
+        if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
+      }
+      out = etDateString(at);
+      if (pattern === SEASONAL_FEB_OCT) {
+        out = clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
+      }
+    }
+    projectedByOccurrence.set(occurrenceIndex, out);
+    return out;
+  };
+  return { pattern, isMonthBasedPattern, seriesSkipWeekends, opts, deltaDays, pureCadenceDate, projectOccurrenceDate };
+}
+
 class SmartRebooker {
   async findRescheduleOptions(serviceId, reason, opts = {}) {
     const service = await db('scheduled_services')
@@ -481,6 +638,24 @@ class SmartRebooker {
         statusCode: 409,
       });
     }
+    // Collective choke point (see collectiveMoveGateOn): a DATE move of a
+    // cadence visit is a series move. Same-date window edits, boosters
+    // (is_recurring=false) and one-time visits stay single. The caller's
+    // `expect` pin (date/window) carries over as the series writer's own
+    // expectAnchor fence; excludeServiceIds is a batch-mover concept the
+    // series path has no use for.
+    if (options.seriesPolicy !== 'single' && collectiveMoveGateOn()
+      && service.is_recurring === true
+      && dateOnly(newDate) !== dateOnly(service.scheduled_date)) {
+      const { seriesPolicy: _policy, expect, excludeServiceIds: _exclude, ...seriesOptions } = options;
+      if (expect && (expect.scheduled_date || expect.window_start) && !seriesOptions.expectAnchor) {
+        seriesOptions.expectAnchor = {
+          ...(expect.scheduled_date ? { scheduled_date: expect.scheduled_date } : {}),
+          window_start: expect.window_start ?? null,
+        };
+      }
+      return this.rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, seriesOptions);
+    }
     const wasLive = LIVE_OVERRIDE_STATUSES.has(service.status);
     // Evidence-based rewind test — broader than wasLive (live track_state
     // or stale stamps under a non-live status). Drives the lifecycle reset
@@ -571,6 +746,14 @@ class SmartRebooker {
       window_end: windowEnd,
       status: 'confirmed',
       ...(lifecycleRewound ? LIVE_LIFECYCLE_RESET : {}),
+      // A this-visit-only DATE move of a cadence visit is a deliberate
+      // exception to the series (staff, customer, SMS reply): stamp it so a
+      // later collective move shifts this row by the delta instead of
+      // regenerating it from cadence. Auto-dispatch nudges are placement,
+      // not intent — they never stamp, so they keep re-deriving.
+      ...(service.is_recurring === true && !sameDayTarget && initiatedBy !== 'auto_dispatch'
+        ? { date_exception: true, date_exception_source: initiatedBy, date_exception_at: new Date() }
+        : {}),
     };
     if (Object.prototype.hasOwnProperty.call(options, 'technicianId')) {
       updates.technician_id = options.technicianId;
@@ -852,6 +1035,18 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // operation_key dedupes the INITIATING action: a retried request (timeout,
+    // double tap, an agent re-running its tool) returns the committed result
+    // instead of shifting the series a second time. The series_moves id it
+    // carries is the idempotency key for every downstream effect.
+    if (options.operationKey) {
+      const prior = await db('series_moves')
+        .where({ operation_key: options.operationKey, status: 'committed' })
+        .first();
+      if (prior) {
+        return { ...(prior.result || {}), seriesMoveId: prior.id, replayed: true };
+      }
+    }
     // Staff-advisory overlap mode — same contract as the single path above:
     // occupancy clashes commit and warn (per clashing date); validation and
     // concurrency aborts are unaffected.
@@ -939,82 +1134,9 @@ class SmartRebooker {
         code: 'SLOT_TAKEN',
       });
     }
-    const pattern = parent.recurring_pattern;
-    const isMonthBasedPattern = isMonthBasedRecurrence(pattern);
-    // Seasonal series keep their seeded weekend/season contract on re-anchor
-    // (codex r15 P2): conversion seeds seasonal series with skip_weekends,
-    // but a weekend anchor (public availability can offer weekends) would
-    // otherwise project every later occurrence onto weekends — and a shifted
-    // date can cross the season edge (Oct 31 Sat → Nov 2). The customer's
-    // picked anchor date itself is honored as-is; only projected siblings
-    // shift. Scoped to seasonal so every other cadence keeps its
-    // long-standing unshifted re-anchor behavior.
-    // B6: the projected siblings honor the customer's LIVE weekday
-    // preference alongside the operator-set series flag — the flag alone
-    // is operator provenance; the preference is never persisted onto rows.
-    const seriesSkipWeekends = !!parent.skip_weekends
-      || await customerPrefersNoWeekends(db, parent.customer_id);
-    const projectSeriesDate = (raw) => {
-      let out = String(raw).split('T')[0];
-      // The weekend shift applies to EVERY recurring pattern (hook B6 P1 —
-      // the old seasonal-only scoping predates the ruling): a weekend-
-      // averse customer re-anchoring a quarterly/monthly series must not
-      // get weekend siblings. The customer's picked anchor date itself is
-      // honored as-is; only projected siblings shift.
-      if (seriesSkipWeekends) {
-        const at = parseETDateTime(`${out}T12:00`);
-        const { dayOfWeek } = etParts(at);
-        if (dayOfWeek === 0 || dayOfWeek === 6) {
-          const back = parent.weekend_shift === 'back';
-          const delta = back ? (dayOfWeek === 6 ? -1 : -2) : (dayOfWeek === 6 ? 2 : 1);
-          out = etDateString(addETDays(at, delta));
-        }
-      }
-      if (pattern !== SEASONAL_FEB_OCT) return out;
-      // No blackout layer is threaded here, so the clamp can only exhaust
-      // on 75 straight in-season weekend days — impossible. The || keeps
-      // this caller's legacy always-a-date contract if that ever changes
-      // (its write sites are not null-safe).
-      return clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
-    };
-    const opts = {
-      ...(isMonthBasedPattern
-        ? recurrenceOrdinalOptions(newDate)
-        : {
-            nth: parent.recurring_nth,
-            weekday: parent.recurring_weekday,
-          }),
-      intervalDays: parent.recurring_interval_days,
-    };
-    // Weekend shifts can COLLAPSE consecutive occurrences onto one weekday
-    // (a daily series re-anchored Friday maps Sat+Sun+Mon all to Monday; a
-    // 2-day cadence anchored Thursday maps Sat and Mon both to Monday) — a
-    // plan must never write two of its own visits on one date (codex
-    // #3509). Project each occurrence ONCE, memoized, advancing a collided
-    // date day-by-day (still honoring the weekend rule and the season
-    // clamp) — the collision probe and the write loop below read this same
-    // mapping, so what gets probed is exactly what gets written.
-    const projectedByOccurrence = new Map();
-    const projectOccurrenceDate = (occurrenceIndex) => {
-      if (projectedByOccurrence.has(occurrenceIndex)) return projectedByOccurrence.get(occurrenceIndex);
-      let out = occurrenceIndex === 0
-        ? String(newDate).split('T')[0]
-        : projectSeriesDate(nextRecurringDate(newDate, parent.recurring_pattern, occurrenceIndex, opts));
-      const used = new Set(projectedByOccurrence.values());
-      for (let guard = 0; guard < 31 && used.has(out); guard++) {
-        let at = addETDays(parseETDateTime(`${out}T12:00`), 1);
-        if (seriesSkipWeekends) {
-          const { dayOfWeek } = etParts(at);
-          if (dayOfWeek === 0 || dayOfWeek === 6) at = addETDays(at, dayOfWeek === 6 ? 2 : 1);
-        }
-        out = etDateString(at);
-        if (pattern === SEASONAL_FEB_OCT) {
-          out = clampDateToSeason(SEASONAL_FEB_OCT, out, { skipWeekends: seriesSkipWeekends }) || out;
-        }
-      }
-      projectedByOccurrence.set(occurrenceIndex, out);
-      return out;
-    };
+    const {
+      isMonthBasedPattern, opts, deltaDays, pureCadenceDate, projectOccurrenceDate,
+    } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
 
     // Live lifecycle states (en_route, on_site) and intentional drop-offs
     // (skipped) must NOT be steamrolled back to 'confirmed' by a series
@@ -1034,6 +1156,21 @@ class SmartRebooker {
     const rewoundSiblings = [];
     let anchorRewound = false;
     let rewoundAnchorRow = null;
+    let seriesMoveId = null;
+    let skippedCount = 0;
+    const moveRows = [];
+    const failedMoveFields = {
+      operation_key: options.operationKey || null,
+      anchor_service_id: serviceId,
+      parent_service_id: parentId,
+      customer_id: service.customer_id,
+      source_surface: options.sourceSurface || 'unspecified',
+      initiated_by: initiatedBy,
+      reason_code: reason,
+      original_date: dateOnly(service.scheduled_date),
+      new_date: seriesDateStr,
+      delta_days: deltaDays,
+    };
     const occurrencesRescheduled = await db.transaction(async (trx) => {
       // NOTE (lock order): the month-based parent's recurrence-anchor UPDATE
       // is deliberately NOT here. It is the series path's first ROW lock and
@@ -1056,6 +1193,9 @@ class SmartRebooker {
         .orderBy('scheduled_date', 'asc')
         .select(
           'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'technician_id',
+          // Undo snapshot + exception handling (SERIES_MOVE_SNAPSHOT_COLUMNS).
+          'route_order', 'time_window', 'window_display', 'track_token_expires_at', 'updated_at',
+          'date_exception', 'date_exception_source', 'date_exception_at',
           // Feeds the duration-aware occupancy fallbacks below.
           'estimated_duration_minutes',
           // Rewind evidence for needsLifecycleRewind below — a pending
@@ -1132,7 +1272,7 @@ class SmartRebooker {
           const sib = siblings[i];
           if (!RESCHEDULABLE.has(sib.status) && !(wasLive && String(sib.id) === String(serviceId))) continue;
           const oi = i - startIdx;
-          projectedDates.push(projectOccurrenceDate(oi));
+          projectedDates.push(projectOccurrenceDate(oi, sib));
         }
         if (projectedDates.length) {
           // Date-wide occupancy locks for EVERY target date this sweep will
@@ -1199,7 +1339,10 @@ class SmartRebooker {
         // every OTHER live/skipped row is still skipped — see the
         // cadence-math comment above.
         const isLiveAnchor = wasLive && String(sib.id) === String(serviceId);
-        if (!RESCHEDULABLE.has(sib.status) && !isLiveAnchor) continue;
+        if (!RESCHEDULABLE.has(sib.status) && !isLiveAnchor) {
+          skippedCount += 1;
+          continue;
+        }
 
         const occurrenceIndex = i - startIdx;
         const isAnchor = occurrenceIndex === 0;
@@ -1207,7 +1350,7 @@ class SmartRebooker {
         // probe above locked and probed (codex #3509).
         const date = isAnchor
           ? newDate
-          : projectOccurrenceDate(occurrenceIndex);
+          : projectOccurrenceDate(occurrenceIndex, sib);
 
         // Non-live rows rewind only when this row's date actually changes
         // (same-date landings keep a genuine same-day attempt intact).
@@ -1216,13 +1359,30 @@ class SmartRebooker {
             ? sib.scheduled_date.toISOString()
             : sib.scheduled_date || '').slice(0, 10);
         const sibRewound = isLiveAnchor || (sibDateChanges && needsLifecycleRewind(sib));
-        const occurrenceWindow = seriesOccurrenceWindow(win, sib, options);
+        // A series move mutates the DATE dimension it owns (owner ruling
+        // 2026-08-28): the anchor takes the caller's window and lands on
+        // 'confirmed' like any reschedule; every sibling KEEPS its own
+        // window, status, tech and overrides — a Sep 10 1–3 PM visit moved
+        // to Sep 15 8–10 AM must not silently make Oct–Dec 8–10 AM, and a
+        // pending placeholder must stay a placeholder (isSeededPlaceholderRow
+        // keys on status; plan-extend counts only pending rows). Sibling
+        // windows skip the admin validator: a legacy 07:00 sibling keeping
+        // its own time is not this move's edit.
+        const occurrenceWindow = isAnchor
+          ? seriesOccurrenceWindow(win, sib, options)
+          : seriesOccurrenceWindow({ start: null, end: null }, sib, { ...options, adminWindowRules: false });
+        // An exception row this shift lands exactly on its cadence date has
+        // rejoined the series — clear the flag (the only clearing path until
+        // an explicit rejoin operation exists).
+        const rejoinsCadence = !isAnchor && sib.date_exception === true
+          && String(date).split('T')[0] === pureCadenceDate(occurrenceIndex);
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
           window_end: occurrenceWindow.end,
-          status: 'confirmed',
+          status: isAnchor ? 'confirmed' : sib.status,
           updated_at: trx.fn.now(),
+          ...(rejoinsCadence ? { date_exception: false, date_exception_source: null, date_exception_at: null } : {}),
           ...(sibRewound ? LIVE_LIFECYCLE_RESET : {}),
           // Day change invalidates the row's route sequence — clear it so the
           // destination day appends the stop (consumers sort NULLs last).
@@ -1479,8 +1639,11 @@ class SmartRebooker {
           // came from this read — see the single-job CAS above.
           sib,
         )
-          .update(updateData);
-        if (updated === 0) {
+          // RETURNING updated_at: the Undo snapshot's version stamp for this
+          // row, from the same statement that wrote it (no second read).
+          .update(updateData, ['updated_at']);
+        const updatedRows = Array.isArray(updated) ? updated : null;
+        if ((updatedRows ? updatedRows.length : updated) === 0) {
           throw Object.assign(new Error('Cannot reschedule — an appointment in this series changed concurrently'), {
             statusCode: 409,
             isOperational: true,
@@ -1495,7 +1658,7 @@ class SmartRebooker {
           await AppointmentReminders.precloseWindowlessReminderInTx(trx, sib.id);
         }
 
-        if (sib.status !== 'confirmed') {
+        if (isAnchor && sib.status !== 'confirmed') {
           // transitioned_by is a UUID FK to technicians; the route
           // currently passes the sentinel 'admin' string for
           // initiatedBy, which would violate the FK. Until we plumb
@@ -1509,11 +1672,18 @@ class SmartRebooker {
             transitioned_by: null,
           });
         }
+        moveRows.push({
+          id: sib.id,
+          anchor: isAnchor,
+          exception: !isAnchor && sib.date_exception === true && !rejoinsCadence,
+          before: snapshotRow(sib),
+          after: snapshotRow({ ...sib, ...updateData, updated_at: updatedRows?.[0]?.updated_at ?? null }),
+        });
         touched.push({
           id: sib.id,
           date,
-          windowStart: sibClashBeyondHorizon ? null : (win.start || sib.window_start),
-          windowEnd: sibClashBeyondHorizon ? null : (win.end || sib.window_end),
+          windowStart: sibClashBeyondHorizon ? null : occurrenceWindow.start,
+          windowEnd: sibClashBeyondHorizon ? null : occurrenceWindow.end,
           // True only for a BEYOND-horizon occurrence whose projected window
           // held a seeded placeholder — committed at its cadence date
           // WINDOWLESS (see above); near-term clashes and real-booking
@@ -1525,6 +1695,24 @@ class SmartRebooker {
         });
       }
 
+      // One operation row per shift — the audit boundary, the idempotency
+      // key for every side effect, and the Undo source of truth. Inside the
+      // trx: a shift with no record is as bad as a record with no shift.
+      // The partial unique index on operation_key (committed rows only)
+      // makes two concurrent same-key requests serialize here — the loser
+      // rolls back and replays the winner's result (see the catch below).
+      seriesMoveId = crypto.randomUUID();
+      await trx('series_moves').insert({
+        id: seriesMoveId,
+        ...failedMoveFields,
+        movable_count: touched.length,
+        skipped_count: skippedCount,
+        exception_count: moveRows.filter((r) => r.exception).length,
+        conflict_count: touched.filter((t) => t.conflicted).length,
+        status: 'committed',
+        rows: JSON.stringify(moveRows),
+      });
+
       await trx('reschedule_log').insert({
         scheduled_service_id: serviceId,
         customer_id: service.customer_id,
@@ -1534,10 +1722,25 @@ class SmartRebooker {
         initiated_by: initiatedBy,
         original_window: service.window_start ? `${service.window_start}-${service.window_end}` : null,
         new_window: win.start ? `${win.start}-${win.end}` : null,
+        series_move_id: seriesMoveId,
       });
 
       return touched;
+    }).catch(async (err) => {
+      if (err?.code === '23505' && options.operationKey) {
+        const prior = await db('series_moves')
+          .where({ operation_key: options.operationKey, status: 'committed' })
+          .first()
+          .catch(() => null);
+        if (prior) return { replayedFrom: prior };
+      }
+      await recordFailedSeriesMove(failedMoveFields, err);
+      throw err;
     });
+    if (occurrencesRescheduled && occurrencesRescheduled.replayedFrom) {
+      const prior = occurrencesRescheduled.replayedFrom;
+      return { ...(prior.result || {}), seriesMoveId: prior.id, replayed: true };
+    }
 
     // Live-anchor post-commit cleanup — same pattern as the single-job
     // override in reschedule(): free the tech_status pointer and push
@@ -1568,11 +1771,11 @@ class SmartRebooker {
       emitCustomerJobRefresh({ ...service, ...(rewoundAnchorRow || {}), id: serviceId }, 'confirmed');
     }
     // Rewound non-anchor siblings get the same cleanup: release any tech
-    // pinned to them and refresh open trackers. They all landed on
-    // 'confirmed' in the sweep. Best-effort per row.
+    // pinned to them and refresh open trackers. Siblings keep their own
+    // status in the sweep, so the refresh carries it. Best-effort per row.
     for (const rewoundSib of rewoundSiblings) {
       try {
-        await applyLiveMovePostCommitEffects(rewoundSib);
+        await applyLiveMovePostCommitEffects(rewoundSib, { toStatus: String(rewoundSib.status) });
       } catch (err) {
         logger.error(`[rebooker] track-rewind cleanup failed for series sibling ${rewoundSib.id}: ${err.message}`);
       }
@@ -1610,13 +1813,93 @@ class SmartRebooker {
       const { slotOverlapWarning } = require('./scheduling/window-rules');
       return slotOverlapWarning(d);
     });
-    return {
+    const result = {
       success: true,
       originalDate: service.scheduled_date,
       newDate,
       occurrencesRescheduled: occurrencesRescheduled.length,
       rescheduledOccurrences: occurrencesRescheduled,
+      seriesMoveId,
+      deltaDays,
+      skippedCount,
+      exceptionCount: moveRows.filter((r) => r.exception).length,
       ...(seriesWarnings.length ? { warnings: seriesWarnings } : {}),
+    };
+    // The committed result is what an operation_key replay hands back —
+    // best-effort post-commit; a miss only degrades a replay to counts.
+    try {
+      await db('series_moves').where({ id: seriesMoveId }).update({ result: JSON.stringify(result) });
+    } catch (err) {
+      logger.warn(`[rebooker] series_moves result stamp failed for ${seriesMoveId}: ${err.message}`);
+    }
+    return result;
+  }
+
+  // Read-only preview of what rescheduleSeries would touch — the server
+  // contract every surface renders ("Move visit + N future visits", the IB
+  // pending-action card). No client computes N. Same sibling selection and
+  // projector as the move; conflicts are probed without locks for the
+  // projected SIBLINGS (the anchor's own window is the caller's choice and is
+  // validated by the move itself).
+  async previewSeriesMove(serviceId, newDate) {
+    const service = await db('scheduled_services').where({ id: serviceId }).first();
+    if (!service) throw Object.assign(new Error('Service not found'), { statusCode: 404 });
+    const seriesDateStr = dateOnly(newDate);
+    const empty = {
+      collective: false, deltaDays: 0, movableCount: 0, skippedCount: 0,
+      exceptionCount: 0, conflictCount: 0, firstAffectedDate: null, lastAffectedDate: null,
+    };
+    if (service.is_recurring !== true || !seriesDateStr || seriesDateStr === dateOnly(service.scheduled_date)) {
+      return empty;
+    }
+    const parentId = service.recurring_parent_id || service.id;
+    const parent = await db('scheduled_services').where({ id: parentId }).first();
+    if (!parent || (!parent.is_recurring && !parent.recurring_pattern)) return empty;
+    const TERMINAL = ['completed', 'cancelled'];
+    const siblings = await db('scheduled_services')
+      .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
+      .where('customer_id', service.customer_id)
+      .where('scheduled_date', '>=', service.scheduled_date)
+      .whereNotIn('status', TERMINAL)
+      .orderBy('scheduled_date', 'asc')
+      .select('id', 'status', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception');
+    const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
+    if (droppedIdx === -1) return empty;
+    const { deltaDays, projectOccurrenceDate } = await makeSeriesProjector({ service, parent, newDate, seriesDateStr });
+    const swept = siblings.slice(droppedIdx);
+    // Staff surfaces move a live anchor (allowLive); every other live/skipped
+    // row is counted-but-not-moved, exactly as the sweep does.
+    const movable = swept.filter((row, idx) => RESCHEDULABLE_STATUSES.has(row.status)
+      || (idx === 0 && LIVE_OVERRIDE_STATUSES.has(row.status)));
+    const sweptIds = movable.map((row) => String(row.id));
+    const dates = [];
+    let conflictCount = 0;
+    for (let i = 0; i < swept.length; i++) {
+      const row = swept[i];
+      if (!movable.includes(row)) continue;
+      const date = projectOccurrenceDate(i, row);
+      dates.push(date);
+      if (i === 0 || !row.window_start) continue;
+      const clash = await findConflictingVisits({
+        db,
+        date,
+        windowStart: row.window_start,
+        windowEnd: occupancyProbeEnd(row.window_start, row.window_end, row.estimated_duration_minutes),
+        excludeServiceIds: sweptIds,
+        excludeStatuses: TERMINAL,
+      });
+      if (clash.length) conflictCount += 1;
+    }
+    dates.sort();
+    return {
+      collective: true,
+      deltaDays,
+      movableCount: movable.length,
+      skippedCount: swept.length - movable.length,
+      exceptionCount: movable.filter((row, idx) => idx > 0 && row.date_exception === true).length,
+      conflictCount,
+      firstAffectedDate: dates[0] || null,
+      lastAffectedDate: dates[dates.length - 1] || null,
     };
   }
 }
@@ -1711,3 +1994,5 @@ module.exports.isMonthBasedRecurrence = isMonthBasedRecurrence;
 // Exported for tests: the per-occurrence window derivation (rollback toggle +
 // admin window rules) the series mover applies to every sibling.
 module.exports.seriesOccurrenceWindow = seriesOccurrenceWindow;
+module.exports.collectiveMoveGateOn = collectiveMoveGateOn;
+module.exports.SERIES_MOVE_SNAPSHOT_COLUMNS = SERIES_MOVE_SNAPSHOT_COLUMNS;

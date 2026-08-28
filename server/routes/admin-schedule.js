@@ -8,6 +8,7 @@ const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../midd
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
 const { isEnabled } = require('../config/feature-gates');
+const { collectiveMoveGateOn } = require('../services/rebooker');
 const { stampedDivergesSql, stampedLine2Sql } = require('../services/stamped-address');
 const { dayStopsQuery, guardedCoordSelects } = require('../services/scheduling/day-stops');
 const {
@@ -6538,8 +6539,76 @@ async function voidConversionInvoicesRestoringCredits({ trx, ids, voidUpdate }) 
 // (assignmentScope, recurrence config, spawnRecurringChildren, payer/pricing
 // fields) can propagate to recurring siblings and children — rows a per-visit
 // ownership check on :id alone cannot vouch for.
+// Collective series move from the Edit appointment modal (owner ruling
+// 2026-08-28, GATE_ADMIN_COLLECTIVE_MOVE): a DATE change on a cadence visit
+// is a series move. It commits through the rebooker's choke point BEFORE the
+// per-row edit transaction, which then sees the visit already on its new
+// date and applies the remaining field edits as a same-slot save; the series
+// effects (reminders, board, ONE series text when the office ticked notify)
+// replace this handler's single-visit notice. Returns null when the save is
+// not a collective date move (gate off, one-time/booster row, same date,
+// terminal row = record correction, or a date the handler's own validation
+// must answer) — the handler then runs exactly as before.
+async function collectiveEditDateMove(req) {
+  const { scheduledDate, windowStart, windowEnd, notifyCustomer } = req.body || {};
+  if (scheduledDate === undefined || scheduledDate === '' || !collectiveMoveGateOn()) return null;
+  const target = validScheduleDate(scheduledDate);
+  if (!target) return null;
+  const row = await db('scheduled_services').where({ id: req.params.id })
+    .first('id', 'is_recurring', 'scheduled_date', 'status', 'window_start');
+  if (!row || row.is_recurring !== true) return null;
+  if (['completed', 'cancelled', 'skipped', 'no_show'].includes(String(row.status))) return null;
+  if (target === dateOnly(row.scheduled_date)) return null;
+  const win = { start: normalizeHHMM(windowStart) || null, end: normalizeHHMM(windowEnd) || null };
+  const SmartRebooker = require('../services/rebooker');
+  // Same predicate the choke point evaluates (gate + cadence row + date
+  // delta), so this call always lands as a series move.
+  const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
+    allowLive: true,
+    adminWindowRules: true,
+    overlapAdvisory: true,
+    sourceSurface: 'edit_modal',
+    ...(typeof req.body.operationKey === 'string' && req.body.operationKey.length <= 120
+      ? { operationKey: req.body.operationKey }
+      : {}),
+    // Pin the anchor to the row this decision read — a concurrent move makes
+    // the delta stale and the series must not shift on it.
+    expect: { scheduled_date: dateOnly(row.scheduled_date), window_start: row.window_start ?? null },
+  });
+  const { applySeriesMoveEffects } = require('./admin-dispatch');
+  const effects = await applySeriesMoveEffects({
+    result,
+    serviceId: row.id,
+    newDate: target,
+    newWindow: win,
+    notify: notifyCustomer === true,
+    actorId: req.technicianId,
+    reasonText: null,
+  });
+  return {
+    seriesMoveId: result.seriesMoveId || null,
+    occurrencesRescheduled: result.occurrencesRescheduled || 0,
+    deltaDays: result.deltaDays || 0,
+    skippedCount: result.skippedCount || 0,
+    exceptionCount: result.exceptionCount || 0,
+    conflicts: effects.conflicts,
+    warnings: Array.isArray(result.warnings) ? result.warnings : [],
+    notificationSent: effects.notificationSent,
+    notificationError: effects.notificationError,
+  };
+}
+
 router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
   try {
+    const seriesMove = await collectiveEditDateMove(req);
+    if (seriesMove) {
+      // The series trx already landed the visit on its new date/window; the
+      // per-row edit below runs as a same-slot save of the remaining fields
+      // (windowIntakeFromBody reads req.body, so the body keys go too).
+      delete req.body.scheduledDate;
+      delete req.body.windowStart;
+      delete req.body.windowEnd;
+    }
     const {
       serviceType, estimatedDuration, scheduledDate,
       windowStart, windowEnd, technicianId, notes, routeOrder, zone,
@@ -9330,6 +9399,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         },
       } : {}),
       ...(notificationSent !== undefined ? { notificationSent, notificationError } : {}),
+      // Present when the date change committed as a collective series move
+      // (GATE_ADMIN_COLLECTIVE_MOVE) — the series text replaced the
+      // single-visit notice, so its send result wins.
+      ...(seriesMove ? {
+        seriesMove,
+        notificationSent: seriesMove.notificationSent,
+        notificationError: seriesMove.notificationError,
+      } : {}),
       // Present only when a 'following' price/service scope actually rewrote
       // sibling visits — lets the modal report how many future visits moved.
       ...(priceServicePropagatedCount != null

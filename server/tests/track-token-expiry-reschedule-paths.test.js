@@ -83,6 +83,7 @@ describe('track token expiry on reschedule paths', () => {
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return updateQuery;
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -165,6 +166,7 @@ describe('track token expiry on reschedule paths', () => {
     const trx = jest.fn((table) => {
       if (table === 'scheduled_services') return scheduledQueries.shift();
       if (table === 'reschedule_log') return logInsert;
+      if (table === 'series_moves') return chain();
       throw new Error(`Unexpected trx table ${table}`);
     });
     trx.raw = rawFactory('trx.raw');
@@ -198,8 +200,10 @@ describe('track token expiry on reschedule paths', () => {
     expect(firstUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
       bindings: ['2027-06-03', '12:30:00'],
     });
+    // The sibling keeps its OWN window (date-only sweep), so its expiry is
+    // derived from its new date + stored 11:00 end, not the anchor's 12:30.
     expect(secondUpdate.update.mock.calls[0][0].track_token_expires_at).toMatchObject({
-      bindings: ['2027-06-10', '12:30:00'],
+      bindings: ['2027-06-10', '11:00:00'],
     });
   });
 

@@ -1754,6 +1754,7 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           const seriesResult = await SmartRebooker.rescheduleSeries(job.id, target.date, newWindow, reasonCode, initiatedBy, {
             allowLive: true,
             overlapAdvisory: true,
+            sourceSurface: 'quick_move',
             // Pin the anchor to the state this loop read — a concurrent
             // move means the delta is stale and the series must not shift.
             expectAnchor: { scheduled_date: job.scheduled_date, window_start: job.window_start },
@@ -1811,6 +1812,10 @@ async function commit({ serviceId, technicianId, reasonCode, scope, target, noti
           allowLive: true,
           overlapAdvisory: true,
           excludeServiceIds: [job.id],
+          // This path governs series scope itself (the atomic shift was tried
+          // above): the fallback is the visit moving ALONE by design, so the
+          // collective choke point must not re-enter the series.
+          seriesPolicy: 'single',
           ...(wantsSeriesShift
             ? { expect: { scheduled_date: job.scheduled_date, window_start: job.window_start } }
             : {}),
