@@ -283,7 +283,9 @@ class GoogleBusinessService {
     return allReviews;
   }
 
-  async replyToReview(reviewResourceName, replyText, locationId) {
+  // `signal` (AbortSignal) lets a caller with a total deadline actually cancel
+  // the request instead of just racing a timer (auto-reply publisher).
+  async replyToReview(reviewResourceName, replyText, locationId, { signal } = {}) {
     // Determine location from resource name if not provided
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
@@ -294,14 +296,14 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }) });
+    const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify({ comment: replyText }), ...(signal ? { signal } : {}) });
     return readJsonOrThrow(res, 'GBP replyToReview');
   }
 
   // Single-review read (v4 GET {name}) — used by the reply publisher to see
   // Google's CURRENT owner reply inside its publish claim, since the hourly
   // sync cannot close the "owner replied in Google after the last sync" gap.
-  async getReview(reviewResourceName, locationId) {
+  async getReview(reviewResourceName, locationId, { signal } = {}) {
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
       if (match) {
@@ -310,11 +312,11 @@ class GoogleBusinessService {
       }
     }
     const headers = await this._getHeaders(locationId);
-    const res = await fetch(`https://mybusiness.googleapis.com/v4/${reviewResourceName}`, { headers });
+    const res = await fetch(`https://mybusiness.googleapis.com/v4/${reviewResourceName}`, { headers, ...(signal ? { signal } : {}) });
     return readJsonOrThrow(res, 'GBP getReview');
   }
 
-  async deleteReply(reviewResourceName, locationId) {
+  async deleteReply(reviewResourceName, locationId, { signal } = {}) {
     if (!locationId) {
       const match = reviewResourceName.match(/accounts\/(\d+)\/locations\/(\d+)/);
       if (match) {
@@ -324,7 +326,7 @@ class GoogleBusinessService {
     }
     const headers = await this._getHeaders(locationId);
     const url = `https://mybusiness.googleapis.com/v4/${reviewResourceName}/reply`;
-    const res = await fetch(url, { method: 'DELETE', headers });
+    const res = await fetch(url, { method: 'DELETE', headers, ...(signal ? { signal } : {}) });
     if (!res.ok) {
       const text = await res.text();
       throw new Error(`GBP deleteReply ${res.status}: ${text.slice(0, 500)}`);

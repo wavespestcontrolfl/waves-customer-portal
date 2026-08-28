@@ -85,7 +85,7 @@ describe('publishReviewReply', () => {
     const r = await publishReviewReply({ reviewId: 'rev-1', text: 'Thanks Dana.', actor: { type: 'ib' }, allowOverwrite: true });
     expect(r.googlePosted).toBe(true);
     expect(mockLock).toHaveBeenCalledWith('rev-1', expect.any(Function));
-    expect(mockGbp.replyToReview).toHaveBeenCalledWith('accounts/1/locations/2/reviews/9', 'Thanks Dana.', 'sarasota');
+    expect(mockGbp.replyToReview).toHaveBeenCalledWith('accounts/1/locations/2/reviews/9', 'Thanks Dana.', 'sarasota', expect.objectContaining({ signal: expect.anything() }));
     expect(state.rows[0].review_reply).toBe('Thanks Dana.');
     expect(state.activity[0].action).toBe('review_replied');
     expect(JSON.parse(state.activity[0].metadata).source).toBe('ib');
@@ -215,13 +215,16 @@ describe('publishReviewReply', () => {
     process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS = '5000';
     const out = { blocked: false, result: true, releaseClaim: jest.fn(async () => {}), abandonClaim: jest.fn() };
     mockLock.mockImplementationOnce(async (id, fn) => { out.result = await fn(); return out; });
-    mockGbp.replyToReview.mockImplementationOnce(() => new Promise(() => {}));
+    let putSignal = null;
+    mockGbp.replyToReview.mockImplementationOnce((name, text, loc, { signal } = {}) => { putSignal = signal; return new Promise(() => {}); });
     jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
     const p = publishReviewReply({ reviewId: 'rev-1', text: 'x y z', actor: { type: 'auto' } });
     const assertion = expect(p).rejects.toMatchObject({ code: CODES.GOOGLE_UNCERTAIN });
     await jest.advanceTimersByTimeAsync(31000);
     await assertion;
     jest.useRealTimers();
+    // The request was actually aborted at the deadline (socket closed).
+    expect(putSignal && putSignal.aborted).toBe(true);
     // A timed-out PUT may have landed: the claim is ABANDONED (never released
     // while the request is in flight), the row parks for reconciliation.
     expect(out.abandonClaim).toHaveBeenCalled();
@@ -370,7 +373,7 @@ describe('retractReviewReply', () => {
     mockGbp.getReview.mockResolvedValueOnce({ reviewReply: { comment: 'Posted reply' } });
     const r = await retractReviewReply({ reviewId: 'rev-1', actor: { type: 'admin' }, autoFields: { auto_reply_status: 'retracted' } });
     expect(r.googleDeleted).toBe(true);
-    expect(mockGbp.deleteReply).toHaveBeenCalledWith('accounts/1/locations/2/reviews/9', 'sarasota');
+    expect(mockGbp.deleteReply).toHaveBeenCalledWith('accounts/1/locations/2/reviews/9', 'sarasota', expect.objectContaining({ signal: expect.anything() }));
     expect(state.rows[0].review_reply).toBeNull();
     expect(state.rows[0].auto_reply_status).toBe('retracted');
     expect(state.activity[0].action).toBe('review_reply_retracted');

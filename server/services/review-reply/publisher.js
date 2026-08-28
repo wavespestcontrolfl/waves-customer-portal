@@ -54,13 +54,23 @@ const MISSING_MSG = 'This review has been removed from Google — replies are di
 // under a fleet-wide cron lease; a request that connects but never completes
 // must fail (retryable) instead of holding every later row and tick.
 const GOOGLE_CALL_TIMEOUT_MS = Math.max(5000, parseInt(process.env.REVIEW_REPLY_GOOGLE_TIMEOUT_MS, 10) || 30000);
-function withDeadline(promise, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
+// The call is given an AbortSignal and ABORTED at the deadline — the socket
+// is closed, so a late completion cannot land after the claim TTL. (Google
+// may still have applied a mutation whose request body was fully received;
+// that residual uncertainty is why timed-out writes park for reconciliation.)
+function withDeadline(call, label, ms = GOOGLE_CALL_TIMEOUT_MS) {
+  const controller = new AbortController();
   let timer;
   const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => { const e = new Error(`${label} timed out after ${ms}ms`); e.timedOut = true; reject(e); }, ms);
+    timer = setTimeout(() => {
+      const e = new Error(`${label} timed out after ${ms}ms`);
+      e.timedOut = true;
+      controller.abort(e);
+      reject(e);
+    }, ms);
   });
   timer.unref?.();
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  return Promise.race([call(controller.signal), timeout]).finally(() => clearTimeout(timer));
 }
 
 /**
@@ -79,7 +89,7 @@ async function resolveGbpReviewName(review, { conn = db } = {}) {
     const loc = WAVES_LOCATIONS.find((l) => l.id === review.location_id);
     if (!loc?.googleLocationResourceName) return null;
     // GBP caps pageSize at 50; the helper pages until exhausted.
-    const gbpReviews = await withDeadline(gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
+    const gbpReviews = await withDeadline(() => gbp.getAllLocationReviews(loc.googleLocationResourceName, review.location_id, 50), 'GBP getAllLocationReviews', GOOGLE_CALL_TIMEOUT_MS * 2);
     const rName = (review.reviewer_name || '').toLowerCase();
     const rTime = review.review_created_at ? new Date(review.review_created_at).getTime() : 0;
     const rRating = Number(review.star_rating) || 0;
@@ -206,7 +216,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         // read error — the row retries later.
         let live;
         try {
-          live = await withDeadline(gbp.getReview(resourceName, review.location_id), 'GBP getReview');
+          live = await withDeadline((signal) => gbp.getReview(resourceName, review.location_id, { signal }), 'GBP getReview');
         } catch (e) {
           throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before posting: ${e.message}`, { status: 502, cause: e });
         }
@@ -251,7 +261,7 @@ async function publishReviewReply({ reviewId, text, actor, allowOverwrite = fals
         }
       }
       try {
-        await withDeadline(gbp.replyToReview(resourceName, replyText, review.location_id), 'GBP replyToReview');
+        await withDeadline((signal) => gbp.replyToReview(resourceName, replyText, review.location_id, { signal }), 'GBP replyToReview');
       } catch (e) {
         // A timed-out PUT is still IN FLIGHT and may land later. Throwing
         // here would make the lock helper release the publish claim (and a
@@ -391,7 +401,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
       // and deleting blind would destroy it. Fail closed on a read error.
       let live;
       try {
-        live = await withDeadline(gbp.getReview(resourceName, review.location_id), 'GBP getReview');
+        live = await withDeadline((signal) => gbp.getReview(resourceName, review.location_id, { signal }), 'GBP getReview');
       } catch (e) {
         throw new ReviewReplyError(CODES.GOOGLE_FAILED, `Could not read the live review before retracting: ${e.message}`, { status: 502, cause: e });
       }
@@ -410,7 +420,7 @@ async function retractReviewReply({ reviewId, actor, autoFields = null, auditMet
           : 'There is no reply on Google to retract — reload.', { status: 409 });
       }
       try {
-        await withDeadline(gbp.deleteReply(resourceName, review.location_id), 'GBP deleteReply');
+        await withDeadline((signal) => gbp.deleteReply(resourceName, review.location_id, { signal }), 'GBP deleteReply');
       } catch (e) {
         if (e.timedOut) return { timedOut: true, error: e };
         throw e;
