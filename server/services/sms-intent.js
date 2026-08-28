@@ -78,6 +78,11 @@ const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok
 // same way a bare "yes" does, so alone it stays loud. Bare affirmatives
 // (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
 const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
+// Compositional fragments in the grammar ("again", "a lot", "so much", "for
+// the update") only ride along with a real closer word; alone they are
+// content ("Again" = the pests are back). At least one anchor is required
+// (hook P1).
+const CLOSER_ANCHOR_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok(?:ay)?|sounds\s+(?:good|great|perfect)|great|perfect|awesome|cool|nice|wonderful|got\s+it|will\s+do|noted|understood|no\s+(?:problem|worries)|np|you\s+(?:too|as\s+well)|all\s+good|good\s+deal|appreciate|much\s+appreciated|see\s+(?:you|ya)|have\s+a\s+(?:good|great|nice|wonderful)|cheers|my\s+pleasure|welcome|all\s+set)`, 'iu');
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
 // you guys!"). Only KNOWN addressees qualify — the people customers actually
@@ -117,7 +122,7 @@ function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
   const named = COURTESY_WITH_NAME_RE.exec(stripped);
   const grammar = COURTESY_ONLY_RE.test(stripped)
     || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
-  if (!grammar) return false;
+  if (!grammar || !CLOSER_ANCHOR_RE.test(stripped)) return false;
   // Gratitude honors the open question too: "Thanks!" after "please confirm
   // someone will be home" did not answer it (hook P1). The tiers differ only
   // in what the grammar accepts; the context decides for all of them.

@@ -83,7 +83,7 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
       expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "please confirm…" → "Thanks!" is a non-answer (hook P1)
       expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
     }
-    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works']) {
+    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works', 'Again', 'A lot', 'So much', 'For the update', 'again!']) {
       expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]); // real content stays loud regardless
     }
   });

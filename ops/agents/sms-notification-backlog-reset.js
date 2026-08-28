@@ -49,10 +49,13 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
     SELECT m.id, m.body, (m.media IS NOT NULL AND m.media::text NOT IN ('[]','null','')) AS has_media,
            COALESCE(o.asks, true) AS awaiting
     FROM messages m
-    LEFT JOIN conversations cv ON cv.id = m.conversation_id
+    -- the inbound's own legacy row carries the phone pair; the outbound must be
+    -- on the SAME pair (our number -> their number), as the webhook does
+    LEFT JOIN sms_log i ON i.twilio_sid = m.twilio_sid AND i.direction='inbound'
     LEFT JOIN LATERAL (
       SELECT (l.message_body ~* $1) AS asks FROM sms_log l
-      WHERE l.direction='outbound' AND l.customer_id = cv.customer_id AND l.status IN ('queued','sent','delivered')
+      WHERE i.id IS NOT NULL AND l.direction='outbound' AND l.to_phone = i.from_phone AND l.from_phone = i.to_phone
+        AND l.status IN ('queued','sent','delivered')
         AND l.message_type <> 'internal_alert' AND l.created_at < m.created_at AND l.created_at > m.created_at - interval '24 hours'
       ORDER BY l.created_at DESC LIMIT 1) o ON true
     WHERE m.channel='sms' AND m.direction='inbound' AND (m.is_read IS NOT TRUE)`, [ASKS]);
