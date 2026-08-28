@@ -1682,9 +1682,12 @@ async function committedImageBuffer(repoPath, getFile = (path) => gh.getFile(pat
 async function assertDistinctPictures({ srcs, heroSrc = '', getFile }) {
   const seen = [];
   const hero = String(heroSrc || '');
-  if (hero.startsWith('/')) {
-    const buf = await committedImageBuffer(`public${hero}`, getFile);
-    if (buf) seen.push({ label: 'hero', hash: await imageDHash(buf) });
+  if (hero) {
+    // Fail closed: without the hero's bytes a body image cannot be proven
+    // different from it.
+    const buf = hero.startsWith('/') ? await committedImageBuffer(`public${hero}`, getFile) : null;
+    if (!buf) return { ok: false, reason: `hero bytes unavailable for ${hero} — cannot verify body images differ from the hero` };
+    seen.push({ label: 'hero', hash: await imageDHash(buf) });
   }
   for (const src of srcs) {
     const buf = await committedImageBuffer(`public${src}`, getFile);
@@ -1719,23 +1722,20 @@ const RENDERED_IMAGE_RE = /(?<![\\])(?:\\\\)*!\[([^\]]*)\]\(((?:[^()\s]|\([^()\s
 // code spans, HTML/JSX comments, <pre>) — newline-preserving, so line indices
 // still address the original text. Shared stripper, so "rendered" here means
 // exactly what the table scanner and CTA extraction mean by it.
-// Same-length blanking that keeps newlines (line indices stay aligned).
-function blankKeepNewlines(match) {
-  return match.replace(/[^\n]/g, ' ');
-}
-
 // Markdown image syntax inside a JSX/HTML tag (an attribute string) or an
 // MDX expression is data, not a rendered image — mask tags (multi-line
 // components included) and balanced {…} expressions after the shared
 // stripper has removed code and comments.
+// Tags are walked QUOTE-AWARE (content-guardrails.eachTag — a quoted
+// attribute may contain ">") and MDX expressions are blanked balanced and
+// quote-aware (blankExpressions); both keep newlines so line indices hold.
 function blankJsxAndExpressions(text) {
-  let out = String(text || '').replace(/<[A-Za-z!/][^>]*>/g, blankKeepNewlines);
-  for (let pass = 0; pass < 4; pass++) {
-    const next = out.replace(/\{[^{}]*\}/g, blankKeepNewlines);
-    if (next === out) break;
-    out = next;
+  const str = String(text || '');
+  const out = str.split('');
+  for (const tag of contentGuardrails.eachTag(str)) {
+    for (let k = tag.start; k <= tag.end; k += 1) if (out[k] !== '\n') out[k] = ' ';
   }
-  return out;
+  return contentGuardrails.blankExpressions(out.join(''));
 }
 
 function renderedBodyLines(body) {

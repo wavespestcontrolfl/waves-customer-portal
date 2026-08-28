@@ -4627,6 +4627,11 @@ module.exports = {
   // certainty-only hidden-text blanker — the completion gate judges HTML
   // CTA anchors by their VISIBLE wording.
   blankDefinitelyHiddenContent,
+  // quote-aware tag walker + balanced MDX-expression blanker — the ONE tag
+  // scanner (astro-publisher's body-image scan masks with these, never a
+  // parallel regex).
+  eachTag,
+  blankExpressions,
   // fail-closed park for bodies outside the writer's plain Markdown subset
   unsupportedBodySyntax,
   unsupportedBodySyntaxAdded,

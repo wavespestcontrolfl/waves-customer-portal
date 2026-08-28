@@ -1272,6 +1272,11 @@ describe('validateAutonomousRunGates', () => {
       // Two distinct PATHS holding the same PICTURE are rejected (GH r3) — hashed on the PR branch.
       const samePic = { ...deps, gh: { getFile: async (path) => (bytes[path] ? { sha: 'ok', raw: { content: bytes['public/images/blog/x/body-1.webp'] } } : null) } };
       expect((await rem.validateAutonomousRunGates(two, RUN_REF, samePic)).reason).toMatch(/near-duplicate of \/images\/blog\/x\/body-1\.webp/);
+      // A stamped hero whose branch bytes cannot be read fails closed (GH r4).
+      const twoWithHero = '---\ntitle: T\nhero_image:\n  src: /images/blog/x/hero.webp\n  alt: h\n---\nFixed.\n\n![a](/images/blog/x/body-1.webp)\n\n## B\n\n![b](/images/blog/x/body-2.webp)';
+      expect((await rem.validateAutonomousRunGates(twoWithHero, RUN_REF, deps)).reason).toMatch(/hero bytes unavailable/);
+      const withHeroBytes = { ...deps, gh: { getFile: async (path) => (path === 'public/images/blog/x/hero.webp' ? { sha: 'h', raw: { content: await png(3) } } : (bytes[path] ? { sha: 'ok', raw: { content: bytes[path] } } : null)) } };
+      expect((await rem.validateAutonomousRunGates(twoWithHero, RUN_REF, withHeroBytes)).ok).toBe(true);
     } finally { spy.mockRestore(); }
     // Gate off: no recount.
     expect((await rem.validateAutonomousRunGates(MD, RUN_REF, goodDeps())).ok).toBe(true);

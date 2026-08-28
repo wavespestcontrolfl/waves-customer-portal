@@ -3708,11 +3708,13 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       '/>',
       '{"![z](/images/2026/08/c.webp)"}',
       '<span title="![w](/images/2026/08/d.webp)">t</span>',
+      '<Card note="x > ![hidden](/images/2026/08/f.webp)" />',
+      '{"a}" + "![g](/images/2026/08/g.webp)"}',
       '',
       '![real](/images/2026/08/e.webp)',
     ].join('\n');
     expect(AstroPublisher._internals.bodyImageRefs(body).map((r) => r.src)).toEqual(['/images/2026/08/e.webp']);
-    expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(7);
+    expect(AstroPublisher._internals.bodyImageRefs(body)[0].line).toBe(9);
   });
 
   test('bodyImageRefs: a destination with balanced parentheses is captured whole; a title after whitespace is ignored (GH r2)', () => {
