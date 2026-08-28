@@ -403,7 +403,18 @@ router.post('/:id/reply', async (req, res, next) => {
       // The account half of an editor AI draft's grounding token: the
       // post-PUT check parks a reply whose facts changed while Google's PUT
       // was in flight, human path included (codex r40).
-      expectedAccountFingerprint: AutoReply.parseGroundingToken(groundingToken)?.account || undefined,
+      expectedAccountFingerprint: await (async () => {
+        const fromToken = AutoReply.parseGroundingToken(groundingToken)?.account;
+        if (fromToken) return fromToken;
+        // "Use Draft" (draftToken only): the stored pipeline draft's snapshot
+        // carries the account fingerprint it was grounded on (codex r50).
+        if (typeof draftToken !== 'string' || !draftToken) return undefined;
+        const r = await db('google_reviews').where({ id: req.params.id }).first('auto_reply_draft', 'auto_reply_grounding', 'review_reply');
+        if (!r?.auto_reply_draft || !isDraftReply(r.review_reply) || stripDraftPrefix(r.review_reply).trim() !== String(r.auto_reply_draft).trim()) return undefined;
+        const g = r.auto_reply_grounding;
+        const snap = !g ? null : (typeof g === 'string' ? (() => { try { return JSON.parse(g); } catch { return null; } })() : g);
+        return snap?.accountFingerprint || undefined;
+      })(),
     });
     res.json({ success: true, googlePosted: result.googlePosted });
   } catch (err) { sendReplyError(res, err, next); }

@@ -952,7 +952,10 @@ class GoogleBusinessService {
         if ((Array.isArray(loserUpdated) ? loserUpdated.length : loserUpdated) > 0) {
           await applySyncReplyFields(winner.id, winnerReplyFields, { expectedReply: winner.review_reply ?? null });
         } else {
+          // A yielded loser performs NONE of the attribution / thank-you /
+          // reinstatement side effects below: its snapshot is stale (codex r50).
           logger.info(`[gbp] insert race: older runner yielded to the newer winner row ${winner.id}`);
+          return { id: winner.id, inserted: false, yielded: true };
         }
         result = { id: winner.id, inserted: false };
       }

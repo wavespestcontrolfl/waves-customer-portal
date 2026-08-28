@@ -132,7 +132,7 @@ const BANNED_RE = new RegExp([
   // Post-verbal negation (codex r45): "caused your pets no discomfort",
   // "left the kids without any irritation", "gave them zero trouble".
   '\\bdiscomfort\\b',
-  '\\b(?:caus|gave|giv|left|leav|brought|bring|creat|pos|present|produc)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:no|zero|little|minimal|hardly\\s+any|not\\s+(?:a|any)|without\\s+(?:any\\s+)?)\\s*(?:[\\w-]+\\s+){0,1}?(?:discomfort|trouble|harm|problems?|issues?|worry|worries|stress|distress|irritation|reactions?|effects?|side[- ]?effects?|concerns?|pain|upset|fuss|risks?|danger|hazards?|symptoms?)\\b',
+  '\\b(?:caus|gave|giv|left|leav|brought|bring|creat|pos|present|produc|experienc|had|has|have|having|suffer|encounter|notic|report|show|develop|got|get|getting|saw|see|felt|feel|display|exhibit|face|met)\\w*\\s+(?:[\\w-]+\\s+){0,3}?(?:no|zero|little|minimal|hardly\\s+any|not\\s+(?:a|any)|without\\s+(?:any\\s+)?|none)\\s*(?:[\\w-]+\\s+){0,1}?(?:discomfort|trouble|harm|problems?|issues?|worry|worries|stress|distress|irritation|reactions?|effects?|side[- ]?effects?|concerns?|pain|upset|fuss|risks?|danger|hazards?|symptoms?|ill\\s+effects?|adverse)\\b',
   '\\bspar(?:e|es|ed|ing)\\b',
   // "<protected subject> never noticed / barely knew / didn't mind" (codex r48).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|anyone|nobody|everyone)\\s+(?:[\\w-]+\\s+){0,2}?(?:never|didn.t|did\\s+not|barely|hardly|won.t|wouldn.t|don.t|do\\s+not|couldn.t)\\s+(?:even\\s+)?(?:notic|realiz|realis|know|knew|mind|blink|flinch|care|react|tell|budg|stir)\\w*\\b',
@@ -436,9 +436,15 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
     return 'unlisted_name';
   }
-  // Digits: only what the reviewer typed (plus the star rating itself).
-  const allowedDigits = new Set([...(grounding.allow.digits || []), String(grounding.review.rating)]);
-  for (const d of body.match(/\d+/g) || []) {
+  // Digits: only what the reviewer typed. The star rating is allowed ONLY in
+  // a rating-shaped phrase ("5 star", "5-star", "5/5", "5 out of 5") — never
+  // as a bare number that could read as a duration or count (codex r50).
+  const rating = Number(grounding.review.rating) || 0;
+  const bodyForDigits = rating
+    ? body.replace(new RegExp(`\\b${rating}\\s*(?:/\\s*5|out\\s+of\\s+5)?\\s*(?:-\\s*)?(?:stars?|★)\\b`, 'gi'), ' ').replace(new RegExp(`\\b${rating}\\s*(?:/\\s*5|out\\s+of\\s+5)\\b`, 'gi'), ' ')
+    : body;
+  const allowedDigits = new Set(grounding.allow.digits || []);
+  for (const d of bodyForDigits.match(/\d+/g) || []) {
     if (!allowedDigits.has(d)) return 'unlisted_digits';
   }
   // Cities: only the location's own area, the reviewer's words, or the

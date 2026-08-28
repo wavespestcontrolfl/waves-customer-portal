@@ -133,6 +133,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, Marcus got the ants and the product is no problem with your dogs.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and we work around your pets every time.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants with a people-friendly product.'))).toBe('banned_phrase');
+    // codex r50: experienced / had / suffered no problems.
+    const gp = grounding({ text: 'Marcus fixed our ant problems and the pets were fine.', topics: ['pest'] });
+    expect(verify(good('Hi Dana, we are glad your pets experienced no problems afterward.'), gp)).toBe('banned_phrase');
+    expect(verify(good('Hi Dana, Marcus got the ants and the kids had no issues with it.'), gp)).toBe('banned_phrase');
     // codex r49: post-verbal "none of your pets".
     expect(verify(good('Hi Dana, we are glad the treatment bothered none of your pets.'))).toBe('banned_phrase');
     expect(verify(good('Hi Dana, Marcus got the ants and it troubled neither of the kids.'))).toBe('banned_phrase');
@@ -390,6 +394,9 @@ describe('verifyReplyText — public-surface safety net', () => {
   test('provenance: digits the reviewer did not type are rejected; the star rating is allowed', () => {
     expect(verify(good('Hi Dana, Marcus got the ants on his 2nd visit and they are gone.'))).toBe('unlisted_digits');
     expect(verify(good('Hi Dana, thanks for the 5 star note. Marcus is glad the ants are gone.'))).toBeNull();
+    expect(verify(good('Hi Dana, thanks for the 5-star review. Marcus is glad the ants are gone.'))).toBeNull();
+    // codex r50: the rating digit is not a licence for a bare number.
+    expect(verify(good('Hi Dana, our team arrived in 5 minutes and Marcus got the ants.'))).toBe('unlisted_digits');
     const g = grounding({ text: 'Marcus came out within 2 hours and the ants are gone.' });
     expect(verify(good('Hi Dana, glad Marcus got there within 2 hours and the ants are gone.'), g)).toBeNull();
   });
