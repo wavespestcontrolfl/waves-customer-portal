@@ -965,18 +965,21 @@ router.post('/messages/read', async (req, res, next) => {
     // it: drop the reset marker so the printed rollback (keyed on marker +
     // batch timestamp) leaves these rows alone (codex P2). Fail-soft.
     try {
-      await db('messages')
+      // Request scope regardless of is_read (rows the reset already marked
+      // read are exactly the ones that need the marker stripped — hook P1).
+      const marked = () => db('messages')
         .where({ channel: 'sms', direction: 'inbound' })
         .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
         .andWhere(function scope() {
           if (ids.length) this.whereIn('id', ids);
           if (conversationIds.length) this.orWhere(function conv() { this.whereIn('conversation_id', conversationIds).where('created_at', '<=', readBefore); });
-        })
-        .update({ metadata: db.raw("metadata - 'backlog_reset'") });
+        });
+      const markedSids = (await marked().whereNotNull('twilio_sid').pluck('twilio_sid')).filter(Boolean);
+      await marked().update({ metadata: db.raw("metadata - 'backlog_reset'") });
       // …and from the legacy twins and the thread's bells, so the rollback
       // (marker-keyed) never reopens anything a human has looked at.
-      if (mirrorSids.length) {
-        await db('sms_log').whereIn('twilio_sid', mirrorSids)
+      if (markedSids.length) {
+        await db('sms_log').whereIn('twilio_sid', markedSids)
           .whereRaw("jsonb_exists(COALESCE(metadata,'{}'::jsonb), 'backlog_reset')")
           .update({ metadata: db.raw("metadata - 'backlog_reset'") });
       }
