@@ -142,7 +142,9 @@ t.timestamps(true, true);
 t.text('path_key').notNullable();                 // `${acquisition_type}:${normalized submission_url || '-'}` — non-null, so re-investigation upserts instead of duplicating (Postgres UNIQUE treats NULLs as distinct)
 t.uuid('superseded_by');                          // → the path row that replaced this one (identity change); a superseded path is never claimable
 t.timestamp('superseded_at');
-t.unique(['domain_id', 'path_key']);
+// uniqueness applies to ACTIVE paths only: partial unique index ON (domain_id, path_key) WHERE superseded_by IS NULL —
+// a superseded row keeps its key for history, and a path seen again later (A → B → A) is a NEW active row
+// (fresh id, revision 1, no approvals carried; the superseded A's approvals stay invalidated)
 // IDENTITY vs REVISION: acquisition_type and submission_url ARE the identity (path_key). A re-investigation that
 // finds a different type/URL does not edit the row in place — it inserts the new path and, in the SAME transaction,
 // marks the old one superseded_by it, invalidates every open approval on the old path (reason 'path_superseded'),
