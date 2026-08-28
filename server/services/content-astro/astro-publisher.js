@@ -1659,6 +1659,23 @@ function hammingDistance(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d += 1;
   return d;
 }
+// Bytes of an image already committed in the Astro repo (contents API
+// returns base64 for files < 1 MB — every hero/body WebP is far under). Null
+// when unavailable; callers then treat the image as unverifiable for the
+// near-duplicate check and regenerate rather than reuse blind.
+async function committedImageBuffer(repoPath) {
+  try {
+    const file = await gh.getFile(repoPath);
+    const b64 = file?.raw?.content;
+    if (!b64) return null;
+    const buffer = Buffer.from(String(b64).replace(/\s/g, ''), 'base64');
+    return buffer.length ? buffer : null;
+  } catch (err) {
+    logger.warn(`[astro-publisher] could not read committed image ${repoPath}: ${err.message}`);
+    return null;
+  }
+}
+
 async function nearDuplicateOf(buffer, siblings) {
   const hash = await imageDHash(buffer);
   for (const sib of siblings) if (hammingDistance(hash, sib.hash) <= NEAR_DUPLICATE_MAX_DISTANCE) return { label: sib.label, hash };
@@ -1899,9 +1916,13 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
   const placements = [];
   const city = brief.city || (Array.isArray(frontmatter?.service_areas_tag) ? frontmatter.service_areas_tag[0] : '');
   const heroSubject = String(frontmatter?.primary_keyword || frontmatter?.title || '').trim();
+  // Every picture the body images must differ from — including a REUSED
+  // hero (bytes fetched from the repo) — enters the hash set.
   const seen = [];
   for (const sib of siblings) {
-    if (Buffer.isBuffer(sib?.buffer) && sib.buffer.length) seen.push({ label: sib.label || 'hero', hash: await imageDHash(sib.buffer) });
+    let buf = Buffer.isBuffer(sib?.buffer) && sib.buffer.length ? sib.buffer : null;
+    if (!buf && sib?.repoPath) buf = await committedImageBuffer(sib.repoPath);
+    if (buf) seen.push({ label: sib.label || 'hero', hash: await imageDHash(buf) });
   }
   // body-N names are allocated past anything the draft already references
   // (a draft carrying body-2.webp must not have it overwritten by a new
@@ -1919,10 +1940,18 @@ async function resolveBodyImages({ frontmatter, slug, body, existingFile, brief 
     // describes it; otherwise (re)generate — never reuse a picture blind.
     if (existingFile) {
       const liveAlt = reusableLiveBodyImage(existingFile, src, slot.heading, { title: frontmatter?.title });
-      if (liveAlt && await gh.getFile(repoPath)) {
-        images.push({ src, alt: liveAlt, reused: true });
-        placements.push({ insertAt: slot.insertAt, src, alt: liveAlt });
-        continue;
+      const committed = liveAlt ? await committedImageBuffer(repoPath) : null;
+      if (committed) {
+        // A reused picture obeys the same rule as a generated one: if it
+        // duplicates the (possibly new) hero or a sibling, regenerate.
+        const dup = await nearDuplicateOf(committed, seen);
+        if (!dup.label) {
+          seen.push({ label: `body-${n}`, hash: dup.hash });
+          images.push({ src, alt: liveAlt, reused: true });
+          placements.push({ insertAt: slot.insertAt, src, alt: liveAlt });
+          continue;
+        }
+        logger.warn(`[astro-publisher] committed body image ${repoPath} is a near-duplicate of ${dup.label} — regenerating instead of reusing`);
       }
     }
 
@@ -2156,7 +2185,11 @@ async function publishOrUpdatePage(draft, brief = {}) {
   // a hero failure never burns two more generations, and before the branch is
   // cut so a failure can't orphan a PR. Their alts are generated text that
   // the semantic gate never saw: the same narrow second pass as the hero alt.
-  const bodyImages = await resolveBodyImages({ frontmatter, slug, body, existingFile, brief, siblings: [{ label: 'hero', buffer: hero.buffer }] });
+  const bodyImages = await resolveBodyImages({
+    frontmatter, slug, body, existingFile, brief,
+    // Fresh hero bytes, or the committed hero's repo path when it was reused.
+    siblings: [{ label: 'hero', buffer: hero.buffer, repoPath: hero.buffer ? null : (String(hero.src || '').startsWith('/') ? `public${hero.src}` : null) }],
+  });
   if (bodyImages.newAlts.length) {
     await assertComplianceClear({
       title: frontmatter.title,
@@ -3612,6 +3645,7 @@ module.exports = {
     scanBodySections,
     imageDHash,
     hammingDistance,
+    committedImageBuffer,
     BODY_IMAGE_SHOTS,
     NEAR_DUPLICATE_MAX_DISTANCE,
     reusableLiveBodyImage,

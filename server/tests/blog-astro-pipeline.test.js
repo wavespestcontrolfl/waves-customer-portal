@@ -3573,10 +3573,11 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
       'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
     );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
     gh.getFile.mockImplementation(async (path) => {
       if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
-      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: 'x', sha: 'h' };
-      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: 'x', sha: 'b1' };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[1]) } };
       return null;
     });
     heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: PATTERNS[4], model: 'm', alt: 'Generated alt two' }));
@@ -3593,6 +3594,30 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     const parsed = fmModule.parse(files[1].content);
     expect(parsed.content).toContain('![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)');
     expect(parsed.content).toContain('![Generated alt two](/images/blog/pest-control/drywood-frass-venice/body-2.webp)');
+  });
+
+  test('update run: a REUSED committed body image is hashed too — one that duplicates the reused hero is regenerated instead of reused (hook r8)', async () => {
+    const liveMd = fmModule.stringify(
+      { ...draft().frontmatter, slug: '/pest-control/drywood-frass-venice/', hero_image: { src: '/images/blog/pest-control/drywood-frass-venice/hero.webp', alt: 'live hero' }, og_image: '/images/blog/pest-control/drywood-frass-venice/hero.webp' },
+      'Old body.\n\n## Reading the pellets\n\nOld prose.\n\n![Live alt for pellets](/images/blog/pest-control/drywood-frass-venice/body-1.webp)\n',
+    );
+    const b64 = (dataUrl) => dataUrl.split(',')[1];
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/pest-control/drywood-frass-venice.mdx') return { content: liveMd, sha: 'live-sha' };
+      // Committed hero and body-1 are the SAME picture.
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/hero.webp') return { content: '', sha: 'h', raw: { content: b64(PATTERNS[0]) } };
+      if (path === 'public/images/blog/pest-control/drywood-frass-venice/body-1.webp') return { content: '', sha: 'b1', raw: { content: b64(PATTERNS[0]) } };
+      return null;
+    });
+    let call = 0;
+    heroImageGenerator.generate.mockImplementation(async () => ({ dataUrl: [PATTERNS[2], PATTERNS[3]][call++], model: 'm', alt: 'Regenerated' }));
+
+    await AstroPublisher.publishOrUpdatePage(draft(), { action_type: 'new_supporting_blog' });
+
+    expect(heroImageGenerator.generate.mock.calls.filter(([a]) => a.mode === 'blog-body')).toHaveLength(2);
+    const files = gh.commitFiles.mock.calls[0][0].files.map((f) => f.path);
+    expect(files).toContain('public/images/blog/pest-control/drywood-frass-venice/body-1.webp');
+    expect(fmModule.parse(gh.commitFiles.mock.calls[0][0].files.at(-1).content).content).not.toContain('Live alt for pellets');
   });
 
   test('update run: a committed body image that now sits under a DIFFERENT heading is regenerated, not reused (hook r2)', async () => {
