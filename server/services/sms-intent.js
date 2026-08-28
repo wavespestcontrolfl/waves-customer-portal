@@ -78,12 +78,10 @@ const COURTESY_TOKEN_RE = String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|ok
 // same way a bare "yes" does, so alone it stays loud. Bare affirmatives
 // (sure/yep/yup) and greetings are not in the grammar at all (hook P1).
 const WEAK_ONLY_RE = /^(?:ok(?:ay)?)[\s,.!\-]*$/iu;
-// A closer must carry at least one GRATITUDE/sign-off token. Affirmatives
-// ("Sounds good", "Great", "Perfect", "Will do", "Got it") can answer an
-// operational question ("does 9am work?") exactly like a bare "yes", so on
-// their own they stay loud; "Sounds good, thanks!" is a closer (hook P1).
-// Context-aware quieting of bare affirmatives is the drafter's job (it sees
-// the thread), not this context-free grammar's.
+// Gratitude / sign-off tokens: a message carrying one is a closer in any
+// context. Affirmatives without one ("Sounds good", "Great", "Will do") can
+// answer an operational question exactly like a bare "yes", so they only
+// close a thread when we are not awaiting an answer (hook P1 ×2).
 const STRONG_CLOSER_RE = new RegExp(String.raw`(?:thanks?|thank\s+(?:you|u)|thx|ty|tysm|appreciate\s+(?:it|you|that|ya)|much\s+appreciated|i\s+appreciate|we\s+appreciate|(?:you'?re\s+)?welcome|my\s+pleasure|have\s+a\s+(?:good|great|nice|wonderful)\s+(?:one|day|night|evening|weekend)|you\s+(?:too|as\s+well)|cheers)`, 'iu');
 const COURTESY_ONLY_RE = new RegExp(`^(?:${COURTESY_TOKEN_RE}\\s*[,.!\\-]*\\s*){1,5}$`, 'iu');
 // One trailing addressee after a THANKS-family token ("Thanks Adam", "Thank
@@ -100,24 +98,34 @@ const ACK_EMOJI_RE = /(?:[\u{1F44D}\u{1F44C}\u{1F64F}\u{1F44F}\u{1F64C}\u{1F91D}
 const COURTESY_MAX_CHARS = 60;
 
 /**
- * True when the message is a pure courtesy closer (no question, no
- * scheduling/reschedule/away signal, no substantive content).
- * Acknowledgement-emoji-only bodies ("👍", "🙏🙏") count; any other emoji is
- * content. Fail-safe direction: any doubt → false, so a real request never
- * gets quieted.
+ * True when the message is a pure conversation closer with nothing to answer.
+ *
+ * Two tiers, chosen by `awaitingAnswer` (did OUR last text ask the customer a
+ * question?). Default true = strict/context-free:
+ *   - gratitude / sign-off ("Thanks!", "Appreciate it Adam", "You too") →
+ *     always a closer;
+ *   - bare affirmatives ("Sounds good", "Great", "Okay") and acknowledgement
+ *     emoji (👍 🙏 ❤️) → a closer ONLY when we are not waiting on an answer —
+ *     after "does 9am work?" a 👍 is the answer, and it stays loud.
+ * Always loud: any "?", digits, scheduling/reschedule/away signal, mixed
+ * content, non-acknowledgement emoji (❓ 🚨 🐜). Fail-safe direction: doubt →
+ * false.
  */
-function isCourtesyOnly(body) {
+function isCourtesyOnly(body, { awaitingAnswer = true } = {}) {
   const raw = String(body || '').trim();
   if (!raw || raw.length > COURTESY_MAX_CHARS) return false;
   if (/[?]/.test(raw)) return false;
   const stripped = raw.replace(ACK_EMOJI_RE, ' ').replace(/\s+/g, ' ').trim();
-  if (!stripped) return true; // acknowledgement-emoji-only (👍 🙏 ❤️ — never an answer to a yes/no question)
+  if (!stripped) return !awaitingAnswer; // acknowledgement-emoji-only
   if (/[?]/.test(stripped) || /\d/.test(stripped)) return false;
   if (hasSchedulingIntent(stripped) || hasRescheduleOrAwayIntent(stripped)) return false;
-  if (WEAK_ONLY_RE.test(stripped) || !STRONG_CLOSER_RE.test(stripped)) return false;
-  if (COURTESY_ONLY_RE.test(stripped)) return true;
+  if (WEAK_ONLY_RE.test(stripped)) return !awaitingAnswer; // bare ok / okay
   const named = COURTESY_WITH_NAME_RE.exec(stripped);
-  return Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, ''));
+  const grammar = COURTESY_ONLY_RE.test(stripped)
+    || (Boolean(named) && KNOWN_ADDRESSEES.has(named[1].toLowerCase().replace(/'/g, '')));
+  if (!grammar) return false;
+  if (STRONG_CLOSER_RE.test(stripped)) return true; // gratitude / sign-off
+  return !awaitingAnswer; // affirmative-only ("Sounds good", "Great", "Will do")
 }
 
 function hasSchedulingIntent(body) {

@@ -244,7 +244,14 @@ router.post('/sms', async (req, res) => {
     // isCourtesyOnly is fail-safe: any question/scheduling/mixed content → false.
     // An attachment is content — a photo captioned "Thanks" stays loud.
     // (Computed after the media upload: needs inboundMedia — hook P0.)
-    const courtesyOnly = !smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body);
+    // Bare affirmatives / 👍 are closers only when OUR last text did not ask
+    // a question; that context comes from sms_log, fail-closed (unknown →
+    // treated as awaiting an answer → stays loud). The DB read only runs for
+    // grammar candidates, never on every inbound.
+    let courtesyOnly = false;
+    if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
+      courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From) });
+    }
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
@@ -1752,6 +1759,27 @@ router.post('/status', async (req, res) => {
 // the kill-switch state — the lane must not add awaited DB work or persist
 // duplicate SMS/PII on the webhook path at all; the worker-side gate_off
 // outcome is the backstop, not the boundary.
+/**
+ * Did the most recent customer-facing outbound to this phone (last 24h) end
+ * on a question? Internal alerts are excluded. Fail CLOSED: any error or no
+ * recent outbound → true, so a bare "👍" stays loud when in doubt.
+ */
+async function lastOutboundAskedQuestion(toPhone) {
+  try {
+    const last = await db('sms_log')
+      .where({ direction: 'outbound', to_phone: toPhone })
+      .whereNot('message_type', 'internal_alert')
+      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .orderBy('created_at', 'desc')
+      .first('message_body');
+    if (!last) return true;
+    return /\?/.test(String(last.message_body || ''));
+  } catch (e) {
+    logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
+    return true;
+  }
+}
+
 function shouldReserveCorrectionJob(body, smsReaction) {
   return Boolean(body && !smsReaction
     && require('../config/feature-gates').isEnabled('contactCorrection')

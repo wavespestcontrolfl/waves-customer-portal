@@ -65,8 +65,24 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
     expect(hasSchedulingIntent('Reacted ❤️ to "Your service is scheduled for Thursday"')).toBe(true); // still prose to that detector — the webhook gates on isSmsReaction first
   });
 
+  test('bare affirmatives and 👍 are closers only when we are NOT awaiting an answer', () => {
+    for (const t of ['Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Okay', 'Ok great', 'Np', 'All set', '👍', '🙏🙏', 'Ok 👍']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, true]);
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, false]); // "does 9am work?" → 👍 is the answer
+      expect([t, isCourtesyOnly(t)]).toEqual([t, false]); // default = strict
+    }
+    // Gratitude closes the thread in any context.
+    for (const t of ['Thanks!', 'Sounds good, thanks!', 'Thank you 🙏']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: true })]).toEqual([t, true]);
+    }
+    // Real content stays loud even when nothing is pending.
+    for (const t of ['Yes', 'No', 'Sure', 'Hello', 'Good morning', '❓', 'Thanks spider', 'Sure, 8 AM works']) {
+      expect([t, isCourtesyOnly(t, { awaitingAnswer: false })]).toEqual([t, false]);
+    }
+  });
+
   test('pure courtesy closers are detected', () => {
-    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Sounds good, thanks!', 'Got it, thank you', '👍', '🙏🙏', 'Perfect, thanks Adam!', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'You too!', 'Have a great weekend']) {
+    for (const t of ['Thanks!', 'Thank you ', 'Ok, thanks ', 'Sounds good, thanks!', 'Got it, thank you', 'Perfect, thanks Adam!', 'I appreciate you!', 'Thanks for the update!', 'Awesome thank you so much', 'thank you for letting me know', 'Thanks Adam', 'Thank you guys!', 'You too!', 'Have a great weekend']) {
       expect([t, isCourtesyOnly(t)]).toEqual([t, true]);
     }
   });
@@ -75,7 +91,7 @@ describe('emoji tapbacks + courtesy closers (2026-08-28 notification quieting)',
     for (const t of [
       'Yes', 'No', 'Sure', 'Yep', 'Yup', 'Okay', 'Ok', 'K', // may answer a question we asked → stay loud (hook P1)
       'Good morning', 'Good afternoon', 'Hello', 'Bye', // greetings open threads, they do not close them (hook P1)
-      'Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Ok great', 'Np', 'No problem', 'All set', // bare affirmatives can answer "does 9am work?" (hook P1)
+      'Sounds good', 'Great', 'Perfect', 'Will do', 'Got it', 'Ok great', 'Np', 'No problem', 'All set', '👍', // bare affirmatives / 👍 can answer "does 9am work?" — strict default (hook P1)
       'Thanks again Adam. Your opinion do you think the second session is going to be enough?',
       'Thanks, but you missed the backyard',
       'Sure, 8 AM works',
