@@ -150,6 +150,8 @@ const BANNED_RE = new RegExp([
   // "<protected subject> came out | emerged | ended up | turned out | were … okay | fine | unharmed …" (codex r58).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:came\\s+out|come\\s+out|emerg\\w*|end(?:ed|s)?\\s+up|turn(?:ed|s)?\\s+out|wound\\s+up|pull(?:ed|s)?\\s+through|were|are|was|is|remain\\w*|stay\\w*|seem\\w*|look\\w*|felt|feel\\w*)\\s+(?:[\\w-]+\\s+){0,2}?(?:okay|ok|fine|alright|all\\s+right|unharmed|unscathed|unaffected|untouched|unbothered|unfazed|untroubled|great|good|well|happy|comfortable|content|relaxed|calm|intact|normal|themselves|like\\s+themselves|usual|the\\s+same|at\\s+ease|settled|none\\s+the\\s+worse|none\\s+the\\s+wiser|no\\s+worse|a-?ok)\\b',
   '\\bnone\\s+the\\s+worse\\b', '\\bnone\\s+the\\s+wiser\\b',
+  // "sailed | breezed | cruised | rolled | carried … right along | on | ahead | past" (codex r66).
+  '\\b(?:sail|breez|cruis|coast|roll|glid|skat|waltz|carr(?:y|ied|ies)|motor|chug|trot|bounc|trundl)\\w*\\s+(?:right\\s+|straight\\s+|merrily\\s+|happily\\s+)?(?:along|on|onward|ahead|past|by|forward)\\b',
   // "<subject> acted | behaved | carried on | went about … normally | as usual | like themselves" (codex r64).
   '\\b(?:pets?|dogs?|cats?|puppies|kittens|kids?|children|babies|toddlers|family|families|people|animals|everyone|anyone|nobody)\\s+(?:[\\w-]+\\s+){0,3}?(?:act|behav|respond|react|carr(?:y|ied|ies)\\s+on|went\\s+about|go(?:es|ing)?\\s+about|play|eat|ate|sleep|slept|run|ran|mov|romp|roam|function|operat)\\w*\\s+(?:[\\w-]+\\s+){0,2}?(?:normal\\w*|as\\s+usual|as\\s+always|as\\s+ever|as\\s+before|like\\s+(?:themselves|nothing|normal|usual|always|before)|the\\s+same|fine|okay|ok|well|great|happily|unchanged|no\\s+differently|without\\s+(?:a\\s+)?(?:care|worry|concern|issue|problem)s?)\\b',
   // "didn't miss a beat / skip a beat / bat an eye / blink", "no worse for wear" (codex r63).
@@ -200,6 +202,8 @@ const BANNED_RE = new RegExp([
   // banned on every customer surface; a reply has no legitimate use for it).
   '\\bdr(?:y|ies|ied|ying)\\b', '\\bcur(?:e|es|ed|ing)\\b', '\\bto\\s+dry\\b',
   '\\b(?:wait|stay\\s+off|keep\\s+off|stay\\s+out|keep\\s+out|avoid)\\b[^.]{0,30}\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b',
+  // "<duration> was all the wait needed", "<duration> of downtime", "<duration> off the lawn" (codex r66).
+  '\\b(?:minutes?|mins?|hours?|hrs?|days?)\\b[^.]{0,30}\\b(?:waits?|waiting|wait\\s+time|downtime|down\\s+time|delay|hold[- ]?off|keep[- ]?out|stay[- ]?out|keep[- ]?off|stay[- ]?off|off\\s+the\\s+(?:lawn|grass|yard|turf|floors?)|out\\s+of\\s+the\\s+(?:house|home|yard|rooms?|area)|away\\s+from|before\\s+(?:re-?entering|going\\s+back|letting|coming\\s+back))\\b',
   // …and any fixed post-treatment interval in indirect form (codex r45):
   // "ready after 30 minutes", "back to normal within an hour".
   // (Timeliness a reviewer wrote — "came out within 2 hours" — stays a
@@ -261,6 +265,10 @@ const RESOLUTION_PARAPHRASE_RE = /^(?:behind (?:you|us|them)|(?:a )?thing of the
 // The company is "Waves Pest Control" in written copy — the former name
 // is never published (AGENTS.md; codex r65).
 const LEGACY_BRAND_RE = /\bwaves\s+lawn(?:\s*(?:&|and|\+|\/|-)\s*pest)?\b/i;
+// Lowercase-name backstop (codex r66): common first names that are not also
+// ordinary English words. Any occurrence, in any case, needs provenance.
+const COMMON_FIRST_NAMES = new Set(('kevin marcus james john robert michael william david richard joseph thomas charles christopher daniel matthew anthony donald steven paul andrew joshua kenneth brian george edward ronald timothy jason jeffrey ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory alexander patrick raymond jack dennis jerry tyler aaron jose adam nathan henry douglas zachary peter kyle ethan walter noah jeremy christian keith roger terry austin sean gerald carl harold dylan arthur jordan jesse bryan billy bruce gabriel joe logan alan juan albert willie elijah wayne randy vincent ralph eugene russell bobby mason philip louis mary patricia jennifer linda elizabeth barbara susan jessica sarah karen lisa nancy betty sandra margaret ashley kimberly emily donna michelle carol amanda melissa deborah stephanie rebecca sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha katherine christine debra rachel carolyn janet catherine maria heather diane olivia julie joyce victoria kelly christina lauren joan evelyn judith megan andrea cheryl hannah jacqueline martha gloria teresa ann sara madison frances kathryn janice jean abigail alice judy sophia julia denise amber danielle marilyn beverly charlotte natalie theresa diana brittany doris kayla alexis lori tiffany carlos luis miguel jorge ricardo eduardo fernando javier sergio roberto manuel pedro raul mario alejandro francisco antonio diego tony mike dave jim bob steve chris matt dan andy josh ben sam greg alex pat nick jon jeff tim jake tyler cody travis trevor shane chad derek dustin brett corey casey tanner colton hunter cole blake wyatt caleb connor evan garrett owen liam lucas oliver isaac levi carter jaxon grayson lincoln easton landon nolan hudson brooks brayden dominic jace jaden tristan kaden bryce marcos rafael ruben santiago hector oscar omar victor ivan cesar jesus angel gilbert lorenzo dean guy earl leo max sid ray ken don ron rick rich bill tom ed al lou pete art ted fred frank stan marty vince ernie chuck kim sue jan pam deb kate liz beth jen jess amy meg kay jo bea tina gina lena nina rosa ana luz ines elena sofia isabella mia ava ella chloe zoe lily grace layla nora aria ellie riley zoey hazel violet aurora savannah audrey bella claire skylar lucy paisley everly anna caroline nova genesis emilia kennedy maya willow kinsley naomi aaliyah elena sarah ariana allison gabriella alice madelyn cora ruby eva serenity autumn adeline hailey gianna valentina isla eliana quinn nevaeh ivy sadie piper lydia alexa josephine emery julia delilah arianna vivian kaylee sophie brielle madeline peyton rylee clara hadley melanie mackenzie reagan adalynn liliana aubrey jade katherine isabelle natalia raelynn maria athena ximena arya leilani taylor faith rose kylie alexandra mary margaret lyla ashley amaya eliza brianna bailey andrea khloe jocelyn angela cecilia leah').split(' '));
+const COMMON_ENGLISH_AFTER_ATTRIBUTION = /^(?:someone|somebody|anybody|nobody|people|folks|others|management|ownership|leadership|dispatch|scheduling|billing|support|service|services|everyone|whoever|whomever|him|her|them|us|you|it|that|this|these|those|which|what|whom|about|know|see|hear|feel|understand|the|our|your|his|their|its|my|a|an|no|any|all|both|each|every|more|less|enough|plenty|nothing|something|anything|everything|there|here|now|then|soon|today|tomorrow|again|right|well|too|also|just|only|even|still|yet|already|back|out|over|up|down|off|on|in|at|to|of|for|by|with|from|and|or|but|so|if|as|than|when|where|why|how|be|been|being|is|are|was|were|has|have|had|do|does|did|done|will|would|can|could|should|may|might|must|shall|go|goes|going|went|gone|get|gets|got|gotten|make|makes|made|take|takes|took|taken|come|comes|came|give|gives|gave|given|put|puts|keep|keeps|kept|let|lets|say|says|said|tell|tells|told|ask|asks|asked|call|calls|called|reach|reached|contact|contacted|hear|hears|heard|know|knows|knew|known|thank|thanks|thanked|help|helps|helped|need|needs|needed|want|wants|wanted|time|times|word|words|note|notes|message|messages|feedback|review|reviews|praise|kudos|credit|thanks|shout|hat|hats|off)$/;
 const PLACEHOLDER_RE = /[{}\[\]<>]|\b(?:first name|customer name|location name|reviewer)\b/i;
 
 // Negation scopes: each negation token opens a window that runs to the next
@@ -474,6 +482,25 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
   while ((rn = roleNameRe.exec(body)) !== null) {
     const w = rn[1].toLowerCase();
     if (ROLE_FOLLOWERS.has(w) || allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || SENTENCE_STARTERS.has(w)) continue;
+    return 'unlisted_name';
+  }
+  // A lowercase name in an attribution slot ("make sure kevin hears", "pass
+  // this along to kevin", "thanks to kevin") and any lowercase word that is
+  // a common first name need provenance too (codex r66).
+  const attributionRe = /\b(?:make\s+sure|making\s+sure|let|tell|telling|told|thank(?:s|ed)?\s+to|kudos\s+to|shout-?out\s+to|credit\s+to|hats?\s+off\s+to|(?:pass|hand|send|forward|relay|shar|give|giv)\w*\s+(?:this|that|it|these|those|your\s+(?:words|feedback|kind\s+words|note|comments?|praise|review))\s+(?:along\s+|on\s+|over\s+)?(?:to|with)|(?:pass|hand|send|relay)\w*\s+(?:along\s+|on\s+)?to|shared?\s+with)\s+([a-z][a-z'-]{1,20})\b/g;
+  const ATTRIBUTION_FOLLOWERS = new Set(['us', 'our', 'the', 'your', 'you', 'him', 'her', 'them', 'everyone', 'everybody', 'anyone', 'team', 'office', 'crew', 'staff', 'whoever', 'all', 'each', 'every', 'both', 'it', 'this', 'that', 'a', 'an', 'my', 'his', 'their', 'its', 'me', 'we', 'they', 'he', 'she', 'to', 'that', 'know', 'about', 'of', 'in', 'on', 'at', 'for', 'and', 'or', 'not', 'no', 'any', 'some', 'more', 'time', 'been', 'be', 'is', 'was', 'are', 'were', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 'should', 'do', 'does', 'did', 'done', 'so', 'if', 'when', 'what', 'who', 'how', 'yourself', 'ourselves', 'themselves', 'myself', 'himself', 'herself']);
+  let an;
+  while ((an = attributionRe.exec(body)) !== null) {
+    const w = an[1].toLowerCase();
+    if (ATTRIBUTION_FOLLOWERS.has(w) || ROLE_FOLLOWERS.has(w) || allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || SENTENCE_STARTERS.has(w) || cityWords.has(w)) continue;
+    if (COMMON_FIRST_NAMES.has(w)) return 'unlisted_name';
+    // Any other bare word in an attribution slot that is not a common
+    // English word is a name we cannot source.
+    if (!/ing$/.test(w) && !COMMON_ENGLISH_AFTER_ATTRIBUTION.test(w)) return 'unlisted_name';
+  }
+  for (const w of normalizeWords(body)) {
+    if (!COMMON_FIRST_NAMES.has(w)) continue;
+    if (allowedNames.has(w) || reviewWords.has(w) || BRAND_WORDS.has(w) || cityWords.has(w)) continue;
     return 'unlisted_name';
   }
   // Title-case words AND all-caps words ("KEVIN") both need provenance.

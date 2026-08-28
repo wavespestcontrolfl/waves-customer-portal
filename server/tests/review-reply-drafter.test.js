@@ -167,6 +167,11 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hi Dana, we would love that fifth star next visit. Marcus got the ants.'))).toBe('banned_phrase');
     expect(verify(good('Hello there, we are glad your pets acted normally after the pest treatment.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, glad the kids went about their day as usual after the treatment.'), gpets)).toBe('banned_phrase');
+    // codex r66: "sailed right along" + duration-before-wait.
+    expect(verify(good('Hello there, your pets sailed right along after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, the kids rolled on happily after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, half an hour was all the wait needed after the pest treatment.'), gpets)).toBe('banned_phrase');
+    expect(verify(good('Hello there, thirty minutes of downtime is all the pest treatment took.'), gpets)).toBe('banned_phrase');
     expect(verify(good('Hi Dana, we hope you will consider a five-star rating next time. Marcus got the ants.'))).toBe('banned_phrase');
     // codex r61: "didn't slow your pets down".
     expect(verify(good("Hello there, glad the pest treatment didn't slow your pets down."), gpets)).toBe('banned_phrase');
@@ -352,6 +357,13 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    // codex r66: lowercase names outside a role slot.
+    const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hi Dana, we will make sure kevin hears your feedback about the ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, we will pass this along to tasha, who handled the ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, thanks to kevin for helping with your ants.'), gants)).toBe('unlisted_name');
+    expect(verify(good('Hi Dana, we will make sure the team hears your feedback about the ants.'), gants)).toBe(null);
+    expect(verify(good('Hi Dana, we will pass this along to everyone who helped with the ants.'), gants)).toBe(null);
     // codex r64: the low-rating prompt mandates "the owner wants to make it right" — ordinary verbs after a role noun are not names.
     const glow = grounding({ rating: 2, text: 'Ants came back after a week.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hi Dana, we are sorry the experience fell short. Our owner wants to make it right with you, so please call the office directly.'), glow)).toBe(null);
