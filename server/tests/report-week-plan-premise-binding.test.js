@@ -13,7 +13,7 @@ describe('week-plan premise binding', () => {
     expect(src).toMatch(/const servicedElsewhere = !!snapshot && !planBindsToService\(snapshot, service\);/);
     expect(src).toMatch(/if \(snapshot\?\.plan && !servicedElsewhere\) \{/);
     // …and the cache signature applies the same binding, so an address change re-keys cached PDFs.
-    expect(src).toMatch(/weekPlanSentAt = snapshot\?\.sentAt && planBindsToService\(snapshot, service\) \? new Date\(snapshot\.sentAt\)\.toISOString\(\) : null;/);
+    expect(src).toMatch(/weekPlanSentAt = snapshot\?\.sentAt && planBindsToService\(snapshot, premise\) \? new Date\(snapshot\.sentAt\)\.toISOString\(\) : null;/);
     // The canonical lookup is STRICT and outside the fail-open prefs catch: a failure propagates (render refused), never plan=none.
     expect(src).toMatch(/const snapshot = await loadCurrentWeekPlan\(service\.customer_id, \{ strict: true \}\);/);
     // The report renderer receives the snapshot's restriction (hour constraints).
@@ -64,5 +64,43 @@ describe('visitInPlanWeek (codex gh-r14: no historical watering-in credit)', () 
   test('report-data stamps the rendered plan with visitInPlanWeek for the assessment date', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
     expect(src).toMatch(/visitInPlanWeek: visitInPlanWeek\(snapshot, assessment\.service_date\)/);
+  });
+});
+
+describe('cache-key premise resolution (codex gh-r16: partial lookup rows must not match every snapshot)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'services', 'service-report', 'report-data.js'), 'utf8');
+  test('resolveCanonicalLawnRender resolves the premise before binding the snapshot, and binds against it', () => {
+    expect(src).toMatch(/const premise = await loadServicePremise\(service, knex\);/);
+    expect(src).toMatch(/planBindsToService\(snapshot, premise\)/);
+    expect(src).toMatch(/premise\.stamped_address_diverges !== true/);
+  });
+  test('loadServicePremise reads the same stamped-else-home columns as the full render row', () => {
+    const fn = src.slice(src.indexOf('async function loadServicePremise'), src.indexOf('async function lawnAssessmentPdfSignature'));
+    expect(fn).toMatch(/COALESCE\(ss\.service_address_line1, customers\.address_line1\) as address_line1/);
+    expect(fn).toMatch(/stampedDivergesSql\('ss', 'customers'\)\} as stamped_address_diverges/);
+    expect(fn).toMatch(/if \(!row\) throw new Error/);
+  });
+  test('loadServicePremise is a no-op on a full row and resolves a partial one through the join', async () => {
+    const { loadServicePremise } = require('../services/service-report/report-data');
+    const full = { id: 'sr1', address_line1: '1 Main St', stamped_address_diverges: false };
+    expect(await loadServicePremise(full, () => { throw new Error('must not query'); })).toBe(full);
+    const calls = [];
+    const chain = {
+      where(w) { calls.push(['where', w]); return chain; },
+      leftJoin(...a) { calls.push(['leftJoin', a[0]]); return chain; },
+      first: async () => ({ address_line1: '9 Rental Rd', address_line2: null, city: 'Bradenton', zip: '34205', stamped_address_diverges: true }),
+    };
+    const knex = Object.assign(() => chain, { raw: (sql) => sql });
+    const out = await loadServicePremise({ id: 'sr1', customer_id: 'c1' }, knex);
+    expect(out).toMatchObject({ id: 'sr1', customer_id: 'c1', address_line1: '9 Rental Rd', stamped_address_diverges: true });
+    expect(calls).toEqual(expect.arrayContaining([['where', { 'service_records.id': 'sr1' }], ['leftJoin', 'scheduled_services as ss']]));
+    const gone = { where() { return gone; }, leftJoin() { return gone; }, first: async () => null };
+    await expect(loadServicePremise({ id: 'gone' }, Object.assign(() => gone, { raw: (x) => x }))).rejects.toThrow(/premise unavailable/);
+  });
+  test('reports-public maps a refused week-plan pin to 409 like a refused assessment pin', () => {
+    const route = fs.readFileSync(path.join(__dirname, '..', 'routes', 'reports-public.js'), 'utf8');
+    expect(route).toMatch(/err\?\.code === 'pinned_assessment_unavailable' \|\| err\?\.code === 'pinned_week_plan_unavailable'/);
   });
 });

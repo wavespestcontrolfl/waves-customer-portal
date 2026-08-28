@@ -184,7 +184,7 @@ describe('GaugePrimitives honesty guards', () => {
 });
 
 describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
-  const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true } };
+  const water = { rainInches: 0.2, irrigationInches: 0.5, totalInches: 0.7, targetInches: 0.75, status: 'balanced', weekPlan: { title: 'This week: run once', detail: 'About 20 minutes.', visitInPlanWeek: true, prescribesRun: true } };
   it('credits the treatment watering only for a label-REQUIRED watering-in inside the plan week', () => {
     render(<WaterIntakeBar water={water} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
     expect(screen.getByTestId('lawn-week-plan-aftercare-note')).toHaveTextContent(/counts as one of this week/);
@@ -193,6 +193,14 @@ describe('WaterIntakeBar week-plan aftercare credit (codex gh-r14)', () => {
     render(<WaterIntakeBar water={water} aftercare={{ watering: 'No special watering is needed because of today’s treatment — keep your normal schedule.', waterInRequired: false }} />);
     expect(screen.getByTestId('lawn-week-plan')).toBeInTheDocument();
     expect(screen.queryByTestId('lawn-week-plan-aftercare-note')).toBeNull();
+  });
+  it('a HOLD plan keeps treatment-first but never claims a run was covered (codex gh-r16)', () => {
+    render(<WaterIntakeBar water={{ ...water, weekPlan: { title: 'This week: skip your turf watering', detail: 'Your lawn has what it needs.', visitInPlanWeek: true, prescribesRun: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);
+    const note = screen.getByTestId('lawn-week-plan-aftercare-note');
+    expect(note).toHaveAttribute('data-plan-credit', 'hold');
+    expect(note).toHaveTextContent(/treatment comes first/);
+    expect(note).toHaveTextContent(/no extra runs/);
+    expect(note).not.toHaveTextContent(/counts as one of this week/);
   });
   it('never credits a historical visit\'s watering-in against the current week', () => {
     render(<WaterIntakeBar water={{ ...water, weekPlan: { ...water.weekPlan, visitInPlanWeek: false } }} aftercare={{ watering: 'Water in today’s application.', waterInRequired: true }} />);

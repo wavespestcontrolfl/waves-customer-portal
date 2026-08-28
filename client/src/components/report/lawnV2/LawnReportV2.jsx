@@ -705,12 +705,16 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
           (the neutral "keep your schedule" fallback is not a watering) and
           only when this visit falls inside the snapshot's plan week — a
           reopened older report never credits a past treatment against the
-          current week's runs (codex gh-r14). */}
+          current week's runs (codex gh-r14). A HOLD plan has no run to
+          cover — treatment-first still, but no "counts as a run" claim
+          (codex gh-r16). */}
       {water.weekPlan && water.weekPlan.title ? (
         <div className="lawn-callout-plan" data-testid="lawn-week-plan" style={{ marginTop: 12, padding: '11px 13px', background: COLORS.sand, border: `1px solid ${COLORS.glassNavy}`, borderRadius: 8, fontSize: 14.5, color: BODY, lineHeight: 1.5 }}>
           {aftercare && aftercare.waterInRequired === true && water.weekPlan.visitInPlanWeek === true ? (
-            <div data-testid="lawn-week-plan-aftercare-note" style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
-              Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.
+            <div data-testid="lawn-week-plan-aftercare-note" data-plan-credit={water.weekPlan.prescribesRun === true ? 'run' : 'hold'} style={{ marginBottom: 6, fontSize: 14, color: MUTED }}>
+              {water.weekPlan.prescribesRun === true
+                ? 'Today’s treatment comes first — follow the after-visit watering note below. That watering counts as one of this week’s runs (a one-run plan is covered by it); only pick the plan back up if it called for more.'
+                : 'Today’s treatment comes first — follow the after-visit watering note below. Beyond that one watering-in, this week’s plan stands: no extra runs.'}
             </div>
           ) : null}
           <div style={{ fontFamily: FONTS.heading, fontWeight: 800, fontSize: 14.5, color: TEXT }}>{water.weekPlan.title}</div>

@@ -943,6 +943,32 @@ describe('executeMerge', () => {
     expect(result.repointed['email_messages.recipient_id']).toBe(1);
   });
 
+  it('rewrites the irrigation weekly delivery identity (trigger_event_id) from the loser to the winner (codex #3565 gh-r16)', async () => {
+    const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003' };
+    const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003' };
+    const { trx, state } = buildTrx({ winner, loser, fkRows: [{ table_name: 'leads', column_name: 'customer_id' }] });
+    const base = trx.getMockImplementation();
+    state.triggerRewrites = [];
+    trx.mockImplementation((table) => {
+      if (table !== 'email_messages') return base(table);
+      return makeChain(table, (q) => {
+        if (q.called('select')) {
+          const like = q.args('where');
+          expect(like).toEqual(['trigger_event_id', 'like', `irrigation.weekly:${LOSER}:%`]);
+          return [{ id: 'em1', trigger_event_id: `irrigation.weekly:${LOSER}:2026-08-23` }];
+        }
+        // The polymorphic recipient repoint also updates email_messages —
+        // only the identity rewrite is under test here.
+        if (q.called('update')) { if (q.args('update')[0].trigger_event_id) state.triggerRewrites.push([q.args('where')[0], q.args('update')[0]]); return 1; }
+        return 1;
+      });
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
+    expect(state.triggerRewrites).toEqual([[{ id: 'em1' }, { trigger_event_id: `irrigation.weekly:${WINNER}:2026-08-23` }]]);
+    expect(result.repointed['email_messages.trigger_event_id']).toBe(1);
+  });
+
   it('moves the cached account_credits with the ledger and zeroes the retired row', async () => {
     const winner = { id: WINNER, first_name: 'A', last_name: 'B', phone: '+19995550003', account_credits: '10.00' };
     const loser = { id: LOSER, first_name: 'A', last_name: 'B', phone: '9995550003', account_credits: '25.50' };

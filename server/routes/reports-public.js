@@ -2228,12 +2228,12 @@ router.get('/:token/data', async (req, res, next) => {
     // different assessment would produce exactly the divergence it prevents,
     // and the caller could not tell. 409 so the render errors and the delivery
     // defers retryably. The message names no ids — the caller supplied it.
-    if (err?.code === 'pinned_assessment_unavailable') {
+    if (err?.code === 'pinned_assessment_unavailable' || err?.code === 'pinned_week_plan_unavailable') {
       // NEVER log the report token — it is a bearer credential for a
       // customer-facing report carrying their address, so plain-text logs
       // would become a credential store. The service-record id identifies the
       // visit for debugging and grants nothing.
-      logger.warn(`[reports-public] pinned assessment refused for service_record ${serviceRecordId || 'unknown'}`);
+      logger.warn(`[reports-public] ${err.code === 'pinned_week_plan_unavailable' ? 'pinned week plan' : 'pinned assessment'} refused for service_record ${serviceRecordId || 'unknown'}`);
       return res.status(409).json({ error: 'Requested assessment is not available for this report' });
     }
     return next(err);

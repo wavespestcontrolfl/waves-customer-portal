@@ -1259,6 +1259,28 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         throw new Error(`executeMerge: repoint failed on ${table}.${idColumn}: ${e.message}`);
       }
     }
+    // The weekly watering-plan delivery record is keyed by a customer/week
+    // trigger id (`irrigation.weekly:<customerId>:<weekEnding>`) that the
+    // recipient repoint above does not touch. Left on the loser id, the
+    // winner's next sweep sees neither a sent snapshot (a delivered-but-
+    // unstamped plan has sent_at null) nor the delivery record, replaces the
+    // moved decision and sends a second plan — rewrite the identity to the
+    // winner (codex #3565 gh-r16). Fail-closed like the pointer sweeps.
+    try {
+      await trx.transaction(async (sp) => {
+        const loserPrefix = `irrigation.weekly:${loserId}:`;
+        const rows = await sp('email_messages')
+          .where('trigger_event_id', 'like', `${loserPrefix}%`)
+          .select('id', 'trigger_event_id');
+        for (const r of rows) {
+          await sp('email_messages').where({ id: r.id })
+            .update({ trigger_event_id: `irrigation.weekly:${winnerId}:${String(r.trigger_event_id).slice(loserPrefix.length)}` });
+        }
+        if (rows.length) repointed['email_messages.trigger_event_id'] = rows.length;
+      });
+    } catch (e) {
+      throw new Error(`executeMerge: irrigation delivery identity rewrite failed: ${e.message}`);
+    }
     // Referral surfaces load ONE promoter per customer (`.first()` in
     // referral-engine/referrals-v2) — if both sides were enrolled, the sweep
     // left two rows on the winner and the second row's rewards would vanish

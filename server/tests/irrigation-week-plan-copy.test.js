@@ -296,6 +296,22 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await loadCurrentWeekPlan('c1', { now: NOW })).toBeNull();
   });
 
+  test('strict + pinned to a real send: missing row, policy change and a different send REFUSE (code pinned_week_plan_unavailable), never render plan-less (codex gh-r16)', async () => {
+    const strictPin = { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true };
+    stubSelect(null);
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'missing' });
+    stubSelect(row({ ...POLICY, maxDaysPerWeek: 2 }));
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'policy_changed' });
+    stubSelect(row(POLICY, { sent_at: new Date('2026-08-24T12:00:00Z') }));
+    await expect(loadCurrentWeekPlan('c1', strictPin)).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'sent_at_mismatch' });
+    // The same states are plain absence when not pinned to a send.
+    stubSelect(null);
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, strict: true })).toBeNull();
+    expect(await loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: null, strict: true })).toBeNull();
+    stubSelect(row(POLICY));
+    expect((await loadCurrentWeekPlan('c1', strictPin)).plan.action).toBe('run');
+  });
+
   test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {
     const calls = {};
     let returned = [{ decision_hash: 'x' }];

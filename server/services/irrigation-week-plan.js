@@ -601,6 +601,20 @@ function samePolicy(a, b) {
  * so the report shows nothing rather than a stale legal instruction.
  * Null when there is no such snapshot.
  */
+// A render pinned to a plan the cache key saw, that can no longer be shown as
+// that plan (row gone, policy changed, a different send stamped) — refusal,
+// never a quiet plan-less render under a plan-present signature: the browser
+// would otherwise produce a plan-less PDF a queued delivery mails while the
+// Monday email carried the plan (codex #3565 gh-r16). Mirrors
+// PinnedAssessmentUnavailable; reports-public maps the code to 409.
+class PinnedWeekPlanUnavailable extends Error {
+  constructor(reason) {
+    super(`pinned week plan is no longer available for this render (${reason})`);
+    this.code = 'pinned_week_plan_unavailable';
+    this.reason = reason;
+  }
+}
+
 async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt, strict = false } = {}) {
   if (!customerId) return null;
   // A render pinned to the cache-signature lookup's answer: the snapshot
@@ -609,21 +623,28 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
   // "plan=none" key (or vice versa).
   const pinned = pinnedSentAt !== undefined;
   if (pinned && pinnedSentAt === null) return null;
+  // Strict + pinned to a real send: any way the pinned plan fails to resolve
+  // is a refusal, not an absence.
+  const strictPin = strict && typeof pinnedSentAt === 'string';
+  const absent = (reason) => {
+    if (strictPin) throw new PinnedWeekPlanUnavailable(reason);
+    return null;
+  };
   try {
     const weekEnding = lastCompletedWeekEndingET(now);
     const row = await db('irrigation_week_plans')
       .where({ customer_id: customerId, week_ending: weekEnding })
       .whereNotNull('sent_at')
       .first();
-    if (!row) return null;
+    if (!row) return absent('missing');
     const parse = (v) => (typeof v === 'string' ? JSON.parse(v) : v);
     const restriction = parse(row.restriction_policy) || null;
     const decisionInputs = parse(row.weather_inputs) || {};
     // The policy must still be in force for the county AND still cover the
     // snapshot's whole plan week.
     const horizonEnd = decisionInputs.planWeekEnd || etDateStringPlusDays(row.week_ending, 7);
-    if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null, horizonEnd }))) return null;
-    if (pinned && new Date(row.sent_at).toISOString() !== pinnedSentAt) return null;
+    if (!samePolicy(restriction, currentRestrictionPolicy(now, { county: decisionInputs.county || restriction?.county || null, horizonEnd }))) return absent('policy_changed');
+    if (pinned && new Date(row.sent_at).toISOString() !== pinnedSentAt) return absent('sent_at_mismatch');
     return {
       weekEnding: row.week_ending,
       planAsOf: row.plan_as_of,
@@ -635,6 +656,7 @@ async function loadCurrentWeekPlan(customerId, { now = new Date(), pinnedSentAt,
       plan: parse(row.week_plan),
     };
   } catch (err) {
+    if (err instanceof PinnedWeekPlanUnavailable) throw err;
     logger.warn(`[irrigation-week-plan] snapshot load failed for ${customerId}: ${err.message}`);
     // A PINNED render must not quietly render plan-less under a plan-present
     // cache key — refuse the render (the caller retries) instead.
@@ -648,6 +670,7 @@ module.exports = {
   renderWeekPlanEmail,
   renderWeekPlanReport,
   visitInPlanWeek,
+  PinnedWeekPlanUnavailable,
   persistWeekPlan,
   markWeekPlanSent,
   hasSentWeekPlan,

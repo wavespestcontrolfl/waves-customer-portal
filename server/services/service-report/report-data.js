@@ -48,6 +48,7 @@ const {
 const { etDateString, parseETDateTime } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { renderWeekPlanReport, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek } = require('../irrigation-week-plan');
+const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { configuredPublicPortalOrigin } = require('../../utils/portal-url');
 
 let PhotoService = null;
@@ -2049,13 +2050,18 @@ async function resolveCanonicalLawnRender(service, knex = db) {
   // the render plan-less — the queued PDF path could then mail an
   // irreversible attachment without the plan the Monday email carried.
   // Propagating refuses the render; the caller retries.
-  if (featureGates.isEnabled('irrigationWeekPlan') && service.stamped_address_diverges !== true) {
-    // loadCurrentWeekPlan already returns null once the policy it was
-    // decided under is no longer in force, so its identity is the stamp —
-    // and only when the snapshot binds to THIS premise: an address change
-    // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
-    const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
-    weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, service) ? new Date(snapshot.sentAt).toISOString() : null;
+  if (featureGates.isEnabled('irrigationWeekPlan')) {
+    // The premise this key describes — resolved here, never trusted from a
+    // partial lookup row (see loadServicePremise).
+    const premise = await loadServicePremise(service, knex);
+    if (premise.stamped_address_diverges !== true) {
+      // loadCurrentWeekPlan already returns null once the policy it was
+      // decided under is no longer in force, so its identity is the stamp —
+      // and only when the snapshot binds to THIS premise: an address change
+      // (or a stamped visit elsewhere) flips the binding and re-keys the PDF.
+      const snapshot = await loadCurrentWeekPlan(service.customer_id, { strict: true });
+      weekPlanSentAt = snapshot?.sentAt && planBindsToService(snapshot, premise) ? new Date(snapshot.sentAt).toISOString() : null;
+    }
     irrigationStamp += `:plan=${weekPlanSentAt || 'none'}`;
   }
 
@@ -2079,6 +2085,31 @@ async function resolveCanonicalLawnRender(service, knex = db) {
 // a report view should not 500 because an assessment read blipped. An
 // unreadable state yields a value nothing can match, forcing a re-render
 // instead of serving a stale object.
+// Cache-LOOKUP callers (pdf-queue getOrRenderServiceReportPdf) pass a PARTIAL
+// service row — no serviced address, no stamped_address_diverges — so the
+// premise binding below would match every snapshot and a cached lawn PDF
+// could be served under the OLD home's plan after a same-week address change
+// (codex #3565 gh-r16). Resolve the premise exactly as the full render row
+// does (loadServiceRecordForPdf: stamped visit address, else the home). A
+// failed read throws — the signature wrapper turns that into a no-match key
+// and the PDF re-renders instead of matching a stale one.
+async function loadServicePremise(service, knex = db) {
+  if (service?.stamped_address_diverges !== undefined && service?.address_line1 !== undefined) return service;
+  const row = await knex('service_records')
+    .where({ 'service_records.id': service.id })
+    .leftJoin('customers', 'service_records.customer_id', 'customers.id')
+    .leftJoin('scheduled_services as ss', 'service_records.scheduled_service_id', 'ss.id')
+    .first(
+      knex.raw('COALESCE(ss.service_address_line1, customers.address_line1) as address_line1'),
+      knex.raw(`${stampedLine2Sql('ss', 'customers')} as address_line2`),
+      knex.raw('COALESCE(ss.service_address_city, customers.city) as city'),
+      knex.raw('COALESCE(ss.service_address_zip, customers.zip) as zip'),
+      knex.raw(`${stampedDivergesSql('ss', 'customers')} as stamped_address_diverges`),
+    );
+  if (!row) throw new Error(`service_record ${service?.id || 'unknown'}: premise unavailable for the week-plan cache key`);
+  return { ...service, ...row };
+}
+
 async function lawnAssessmentPdfSignature(service, knex = db) {
   try {
     return (await resolveCanonicalLawnRender(service, knex)).signature;
@@ -2618,7 +2649,10 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // this visit sits inside the plan week — a reopened older report
       // loads the current week's snapshot and must not count a treatment
       // watered in weeks ago as one of this week's runs.
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date) } : null;
+      // prescribesRun: a hold plan (zero runs) never has a run for a
+      // treatment watering-in to cover — the card keeps treatment-first but
+      // must not claim a nonexistent run was covered (codex gh-r16).
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1 } : null;
     }
   }
 
@@ -5027,6 +5061,7 @@ module.exports = {
   loadPinnedLawnAssessment,
   lawnAssessmentPdfSignature,
   resolveCanonicalLawnRender,
+  loadServicePremise,
   freezeLawnWeekWeather,
   frozenWeekMatches,
   storedWeekFor,
