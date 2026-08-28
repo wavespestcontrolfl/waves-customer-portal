@@ -98,15 +98,16 @@ const tag = `sms-backlog-reset-${etStamp}-${require('crypto').randomBytes(3).toS
 
   await c.query('BEGIN');
   const stamp = `jsonb_build_object('backlog_reset', $1::text)`;
+  // Every read is mirrored into the legacy sms_log row (same twilio_sid) so
+  // pass 2's legacy-unread guard and the dry-run preview agree with execution.
   const readMsgs = async (idList, label) => {
     if (!idList.length) return 0;
     const r = await c.query(`UPDATE messages SET is_read=true, read_at=now(), updated_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE id = ANY($2::uuid[]) AND (is_read IS NOT TRUE)`, [tag, idList]);
-    console.log(`${label}: marked ${r.rowCount} messages read`);
+    const rl = await c.query(`UPDATE sms_log l SET is_read=true, metadata = COALESCE(l.metadata,'{}'::jsonb) || ${stamp} WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($2::uuid[]) AND twilio_sid IS NOT NULL)`, [tag, idList]);
+    console.log(`${label}: marked ${r.rowCount} messages read (+${rl.rowCount} legacy sms_log mirror)`);
     return r.rowCount;
   };
   await readMsgs(closers, 'pass 1 (reaction/courtesy)');
-  const rl = await c.query(`UPDATE sms_log l SET is_read=true, metadata = COALESCE(l.metadata,'{}'::jsonb) || ${stamp} WHERE l.direction='inbound' AND (l.is_read IS NOT TRUE) AND l.twilio_sid IN (SELECT twilio_sid FROM messages WHERE id = ANY($2::uuid[]) AND twilio_sid IS NOT NULL)`, [tag, closers]);
-  console.log(`pass 1 (legacy sms_log mirror): marked ${rl.rowCount} rows read`);
   if (staleDays) {
     await readMsgs(staleMsgs.rows.map((r) => r.id), `pass 3 (stale >${staleDays}d messages)`);
     const rb = await c.query(`UPDATE notifications SET read_at=now(), metadata = COALESCE(metadata,'{}'::jsonb) || ${stamp} WHERE category='inbound_sms' AND read_at IS NULL AND created_at < now() - ($2::int * interval '1 day')`, [tag, staleDays]);

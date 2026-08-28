@@ -981,12 +981,24 @@ router.post('/sms', async (req, res) => {
         // unknown state still rings.
         const unified = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read').catch(() => null);
         if (unified?.is_read === true) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
+        const bellStartedAt = new Date();
         const stats = await triggerNotification('sms_reply', {
           fromName: `${customer.first_name} ${customer.last_name}`,
           fromPhone: From,
           message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
           threadId: customer.id,
         });
+        // Post-check closes the remaining window (hook P1): if the thread was
+        // read while the trigger ran, the bell it just wrote would outlive
+        // its message — retire it. Fail open on any lookup error.
+        try {
+          const after = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read');
+          if (after?.is_read === true) {
+            await db('notifications').where({ category: 'inbound_sms' }).whereNull('read_at')
+              .where('link', `/admin/communications?thread=${customer.id}`).where('created_at', '>=', bellStartedAt)
+              .update({ read_at: new Date() });
+          }
+        } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
@@ -1785,7 +1797,7 @@ async function lastOutboundAskedQuestion(toPhone, ourNumber) {
     const last = await db('sms_log')
       .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
       .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
-      .whereNot('message_type', 'internal_alert')
+      .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
       .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
       .orderBy('created_at', 'desc')
       .first('message_body');
