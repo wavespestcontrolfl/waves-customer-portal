@@ -1025,7 +1025,11 @@ async function manualAttributeGoogleReview(attrs = {}, options = {}) {
     if (!linked) {
       throw operationalError('This review has been removed from Google and can no longer be attributed', 409, 'review_removed_from_google');
     }
-    if (String(beforeRelink.customer_id ?? '') !== String(customerId ?? '')) {
+    // Run the reconciliation on EVERY relink (codex r58): a same-customer
+    // confirmation over a click_auto link changes the grounding identity
+    // (review-only → customer-grounded) even though customer_id is unchanged;
+    // applyReviewEditFields is a no-op when nothing moved.
+    {
       const { applyReviewEditFields } = require('./review-reply/runner');
       const n = await applyReviewEditFields(beforeRelink.id, beforeRelink, {
         star_rating: beforeRelink.star_rating, review_text: beforeRelink.review_text, reviewer_name: beforeRelink.reviewer_name, customer_id: customerId,

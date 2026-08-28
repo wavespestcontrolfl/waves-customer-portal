@@ -816,6 +816,16 @@ describe('processDueAutoReplies — state machine', () => {
     mockNotify.mockReset().mockResolvedValue({});
   });
 
+  test('Use Draft on an Agent Ops draft: verbatim text is verified, a failing verdict refuses, edited text is the admin\'s own (codex r58)', async () => {
+    const agentText = 'I am sorry to hear that. Regards, Waves';
+    const fresh = row({ id: 'aou', review_reply: '[DRAFT] ' + agentText, ...Runner.agentDraftSavedFields(agentText) });
+    mockVerify.mockReturnValueOnce('first_person_singular');
+    expect(await Runner.pipelineDraftGuard(agentText, { draftToken: Runner.reviewFingerprint(fresh) })(fresh)).toMatch(/does not pass the public-reply checks \(first_person_singular\)/);
+    mockVerify.mockReturnValueOnce(null);
+    expect(await Runner.pipelineDraftGuard(agentText, { draftToken: Runner.reviewFingerprint(fresh) })(fresh)).toBeNull();
+    expect(await Runner.pipelineDraftGuard('Hi Dana, edited by the admin.', { draftToken: Runner.reviewFingerprint(fresh) })(fresh)).toBeNull();
+  });
+
   test('an Agent Ops draft is machine-authored: Post now re-verifies it, a failing verdict surfaces a canonical replacement (codex r46)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     const agentText = 'I am sorry to hear that. Regards, Waves';

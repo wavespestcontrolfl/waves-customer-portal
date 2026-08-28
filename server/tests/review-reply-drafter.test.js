@@ -139,6 +139,10 @@ describe('verifyReplyText — public-surface safety net', () => {
     expect(verify(good('Hello there, glad the product sat well with the kids.'), gpets)).toBe('banned_phrase');
     // codex r55: adjectival tolerance ("agreeable to") + return-before-interval.
     expect(verify(good('Hello there, we are glad the pest treatment was agreeable to your pets.'), gpets)).toBe('banned_phrase');
+    // codex r58: "came out okay" with unrelated "came out" provenance.
+    const gco = grounding({ text: 'Great pest treatment. The tech came out quickly. We have pets.', mentionedTechNames: [], topics: ['pest'] });
+    expect(verify(good('Hello there, we are glad your pets came out okay after the pest treatment.'), gco)).toBe('banned_phrase');
+    expect(verify(good('Hello there, glad the kids ended up none the worse.'), gco)).toBe('banned_phrase');
     // codex r57: passive "weren't fazed by".
     expect(verify(good("Hello there, we are glad your pets weren't fazed by the pest treatment."), gpets)).toBe('banned_phrase');
     expect(verify(good('Hello there, the kids were not bothered in the least by the treatment.'), gpets)).toBe('banned_phrase');

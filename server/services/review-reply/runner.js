@@ -1212,6 +1212,19 @@ function pipelineDraftGuard(text, { draftToken = null, groundingToken = null } =
   return async (fresh) => {
     if (!fresh) return null;
     if (tokenInvalid) return 'the grounding token is malformed — draft again';
+    // An Agent Ops draft has no grounding snapshot (its writer is not the
+    // canonical drafter). Posting it VERBATIM through Use Draft runs the
+    // canonical verifier here (codex r46/r58); text the admin edited is
+    // their own and takes the ordinary human path.
+    if (fresh.auto_reply_reason === AGENT_OPS_DRAFT && fresh.auto_reply_draft) {
+      if (submitted !== String(fresh.auto_reply_draft).trim()) return null;
+      try {
+        const groundingNow = await buildReplyGrounding(fresh);
+        const recentNow = await loadRecentPostedReplies(fresh.location_id);
+        const verdict = verifyReplyText(submitted, groundingNow, { recentReplies: recentNow });
+        return verdict ? `the Agent Ops draft does not pass the public-reply checks (${verdict}) — edit it before posting` : null;
+      } catch (e) { return `the Agent Ops draft could not be verified (${e.message})`; }
+    }
     const human = humanDraftOn(fresh);
     if (human && submitted === human && fresh.auto_reply_reason === HUMAN_DRAFT_STALE) {
       return 'this draft was written before the review changed — read the current review and edit the draft first';

@@ -251,6 +251,26 @@ describe('review incentives', () => {
     expect(mockNotify.mock.calls[0][3].metadata).toMatchObject({ reason: 'review_edited_after_post', cause: 'attribution', needsAction: true });
   });
 
+  test('confirming a click_auto link against the SAME customer requeues a stored pipeline draft (grounding identity changed) — codex r58', async () => {
+    mockNotify.mockClear();
+    const conn = createDbMock({
+      customers: [{ id: 'customer-1', first_name: 'Customer', last_name: 'One', active: true }],
+      technicians: [],
+      service_records: [],
+      google_reviews: [{
+        id: 'google-same', customer_id: 'customer-1', link_source: 'click_auto', auto_linked_at: '2026-05-29T16:05:00.000Z',
+        reviewer_name: 'Dana W.', star_rating: 5, review_text: 'Great', review_reply: '[DRAFT] Hi Dana, thanks.',
+        auto_reply_status: 'drafted', auto_reply_reason: 'shadow', auto_reply_draft: 'Hi Dana, thanks.', publish_claimed_until: null,
+        review_created_at: '2026-05-29T16:00:00.000Z', location_id: 'sarasota', google_review_id: 'accounts/1/locations/2/reviews/same',
+      }],
+    });
+    await ReviewIncentives.manualAttributeGoogleReview({
+      reviewId: 'google-same', customerId: 'customer-1', technicianId: null, serviceRecordId: null, noVisit: true, adminId: 'admin-1',
+    }, { conn });
+    expect(conn.__state.rows.google_reviews[0]).toMatchObject({ link_source: 'manual_no_visit', auto_reply_status: 'queued', auto_reply_reason: 'review_changed', auto_reply_draft: null, review_reply: null });
+    expect(mockNotify).not.toHaveBeenCalled();
+  });
+
   test('re-attribution refuses while an automatic publish holds the review (live publish claim) — hook P1', async () => {
     const conn = createDbMock({
       customers: [
