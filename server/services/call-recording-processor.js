@@ -2631,9 +2631,10 @@ function leadAddressPlaceCorroborates(suppliedValues, lockedLead) {
 function leadAddressTailPlace(address) {
   const raw = String(address == null ? '' : address).trim();
   if (!raw) return null;
-  const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
   const { snapshotTailPlace } = require('./customer-address-fanout');
-  const tail = String(splitStreetLineUnitParts(raw).tail || '').trim();
+  // Lead-shape splitter so a legacy comma-free stored value still yields
+  // its locality as place evidence (codex r10 P1).
+  const tail = String(splitLeadStreetParts(raw).tail || '').trim();
   return tail ? snapshotTailPlace(`street, ${tail}`) : null;
 }
 
@@ -2644,8 +2645,12 @@ function leadAddressTailPlace(address) {
 function leadAddressCompareKey(v) {
   const raw = String(v == null ? '' : v).trim();
   if (!raw) return '';
-  const { splitStreetLineUnit, normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const { street, unit } = splitStreetLineUnit(raw);
+  const { normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  // Through the lead-shape splitter, not the raw parser: a LEGACY comma-free
+  // stored value ("100 Main St Apt 4 Sarasota FL 34236") must key the same
+  // as its composed restatement ("100 Main St, Apt 4, Sarasota FL 34236"),
+  // or a restated address never records successor ownership (codex r10 P1).
+  const { street, unit } = splitLeadStreetParts(raw);
   const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!streetKey) return '';
   const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
@@ -14757,8 +14762,11 @@ function analyzeLeadAddress(line1, line2) {
   const duplicate = !!embedded && key(embedded) === key(unit);
   const unitConflict = !!embedded && !duplicate;
   if (unitConflict) {
+    // The retained inline unit is the protected tail here too — an overlong
+    // street must not truncate the one door this policy chose to keep
+    // (codex r10 P2).
     return {
-      address: formatAddressBounded({ line1: `${parts.street} ${embedded}`, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
+      address: formatAddressBounded({ line1: parts.street, line2: embedded, city: parts.tail || null }, LEAD_ADDRESS_MAX_LENGTH),
       unitConflict,
     };
   }
