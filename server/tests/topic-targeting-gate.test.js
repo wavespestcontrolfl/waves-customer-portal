@@ -969,6 +969,13 @@ describe('PR codex r22 (b4db7a542)', () => {
     }
     expect(gate.classifyGeoScope('saint augustine grass pests in sarasota').out_of_area).toEqual([]);
   });
+  test('"Mt" / "Mt." match Mount localities; Texas Phoenix palm decline is a disease (r29)', () => {
+    for (const t of ['Mt Dora pest control', 'pest control in Mt. Dora', 'Mount Dora termite treatment']) {
+      expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');
+    }
+    expect(gate.classifyGeoScope('Texas Phoenix palm decline in Sarasota').scope).toBe('footprint');
+    expect(gate.classifyGeoScope('texas phoenix palm decline treatment').out_of_area).toEqual([]);
+  });
   test('abbreviated Fort / St. Pete localities match their blocklist entries', () => {
     for (const t of ['Ft Myers pest control', 'Ft. Lauderdale pest control', 'St Pete termite treatment', 'pest control st. pete']) {
       expect(gate.classifyGeoScope(t).scope).toBe('out_of_area');

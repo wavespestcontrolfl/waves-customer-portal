@@ -231,7 +231,7 @@ const NAME_STATE_RE = new RegExp(
 );
 // State names that are part of a plant / breed / species name, not a market:
 // stripped before the state, abbreviation and context-place matchers.
-const OUT_OF_STATE_EXEMPT_RE = /\b(?:texas\s+(?:sage|lantana|star\s+hibiscus|ranger|red\s+oak|persimmon|mountain\s+laurel|olive|ebony)|maine\s+coons?|california\s+(?:carpenter\s+bees?|poppy|poppies|king\s*snakes?|pepper\s+trees?|sycamores?|laurel|lilac)|kentucky\s+(?:bluegrass|coffee\s*trees?|wisteria)|carolina\s+(?:jasmine|jessamine|wren|cherry\s+laurel|silverbell)|arizona\s+(?:cypress|ash|bark\s+scorpions?)|louisiana\s+iris(?:es)?|mississippi\s+kites?|indiana\s+bats?|tennessee\s+warblers?|georgia\s+peach(?:es)?|alaska\s+cedars?|colorado\s+(?:blue\s+)?spruce|virginia\s+(?:creeper|pine|bluebells?|opossums?)|washington\s+(?:navel|hawthorn)|new\s+england\s+asters?|nevada\s+jointfir|oregon\s+grape)\b/gi;
+const OUT_OF_STATE_EXEMPT_RE = /\b(?:texas\s+(?:sage|lantana|star\s+hibiscus|ranger|red\s+oak|persimmon|mountain\s+laurel|olive|ebony|phoenix\s+palm\s+decline)|maine\s+coons?|california\s+(?:carpenter\s+bees?|poppy|poppies|king\s*snakes?|pepper\s+trees?|sycamores?|laurel|lilac)|kentucky\s+(?:bluegrass|coffee\s*trees?|wisteria)|carolina\s+(?:jasmine|jessamine|wren|cherry\s+laurel|silverbell)|arizona\s+(?:cypress|ash|bark\s+scorpions?)|louisiana\s+iris(?:es)?|mississippi\s+kites?|indiana\s+bats?|tennessee\s+warblers?|georgia\s+peach(?:es)?|alaska\s+cedars?|colorado\s+(?:blue\s+)?spruce|virginia\s+(?:creeper|pine|bluebells?|opossums?)|washington\s+(?:navel|hawthorn)|new\s+england\s+asters?|nevada\s+jointfir|oregon\s+grape)\b/gi;
 // The guardrails own the metro-compound list (both scans must agree); a
 // missing export means nothing is exempted (fail closed).
 let geoCompoundCache;
@@ -317,7 +317,7 @@ const AUDIENCE_PLACE_NAMES = CONTEXT_PLACE_NAMES.filter((n) => n !== 'Mobile');
 // (Reading too: "Reading pest control labels" is a gerund, not Reading, PA.)
 const PLACE_FIRST_NAMES = CONTEXT_PLACE_NAMES.filter((n) => !['Mobile', 'Sunrise', 'Reading'].includes(n));
 // "St. Augustine" must match "St Augustine" / "St. Augustine" (cityRe's rule).
-const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+').replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+');
+const placeAlt = (n) => escapeRe(n).replace(/\\\./g, '\\.?').replace(/\s+/g, '\\s+').replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+').replace(/^Mount\\s\+/, '(?:Mount|Mt\\.?)\\s+');
 // Footprint forms of a contextual name: never the out-of-footprint city.
 const CONTEXT_PLACE_FOOTPRINT_RE = /\b(?:port\s+charlotte|charlotte\s+(?:county|harbor)|(?:vs\.?|versus|or|and|than)\s+st\.?\s*augustine|st\.?\s*augustine\s+(?:vs\.?|versus|or|and|than))\b/gi;
 // "<Name>, <state>": an AMBIGUOUS postal abbreviation ("in" = Indiana, "or",
@@ -363,7 +363,10 @@ function cityRe(names) {
       .replace(/^Fort\\s\+/, '(?:Fort|Ft\\.?)\\s+')
       .replace(/^St\\.\?\\s\+Petersburg$/, 'St\\.?\\s+Pete(?:rsburg)?')
       // …and the full "Saint" spelling for any leading St./St entry.
-      .replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+'))
+      .replace(/^St\\.\?\\s\+/, '(?:St\\.?|Saint)\\s+')
+      // "Mt Dora" / "Mt. Dora" for Mount … (the postal matcher deliberately
+      // never reads a leading Mt as Montana).
+      .replace(/^Mount\\s\+/, '(?:Mount|Mt\\.?)\\s+'))
     .filter(Boolean);
   return alts.length ? new RegExp(`\\b(${alts.join('|')})\\b`, 'i') : null;
 }
