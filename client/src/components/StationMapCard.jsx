@@ -61,8 +61,22 @@ const PLAN_STATUS_LABELS = {
 };
 const PLAN_INTRO_SUFFIX = 'Colors reflect the most recent check.';
 
+// Termite pins render in the customer-surface brand palette (owner
+// 2026-08-29): numbered waves-navy pins with white text; serviced keeps a
+// gold ring so the legend still distinguishes it. Activity stays red — map
+// precedence is activity > inaccessible > serviced > normal (the customer
+// cares more that activity occurred than that we touched the station).
+// Rodent/trapping programs keep the original palette.
+const TERMITE_STATUS_COLORS = {
+  ok: { color: '#04395E' },
+  serviced: { color: '#04395E', ringColor: '#FFD700' },
+};
+
 function stationStatusMeta(status, programMeta, plan = false, initialSetup = false) {
-  const base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
+  let base = STATION_STATUS_META[status] || STATION_ON_FILE_META;
+  if (programMeta === STATION_CARD_PROGRAM_META.termite && TERMITE_STATUS_COLORS[status]) {
+    base = { ...base, ...TERMITE_STATUS_COLORS[status] };
+  }
   if (plan && PLAN_STATUS_LABELS[status]) return { ...base, label: PLAN_STATUS_LABELS[status] };
   if (status === 'activity') return { ...base, label: programMeta.activityLegend };
   if (status === 'ok' && programMeta === STATION_CARD_PROGRAM_META.rodent) {
@@ -273,8 +287,11 @@ const STATION_PIN_STYLES = `
   .station-pin { transform-box: fill-box; transform-origin: center; }
   .station-pin-pop { animation: station-pop 0.45s cubic-bezier(0.2, 1.4, 0.4, 1) backwards; animation-delay: calc(var(--pin-i, 0) * 0.1s); }
   @keyframes station-pop { from { transform: scale(0); } to { transform: scale(1); } }
-  .station-pulse { animation: station-pulse 2.8s ease-out infinite; animation-delay: calc(var(--pin-i, 0) * 0.1s + 0.45s); }
-  @keyframes station-pulse { 0% { r: 12px; opacity: 0.7; } 70% { r: 24px; opacity: 0; } 100% { r: 24px; opacity: 0; } }
+  .station-pulse { animation: station-pulse 2.2s ease-out infinite; animation-delay: calc(var(--pin-i, 0) * 0.1s + 0.45s); }
+  /* Ring launches at the pin edge and travels to ~3x the pin radius while
+     fading — widened from 24px/2px stroke after the original halo proved
+     too subtle to notice on the live report (owner 2026-08-29). */
+  @keyframes station-pulse { 0% { r: 12px; opacity: 0.9; } 80% { r: 34px; opacity: 0; } 100% { r: 34px; opacity: 0; } }
   @media (prefers-reduced-motion: reduce) {
     .station-pin-pop, .station-pulse { animation: none; }
     .station-pulse { display: none; }
@@ -418,9 +435,9 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
                 {/* pulsing halo on activity pins — decorative restatement of the
                     legend color, so it carries no label of its own */}
                 {useStationPinAnim && station.status === 'activity' && (
-                  <circle className="station-pulse" cx={cx} cy={cy} r={12} fill="none" stroke={meta.color} strokeWidth={2} aria-hidden="true" />
+                  <circle className="station-pulse" cx={cx} cy={cy} r={12} fill="none" stroke={meta.color} strokeWidth={3.5} aria-hidden="true" />
                 )}
-                <circle cx={cx} cy={cy} r={12} fill={meta.color} stroke="#fff" strokeWidth={2.5} />
+                <circle cx={cx} cy={cy} r={12} fill={meta.color} stroke={meta.ringColor || '#fff'} strokeWidth={2.5} />
                 <text x={cx} y={cy + 4} textAnchor="middle" fontSize={12} fontWeight={700} fill="#fff">
                   {station.number}
                 </text>
@@ -452,7 +469,8 @@ export function StationMapCard({ stationMap, sectionId = 'station-map', variant 
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px 16px', marginTop: 10 }}>
         {legend.map((entry) => (
           <span key={entry.key} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 14, color: mutedColor }}>
-            <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: entry.color, flexShrink: 0 }} />
+            {/* serviced termite pins carry a gold ring on the map — the legend dot mirrors it */}
+            <span aria-hidden="true" style={{ width: 10, height: 10, borderRadius: '50%', background: entry.color, flexShrink: 0, boxShadow: entry.ringColor ? `0 0 0 2px ${entry.ringColor}` : 'none' }} />
             {entry.label}
           </span>
         ))}

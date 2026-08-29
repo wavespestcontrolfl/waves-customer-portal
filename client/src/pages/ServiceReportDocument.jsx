@@ -543,12 +543,16 @@ export default function ServiceReportDocument({ data, token }) {
   // confidence-gated customer fields, so the document renders their text.
   const pestV2 = data.pestReportV2 || null;
   const mosquitoV2 = data.mosquitoReportV2 || null;
+  // termite bait-station dashboard (termite-report-v2.js) — same status /
+  // defense / primaryMove contract as pest and mosquito.
+  const termiteV2 = data.termiteReportV2 || null;
   // reportV2 serves BOTH lawn and tree_shrub (same snapshot/diagnosis/insights).
   const v2 = data.reportV2 || null;
 
   const v2StatusLine = (() => {
     if (pestV2?.status?.label) return { label: 'Protection status', value: pestV2.status.label, detail: pestV2.statusSummary };
     if (mosquitoV2?.status?.label) return { label: 'Yard usability', value: mosquitoV2.status.label, detail: mosquitoV2.statusSummary };
+    if (termiteV2?.status?.label) return { label: 'Station protection', value: termiteV2.status.label, detail: termiteV2.statusSummary };
     if (v2?.snapshot?.statusHeadline) {
       return {
         label: 'Overall',
@@ -575,7 +579,7 @@ export default function ServiceReportDocument({ data, token }) {
   // The principal SPATIAL result for recurring pest/mosquito V2 visits —
   // what is protected, what was watched, what is clear. Shapes are
   // { summary, items:[{ key, label, status, detail }] } in both builders.
-  const defenseBlock = pestV2?.defense || mosquitoV2?.habitat || null;
+  const defenseBlock = pestV2?.defense || mosquitoV2?.habitat || termiteV2?.defense || null;
   const defenseItems = (Array.isArray(defenseBlock?.items) ? defenseBlock.items : [])
     .filter((item) => item && (item.label || item.detail));
   // PEST_REPORT_V2 puts the approved concern card here; non-V2 pest reports
@@ -584,7 +588,7 @@ export default function ServiceReportDocument({ data, token }) {
   // buildPrimaryMove returns { title, why, impact, dueLabel } in BOTH builders
   // (pest-report-v2.js / mosquito-report-v2.js) — an earlier customerText/text
   // lookup here silently always resolved to null (codex P1 r2).
-  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || null;
+  const primaryMove = pestV2?.primaryMove || mosquitoV2?.primaryMove || termiteV2?.primaryMove || null;
   const v2NextMove = primaryMove?.title
     ? [primaryMove.title, primaryMove.why, primaryMove.impact].filter(Boolean).join(' ')
       + (primaryMove.dueLabel ? ` (${primaryMove.dueLabel})` : '')

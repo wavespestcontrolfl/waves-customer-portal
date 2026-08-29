@@ -35,7 +35,7 @@ const { findReportFollowupAppointment } = require('../services/report-followup-a
 // re-exported below so existing consumers/tests keep their import path.
 const { storedRevisionMatches, writeOrRefreshCtaRequest } = require('../services/cta-service-request');
 
-const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender } = require('../services/service-report/report-data');
+const { buildReportV1Data, stripLiveOnlyScheduleFields, PIN_NO_ASSESSMENT, lawnAssessmentPdfSignature, resolveCanonicalLawnRender, parseJsonObject } = require('../services/service-report/report-data');
 
 // lawn_assessments.id is a Postgres uuid — anything else must be refused
 // before it reaches a query (#3168).
@@ -164,6 +164,7 @@ const {
   isRecurringMosquitoServiceType,
 } = require('../services/service-report/mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('../services/service-report/pest-report-v2');
+const { buildTermiteReportV2, termiteReportV2PdfSignature } = require('../services/service-report/termite-report-v2');
 const { treatmentZonePdfSignature } = require('../services/treatment-zone-maps');
 const { photoMarksPdfSignature } = require('../services/service-report/photo-marks');
 const { stationMapPdfSignature } = require('../services/termite-stations');
@@ -532,6 +533,35 @@ async function buildServiceReportV1ResponseData(service, token, {
           : null,
       });
       if (mosquitoReportV2) data.mosquitoReportV2 = mosquitoReportV2;
+    } catch { /* best-effort — never block the report */ }
+  }
+
+  // Termite Report V2 — station-protection dashboard for termite BAIT
+  // STATION visits (flag-gated). Keyed on the typed report type, not the
+  // service name: liquid/trench/spot termite treatments and inspections keep
+  // their typed cards — only bait-station completions speak station
+  // language. The builder consumes the frozen typed snapshot values plus the
+  // station-map summary (both immutable per record). Best-effort, never
+  // blocks; the client mounts purely on payload presence.
+  if (
+    process.env.TERMITE_REPORT_V2 === 'true'
+    && data.serviceLine === 'termite'
+    && data.typedReport?.type === 'termite_bait_station'
+  ) {
+    try {
+      const serviceData = parseJsonObject(service.service_data);
+      const typedSnapshot = serviceData?.typedReportSnapshot;
+      const termiteReportV2 = buildTermiteReportV2({
+        typedSnapshotValues: typedSnapshot?.values || null,
+        typedReportType: data.typedReport.type,
+        stationSummary: data.stationMap?.available ? data.stationMap.summary || null : null,
+        visitSequence: data.typedReport.visitSequence || 1,
+        // Same typed-report double-print guard as the pest/mosquito heroes:
+        // typed visits render the tech-reviewed copy via Today's Result, so
+        // the dashboard never carries it a second time.
+        technicianReport: null,
+      });
+      if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
     } catch { /* best-effort — never block the report */ }
   }
 
@@ -1822,6 +1852,9 @@ router.get('/:token', async (req, res, next) => {
       // PEST_REPORT_V2 predates this key component — pest PDFs cached before
       // the pest V2 flip re-render once on next view.
       const pestV2Signature = pestReportV2PdfSignature(service);
+      // TERMITE_REPORT_V2 — same contract as the mosquito component: a gate
+      // flip must re-render cached termite bait-station PDFs.
+      const termiteV2Signature = termiteReportV2PdfSignature(service);
       // Treatment-zone key component: gate flips and re-traces change the
       // key so cached PDFs re-render with/without the traced map.
       const tzSignature = await treatmentZonePdfSignature(service, db);
@@ -1839,7 +1872,7 @@ router.get('/:token', async (req, res, next) => {
       // bypassing it into a generic 500.
       const laSignature = await lawnAssessmentPdfSignature(service, db);
       const expectedPdfStorageKey = reportPdfStorageKey(service.id, {
-        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+        visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
       });
       const storedPdf = service.pdf_storage_key === expectedPdfStorageKey
         ? await getHealthyStoredReportPdf(service.pdf_storage_key)
@@ -1957,7 +1990,7 @@ router.get('/:token', async (req, res, next) => {
           logger.warn(`[reports-public] ${unreachablePhotos} report photo(s) unreachable for ${service.id} — serving without storing`);
         } else {
           const key = await putReportPdf(service.id, pdf, {
-            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+            visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laRenderSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
           });
           await db('service_records').where({ id: service.id }).update({ pdf_storage_key: key });
         }

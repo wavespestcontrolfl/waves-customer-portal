@@ -354,6 +354,25 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(hab.container.textContent).toMatch(/Perimeter shield/);
   });
 
+  it('prints the termite V2 status, station network, and primary move', () => {
+    const data = {
+      ...BASE_DATA,
+      termiteReportV2: {
+        status: { key: 'protected', tone: 'good', label: 'No termite activity observed' },
+        statusSummary: 'We inspected all 12 bait stations around your home today.',
+        defense: { summary: 'Your protective ring: 12 inspected.', items: [
+          { key: 'inspected', label: 'Stations inspected', status: 'clear', detail: '12 stations' },
+        ] },
+        primaryMove: { title: 'Keep mulch off the slab', why: 'Mulch holds moisture.', impact: 'Lowers termite pressure', dueLabel: 'Before your next visit' },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="t" />);
+    expect(container.textContent).toMatch(/Station protection/);
+    expect(container.textContent).toMatch(/No termite activity observed/);
+    expect(container.textContent).toMatch(/12 inspected/);
+    expect(container.textContent).toMatch(/Keep mulch off the slab/);
+  });
+
   it('does not claim treated areas when the only application is a station check', () => {
     // treatment-map.js isRenderableApplication excludes method 'station_check'
     const data = {

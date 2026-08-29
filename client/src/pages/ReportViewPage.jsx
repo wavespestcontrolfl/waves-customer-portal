@@ -11,6 +11,7 @@ import PestReportV2Section from '../components/report/pestV2/PestReportV2Section
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
 import MosquitoReportV2Section from '../components/report/mosquitoV2/MosquitoReportV2Section';
+import TermiteReportV2Section from '../components/report/termiteV2/TermiteReportV2Section';
 import TreeShrubReportV2Section from '../components/report/treeShrubV2/TreeShrubReportV2Section';
 import useStickyStuck from '../hooks/useStickyStuck';
 import {
@@ -668,6 +669,20 @@ export function latestPendingReentryTarget(targets = [], nowMs = Date.now()) {
 // cell must say what happened: treatments applied, areas covered, photos
 // documented). Shared by every report line.
 export function visitWorkSummary(data = {}, fallback = '') {
+  // Termite bait-station visits are monitoring, not application: the cell
+  // says what was inspected/serviced, never "1 product applied" (owner
+  // 2026-08-29). Counts come from the builder's metrics (documented station
+  // counts) — same source the dashboard hero prints.
+  const termiteMetrics = Array.isArray(data.termiteReportV2?.metrics) ? data.termiteReportV2.metrics : null;
+  if (termiteMetrics) {
+    const inspected = termiteMetrics.find((m) => m?.label === 'Stations inspected')?.value;
+    const serviced = Number(termiteMetrics.find((m) => m?.label === 'Stations serviced')?.value);
+    const parts = [
+      inspected ? `${inspected} stations inspected` : null,
+      Number.isFinite(serviced) && serviced > 0 ? `${serviced} station${serviced === 1 ? '' : 's'} serviced` : null,
+    ].filter(Boolean);
+    if (parts.length) return parts.join(' · ');
+  }
   const appCount = (Array.isArray(data.applications) ? data.applications : [])
     .filter((app) => applicationProductName(app) || app.product || app.productName || app.product_name).length;
   const photoCount = [data.photos, data.completionPhotos, data.reportV2?.photos]
@@ -816,6 +831,27 @@ export function smartStatusSummary(data = {}, mode = 'live', nowMs = Date.now())
         data.techVisitCard ? null : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
         'Treatments can take several days to knock activity down fully — contact us if you are still seeing activity after two weeks.',
       ].filter(Boolean).join(' '),
+    };
+  }
+
+  // Termite V2 carries an honest station-scoped status — same rule as the
+  // lawn/T&S branch below: the generic "No high-priority issues" line must
+  // not sit above a colony-activity hero saying the opposite. Prefer the
+  // dashboard's own summary whenever the payload is present.
+  // The header cell carries the short HEADLINE only ("Termite activity
+  // observed at 2 stations"); the full body lives in the dashboard hero
+  // right below, so printing it here too read the same paragraph twice at
+  // heading size (owner eyeball 2026-08-29).
+  if (data.termiteReportV2?.status?.label || data.termiteReportV2?.statusSummary) {
+    return {
+      heading: 'your service is complete!',
+      status: allReady ? 'Ready now' : 'Service complete',
+      statusTone: 'neutral',
+      result: data.termiteReportV2.status?.label || data.termiteReportV2.statusSummary,
+      completedLine: completedAreas ? `${completedItems.length} area${completedItems.length === 1 ? '' : 's'} completed · ${completedAreas}` : 'Service areas were completed today.',
+      detail: data.techVisitCard
+        ? ''
+        : (completionTime ? `${technician} completed the visit at ${completionTime}.` : `${technician} completed the visit.`),
     };
   }
 
@@ -5454,6 +5490,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   const pressureGaugeVisible = !data.activity
     && !data.pestReportV2
     && !data.mosquitoReportV2
+    && !data.termiteReportV2
     && !!data.pestPressure
     && data.pestPressure.enabled !== false
     && data.pestPressure.showOnCustomerReport !== false;
@@ -5492,7 +5529,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
   // high; mosquito follows the pest layout (owner 2026-08-27: "evenly
   // spaced — see the recurring pest control report"). The two review
   // mounts are mutually exclusive on this flag.
-  const reviewAskOnTop = Boolean(data.reportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
+  const reviewAskOnTop = Boolean(data.reportV2) || Boolean(data.termiteReportV2) || data.serviceLine === 'pest' || data.serviceLine === 'mosquito';
   const hasReentry = Boolean(dynamicContext.reentry);
   // Bed bug: the typed narrative owns the report's ONE summary surface even
   // without a Pest/Mosquito V2 hero (owner 2026-07-31) — Today's Result
@@ -8734,13 +8771,18 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             bottom card below is suppressed for them to match. */}
         {reviewAskOnTop && <ReviewRequestCard data={data} token={token} mode={mode} placement="top" />}
 
-        <TodaysResultCard
-          typedReport={data.typedReport}
-          bodyOverride={data.summarySource === 'typed_narrative'
-            && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
-            ? cleanVisitSummary(data.summary)
-            : null}
-        />
+        {/* Termite V2 owns the visit story (hero + station network) — the
+            typed Today's Result card would restate it (same rationale as the
+            pest V2 tile suppression, owner 2026-07-21). */}
+        {!data.termiteReportV2 && (
+          <TodaysResultCard
+            typedReport={data.typedReport}
+            bodyOverride={data.summarySource === 'typed_narrative'
+              && (data.pestReportV2 || data.mosquitoReportV2 || typedNarrativeOwnsSummary)
+              ? cleanVisitSummary(data.summary)
+              : null}
+          />
+        )}
 
         {/* Standalone concern acknowledgment for pest reports WITHOUT the V2
             dashboard (cockroach-family typed reports skip it by design) — the
@@ -8831,6 +8873,29 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
+        {/* Termite Report V2 — station-protection dashboard for bait/monitoring
+            visits (flag-gated server-side; mounts purely on payload presence,
+            same rule as pest/mosquito V2). Mutually exclusive with the other
+            V2 payloads (one service line per report). */}
+        {data.termiteReportV2 && (
+          <div id="visit-summary">
+            <TermiteReportV2Section
+              data={data.termiteReportV2}
+              print={mode === 'pdf' || mode === 'static'}
+              token={token}
+              mode={mode}
+              /* Station map rides INSIDE the dashboard (the standalone mount
+                 below is suppressed for termite V2). */
+              stationMap={data.stationMap}
+              stationPins={Boolean(data.termiteStationPins)}
+              nextVisitLabel={formatNextAppointmentLabel(data.nextAppointment)}
+              bondLines={(data.termiteBonds || [])
+                .map((bond) => ({ serviceType: bond.serviceType || null, label: formatTermiteBondRenewalLabel(bond) }))
+                .filter((entry) => entry.label)}
+            />
+          </div>
+        )}
+
         {/* V2: Visit Timeline renders directly under Re-entry (lawn + tree_shrub). */}
         {isV2LeadLayout && (
           <>
@@ -8861,7 +8926,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             Ask-Waves section that used to render into pdf/static documents was
             removed 2026-08-02 (dead chrome in a printed PDF — owner); live
             mode's ask surface is FloatingAskWaves. */}
-        {!data.pestReportV2 && !data.mosquitoReportV2 && !typedNarrativeOwnsSummary && (
+        {!data.pestReportV2 && !data.mosquitoReportV2 && !data.termiteReportV2 && !typedNarrativeOwnsSummary && (
           <section data-glass="card" className="sr-section visit-summary-section" id="visit-summary">
             <h2>Visit Summary</h2>
             <p>{visitSummaryCopy(data, { skipPromotedBody: todaysResultCarriesSummary })}</p>
@@ -8969,7 +9034,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
             the tile card duplicated it ("What we found: German cockroaches")
             right below (owner 2026-07-21). Typed compliance reports (termite,
             WDO, rodent...) keep the card — those tiles ARE the record. */}
-        {!data.pestReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
+        {!data.pestReportV2 && !data.termiteReportV2 && <TypedFindingsCard typedReport={data.typedReport} />}
 
         {/* Seasonal-protocol card renders internal operating fields (production
             mode, carrier target, inventory deductions, compliance gate) that
@@ -9076,7 +9141,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         {/* Bait station map (station-map-v1) — live web only; pdf/static have
             no satellite basemap to pin against (provider ToS). Rodent refresh
             draws trapping pins as animated snap traps. */}
-        {mode === 'live' && (
+        {mode === 'live' && !data.termiteReportV2 && (
           <StationMapCard
             stationMap={data.stationMap}
             trapPins={Boolean(data.rodentReportRefresh)}
@@ -9109,7 +9174,10 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
           </div>
         )}
 
-        {!isV2LeadLayout && (
+        {/* Termite bait visits: no Products Applied section (owner
+            2026-08-29) — station checks read as monitoring, not application;
+            bait work is documented in the station record instead. */}
+        {!isV2LeadLayout && !data.termiteReportV2 && (
           <AppliedProductsSection
             data={data}
             mode={mode}

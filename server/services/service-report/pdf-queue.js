@@ -17,6 +17,7 @@ const { loadActiveConfig, pestPressureVisibilitySignature } = require('../pest-p
 const { summaryCopySignature } = require('./technician-report-copy');
 const { mosquitoReportV2PdfSignature } = require('./mosquito-report-v2');
 const { pestReportV2PdfSignature } = require('./pest-report-v2');
+const { termiteReportV2PdfSignature } = require('./termite-report-v2');
 const { photoMarksPdfSignature } = require('./photo-marks');
 const { treatmentZonePdfSignature } = require('../treatment-zone-maps');
 const { stationMapPdfSignature } = require('../termite-stations');
@@ -131,6 +132,9 @@ async function renderAndStoreServiceReportPdf(recordId, {
   // Same for PEST_REPORT_V2 — the pest gate predates this key component, so
   // pest PDFs cached pre-dashboard re-render once on next view.
   const pestV2Signature = pestReportV2PdfSignature(service);
+  // Same for TERMITE_REPORT_V2 (termite-report-v2.js) — env + service type
+  // only, immutable per render.
+  const termiteV2Signature = termiteReportV2PdfSignature(service);
   // Treatment-zone key component: the traced satellite map bakes into the
   // PDF, so a gate flip or re-trace must change the key (re-trace also
   // nulls pdf_storage_key at save — this covers the gate-flip direction).
@@ -313,7 +317,7 @@ async function renderAndStoreServiceReportPdf(recordId, {
       };
     }
     const key = await putReportPdf(recordId, pdf, {
-      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
+      visibilitySignature: visibilitySignature + summarySignature + mosquitoV2Signature + pestV2Signature + termiteV2Signature + tzSignature + smSignature + tnRenderedSignature + timeOnSiteAdjustedPdfSignature(service) + reentryAdjustedPdfSignature(service) + laSignature + photoMarksPdfSignature() + publicOriginPdfSignature(),
     });
     await knex('service_records').where({ id: recordId }).update({ pdf_storage_key: key });
     return { key, pdf, token: reportToken };

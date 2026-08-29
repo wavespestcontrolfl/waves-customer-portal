@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ReportViewPage from './ReportViewPage';
 import legacyLawnReport from './__fixtures__/legacy-lawn-report.json';
 import lawnReportV2 from './__fixtures__/lawn-report-v2.json';
 import mosquitoReportV2 from './__fixtures__/mosquito-report-v2.json';
+import termiteReportV2 from './__fixtures__/termite-report-v2.json';
 import pestReportV2 from './__fixtures__/pest-report-v2.json';
 
 // Full-render guards for the lawn service report. V2 is THE lawn report
@@ -118,6 +119,60 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     // Shared sections still render exactly once in the V2 lead layout.
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
+  });
+});
+
+describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {
+  it('renders the station dashboard and suppresses the generic summary, tiles, products, and standalone map', async () => {
+    const { container } = renderReport(termiteReportV2);
+    // Headline from the termiteReportV2 payload — in the header status cell
+    // AND the dashboard hero (the header prints the short label, never the
+    // full body).
+    const headlines = await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(headlines).toHaveLength(2);
+    expect(container.querySelector('.smart-status-result').textContent).toBe('Termite activity observed at 2 stations');
+    // Station checks are monitoring, not application — the work cell never
+    // says "product applied".
+    expect(screen.getByText('12 of 14 stations inspected · 3 stations serviced')).toBeInTheDocument();
+    expect(screen.queryByText(/product applied/)).toBeNull();
+
+    // The dashboard owns the summary slot — no legacy Visit Summary, no
+    // typed Today's Result / What-we-found tiles restating the same record.
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelectorAll('#visit-summary')).toHaveLength(1);
+    expect(screen.queryByText(/What we found/i)).toBeNull();
+    // Station checks are monitoring, not application (owner 2026-08-29).
+    expect(container.querySelector('#products-applied')).toBeNull();
+    expect(screen.queryByText('Products Applied')).toBeNull();
+    // Exceptions first: the activity + inaccessible stations, nothing else.
+    const needsAttention = (await screen.findByText('Needs attention')).closest('section');
+    // (the map legend also says "Termite activity observed" once — scope to the card)
+    expect(within(needsAttention).getAllByText('Termite activity observed')).toHaveLength(2);
+    expect(within(needsAttention).getAllByText('Could not be accessed this visit')).toHaveLength(2);
+    // Station map rides inside the dashboard exactly once.
+    expect(container.querySelectorAll('#station-map')).toHaveLength(1);
+    // Program card: next monitoring visit + warranty line.
+    await screen.findByText('Your termite protection');
+    const nextVisit = (await screen.findByText('Next monitoring visit')).closest('section');
+    expect(within(nextVisit).getByText(/Termite Bait Station Service · Mon, Nov 16/)).toBeInTheDocument();
+    expect(within(nextVisit).getByText(/Renews Mar 14, 2027/)).toBeInTheDocument();
+    // Tech's top recommendation.
+    await screen.findByText('Pull mulch back from foundation');
+  });
+
+  it('hides Needs attention on a clean visit', async () => {
+    const clean = JSON.parse(JSON.stringify(termiteReportV2));
+    clean.stationMap.stations = clean.stationMap.stations.map((st) => ({ ...st, status: 'ok' }));
+    clean.termiteReportV2.status = { key: 'protected', tone: 'good', label: 'No termite activity observed' };
+    renderReport(clean);
+    await screen.findAllByText('No termite activity observed');
+    expect(screen.queryByText('Needs attention')).toBeNull();
+  });
+
+  it('termite visit without the payload keeps the legacy layout', async () => {
+    const { termiteReportV2: _omit, ...gatedOff } = termiteReportV2;
+    renderReport(gatedOff);
+    await screen.findByText('Visit Summary');
   });
 });
 

@@ -1,0 +1,535 @@
+{
+  "reportVersion": "service_report_v1",
+  "serviceLine": "termite",
+  "serviceDisplayName": "Termite Bait Station Service",
+  "serviceLineDisplay": "Termite service",
+  "customerName": "Sample Customer",
+  "customerEmail": "sample@example.com",
+  "customerPhone": "(000) 000-0000",
+  "serviceAddress": "123 Sample St, Parrish, FL 34219",
+  "serviceDate": "2026-08-27",
+  "technicianName": "Adam",
+  "technician": {
+    "name": "Alex",
+    "photoUrl": "https://example.test/photo.png",
+    "initials": "A"
+  },
+  "evidenceLevel": "technician_confirmed",
+  "waveGuardTier": "Gold",
+  "applications": [
+    {
+      "id": "7e3b960b-f701-4a61-82ee-670ca331aedf",
+      "product": {
+        "catalogId": "14ff6b90-3c30-4b90-b8f3-721be4ed87c8",
+        "name": "Trelona Compressed Termite Bait Cartridges",
+        "epa_reg": "499-557",
+        "active_ingredient": "Novaluron",
+        "category": "termite bait",
+        "product_type": null,
+        "manufacturer": null,
+        "public_summary": null,
+        "service_report_summary": "A termite bait cartridge installed in secured in-ground stations; foraging termites feed on the bait and carry it back to the colony.",
+        "precaution_summary": "Serviced inside secured, tamper-resistant stations. Please do not open, move, or disturb the stations; let us know if one is dislodged.",
+        "reentry_summary": "No re-entry wait; leave stations undisturbed.",
+        "irrigation_notes": null,
+        "label_verified_at": "2026-07-12T17:55:44.903Z",
+        "label_version": null,
+        "facts_approved": true
+      },
+      "method": "station_check",
+      "methodLabel": "Bait station service",
+      "zone_ids": [
+        "default-zone-1",
+        "default-zone-2",
+        "default-zone-3"
+      ],
+      "rate": "2",
+      "rateUnit": "each/station",
+      "totalAmount": "6",
+      "amountUnit": "cartridges",
+      "applicationArea": null,
+      "areaValue": null,
+      "areaUnit": null,
+      "targets": [
+        "Subterranean termites",
+        "Formosan termites"
+      ],
+      "appliedAt": "2026-06-25T14:56:39.599Z"
+    }
+  ],
+  "visitTimeline": {
+    "enabled": true,
+    "title": "Visit Timeline",
+    "intro": "Here's a simple summary of today's service visit.",
+    "serviceLine": "termite",
+    "status": "completed",
+    "events": [
+      {
+        "id": "technician_en_route",
+        "type": "technician_en_route",
+        "label": "Technician en route",
+        "customerDescription": "Your technician was on the way to the property.",
+        "customerVisibleDescription": "Your technician was on the way to the property.",
+        "occurredAt": "2026-06-25T13:57:21.820Z",
+        "timestamp": "2026-06-25T13:57:21.820Z",
+        "displayTime": "9:57 AM",
+        "source": "bouncie",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 1
+      },
+      {
+        "id": "technician_on_site",
+        "type": "technician_on_site",
+        "label": "Technician on site",
+        "customerDescription": "Your technician was recorded at the property.",
+        "customerVisibleDescription": "Your technician was recorded at the property.",
+        "occurredAt": "2026-06-25T14:08:12.087Z",
+        "timestamp": "2026-06-25T14:08:12.087Z",
+        "displayTime": "10:08 AM",
+        "source": "bouncie",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 2
+      },
+      {
+        "id": "service_completed",
+        "type": "service_completed",
+        "label": "Service completed",
+        "customerDescription": "Your technician completed the termite service and finalized the report.",
+        "customerVisibleDescription": "Your technician completed the termite service and finalized the report.",
+        "occurredAt": "2026-06-25T14:56:39.602Z",
+        "timestamp": "2026-06-25T14:56:39.602Z",
+        "displayTime": "10:56 AM",
+        "source": "service_report",
+        "confidence": "high",
+        "status": "completed",
+        "sortOrder": 3
+      }
+    ],
+    "details": [
+      {
+        "id": "customer_contact",
+        "type": "customer_contact",
+        "label": "Customer contact",
+        "text": "No one was home, and the technician had full access to complete service.",
+        "occurredAt": null,
+        "displayTime": null,
+        "showAsTimelineEvent": false
+      }
+    ],
+    "timingNote": null,
+    "dataSourceNote": "Times are based on available technician status updates, vehicle data, and report completion records.",
+    "durationMinutes": null,
+    "reportGeneratedAt": "2026-06-25T14:56:40.039Z",
+    "config": {
+      "enabled": true,
+      "showOnCustomerReports": true,
+      "title": "Visit Timeline",
+      "showTechnicianEnRoute": true,
+      "showTechnicianOnSite": true,
+      "showServiceCompleted": true,
+      "serviceCompletedRequiredWhenReportCompleted": true,
+      "showCustomerContact": true,
+      "showCustomerContactAsTimelineEvent": false,
+      "showReportGenerated": false,
+      "showExactTimes": true,
+      "showDuration": false,
+      "minimumDurationMinutes": 5,
+      "showTimingNoteWhenDurationUnavailable": true,
+      "showDataSourceNote": true
+    }
+  },
+  "workflowEvents": [
+    {
+      "id": "technician_en_route",
+      "type": "technician_en_route",
+      "label": "Technician en route",
+      "timestamp": "2026-06-25T13:57:21.820Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician was on the way to the property."
+    },
+    {
+      "id": "arrived_on_site",
+      "type": "arrived_on_site",
+      "label": "Technician on site",
+      "timestamp": "2026-06-25T14:08:12.087Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician was recorded at the property."
+    },
+    {
+      "id": "service_completed",
+      "type": "service_completed",
+      "label": "Service completed",
+      "timestamp": "2026-06-25T14:56:39.983Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your technician completed the termite service and finalized the report."
+    },
+    {
+      "id": "report_published",
+      "type": "report_published",
+      "label": "Report published",
+      "timestamp": "2026-06-25T14:56:40.039Z",
+      "status": "completed",
+      "customerVisibleDescription": "Your service report was generated."
+    }
+  ],
+  "customerInteraction": "not_home_full_access",
+  "visitTiming": {
+    "arrivedAt": "2026-06-25T14:08:12.087Z",
+    "exitedAt": "2026-06-25T14:56:39.602Z",
+    "onSiteMinutes": 48
+  },
+  "summary": "We inspected 12 termite bait stations around the exterior perimeter today. Two stations showed live termite activity with moderate bait feeding \u2014 bait was replaced and monitor cartridges refreshed so the colony keeps taking bait.",
+  "scheduledService": {
+    "arrived_at": "2026-06-25T14:08:12.087Z",
+    "actual_start_time": "2026-06-25T14:08:12.087Z",
+    "check_in_time": "2026-06-25T14:08:12.087Z",
+    "completed_at": "2026-06-25T14:56:39.983Z",
+    "actual_end_time": "2026-06-25T14:56:39.602Z",
+    "check_out_time": "2026-06-25T14:56:39.602Z",
+    "started_at": null,
+    "ended_at": null
+  },
+  "serviceRecord": {
+    "arrived_at": null,
+    "actual_start_time": null,
+    "check_in_time": null,
+    "completed_at": null,
+    "actual_end_time": null,
+    "check_out_time": null,
+    "started_at": "2026-06-25T14:08:12.087Z",
+    "ended_at": "2026-06-25T14:56:39.602Z"
+  },
+  "actual_start_time": "2026-06-25T14:08:12.087Z",
+  "actual_end_time": "2026-06-25T14:56:39.602Z",
+  "arrived_at": "2026-06-25T14:08:12.087Z",
+  "completed_at": "2026-06-25T14:56:39.602Z",
+  "check_in_time": "2026-06-25T14:08:12.087Z",
+  "check_out_time": "2026-06-25T14:56:39.602Z",
+  "token": "test-termite-v2",
+  "serviceRecordId": "test-record-termite",
+  "typedReport": {
+    "type": "termite_bait_station",
+    "typeLabel": "Termite Bait Station Inspection",
+    "reportTypeLabel": "Termite Program \u2014 Progress Visit",
+    "visitSequence": 3,
+    "isProgressVisit": true,
+    "todaysResult": {
+      "headline": "Termite activity was high today.",
+      "body": "We inspected 12 termite bait stations around the exterior perimeter today. 2 stations were not accessible and will be checked when access is available. Contact us if you have any questions.",
+      "nextStep": "Contact us if you have any questions."
+    },
+    "findings": [
+      {
+        "fieldKey": "total_stations",
+        "technicianLabel": "Total stations on property",
+        "customerLabel": "Stations on property",
+        "value": 14,
+        "customerValueLabel": "14"
+      },
+      {
+        "fieldKey": "stations_checked",
+        "technicianLabel": "Stations checked",
+        "customerLabel": "Stations checked",
+        "value": 12,
+        "customerValueLabel": "12"
+      },
+      {
+        "fieldKey": "stations_inaccessible",
+        "technicianLabel": "Stations inaccessible",
+        "customerLabel": "Stations not accessible today",
+        "value": 2,
+        "customerValueLabel": "2"
+      },
+      {
+        "fieldKey": "stations_with_activity",
+        "technicianLabel": "Stations with termite activity",
+        "customerLabel": "Stations with termite activity",
+        "value": 2,
+        "customerValueLabel": "2"
+      },
+      {
+        "fieldKey": "termite_activity",
+        "technicianLabel": "Termite activity",
+        "customerLabel": "Termite activity",
+        "value": "Active termites present",
+        "customerValueLabel": "Active termite feeding was observed \u2014 see the station details below"
+      },
+      {
+        "fieldKey": "activity_signs",
+        "technicianLabel": "Activity signs",
+        "customerLabel": "Activity signs observed",
+        "value": "Live termites in station,Bait feeding",
+        "customerValueLabel": "Live termites in station, Bait feeding",
+        "customerValueParts": [
+          "Live termites in station",
+          "Bait feeding"
+        ]
+      },
+      {
+        "fieldKey": "active_station_location",
+        "technicianLabel": "Active station number / location",
+        "customerLabel": "Active station location",
+        "value": "Stations 6 and 10 on the north side of the home",
+        "customerValueLabel": "Stations 6 and 10 on the north side of the home"
+      },
+      {
+        "fieldKey": "bait_consumption",
+        "technicianLabel": "Bait consumption",
+        "customerLabel": "Bait consumption",
+        "value": "Moderate feeding",
+        "customerValueLabel": "Moderate termite feeding on the bait"
+      },
+      {
+        "fieldKey": "bait_actions",
+        "technicianLabel": "Bait service performed",
+        "customerLabel": "Bait service performed",
+        "value": "Bait replaced,Monitor cartridge replaced",
+        "customerValueLabel": "Bait replaced, Monitor cartridge replaced",
+        "customerValueParts": [
+          "Bait replaced",
+          "Monitor cartridge replaced"
+        ]
+      },
+      {
+        "fieldKey": "conducive_conditions",
+        "technicianLabel": "Conducive conditions",
+        "customerLabel": "Conditions to address",
+        "value": "Mulch against foundation,Irrigation hitting structure",
+        "customerValueLabel": "Mulch against foundation, Irrigation hitting structure",
+        "customerValueParts": [
+          "Mulch against foundation",
+          "Irrigation hitting structure"
+        ]
+      },
+      {
+        "fieldKey": "customer_recommendations",
+        "technicianLabel": "Customer recommendations",
+        "customerLabel": "What you can do",
+        "value": "Pull mulch back from foundation,Correct irrigation spraying the structure",
+        "customerValueLabel": "Pull mulch back from foundation, Correct irrigation spraying the structure",
+        "customerValueParts": [
+          "Pull mulch back from foundation",
+          "Correct irrigation spraying the structure"
+        ]
+      }
+    ],
+    "nextStepChips": [
+      "Re-check active stations next visit",
+      "Continue quarterly monitoring"
+    ],
+    "photoSummary": null,
+    "schemaVersion": 2
+  },
+  "termiteReportV2": {
+    "status": {
+      "key": "action",
+      "tone": "watch",
+      "label": "Termite activity observed at 2 stations"
+    },
+    "statusSummary": "Termite activity was observed at Stations 6 and 10 on the north side of the home. Both stations were serviced today and will continue to be monitored. 2 stations could not be accessed today and will be checked next visit.",
+    "metrics": [
+      {
+        "label": "Stations inspected",
+        "value": "12 of 14"
+      },
+      {
+        "label": "Termite activity",
+        "value": "2 stations"
+      },
+      {
+        "label": "Stations serviced",
+        "value": "3"
+      }
+    ],
+    "supportingMetric": {
+      "label": "Stations inspected today",
+      "value": "12 of 14"
+    },
+    "defense": {
+      "summary": "Your protective ring: 12 inspected \u00b7 2 with activity \u00b7 2 inaccessible.",
+      "items": [
+        {
+          "key": "inspected",
+          "label": "Stations inspected",
+          "status": "clear",
+          "detail": "12 of 14 stations"
+        },
+        {
+          "key": "activity",
+          "label": "Stations with termite activity",
+          "status": "active",
+          "detail": "2 stations \u2014 bait engaged"
+        },
+        {
+          "key": "bait",
+          "label": "Bait condition",
+          "status": "watched",
+          "detail": "Moderate bait feeding \u2014 the colony is actively taking bait."
+        },
+        {
+          "key": "access",
+          "label": "Not accessible this visit",
+          "status": "watched",
+          "detail": "2 stations \u2014 we will re-check next visit"
+        }
+      ]
+    },
+    "servicedToday": true,
+    "primaryMove": {
+      "title": "Pull mulch back from foundation",
+      "why": "We noted: mulch against foundation. This keeps the station ring working at full strength.",
+      "impact": "Protects the monitoring system between visits",
+      "dueLabel": "Before your next visit"
+    },
+    "visitSequence": 3,
+    "aiSummary": null
+  },
+  "stationMap": {
+    "available": true,
+    "program": "termite",
+    "image": {
+      "url": "/__stub/sat.svg",
+      "width": 640,
+      "height": 340
+    },
+    "attributionText": "Map data \u00a9 Google",
+    "stations": [
+      {
+        "id": "st-1",
+        "number": 1,
+        "label": "Front entry",
+        "cx": 0.24,
+        "cy": 0.22,
+        "status": "ok"
+      },
+      {
+        "id": "st-2",
+        "number": 2,
+        "label": "Front walk",
+        "cx": 0.38,
+        "cy": 0.18,
+        "status": "ok"
+      },
+      {
+        "id": "st-3",
+        "number": 3,
+        "label": "Garage left",
+        "cx": 0.52,
+        "cy": 0.18,
+        "status": "ok"
+      },
+      {
+        "id": "st-4",
+        "number": 4,
+        "label": "Garage right",
+        "cx": 0.66,
+        "cy": 0.22,
+        "status": "ok"
+      },
+      {
+        "id": "st-5",
+        "number": 5,
+        "label": "East wall",
+        "cx": 0.7,
+        "cy": 0.4,
+        "status": "serviced"
+      },
+      {
+        "id": "st-6",
+        "number": 6,
+        "label": "North side",
+        "cx": 0.7,
+        "cy": 0.6,
+        "status": "activity"
+      },
+      {
+        "id": "st-7",
+        "number": 7,
+        "label": "Northeast corner",
+        "cx": 0.66,
+        "cy": 0.78,
+        "status": "ok"
+      },
+      {
+        "id": "st-8",
+        "number": 8,
+        "label": "Rear patio",
+        "cx": 0.52,
+        "cy": 0.82,
+        "status": "serviced"
+      },
+      {
+        "id": "st-9",
+        "number": 9,
+        "label": "Rear center",
+        "cx": 0.38,
+        "cy": 0.82,
+        "status": "ok"
+      },
+      {
+        "id": "st-10",
+        "number": 10,
+        "label": "North wall",
+        "cx": 0.26,
+        "cy": 0.78,
+        "status": "activity"
+      },
+      {
+        "id": "st-11",
+        "number": 11,
+        "label": "West wall",
+        "cx": 0.22,
+        "cy": 0.6,
+        "status": "serviced"
+      },
+      {
+        "id": "st-12",
+        "number": 12,
+        "label": "Southwest corner",
+        "cx": 0.22,
+        "cy": 0.4,
+        "status": "ok"
+      },
+      {
+        "id": "st-13",
+        "number": 13,
+        "label": "Side gate",
+        "cx": 0.1,
+        "cy": 0.3,
+        "status": "inaccessible"
+      },
+      {
+        "id": "st-14",
+        "number": 14,
+        "label": "Rear lanai",
+        "cx": 0.1,
+        "cy": 0.66,
+        "status": "inaccessible"
+      }
+    ],
+    "summary": {
+      "total": 14,
+      "checked": 12,
+      "activity": 2,
+      "serviced": 3,
+      "inaccessible": 2
+    }
+  },
+  "termiteStationPins": true,
+  "nextAppointment": {
+    "scheduledDate": "2026-11-16",
+    "windowStart": "09:00",
+    "serviceType": "Termite Bait Station Service"
+  },
+  "termiteBonds": [
+    {
+      "serviceType": "Termite Bond (1-Year Term)",
+      "termYears": 1,
+      "startedAt": "2026-03-14",
+      "renewsAt": "2027-03-14"
+    }
+  ],
+  "cityState": "Bradenton, FL"
+}
