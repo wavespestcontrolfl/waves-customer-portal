@@ -157,6 +157,10 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', countyConfirmed: true })).toBe('Charlotte');
     // A confirmed county still loses to a current address that contradicts it.
     expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Bradenton', zip: '34205', homeMoved: true, countyConfirmed: true })).toBe('Manatee');
+    // gh-r34: …but a STALE municipality is not a contradiction — Bradenton → Manatee side of Longboat Key 34228, county re-confirmed Manatee.
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Longboat Key', zip: '34228', homeMoved: true, countyConfirmed: true })).toBe('Manatee');
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Longboat Key', zip: '34228', homeMoved: true, countyConfirmed: false })).toBe(null);
+    expect(resolveRestrictionCounty({ county: 'Manatee', profileCity: 'Bradenton', city: 'Englewood', zip: '34223', homeMoved: true, countyConfirmed: true })).toBe('Manatee');
   });
   test('the ledger entry is written only by a turf-profile save that carries a county (source contract)', () => {
     const fs = require('fs');

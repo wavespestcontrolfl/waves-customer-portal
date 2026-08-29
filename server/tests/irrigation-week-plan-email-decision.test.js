@@ -270,10 +270,25 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(wet.decisionInputs.priorWeekPrescribedInches).toBe(0);
     expect(wet.weekPlan.carryoverInches).toBe(0.5); // root-zone cap, from the rain alone
     expect(wet.weekPlan.reasons).toContain('prior_week_overwatered');
+    expect(wet.decisionInputs.priorWeekRainOverride).toBe(false); // a HOLD prescribed no run to skip (gh-r34)
     expect(wet.payload.summary_line).toMatch(/last week's watering plan \(0" of irrigation\), your lawn got about 2\.5"/);
     const ran = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.2 });
     expect(ran.decisionInputs.appliedInches).toBe(0.95);
+    expect(ran.decisionInputs.priorWeekCreditedInches).toBe(0.75);
+    expect(ran.decisionInputs.priorWeekRainOverride).toBe(false);
     expect(ran.payload.total_inches).toBe('0.95"');
+    // gh-r34: ≥ ½" of observed rain means the prior plan's own rule said SKIP the run — its depth is not credited (unknown = 0), rain still counts.
+    const skipped = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.6 });
+    expect(skipped.decisionInputs.priorWeekRainOverride).toBe(true);
+    expect(skipped.decisionInputs.priorWeekCreditedInches).toBe(0);
+    expect(skipped.decisionInputs.appliedInches).toBe(0.6);
+    expect(skipped.weekPlan.carryoverInches).toBe(0); // 0.6" against a peak target: no manufactured surplus
+    expect(skipped.payload.summary_line).toMatch(/said to skip the run, so no irrigation is counted/);
+    expect(skipped.payload.irrigation_inches).toBe('0" (last week\'s plan — skipped after rain)');
+    expect(skipped.payload.total_inches).toBe('0.6"');
+    const under = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0.75, rainfallInches7d: 0.4 });
+    expect(under.decisionInputs.priorWeekRainOverride).toBe(false);
+    expect(under.decisionInputs.appliedInches).toBe(1.15);
     // Untrusted rain never joins the total (same rule as the advice engine).
     const { decideWeekPlan } = require('../services/irrigation-week-plan');
     const { plan, decisionInputs } = decideWeekPlan({ advice: { rainKnown: false, appliedInchesPerWeek: null, recommendedInchesPerWeek: 0.75 }, grassType: 'st_augustine', forecastEt0Inches: 1.4, lastWeekRainInches: 2.5, priorWeekPrescribedInches: 0, county: 'Manatee', planWeekEnd: '2026-09-06', now: new Date('2026-08-31T11:00:00Z') });

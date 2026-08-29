@@ -23,7 +23,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
-const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
+const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs, WEEK_PLAN_CONSTANTS } = require('@waves/irrigation-runtime');
 const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { stampedAddressDiverges, premiseStampConflicts } = require('./stamped-address');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
@@ -131,8 +131,19 @@ function decideWeekPlan({
   // same rule the advice engine applies.
   const rainKnown = advice?.rainKnown !== false;
   const lastWeekRain = Number.isFinite(Number(lastWeekRainInches)) ? Number(lastWeekRainInches) : null;
-  const lastWeekAppliedInches = priorWeekPrescribedInches != null
-    ? Math.round((Number(priorWeekPrescribedInches) + (rainKnown && lastWeekRain != null ? lastWeekRain : 0)) * 100) / 100
+  // Every unconditional run plan carries the one-soaking-skips-one-run rule
+  // (≥ ½" before the run ⇒ skip it). With that much observed rain the
+  // customer was TOLD to skip, and whether the run happened cannot be
+  // established from weekly totals — so the plan's irrigation is credited
+  // as 0 (unknown = conservative, never a manufactured carryover), exactly
+  // as the cool-season cadence already reads the same rain (codex gh-r34).
+  const priorWeekRainOverride = priorWeekPrescribedInches != null && Number(priorWeekPrescribedInches) > 0 && rainKnown
+    && lastWeekRain != null && lastWeekRain >= WEEK_PLAN_CONSTANTS.RAIN_SKIP_INCHES; // a hold prescribed no run to skip
+  const priorWeekCreditedInches = priorWeekPrescribedInches != null
+    ? (priorWeekRainOverride ? 0 : Number(priorWeekPrescribedInches))
+    : null;
+  const lastWeekAppliedInches = priorWeekCreditedInches != null
+    ? Math.round((priorWeekCreditedInches + (rainKnown && lastWeekRain != null ? lastWeekRain : 0)) * 100) / 100
     : (advice?.appliedInchesPerWeek ?? null);
   const plan = buildWeekPlan({
     targetInchesPerWeek,
@@ -160,6 +171,8 @@ function decideWeekPlan({
     appliedInches: lastWeekAppliedInches,
     priorWeekEvents,
     priorWeekPrescribedInches,
+    priorWeekCreditedInches,
+    priorWeekRainOverride,
     rainOnlyCarryover: rainOnlyCarryover === true,
     lastWeekRainInches,
     rainKnown,

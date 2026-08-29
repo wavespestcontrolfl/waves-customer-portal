@@ -738,10 +738,15 @@ function decideWeeklyEmail({
       // From the second plan week on, last week's irrigation is what the
       // delivered plan prescribed — never the programmed schedule it
       // superseded (codex gh-r31); no surplus/deficit claim is made from it.
-      const priorPlanIrrig = !scheduleUnconfirmed && priorWeekPrescribedInches != null ? roundHundredth(priorWeekPrescribedInches) : null;
+      // The CREDITED figure (the plan's rain rule said skip after ≥ ½" ⇒ 0),
+      // the same one the decision balanced from (codex gh-r34).
+      const priorPlanIrrig = !scheduleUnconfirmed && decisionInputs.priorWeekCreditedInches != null ? roundHundredth(decisionInputs.priorWeekCreditedInches) : null;
+      const priorPlanSkipped = priorPlanIrrig != null && decisionInputs.priorWeekRainOverride === true;
       const priorPlanTotal = priorPlanIrrig != null ? roundHundredth(rainDisplayNum + priorPlanIrrig) : null;
       const lastWeekLine = scheduleUnconfirmed
         ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        : priorPlanSkipped
+        ? `Last week brought ${rain}" of rain near your home — enough that last week's watering plan said to skip the run, so no irrigation is counted; your ${grassLabel} needs about ${target}" this time of year.`
         : priorPlanIrrig != null
         ? `Between last week's rain (${rain}") and last week's watering plan (${formatInches(priorPlanIrrig)}" of irrigation), your lawn got about ${formatInches(priorPlanTotal)}" of water; your ${grassLabel} needs about ${target}" this time of year.`
         : advice.status === 'surplus'
@@ -773,6 +778,7 @@ function decideWeeklyEmail({
           // so instead of quoting the former home's setting and a total that
           // mixes it with the new home's rain (codex gh-r23).
           irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move'
+            : priorPlanSkipped ? '0" (last week\'s plan — skipped after rain)'
             : (priorPlanIrrig != null ? `${formatInches(priorPlanIrrig)}" (last week's plan)` : `${irrigationFmt}"`),
           total_inches: scheduleUnconfirmed ? `${rain}" (rain only)`
             : (priorPlanIrrig != null ? `${formatInches(priorPlanTotal)}"` : `${total}"`),

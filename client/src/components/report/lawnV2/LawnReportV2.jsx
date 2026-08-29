@@ -701,7 +701,7 @@ export function WaterIntakeBar({ water = {}, irrigationHref = '/?tab=property', 
       ) : null}
       {water.scheduleUnconfirmed ? (
         <p data-testid="lawn-schedule-unconfirmed" style={{ margin: '10px 0 0', fontSize: 14, color: MUTED, lineHeight: 1.5 }}>
-          Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type under Irrigation in your portal to bring your irrigation figure back.
+          Your address changed after your sprinkler settings were saved, so they aren’t counted here. Re-enter your zone minutes, watering days and head type (and your weekly inches, if you use them) under Irrigation in your portal to bring your irrigation figure back.
         </p>
       ) : null}
       {/* This week's watering plan (server-gated): the same decision the Monday

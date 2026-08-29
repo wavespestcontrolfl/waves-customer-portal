@@ -114,7 +114,14 @@ function resolveRestrictionCounty({ county = null, profileCity = null, city = nu
   // premise (codex gh-r32). Otherwise the current address alone decides, and
   // null (no plan) when it cannot: never a plan under the old county,
   // partially-covered Charlotte included (hook P1 on ad0b1ed31, gh-r31).
-  if ((homeMoved || movedAt) && countyConfirmed !== true) return currentCounty;
+  if (homeMoved || movedAt) {
+    if (countyConfirmed !== true) return currentCounty;
+    // An explicitly re-confirmed county is the technician's statement about
+    // the CURRENT home: it stands unless the current address unambiguously
+    // contradicts it — a stale profile municipality (never re-typed) is not
+    // a contradiction (codex gh-r34).
+    return profileCounty && !countyConflicts ? profileCounty : currentCounty;
+  }
   if (profileCounty && !profileDiverges && !countyConflicts) return profileCounty;
   return currentCounty;
 }
