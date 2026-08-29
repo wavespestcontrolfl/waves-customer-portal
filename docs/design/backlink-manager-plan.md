@@ -485,7 +485,7 @@ value in the same migration so placement and path agree — the migration never 
 that would fail the §3.2 CHECK, so it cannot abort deployment on a legacy null; `submission_url =
 target_url`; explicit booleans; `agent_completable` = the lane's worker exists; `confidence`
 low; `last_investigated_at = null` so the investigator refreshes it) and is linked via
-`domain_id`/`path_id`. No claim-predicate change ships before this backfill has run; the
+`domain_id`/`path_id`. The backfill is the same shape as the `seo_signup_attempts` one (§3.4): ONE pure re-runnable function keyed by prospect id (`WHERE domain_id IS NULL`), run in the migration AND as the gate-independent 6-hourly `link-registry-catchup`, so a prospect inserted by an old pod or a not-yet-migrated writer during the phased rollout is registered within 6h and never silently excluded by the step-4 predicate; `domain_id`/`path_id` become NOT NULL only in the step-2 contract migration after every writer is registry-aware. No claim-predicate change ships before this backfill has run; the
 step-4 predicate treats a legacy row exactly like a new one (it still needs investigation →
 bridge → authority before any send).
 
@@ -732,6 +732,8 @@ if path.payment_required and payment is unassigned:
                                     and configured(auto_paid_min_score) and configured(auto_paid_min_d30_confidence)
                                     and max_auto_purchase_cents > 0 and monthly_paid_budget_cents > 0
                                     and amount_cents ≤ max_auto_purchase_cents and score ≥ auto_paid_min_score
+                                    and Number.isFinite(d30_conf) and 0 ≤ d30_conf ≤ 1                       # null/NaN NEVER passes (`null >= 0` is true in JS); no D30 evidence ⇒ no automatic spend
+                                    and Number.isFinite(auto_paid_min_d30_confidence) and 0 ≤ auto_paid_min_d30_confidence ≤ 1
                                     and d30_conf ≥ auto_paid_min_d30_confidence
                                     and (month_spend_cents + amount_cents) ≤ monthly_paid_budget_cents
         else OWNER_PAYMENT
