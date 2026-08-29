@@ -151,6 +151,30 @@ describe('record-payment retires an open pay-page PaymentIntent first (codex #36
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('a NEW PI stamped between the pre-lock triage and the row lock refuses with 409 (codex r2 P1)', async () => {
+    StripeService.retrievePaymentIntent.mockResolvedValue({ id: 'pi_open_1', status: 'requires_payment_method' });
+    const trxInvoices = makeRecorder({
+      // Under the lock the invoice now carries a DIFFERENT PI — /setup won the seam.
+      first: jest.fn(async () => ({ ...OPEN_INVOICE, stripe_payment_intent_id: 'pi_new_2' })),
+    });
+    const trx = jest.fn((table) => {
+      if (table === 'invoices') return trxInvoices;
+      throw new Error(`unexpected trx table ${table}`);
+    });
+    trx.fn = { now: jest.fn(() => 'NOW()') };
+    db.transaction.mockImplementation(async (cb) => cb(trx));
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/invoices/inv-1/record-payment`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ method: 'zelle', sendReceipt: false }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toMatch(/new payment session/);
+    });
+    expect(trxInvoices.forUpdate).toHaveBeenCalled();
+    expect(trxInvoices.update).not.toHaveBeenCalled();
+  });
+
   test('an unverifiable PI (Stripe unreachable) fails closed with 409', async () => {
     StripeService.retrievePaymentIntent.mockResolvedValue(null);
     await withServer(async (baseUrl) => {

@@ -1926,6 +1926,7 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
     // still-open tab can't confirm it after the transfer is recorded; refuse
     // while money is in flight. Runs pre-lock (Stripe call), same as
     // apply-credit; the trx's collectible guard covers the seam.
+    const triagedPiId = invoice.stripe_payment_intent_id || null;
     const openPi = await retireOpenPaymentIntentBeforeSettlement(invoice, { action: 'recording a manual payment' });
     if (openPi) return res.status(openPi.status).json({ error: openPi.error });
 
@@ -1960,6 +1961,16 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       // the check and the paid flip. Throws are 409-shaped; the route
       // catch surfaces them.
       await require('../services/pay-combined').releaseCombinedSessionBeforeCollection(trx, invoice, { context: 'recording a manual payment' });
+      // Seam re-check under the row lock (codex #3610 r2 P1, mirrors
+      // apply-credit): /setup could have minted a NEW standalone PI between
+      // the pre-lock triage above and this lock. The combined release only
+      // handles combined PIs, so a fresh standalone stamp means a live client
+      // secret we never retired — refuse; the operator retries and the new PI
+      // gets triaged. A cleared stamp (null) is fine: nothing is live.
+      const locked = await trx('invoices').where({ id }).forUpdate().first();
+      if (!locked) return null;
+      const lockedPiId = locked.stripe_payment_intent_id || null;
+      if (lockedPiId && lockedPiId !== triagedPiId) return { racedNewPaymentIntent: lockedPiId };
       const [row] = await trx('invoices')
         .where({ id })
         .whereNotIn('status', INVOICE_UNCOLLECTIBLE_STATUSES)
@@ -2017,6 +2028,9 @@ router.post('/:id/record-payment', requireAdmin, async (req, res, next) => {
       return row;
     });
 
+    if (updatedInvoice?.racedNewPaymentIntent) {
+      return res.status(409).json({ error: 'A new payment session started for this invoice — retry recording the payment' });
+    }
     if (!updatedInvoice) {
       // Lost the race to a concurrent caller (or another path marked it
       // paid in between). Re-fetch so we can return a useful 409 body.

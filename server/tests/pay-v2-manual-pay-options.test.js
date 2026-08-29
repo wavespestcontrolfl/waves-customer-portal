@@ -142,7 +142,35 @@ describe('GET /pay/:token manualPayOptions', () => {
       zelle: { recipient: 'pay@example.com' },
       venmo: { handle: '@WavesPest' },
       paypal: { handle: 'WavesPest' },
+      amountDue: 150,
     });
+  });
+
+  test('env set ⇒ key absent on a combined-balance session (codex r2 P1)', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const { isEnabled } = require('../config/feature-gates');
+    const openBalance = require('../services/open-balance');
+    isEnabled.mockImplementation((k) => k === 'payIncludeBalance');
+    require('../config/feature-gates').gates.payIncludeBalance = true;
+    openBalance.openBalanceInvoices.mockResolvedValue([{
+      id: 'inv-old-1', invoice_number: 'INV-OLD', status: 'overdue', service_date: '2026-08-01', due_date: '2026-08-15',
+      total: '44.55', credit_applied: 0, stripe_payment_intent_id: null,
+    }]);
+    try {
+      const { body } = await getPayPage(invoiceData());
+      // Either the siblings previewed (then no transfer block), or the
+      // combined selection declined — in both cases a transfer never rides
+      // beside an itemized combined total.
+      if (body.previousBalance) {
+        expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+      } else {
+        expect(body.manualPayOptions).toEqual({ venmo: { handle: '@WavesPest' }, amountDue: 150 });
+      }
+    } finally {
+      isEnabled.mockImplementation(() => false);
+      delete require('../config/feature-gates').gates.payIncludeBalance;
+      openBalance.openBalanceInvoices.mockResolvedValue([]);
+    }
   });
 
   test('env set ⇒ key absent when the invoice must capture a saved method (codex P1)', async () => {
@@ -162,11 +190,13 @@ describe('GET /pay/:token manualPayOptions', () => {
         customerRow: { billing_mode: null, monthly_rate: null, account_credits: 500, auto_apply_account_credit: true },
       });
       expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
-      // Partial credit (balance < amount due) still offers the transfer.
+      // Partial credit (balance < amount due) still offers the transfer —
+      // for the PROJECTED post-credit amount, not the pre-credit amountDue
+      // (codex r2 P1: /setup applies the credit asynchronously).
       const partial = await getPayPage(invoiceData(), {
         customerRow: { billing_mode: null, monthly_rate: null, account_credits: 20, auto_apply_account_credit: true },
       });
-      expect(partial.body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' } });
+      expect(partial.body.manualPayOptions).toEqual({ zelle: { recipient: 'pay@example.com' }, amountDue: 130 });
     } finally {
       gates.autoApplyAccountCredit = false;
     }

@@ -253,6 +253,19 @@ async function invoiceCaptureNeeded(invoice) {
 // held-coverage flow (Codex #2507 round-7 P1) a required-save invoice
 // stays collectible until capture completes, so GET/capture-setup can no
 // longer key the capture state off status === 'prepaid' alone.
+// Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
+// as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
+// amount before /setup answers. 0 when the gate is off / opted out / no credit.
+async function invoiceProjectedCreditApplied(invoice) {
+  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return 0;
+  if (!invoice?.customer_id || invoice?.payer_id) return 0;
+  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  if (row?.auto_apply_account_credit !== true) return 0;
+  const credit = Number(row?.account_credits) || 0;
+  if (!(credit > 0)) return 0;
+  return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
+}
+
 async function invoiceCreditWouldFullyCover(invoice) {
   if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
   if (!invoice?.customer_id || invoice?.payer_id) return false;
@@ -364,9 +377,25 @@ router.get('/:token', async (req, res, next) => {
     // never when account credit will settle the whole invoice at /setup
     // (the customer owes no cash — a transfer of `amountDue` would be an
     // overpayment).
-    const manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor
+    // …nor on a combined-balance session (codex r2 P1): the panel advertises
+    // the COMBINED total but a transfer + record-payment settles only the
+    // anchor — the siblings would stay open while the customer believes
+    // they paid "Total due today". No manual tenders whenever siblings ride.
+    let manualPayOptions = isInvoiceCollectibleStatus(data.status) && !getSaveRequired && !creditWillCoverAnchor && !previousBalance
       ? manualPayOptionsFromEnv()
       : null;
+    if (manualPayOptions) {
+      // Authoritative transfer amount (codex r2 P1): /setup applies partial
+      // account credit asynchronously and the client would otherwise
+      // pre-fill the Venmo/PayPal links with the PRE-credit amountDue during
+      // that window. Serialize the projected post-credit amount from the
+      // same customers row /setup reads.
+      const projectedCredit = await invoiceProjectedCreditApplied(data).catch(() => 0);
+      manualPayOptions = {
+        ...manualPayOptions,
+        amountDue: Math.max(0, Math.round((invoiceAmountDue(data) - projectedCredit) * 100) / 100),
+      };
+    }
 
     const getCaptureNeeded = getSaveRequired
       && (data.status === 'prepaid'

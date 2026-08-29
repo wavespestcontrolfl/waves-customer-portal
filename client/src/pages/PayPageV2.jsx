@@ -2883,7 +2883,18 @@ export default function PayPageV2() {
                 Loading payment form…
               </div>
             )}
-            <OtherWaysToPay options={data.manualPayOptions} invoiceNumber={invoice.invoiceNumber} amountDue={invoice.amountDue ?? invoice.total} />
+            {/* Hidden once /setup reports a combined-balance PI (the server
+                already withholds the block when siblings preview; this
+                covers the setup verdict). Amount: /setup's post-credit
+                anchor amount once it answers, else the GET's projected
+                post-credit amount — never the raw pre-credit amountDue. */}
+            {!stripeSetup?.combined && (
+              <OtherWaysToPay
+                options={data.manualPayOptions}
+                invoiceNumber={invoice.invoiceNumber}
+                amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
+              />
+            )}
             </div>
 
             {/* In-card PDF/Print chips superseded by the DocumentActionBar
