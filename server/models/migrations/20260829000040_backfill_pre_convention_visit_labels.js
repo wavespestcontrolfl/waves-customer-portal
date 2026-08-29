@@ -483,7 +483,9 @@ exports.up = async function up(knex) {
       if (!targets.has(from)) targets.set(from, new Set());
       targets.get(from).add(to);
     };
-    for (const [from, , to] of UNLINKED_MAPPING) note(from, to);
+    // Same fail-closed target guard as Leg A: a mapping whose target the
+    // catalog doesn't carry neither relabels visits nor drafts (r5 P2).
+    for (const [from, , to] of UNLINKED_MAPPING) if (catalog.has(to)) note(from, to);
     for (const { from, to } of groups.values()) note(from, to);
     for (const [from, tos] of targets) {
       if (tos.size !== 1 || catalog.has(from)) continue;
@@ -579,20 +581,31 @@ exports.down = async function down(knex) {
   }
 
   if (reminderRecs.length && (await knex.schema.hasTable('appointment_reminders'))) {
-    // Reverse in the opposite order to the forward passes so a merged label
-    // touched by two (from → to) pairs unwinds cleanly.
-    for (const rec of [...reminderRecs].reverse()) {
-      if (!pair(rec) || !rec.visit_id || !visitRevertible(rec.visit_id)) continue;
-      // Component-wise reversal on the CURRENT value: a merged reminder
-      // whose OTHER component is kept can never equal the recorded
-      // `written` whole-string, and only rows up() recorded are touched.
-      const current = await knex('appointment_reminders').where({ id: rec.id }).first('id', 'service_type');
+    // Exact prior/written chain per reminder, unwound in reverse — the same
+    // reason as invoices (r5 P2): two stale components converging on one
+    // target ("Quarterly Pest Control & Pest Control" → "X & X") cannot be
+    // told apart by an inverse component swap. Each step must find exactly
+    // what it wrote (an owner edit since keeps the row as theirs) and stops
+    // at the first step whose component visit is not revertible.
+    const recsById = new Map();
+    for (const rec of reminderRecs) {
+      if (!pair(rec) || !rec.visit_id || typeof rec.written !== 'string' || typeof rec.prior !== 'string') continue;
+      if (!recsById.has(rec.id)) recsById.set(rec.id, []);
+      recsById.get(rec.id).push(rec);
+    }
+    for (const [id, recs] of recsById) {
+      const current = await knex('appointment_reminders').where({ id }).first('id', 'service_type');
       if (!current) continue;
-      const restored = relabelReminderComponent(current.service_type, rec.to, rec.from);
-      if (restored === null) continue;
+      let working = current.service_type;
+      for (const rec of [...recs].reverse()) {
+        if (!visitRevertible(rec.visit_id)) break;
+        if (working !== rec.written) break;
+        working = rec.prior;
+      }
+      if (working === current.service_type) continue;
       await knex('appointment_reminders')
-        .where({ id: rec.id, service_type: current.service_type })
-        .update({ service_type: restored, updated_at: knex.fn.now() });
+        .where({ id, service_type: current.service_type })
+        .update({ service_type: working, updated_at: knex.fn.now() });
     }
   }
 

@@ -140,6 +140,9 @@ function seedDb() {
       { id: 'l4', service_id: 'svc-q', service_type: 'General Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // whitelisted label that exists only as an INACTIVE catalog row — still stale, syncs
       { id: 'l5', service_id: 'svc-m', service_type: 'Pest Control Service', recurring_pattern: 'monthly', status: 'pending', self_booking_id: 'sb-5' },
+      // second Quarterly Pest Control visit sharing l1's slot (c2/T2) — so that
+      // slot is swept by TWO passes converging on one target
+      { id: 'u6', service_id: null, service_type: 'Quarterly Pest Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       // add-on-only parents: label fine, add-ons stale (open / terminal)
       { id: 'p-open', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'pending', self_booking_id: null },
       { id: 'p-done', service_id: 'svc-mosq', service_type: 'Mosquito Control', recurring_pattern: 'quarterly', status: 'completed', self_booking_id: null },
@@ -166,6 +169,10 @@ function seedDb() {
       { id: 'r-l1', scheduled_service_id: 'l1', customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control & Mosquito Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // live same-slot sibling of l1 (legacy, unlinked) — swept via customer_id + appointment_time
       { id: 'r-sib', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Mosquito Control, Pest Control, and Lawn Care', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      // u6's own registration, same slot as l1
+      { id: 'r-u6', scheduled_service_id: 'u6', customer_id: 'c2', appointment_time: 'T2', service_type: 'Quarterly Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
+      // legacy sibling holding BOTH stale components that converge on one target
+      { id: 'r-conv', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Quarterly Pest Control & Pest Control', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // a longer name that merely STARTS with the stale label — never matches
       { id: 'r-long', scheduled_service_id: null, customer_id: 'c2', appointment_time: 'T2', service_type: 'Pest Control Premium', cancelled: false, windows_preclosed: false, updated_at: 'orig' },
       // PARKED same-slot siblings — the merger excludes them, so must we
@@ -211,6 +218,8 @@ function seedDb() {
       { id: 'i-free-2', scheduled_service_id: null, status: 'draft', title: 'Quarterly Pest Control + General Pest Control (Semiannual)', service_type: null, payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-amb', scheduled_service_id: null, status: 'draft', title: 'Pest Control', service_type: 'Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
       { id: 'i-free-sent', scheduled_service_id: null, status: 'sent', title: 'Quarterly Pest Control', service_type: 'Quarterly Pest Control', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
+      // uniquely mapped label whose TARGET is absent from the catalog — fail closed, untouched
+      { id: 'i-free-nocat', scheduled_service_id: null, status: 'draft', title: 'Lawn Care Service', service_type: 'Lawn Care Service', payer_statement_id: null, updated_at: 'orig', line_items: '[]' },
     ],
     payer_statements: [
       { id: 'ps-closed', status: 'issued' },
@@ -245,7 +254,7 @@ describe('20260829000040 backfill up()', () => {
     expect(byId(db, 'p-open').service_type).toBe('Mosquito Control'); // parent label untouched
 
     const state = readState(db);
-    expect(state.unlinked.map((r) => r.id).sort()).toEqual(['u1', 'u2']);
+    expect(state.unlinked.map((r) => r.id).sort()).toEqual(['u1', 'u2', 'u6']);
     expect(state.linked.map((r) => r.id).sort()).toEqual(['l1', 'l5']);
     // Population identity rides in the record for down().
     expect(state.unlinked.find((r) => r.id === 'u1')).toEqual(
@@ -291,6 +300,9 @@ describe('20260829000040 backfill up()', () => {
     expect(rem(db, 'r-l1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
     expect(rem(db, 'r-sib').service_type).toBe('Mosquito Control, Quarterly Pest Control Service, and Lawn Care');
     expect(rem(db, 'r-long').service_type).toBe('Pest Control Premium'); // prefix-only, not a component
+    // Two passes converged on one target in a single merged label.
+    expect(rem(db, 'r-u6').service_type).toBe('Quarterly Pest Control Service');
+    expect(rem(db, 'r-conv').service_type).toBe('Quarterly Pest Control Service & Quarterly Pest Control Service');
     // Parked siblings the merger excludes stay historical.
     for (const id of ['r-sib-cancelled', 'r-sib-preclosed', 'r-sib-resched', 'r-sib-terminal']) {
       expect(rem(db, id).service_type).toBe('Pest Control & Mosquito Control');
@@ -299,7 +311,12 @@ describe('20260829000040 backfill up()', () => {
     expect(rem(db, 'r-l4').service_type).toBe('General Pest Control'); // conflict visit's reminder
 
     const state = readState(db);
-    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-l1', 'r-p-open', 'r-sib', 'r-u1']);
+    expect(state.reminders.map((r) => r.id).sort()).toEqual(['r-conv', 'r-conv', 'r-l1', 'r-p-open', 'r-sib', 'r-u1', 'r-u6']);
+    // The converging label has one exact prior/written step per pass.
+    expect(state.reminders.filter((r) => r.id === 'r-conv').map((r) => [r.prior, r.written]).sort()).toEqual([
+      ['Quarterly Pest Control & Pest Control', 'Quarterly Pest Control Service & Pest Control'],
+      ['Quarterly Pest Control Service & Pest Control', 'Quarterly Pest Control Service & Quarterly Pest Control Service'],
+    ]);
     // A sibling records the COMPONENT visit that swept it, not its own owner.
     expect(state.reminders.find((r) => r.id === 'r-sib')).toEqual({
       id: 'r-sib',
@@ -358,6 +375,7 @@ describe('20260829000040 backfill up()', () => {
     expect(inv(db, 'i-free-q').title).toBe('Quarterly Pest Control Service — first visit');
     expect(inv(db, 'i-free-amb').service_type).toBe('Pest Control');
     expect(inv(db, 'i-free-sent').service_type).toBe('Quarterly Pest Control');
+    expect(inv(db, 'i-free-nocat').service_type).toBe('Lawn Care Service'); // target missing from catalog → fail closed
     // A combined unattached draft gets EVERY unambiguous component swapped.
     expect(inv(db, 'i-free-2').title).toBe('Quarterly Pest Control Service + Semiannual Pest Control Service');
 
@@ -467,13 +485,15 @@ describe('20260829000040 down()', () => {
     byId(db, 'u2').service_id = 'svc-m'; // owner linked since → visit kept
     byId(db, 'l1').recurring_pattern = 'monthly'; // (linked leg ignores cadence) → l1 reverts
     byId(db, 'l5').service_type = 'Owner Custom Label'; // hand-edited → kept
-    // r-u1 gained an add-on component since up() — would be component-reversed IF u1 reverted.
+    // r-u1 was edited since up() — no longer exactly what up() wrote → the owner's row now.
     rem(db, 'r-u1').service_type = 'Quarterly Pest Control Service & Mosquito Control';
 
     await migration.down(knex);
 
     // u1 (completed): reminder, self-booking, invoice all keep the new label.
     expect(rem(db, 'r-u1').service_type).toBe('Quarterly Pest Control Service & Mosquito Control');
+    // Converging label unwinds exactly: u6 reverted (its pass) and l1 reverted (the other).
+    expect(rem(db, 'r-conv').service_type).toBe('Quarterly Pest Control & Pest Control');
     expect(sb(db, 'sb-1').service_type).toBe('Quarterly Pest Control Service (Quarterly)');
     expect(inv(db, 'i-u1').service_type).toBe('Quarterly Pest Control Service');
     expect(inv(db, 'i-u1').title).toBe('Quarterly Pest Control Service — first visit');
@@ -512,6 +532,25 @@ describe('20260829000040 down()', () => {
     expect(addon(db, 'a-legacy').service_name).toBe('Quarterly Pest Control Service'); // kept
     expect(addon(db, 'a-linked').service_name).toBe('Pest Control'); // catalog-linked, cadence-independent → reverted
     expect(rem(db, 'r-p-open').service_type).toBe('Mosquito Control & Quarterly Pest Control'); // parent still open → reverts
+  });
+
+  test('a converging merged reminder stops unwinding at the first non-revertible step and never guesses', async () => {
+    const db = seedDb();
+    const knex = fakeKnex(db);
+    await migration.up(knex);
+    // The LAST pass on r-conv was l1's (Pest Control → …). Complete l1: that
+    // step is retained, and the earlier u6 step cannot be restored underneath
+    // it — the label stays whole rather than half-reverted.
+    byId(db, 'l1').status = 'completed';
+    await migration.down(knex);
+    expect(rem(db, 'r-conv').service_type).toBe('Quarterly Pest Control Service & Quarterly Pest Control Service');
+    // A reminder edited since up() is left exactly as the owner left it.
+    const db2 = seedDb();
+    const knex2 = fakeKnex(db2);
+    await migration.up(knex2);
+    rem(db2, 'r-conv').service_type = 'Owner Rewrote This';
+    await migration.down(knex2);
+    expect(rem(db2, 'r-conv').service_type).toBe('Owner Rewrote This');
   });
 
   test('a combined draft touched by two passes unwinds BOTH components in one write', async () => {
