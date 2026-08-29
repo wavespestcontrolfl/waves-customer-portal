@@ -35,6 +35,11 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
 
   // ── Water ───────────────────────────────────────────────────────────────────
   const waterCat = catByKey(categories, 'water_moisture_stress');
+  // A weekly watering plan on the card is the SOLE watering instruction: the
+  // balance cards may still explain last week, but their actions defer to
+  // the plan (which already accounts for the balance) instead of prescribing
+  // more or less water against it (codex #3565 gh-r27).
+  const hasPlan = !!(water && water.weekPlan && water.weekPlan.title);
   if (water && water.status === 'surplus') {
     cards.push({
       // Same provenance rule as the damp card below: overwatering is an
@@ -48,10 +53,16 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       wavesAction: has('fungicide')
         ? 'Applied a fungicide and adjusted today’s plan toward drying things out.'
         : 'Documented the moisture and adjusted today’s plan toward drying things out.',
-      customerAction: waterInRequired
-        ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
-        : 'Ease back on irrigation by one cycle and let us know if it stays soggy.',
-      nextVisitPlan: 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
+      customerAction: hasPlan
+        ? (waterInRequired
+          ? 'Water in today’s application as directed, then follow this week’s watering plan below — it already accounts for the extra water.'
+          : 'Follow this week’s watering plan below — it already accounts for the extra water. Let us know if it stays soggy.')
+        : (waterInRequired
+          ? 'Water in today’s application as directed, then ease back on irrigation by one cycle.'
+          : 'Ease back on irrigation by one cycle and let us know if it stays soggy.'),
+      nextVisitPlan: hasPlan
+        ? 'Recheck moisture and fungus signs next visit to confirm the plan is drying things out.'
+        : 'Recheck moisture and fungus signs next visit to confirm the drier schedule is working.',
       confidenceNote: null,
     });
   } else if (water && water.status === 'deficit') {
@@ -60,9 +71,15 @@ function buildLawnInsightCards({ categories = [], water = {}, mowing = null, gra
       headline: 'The lawn is running a little dry',
       whatWeSaw: 'The weekly water total is below the seasonal target for your lawn.',
       whyItMatters: 'Under-watered turf shows heat and drought stress faster and thins out.',
-      wavesAction: 'Noted the shortfall and set the watering target on the report.',
-      customerAction: `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
-      nextVisitPlan: 'Recheck moisture and color next visit to confirm the added water is landing.',
+      wavesAction: hasPlan
+        ? 'Noted the shortfall and set this week’s watering plan on the report.'
+        : 'Noted the shortfall and set the watering target on the report.',
+      customerAction: hasPlan
+        ? 'Follow this week’s watering plan below — it sets this week’s runs from the forecast and your area’s watering rules.'
+        : `Add a little irrigation time to reach the seasonal target for your ${grassLabel}.`,
+      nextVisitPlan: hasPlan
+        ? 'Recheck moisture and color next visit.'
+        : 'Recheck moisture and color next visit to confirm the added water is landing.',
     });
   } else if (water.localizedDry) {
     // Localized dry evidence (dry-signal observations or a coverage-issue

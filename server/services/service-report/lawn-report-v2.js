@@ -373,18 +373,25 @@ function statusHeadline(overallStatus, topIssue) {
 
 // Cross-signal root cause — a small deterministic decision table that connects the
 // separate signals into ONE driver, so the report reads like an expert wrote it.
-function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis }) {
+function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan = null }) {
   const mowShort = mowing && mowing.status === 'too_short';
   const damage = (diagnosis || []).find((c) => c.key === 'damage_disease_signals');
   const damageBad = damage && (damage.status === 'needs_attention' || damage.status === 'watch');
+  // With a weekly plan on the card, the plan IS the watering fix — the root
+  // cause names it instead of prescribing more/less water (codex gh-r27).
+  const hasPlan = !!(weekPlan && weekPlan.title);
   // A vision-only overwatering flag must not override an active coverage
   // (dry-spots) story — the two are contradictory on the same page; only a
   // measured surplus may carry the "too much water" claim alongside it.
   if (effectiveWaterStatus === 'surplus' || (overwatering && !coverageWatch)) {
-    return 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
+    return hasPlan
+      ? 'The main driver looks like too much water — this week’s watering plan below already eases back, which should do more for fungus, mushrooms, and weed pressure than any single treatment.'
+      : 'The main driver looks like too much water — easing back on irrigation should do more for fungus, mushrooms, and weed pressure than any single treatment.';
   }
   if (effectiveWaterStatus === 'deficit' && !coverageWatch) {
-    return 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
+    return hasPlan
+      ? 'The lawn is simply running a little dry — this week’s watering plan below sets the runs to close that gap.'
+      : 'The lawn is simply running a little dry — a bit more even watering is the highest-impact fix right now.';
   }
   if (coverageWatch && mowShort) {
     return 'The dry-looking areas are most likely uneven sprinkler coverage plus mowing a notch too short — not the whole lawn needing more water.';
@@ -618,7 +625,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Cross-signal ROOT CAUSE: connect water + coverage + mowing + stress into one
   // explanation instead of leaving the customer to reconcile separate cards.
-  const rootCause = buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis });
+  const rootCause = buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mowing, diagnosis, weekPlan: water ? water.weekPlan : null });
   const seasonalNote = buildSeasonalNote(lawnAssessment, grassLabel);
 
   const snapshot = {
@@ -669,7 +676,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
   if (aftercare.waterInRequired === true && effectiveWaterStatus === 'surplus') {
-    aftercare.watering += ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
+    aftercare.watering += (water && water.weekPlan && water.weekPlan.title)
+      ? ' This one watering-in is the exception to easing back on irrigation — after it, follow this week’s watering plan.'
+      : ' This one watering-in is the exception to easing back on irrigation — after it, return to the reduced schedule.';
   }
 
   const trends = buildTrends(lawnAssessment, mowingHeight, waterGapHistory, mowingTrendFallback);
@@ -689,4 +698,4 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   };
 }
 
-module.exports = { buildLawnReportV2, grassLabelFor, mapWater };
+module.exports = { buildLawnReportV2, grassLabelFor, mapWater, buildRootCause };
