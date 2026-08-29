@@ -486,6 +486,15 @@ describe('buildReportCrossSell', () => {
         .toEqual({ incomplete: false, unexpected: true });
     });
 
+    test('rodent BAIT is tier-qualifying since 2026-08-29 — a disagreement about it is a mismatch in either direction (codex #3591 r11 P1)', () => {
+      expect(qualifyingBaselineMismatch(['pest_control', 'rodent_bait'], ['pest_control']))
+        .toEqual({ incomplete: true, unexpected: false });
+      expect(qualifyingBaselineMismatch(['pest_control'], ['pest_control', 'rodent_bait']))
+        .toEqual({ incomplete: false, unexpected: true });
+      expect(qualifyingBaselineMismatch(['pest_control', 'rodent_bait'], ['pest_control', 'rodent_bait']))
+        .toEqual({ incomplete: false, unexpected: false });
+    });
+
     test('non-qualifying families are ignored on both sides', () => {
       // Ownership is broader than qualification: rodent monitoring never
       // moves the tier, so it cannot make the baselines disagree.

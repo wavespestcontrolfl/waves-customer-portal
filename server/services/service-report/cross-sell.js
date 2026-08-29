@@ -132,7 +132,11 @@ function startFamilyForIdentity(row = {}) {
 // A subset check catches only the first, so equality is the requirement.
 // Compared over the QUALIFYING families alone: those are the ones that move
 // the tier, and ownership is deliberately broader than qualification.
-const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite']);
+// rodent_bait joined the tier-qualifying families 2026-08-29 (owner
+// directive) — a rodent plan now moves the tier, so a disagreement about it
+// between the strict ownership read and the pricer's own reload prices the
+// offer at the wrong tier in either direction (codex #3591 r11 P1).
+const QUALIFYING_BASELINE = new Set(['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite', 'rodent_bait']);
 
 function qualifyingBaselineMismatch(evidencedOwnedKeys = [], modeledKeys = []) {
   const evidenced = [...offerVocabulary(evidencedOwnedKeys)].filter((key) => QUALIFYING_BASELINE.has(key));

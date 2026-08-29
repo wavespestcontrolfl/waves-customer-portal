@@ -1,6 +1,7 @@
 const db = require('../models/db');
 const { costLineFromUsage } = require('./product-costing');
 const { matchServiceProtocol } = require('./protocol-matcher');
+const { lineFlagsBlockPercentDiscount } = require('./pricing-engine/discount-engine');
 
 const SERVICE_MAP = {
   pest_control: {
@@ -126,6 +127,10 @@ const NAME_TO_KEY = [
   // Rodent-led bait names must resolve BEFORE the generic "bait station"
   // termite pattern — "Rodent Bait Stations" is a recurring.services row
   // since 2026-08-29 and would otherwise mis-key as termite_bait.
+  // The one-time bait-station setup (non-member rodent plans, 2026-08-29)
+  // must resolve before BOTH bait patterns — "Bait Station Setup" would
+  // otherwise key as termite_bait.
+  [/rodent.*setup|bait station setup/i, 'rodent_bait_setup'],
   [/rodent.*bait/i, 'rodent_bait'],
   [/termite|bait station/i, 'termite_bait'],
   [/rodent.*trap/i, 'rodent_trapping'],
@@ -196,14 +201,22 @@ function normalizeRecurringLines(result) {
   for (const svc of result?.recurring?.services || []) {
     const monthly = Number(svc.monthly ?? svc.mo ?? 0);
     const serviceKey = keyFromName(svc.name);
+    // Honor the row's own discount eligibility before applying the plan-wide
+    // percentage (codex #3591 r11 P2): a PINNED pre-realignment rodent row
+    // (legacy posture flags, waveGuardDiscountEligible:false) keeps its
+    // disclosed rate in the engine — the audit must not report a discounted
+    // price and an artificially low margin for it.
+    const rowDiscount = svc.waveGuardDiscountEligible === false || lineFlagsBlockPercentDiscount(svc)
+      ? 0
+      : discount;
     const line = {
       serviceKey,
       label: svc.name || SERVICE_MAP[serviceKey]?.label || serviceKey,
       cadence: 'recurring',
-      price: money(monthly * 12 * (1 - discount)),
-      monthly: money(monthly * (1 - discount)),
+      price: money(monthly * 12 * (1 - rowDiscount)),
+      monthly: money(monthly * (1 - rowDiscount)),
       priceBeforeDiscount: money(monthly * 12),
-      discount,
+      discount: rowDiscount,
       priceSource: 'saved_estimate.result.recurring.services',
     };
     if (serviceKey === 'mosquito') {
@@ -267,6 +280,11 @@ function normalizeOneTimeLines(result) {
       line.cogsServiceTypes = cogs.serviceTypes;
       line.cogsServiceTypeFixedMultipliers = cogs.serviceTypeFixedMultipliers;
     }
+    // The bait-station setup fee (inspection, hardware placement, mapping)
+    // has no inventory of its own — the station hardware is costed under
+    // the recurring rodent_bait program's mapping — so it is not separately
+    // COGS-applicable, like the membership fee (codex #3591 r11 P2).
+    if (serviceKey === 'rodent_bait_setup') line.skipCogs = true;
     lines.push(line);
   }
   for (const item of result?.oneTime?.specItems || []) {
@@ -573,6 +591,8 @@ module.exports = {
   // Exported for regression tests (turf must map to lawn_care, not fall through
   // to an unmapped key that trips a false "Missing COGS" warning).
   keyFromName,
+  normalizeRecurringLines,
+  normalizeOneTimeLines,
   // Live bottom-up COGS primitives — reused by the weekly lawn pricing
   // invariant sweep to compare hardcoded material budgets against inventory.
   loadInventoryCostRows,

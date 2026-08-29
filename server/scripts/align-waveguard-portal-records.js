@@ -45,6 +45,7 @@ const {
   resolveLawnCareRecurringPlan,
   resolveMosquitoRecurringPlan,
   resolvePestControlRecurringPlan,
+  resolveRodentBaitRecurringPlan,
   resolveTermiteBaitRecurringPlan,
   resolveTreeShrubRecurringPlan,
   isCommercialServiceRow,
@@ -167,6 +168,12 @@ function detectServiceKeys(row = {}) {
   if (treeShrubPlan) add(treeShrubPlan.planKey || 'tree_shrub');
   const termitePlan = resolvePlan(resolveTermiteBaitRecurringPlan);
   if (termitePlan) add(termitePlan.planKey || 'termite_bait');
+  // Rodent bait stations are a qualifying family since 2026-08-29 — the
+  // shared resolver (trapping/exclusion/one-time rodent work never resolve)
+  // keeps this script's detection in step with the runtime
+  // detectWaveGuardPlanKeys (codex #3591 r11 P1).
+  const rodentPlan = resolvePlan(resolveRodentBaitRecurringPlan);
+  if (rodentPlan) add(rodentPlan.planKey || 'rodent_bait');
 
   // Catalog FAMILY authority (Codex #3011 r12, mirrors the runtime
   // detectWaveGuardPlanKeys): when the catalog identity resolves to at least
@@ -178,6 +185,7 @@ function detectServiceKeys(row = {}) {
       resolveMosquitoRecurringPlan,
       resolveTreeShrubRecurringPlan,
       resolveTermiteBaitRecurringPlan,
+      resolveRodentBaitRecurringPlan,
     ].map((resolver) => resolver(catalogText)?.planKey).filter(Boolean));
     if (catalogFamilies.length) {
       return keys.filter((key) => catalogFamilies.includes(serviceFamilyKey(key)));
@@ -189,7 +197,7 @@ function detectServiceKeys(row = {}) {
 
 function serviceFamilyKey(serviceKey) {
   const key = String(serviceKey || '');
-  for (const family of ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait']) {
+  for (const family of ['pest_control', 'lawn_care', 'mosquito', 'tree_shrub', 'termite_bait', 'rodent_bait']) {
     if (key === family || key.startsWith(`${family}_`)) return family;
   }
   return serviceKey;
