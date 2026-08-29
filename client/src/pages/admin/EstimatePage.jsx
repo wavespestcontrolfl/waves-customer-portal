@@ -1313,6 +1313,10 @@ function EstimateToolView() {
   // Canonical qualifying families on the matched account (admin endpoint →
   // loadExistingQualifyingServiceKeys). null = not loaded / failed.
   const [existingQualifyingKeys, setExistingQualifyingKeys] = useState(null);
+  // The in-flight canonical-keys load for the matched account; a rodent
+  // fallback quote AWAITS it and blocks when it failed (codex #3591 r18 P1
+  // — never guess the setup waiver from the tier).
+  const existingQualifyingKeysRef = useRef(Promise.resolve(null));
 
   /* ── Live lawn pricing config → client fallback engine ────── */
   // The fallback engine (calculateEstimate, used when there is no enriched
@@ -1639,10 +1643,12 @@ function EstimateToolView() {
             // (codex #3591 r13 P1). Best-effort: a failed load leaves null
             // and the waiver falls back to Silver+ evidence only.
             setExistingQualifyingKeys(null);
-            fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
+            const keysLoad = fetch(`/api/admin/customers/${match.id}/waveguard-qualifying-services`, { headers: authHeaders })
               .then((r) => (r.ok ? r.json() : null))
-              .then((body) => { if (body && Array.isArray(body.keys)) setExistingQualifyingKeys(body.keys); })
-              .catch(() => {});
+              .then((body) => (body && Array.isArray(body.keys) ? body.keys : null))
+              .catch(() => null);
+            existingQualifyingKeysRef.current = keysLoad;
+            keysLoad.then((keys) => { if (Array.isArray(keys)) setExistingQualifyingKeys(keys); });
             // The match flips isRecurringCustomer (loyalty pricing) below —
             // a generate started between the property autofill and this
             // point must not mount a result priced without it.
@@ -1663,6 +1669,7 @@ function EstimateToolView() {
           } else {
             setExistingCustomerMatch(null);
             setExistingQualifyingKeys(null);
+            existingQualifyingKeysRef.current = Promise.resolve(null);
           }
         }
       } catch {
@@ -2318,6 +2325,20 @@ function EstimateToolView() {
       alert("Live rodent bait pricing (brackets, setup fee, WaveGuard flags) could not be loaded — retry in a moment. (Rodent quotes are blocked rather than priced on possibly-stale configuration.)");
       return;
     }
+    // A rodent quote for a MATCHED account waits for the canonical
+    // qualifying-services load and blocks when it failed — the setup waiver
+    // is decided from those keys, never guessed from the tier (codex #3591
+    // r18 P1: a Bronze pest-only customer must waive, a rodent-only Bronze
+    // must not).
+    let resolvedQualifyingKeys = existingQualifyingKeys;
+    if (form.svcRodentBait && existingCustomerMatch) {
+      const keys = await existingQualifyingKeysRef.current;
+      if (!Array.isArray(keys)) {
+        alert("The matched customer's existing services could not be loaded — retry in a moment. (Rodent quotes are blocked rather than guessing the setup waiver.)");
+        return;
+      }
+      resolvedQualifyingKeys = keys;
+    }
     const manualDiscountType =
       overrides.manualDiscountType ?? form.manualDiscountType;
     const manualDiscountValue =
@@ -2376,11 +2397,9 @@ function EstimateToolView() {
       // load, only a Silver+ tier is accepted: two or more qualifying
       // families necessarily include one that is not rodent (codex #3591
       // r13 P1 — a rodent-only Bronze account must still owe the setup).
-      existingOtherQualifyingService: Array.isArray(existingQualifyingKeys)
-        ? existingQualifyingKeys.some((k) => k !== "rodent_bait")
-        : !!(existingCustomerMatch
-          && ["Silver", "Gold", "Platinum"].includes(String(existingCustomerMatch.tier || ""))
-          && Number(existingCustomerMatch.monthlyRate) > 0),
+      existingOtherQualifyingService: Array.isArray(resolvedQualifyingKeys)
+        ? resolvedQualifyingKeys.some((k) => k !== "rodent_bait")
+        : false,
       exclWaive: yesNo(form.exclWaive),
       isCommercial: formIsCommercial,
       commercialSubtype: formIsCommercial ? form.commercialSubtype || "" : "",

@@ -33,7 +33,9 @@ describe('setup-fee follow-up contracts (#3489 residual P1s)', () => {
   });
 
   test('member-waiver retires a consumed draft, or freezes a zero-waiver into a live one', () => {
-    expect(booking).toMatch(/if \(activeMember\) \{\s*\n\s*await retireOrWaiveDraft\('existing_member'\);/);
+    // The member waiver is the membership fee's; a rodent setup quote is
+    // never waived by account-level membership (codex #3591 r18 P1).
+    expect(booking).toMatch(/if \(activeMember && !rodentSetupQuote\) \{\s*\n\s*await retireOrWaiveDraft\('existing_member'\);/);
     expect(booking).toMatch(/await retireOrWaiveDraft\('fee_already_queued'\);/);
     // Non-invoiceable solo visits keep the draft LIVE with the frozen waiver.
     expect(booking).toMatch(/setupFeeQuote: \{ amount: 0, waived: waivedReason \}/);

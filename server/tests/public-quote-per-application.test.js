@@ -435,6 +435,16 @@ describe('one-time add-ons block quote→book (codex rd3 P1 + rd4 P1s, 2026-07-0
     expect(setupFeeQuoteBasisForEstimate(rodentOnly, { commercialDetected: true })).toEqual({ qualifies: false, kind: null, amount: 0 });
   });
 
+  test('the account-level member waiver applies to the membership fee only; a rodent-only member still owes the rodent setup (codex #3591 r18 P1)', () => {
+    const { resolveSetupFeeQuoteDecision } = _internals;
+    const membership = { qualifies: true, kind: 'waveguard_membership', amount: 99 };
+    const rodent = { qualifies: true, kind: 'rodent_bait_setup', amount: 99 };
+    expect(resolveSetupFeeQuoteDecision(membership, { activeMember: true })).toEqual({ amount: 0, waived: 'existing_member', kind: 'waveguard_membership' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { activeMember: true })).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(rodent, { feeAlreadyQueued: true })).toEqual({ amount: 0, waived: 'fee_already_queued', kind: 'rodent_bait_setup' });
+    expect(resolveSetupFeeQuoteDecision(rodent, {})).toEqual({ amount: 99, kind: 'rodent_bait_setup' });
+  });
+
   test('bed bug quotes never get a self-book link (generic 60-min pest slot undersizes a multi-visit treatment)', () => {
     const bedBug = generateEstimate({
       ...BASE_PROPERTY,

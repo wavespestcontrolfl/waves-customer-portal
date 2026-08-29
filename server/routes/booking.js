@@ -2925,7 +2925,12 @@ async function createSelfBooking(payload = {}) {
                       });
                   }
                 };
-                if (activeMember) {
+                // The account-level member waiver is the MEMBERSHIP fee's
+                // (codex #3591 r18 P1): a rodent bait-station setup is waived
+                // only by another qualifying family, which the quote already
+                // applied — a rodent-only Bronze member still owes it.
+                const rodentSetupQuote = estData?.setupFeeQuote?.kind === 'rodent_bait_setup';
+                if (activeMember && !rodentSetupQuote) {
                   await retireOrWaiveDraft('existing_member');
                   return;
                 }

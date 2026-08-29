@@ -139,6 +139,20 @@ function setupFeeQuoteBasisForEstimate(estimate, { commercialDetected = false, q
   return { qualifies: false, kind: null, amount: 0 };
 }
 
+// The waiver step of the persisted setupFeeQuote (codex #3591 r18 P1): the
+// ACCOUNT-LEVEL member waiver (any active WaveGuard tier) belongs to the
+// membership fee only. The rodent bait-station setup is waived by an OTHER
+// qualifying family — canonical evidence the engine already applied when it
+// emitted (or withheld) the line — so a rodent-only Bronze member still owes
+// it. An in-flight setup-fee claim anywhere on the account waives either
+// kind (one setup obligation per account at a time).
+function resolveSetupFeeQuoteDecision(basis, { activeMember = false, feeAlreadyQueued = false } = {}) {
+  const memberWaives = activeMember && basis.kind === 'waveguard_membership';
+  return memberWaives || feeAlreadyQueued
+    ? { amount: 0, waived: memberWaives ? 'existing_member' : 'fee_already_queued', kind: basis.kind }
+    : { amount: basis.amount, kind: basis.kind };
+}
+
 function isManualQuoteLine(line = {}) {
   if (line?.quoteRequired === true || line?.requiresManualReview === true) return true;
   // Priced commercial programs (commercial_lawn / commercial_tree_shrub /
@@ -1670,9 +1684,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
         // booking.js stamps pending_setup_fee from `amount` when the
         // self-booked series activates, so the obligation travels with the
         // handoff instead of vanishing with the archived draft.
-        return activeMember || feeAlreadyQueued
-          ? { amount: 0, waived: activeMember ? 'existing_member' : 'fee_already_queued', kind: setupFeeBasis.kind }
-          : { amount: setupFeeBasis.amount, kind: setupFeeBasis.kind };
+        return resolveSetupFeeQuoteDecision(setupFeeBasis, { activeMember, feeAlreadyQueued });
       } catch (memberErr) {
         logger.warn(`[public-quote] setup-fee membership lookup failed — fee waived on draft: ${memberErr.message}`);
         return { amount: 0, waived: 'membership_undetermined' };
@@ -2489,6 +2501,7 @@ module.exports._internals = {
   buildExistingCustomerPublicQuoteUpdates,
   findExistingCustomerByContact,
   setupFeeQuoteBasisForEstimate,
+  resolveSetupFeeQuoteDecision,
   buildCompactCustomerServiceInterest,
   derivePerApplication,
   derivePerApplicationBreakdown,
