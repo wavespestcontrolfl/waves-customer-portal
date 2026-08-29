@@ -204,6 +204,65 @@ function apptChannel(value) {
   return value === 'email' || value === 'both' ? value : 'sms';
 }
 
+// Effective channel for the 72h reminder leg. Email-first 72h reminders
+// (owner ruling 2026-08-29, GATE_REMINDER_72H_EMAIL_FIRST, scoped to
+// ONE-TIME visits by the follow-up ruling the same day): under the gate a
+// one-time visit's DEFAULT 'sms' resolution is promoted to 'email' — the
+// appointment.reminder_72h template with the self-serve reschedule CTA and
+// the card-hold fee-policy note — and deliverAppointmentNotice's 'email'
+// path already falls back to SMS when there's no usable address. An
+// explicit 'email'/'both' preference is returned untouched, and the 24h
+// leg never routes through this (day-of nudges stay SMS-led).
+//
+// Why one-time only: inspections and estimate-accept one-offs (termite/WDO,
+// rodent, one-time treatments) are the visits that get rescheduled — no
+// habit, often a third party (realtor/buyer) who the email can be forwarded
+// to — and card holds exist ONLY on one-time accepts (owner ruling
+// 2026-06-24), so the durable fee-policy email doubles as dispute evidence.
+// Recurring customers keep their established SMS rhythm.
+//
+// One-time = NOT (is_recurring OR recurring_parent_id OR recurring_pattern)
+// — the canonical lineage test (routes/pay-v2.js; a series "booster" visit
+// carries is_recurring=false WITH recurring_parent_id set, so a bare
+// is_recurring check under-matches). Fail-safe: a missing row, a reminder
+// with no scheduled_service_id, or a thrown lookup promotes NOTHING —
+// today's SMS-led behavior. Kill switch = unset the gate.
+async function isOneTimeVisit(scheduledServiceId) {
+  if (!scheduledServiceId) return false;
+  try {
+    const ss = await db('scheduled_services')
+      .where({ id: scheduledServiceId })
+      .first('id', 'is_recurring', 'recurring_parent_id', 'recurring_pattern');
+    if (!ss) return false;
+    return !(ss.is_recurring || ss.recurring_parent_id || ss.recurring_pattern);
+  } catch (err) {
+    logger.warn(`[appt-remind] one-time lineage lookup failed for ${scheduledServiceId}: ${err.message} — keeping SMS-led channel`);
+    return false;
+  }
+}
+
+async function resolve72hChannel(prefChannel, scheduledServiceId, { prefsUnavailable = false, explicitChoice = false, emailEnabled = true } = {}) {
+  const ch = apptChannel(prefChannel);
+  if (ch !== 'sms') return ch;
+  // Fail closed on an unreadable prefs row (pre-push hook P1): the 'sms'
+  // in hand is a fail-open default, not a stored choice, and the email leg
+  // bypasses sendCustomerMessage's consent validator — promotion could mail
+  // past an opt-out the lookup never read. SMS-led keeps the validator in
+  // the path.
+  if (prefsUnavailable) return 'sms';
+  // A customer who deliberately picked Text in the portal's delivery-method
+  // control keeps Text (Codex #3588 P1) — the stamp is written by the
+  // notifications route on every explicit channel write.
+  if (explicitChoice) return 'sms';
+  // Portal-wide email opt-out (pre-push #3588 P1): promotion must not route
+  // a reminder onto a channel the customer disabled — AppointmentEmail's
+  // transactional_required stream does not enforce the toggle itself.
+  if (emailEnabled === false) return 'sms';
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('reminder72hEmailFirst')) return 'sms';
+  return (await isOneTimeVisit(scheduledServiceId)) ? 'email' : 'sms';
+}
+
 // Send-window pre-check for the 72h/24h reminder legs (GATE_SMS_SEND_WINDOW,
 // owner ruling 2026-08-07). Checked BEFORE the send attempt because a
 // canonical-path block inside safeSendAppointment would cascade into the
@@ -1396,11 +1455,23 @@ async function getReminderPrefs(customerId) {
     // unknowable.
     unavailable: prefs?.__prefsUnavailable === true || channelPrefs?.__prefsUnavailable === true,
     smsEnabled: prefs?.sms_enabled !== false,
+    // Portal-wide email opt-out (pre-push #3588 P1): the email-first 72h
+    // promotion must not route around it — AppointmentEmail sends on the
+    // transactional_required stream and does not enforce this toggle
+    // itself. Same fail-open default shape as smsEnabled; the `unavailable`
+    // sentinel above already fails the promotion closed when this could
+    // not actually be read.
+    emailEnabled: prefs?.email_enabled !== false,
     appointmentConfirmation: prefs?.appointment_confirmation !== false,
     serviceReminder72h: prefs?.service_reminder_72h !== false,
     serviceReminder24h: prefs?.service_reminder_24h !== false,
     confirmationChannel: apptChannel(channelPrefs?.appointment_confirmation_channel),
     reminder72hChannel: apptChannel(channelPrefs?.service_reminder_72h_channel),
+    // Explicit delivery-method choice (Codex #3588 P1): stamped by the
+    // notifications route on any customer write of the 72h channel. Read
+    // from the same owner-resolved row as the channel itself so a secondary
+    // profile honors the account owner's choice.
+    reminder72hChannelExplicit: channelPrefs?.service_reminder_72h_channel_explicit === true,
     reminder24hChannel: apptChannel(channelPrefs?.service_reminder_24h_channel),
   };
 }
@@ -2325,7 +2396,14 @@ const AppointmentReminders = {
         // the final day.
         if (!r.reminder_72h_sent && hoursUntil > 24.25 && hoursUntil <= 72.25) {
           const prefs = await getReminderPrefs(r.customer_id);
-          const channel72 = prefs.reminder72hChannel;
+          // Email-first promotion under GATE_REMINDER_72H_EMAIL_FIRST
+          // (one-time visits only; never past an unreadable prefs row or an
+          // explicit Text choice) — see resolve72hChannel for the contract.
+          const channel72 = await resolve72hChannel(prefs.reminder72hChannel, r.scheduled_service_id, {
+            prefsUnavailable: prefs.unavailable,
+            explicitChoice: prefs.reminder72hChannelExplicit,
+            emailEnabled: prefs.emailEnabled,
+          });
           // Skip only if the reminder is off, or it is SMS-only and the
           // customer has opted out of texts. An email/both preference still
           // sends by email even when SMS is suppressed.
@@ -4361,6 +4439,8 @@ AppointmentReminders._test = {
   acceptedMixServiceName,
   estimateBackedServiceName,
   apptChannel,
+  resolve72hChannel,
+  isOneTimeVisit,
   deliverAppointmentNotice,
   deliverConfirmationByChannel,
   scheduledServiceApptTime,

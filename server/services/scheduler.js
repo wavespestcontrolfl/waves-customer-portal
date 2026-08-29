@@ -5503,15 +5503,17 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('*/5 * * * *', async () => {
     if (!isEnabled('reviewAutoReply')) {
-      // Gate off: only the failed-bell sweep runs (a bell_failed stamp left
-      // while the lane was on must still be re-rung) — codex r54.
+      // Gate off: only the mode-independent sweeps run — the failed-bell
+      // retry (codex r54) and the legacy under-4★ park release (codex #3587
+      // r3); no row is claimed, drafted or posted.
       try {
         await runExclusive('review-auto-reply', async () => {
-          const { retryFailedEditedBells } = require('./review-reply/runner');
-          const n = await retryFailedEditedBells();
-          if (n > 0) logger.info(`Review auto-reply (off): re-rang ${n} failed bell(s)`);
+          const { runModeIndependentSweeps } = require('./review-reply/runner');
+          const { bellsRetried, lowRatingReleased } = await runModeIndependentSweeps();
+          if (bellsRetried > 0) logger.info(`Review auto-reply (off): re-rang ${bellsRetried} failed bell(s)`);
+          if (lowRatingReleased > 0) logger.info(`Review auto-reply (off): released ${lowRatingReleased} legacy under-4★ park(s)`);
         });
-      } catch (err) { logger.warn(`Review auto-reply bell sweep (gate off) failed: ${err.message}`); }
+      } catch (err) { logger.warn(`Review auto-reply sweeps (gate off) failed: ${err.message}`); }
       return;
     }
     try {
