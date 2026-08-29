@@ -4307,11 +4307,21 @@ function stripManagedBodyImages(body, slug) {
   rawLines.forEach((line, i) => { if (touchedLineStarts.has(pos)) touched.add(i); pos += line.length + 1; });
   const lines = text.split('\n');
   const kept = [];
+  const titleOnly = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
+  const destOnly = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
   for (let i = 0; i < lines.length; i += 1) {
-    const m = rawLines[i].match(/^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:/);
+    const m = rawLines[i].match(/^[ \t]*\[((?:[^\]\\\n]|\\.)+)\]:([ \t]*)(.*)$/);
     if (m) {
       const label = contentGuardrails.normalizeReferenceLabel(m[1]);
-      if (defs.has(label) && isManaged(decodeDestination(defs.get(label)))) continue; // managed definition line
+      if (defs.has(label) && isManaged(decodeDestination(defs.get(label)))) {
+        // Managed definition: drop the label line AND its continuation
+        // lines (destination on the next line, optional title after a
+        // destination-only line) — the whole definition, not its head.
+        let destText = m[3];
+        if (destText.trim() === '') { i += 1; destText = rawLines[i] || ''; }
+        if (destOnly.test(destText) && rawLines[i + 1] !== undefined && titleOnly.test(rawLines[i + 1])) i += 1;
+        continue;
+      }
     }
     if (touched.has(i)) {
       const tidy = lines[i].replace(/[ \t]{2,}/g, ' ').replace(/\s+([.,;:!?])/g, '$1').trim();

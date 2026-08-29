@@ -4535,6 +4535,9 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     // Reference-style managed images and their definitions go too; a definition for a NON-managed path stays (hook P1).
     const ref = '## A\n\nProse.\n\n![gen][pic]\n\n![keep][photo]\n\n[pic]: </images/blog/x/body-1.webp>\n[photo]: /images/2025/12/photo.webp';
     expect(AstroPublisher.stripManagedBodyImages(ref, 'x')).toBe('## A\n\nProse.\n\n![keep][photo]\n\n[photo]: /images/2025/12/photo.webp');
+    // Multi-line managed definitions (destination on the continuation line, title after) are removed whole (hook P1).
+    const multi = '## A\n\nProse.\n\n![gen][pic]\n\n[pic]:\n  </images/blog/x/body-1.webp>\n  "title"\n[photo]: /images/2025/12/photo.webp';
+    expect(AstroPublisher.stripManagedBodyImages(multi, 'x')).toBe('## A\n\nProse.\n\n[photo]: /images/2025/12/photo.webp');
     // Nullable slug → publishAstro's slugify(title) fallback.
     expect(AstroPublisher.stripManagedBodyImagesForPost('P.\n\n![g](/images/blog/ant-trails-in-bradenton/body-1.webp)', { slug: null, title: 'Ant Trails in Bradenton' })).toBe('P.');
     expect(AstroPublisher.scheduledBlogFilePathForPost({ slug: null, title: 'Ant Trails in Bradenton' })).toBe('src/content/blog/ant-trails-in-bradenton.md');
