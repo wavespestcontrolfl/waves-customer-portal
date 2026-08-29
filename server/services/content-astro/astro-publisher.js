@@ -1883,7 +1883,7 @@ function imageRefsInText(text, defs) {
     if (span.kind === 'malformed') continue;
     const tail = span.kind === 'reference' ? str.slice(span.refStart, span.refEnd + 1) : '';
     const label = contentGuardrails.normalizeReferenceLabel(tail || alt);
-    if (label && defs && defs.has(label)) out.push({ alt, src: defs.get(label), line });
+    if (label && defs && defs.has(label)) out.push({ alt, src: decodeDestination(defs.get(label)), line });
   }
   return out;
 }

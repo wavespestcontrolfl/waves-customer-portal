@@ -4271,6 +4271,11 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(gh.commitFiles).not.toHaveBeenCalled();
   });
 
+  test('bodyImageRefs: a reference definition with an angle-bracket (spaced) destination is decoded like an inline one; escaped label punctuation matches its unescaped spelling (GH r17)', () => {
+    const refs = AstroPublisher._internals.bodyImageRefs('![a][pic]\n![detail][shot!]\n\n[pic]: </images/blog/x/body 1.webp>\n[shot\\!]: /images/blog/x/body-2.webp');
+    expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/body 1.webp', '/images/blog/x/body-2.webp']);
+  });
+
   test('bodyImageRefs: an angle-bracket destination keeps its parentheses; an escaped-bracket reference label resolves (GH r15)', () => {
     const refs = AstroPublisher._internals.bodyImageRefs('![a](</images/blog/x/a.webp)variant>)\n![detail][body\\]shot]\n\n[body\\]shot]: /images/blog/x/body-1.webp');
     expect(refs.map((r) => r.src)).toEqual(['/images/blog/x/a.webp)variant', '/images/blog/x/body-1.webp']);

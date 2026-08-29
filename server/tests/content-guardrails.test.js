@@ -4680,6 +4680,10 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     const defs = guardrails.markdownReferenceDefinitions('[Body]: /a.webp "t"\n[ two   words ]: </b c.webp>\n[body]: /dup.webp\ntext [x]: not-at-line-start');
     expect([...defs.entries()]).toEqual([['body', '/a.webp'], ['two words', '/b c.webp']]);
     expect(guardrails.normalizeReferenceLabel('  Two\n  Words ')).toBe('two words');
+    // Escaped ASCII punctuation is interpreted before matching: `[shot\!]` ≡ `[shot!]`; a non-punctuation backslash stays (GH r17).
+    expect(guardrails.normalizeReferenceLabel('shot\\!')).toBe('shot!');
+    expect(guardrails.normalizeReferenceLabel('body\\]shot')).toBe('body]shot');
+    expect(guardrails.normalizeReferenceLabel('a\\b')).toBe('a\\b');
     // Destination on the continuation line (CommonMark allows one line ending after `[label]:`); a bare `[label]:` with nothing after is not a definition.
     const multi = guardrails.markdownReferenceDefinitions('[pic]:\n  /images/blog/x/body-1.webp "t"\n[angle]:\n</a b.webp>\n[none]:\n\ntext');
     expect([...multi.entries()]).toEqual([['pic', '/images/blog/x/body-1.webp'], ['angle', '/a b.webp']]);
@@ -4732,7 +4736,7 @@ describe('shared rendered-scanner helpers for the body-image scanner (GH r9 on P
     const spans = [...guardrails.eachMarkdownLink(t)].map((sp) => [sp.kind, sp.kind === 'reference' ? t.slice(sp.refStart, sp.refEnd + 1) : null]);
     expect(spans).toEqual([['reference', 'body\\]shot'], ['none', null], ['none', null]]);
     const defs = guardrails.markdownReferenceDefinitions('[Body\\]Shot]: /images/blog/x/body-1.webp');
-    expect([...defs.entries()]).toEqual([['body\\]shot', '/images/blog/x/body-1.webp']]);
+    expect([...defs.entries()]).toEqual([['body]shot', '/images/blog/x/body-1.webp']]);
   });
 
   test('blankNonRenderedMarkdownWithDepths.inList: list markers, continuations and lazy lines are list content; 1–3 space top-level blocks and post-list paragraphs are not', () => {

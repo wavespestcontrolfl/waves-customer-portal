@@ -309,8 +309,11 @@ function parseLinkDestination(text, { allowEmpty = false } = {}) {
 }
 const LINK_TITLE_ONLY_RE = /^\s*(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\((?:[^()\\]|\\.)*\))\s*$/;
 const DESTINATION_ONLY_RE = /^\s*(?:<[^<>\n]*>|\S+)\s*$/;
+// Backslash escapes of ASCII punctuation are interpreted before the label
+// is compared (`[shot\!]` matches `[shot!]`), then case fold + whitespace
+// collapse.
 function normalizeReferenceLabel(label) {
-  return String(label || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  return String(label || '').replace(/\\([!-/:-@[-`{-~])/g, '$1').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 function markdownReferenceDefinitions(str) {
   const defs = new Map();
