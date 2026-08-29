@@ -38,8 +38,10 @@ function seedDb() {
       // Same street + ZIP as the primary, different city spelling, no label,
       // occupancy unknown, referenced by nothing → retire.
       prop('p4', 'c3', P2, { label: null, occupancy_type: 'unknown' }),
-      // Same shape but a visit references it → keep.
-      prop('p5', 'c3', { ...P2, address_line2: 'B' }, { label: null, occupancy_type: 'unknown' }),
+      // Same shape but an OPEN visit references it → keep.
+      prop('p5', 'c3', { ...P2, city: 'N Venice' }, { label: null, occupancy_type: 'unknown' }),
+      // Same shape, referenced ONLY by a cancelled visit → history, retire.
+      prop('p6', 'c3', { ...P2, city: 'Nokomis FL' }, { label: null, occupancy_type: 'unknown' }),
     ],
     scheduled_services: [
       // stamped address = A → p1
@@ -56,6 +58,7 @@ function seedDb() {
       { id: 'v-single', customer_id: 'c2', status: 'pending', property_id: null, service_address_line1: A.address_line1, service_address_city: A.city, service_address_zip: A.zip },
       // references p5 so p5 must survive leg B
       { id: 'v-ref-p5', customer_id: 'c3', status: 'pending', property_id: 'p5', service_address_line1: null },
+      { id: 'v-ref-p6-cancelled', customer_id: 'c3', status: 'cancelled', property_id: 'p6', service_address_line1: null },
     ],
     estimates: [],
     system_settings: [],
@@ -140,14 +143,17 @@ describe('20260829000050 backfill visit property links', () => {
     expect(state(db).linked).toEqual({});
   });
 
-  test('up() retires the unreferenced same-street duplicate and keeps the referenced one', async () => {
+  test('up() retires the unreferenced / terminal-only-referenced duplicates and keeps the live-referenced one', async () => {
     const db = seedDb();
     await migration.up(fakeKnex(db));
     expect(property(db, 'p4').active).toBe(false);
     expect(property(db, 'p4').updated_at).toBe('NOW');
     expect(property(db, 'p5').active).toBe(true);
     expect(property(db, 'p3').active).toBe(true);
-    expect(state(db).deactivated).toEqual(['p4']);
+    // Terminal-only reference does not block; the cancelled visit keeps its link.
+    expect(property(db, 'p6').active).toBe(false);
+    expect(visit(db, 'v-ref-p6-cancelled').property_id).toBe('p6');
+    expect(state(db).deactivated.sort()).toEqual(['p4', 'p6']);
   });
 
   test('up() does not retire a labeled, blank-labeled, or non-unknown duplicate', async () => {

@@ -22,10 +22,12 @@
  *   "second property" is the SAME street + ZIP as the primary, entered again
  *   with a different city spelling (so the per-customer active-address unique
  *   index did not catch it), no label, occupancy unknown, and referenced by
- *   nothing. Such rows are deactivated (active=false — the row is kept, never
+ *   nothing OPEN (a cancelled/completed visit is history and its link survives
+ *   retirement). Such rows are deactivated (active=false — the row is kept, never
  *   deleted; admin edits are owner data) ONLY when: not primary, label NULL,
  *   occupancy_type 'unknown', same city-less address key as the primary, and
- *   zero references from scheduled_services / estimates / service_visits.
+ *   zero OPEN scheduled_services references and zero estimates / service_visits
+ *   references.
  *   `label` must be strictly NULL — any non-NULL value is treated as intent.
  *
  * Ownership is recorded in a system_settings state row so down() reverses
@@ -68,12 +70,21 @@ function visitAddressKey(visit, customer) {
   return addressKey({ address_line1: line1, address_line2: line2, city, zip });
 }
 
-// Property ids referenced by any linkage table that exists — a referenced
-// property is never retired, whatever its shape.
-async function referencedPropertyIds(knex, ids) {
+// Property ids with a LIVE reference — a live-referenced property is never
+// retired, whatever its shape. A visit in a terminal status is history: its
+// link survives retirement untouched (active=false keeps the row, and the FK
+// only nulls on DELETE), so it does not block. Estimates and service_visits
+// references block regardless of status (prod pre-read 08-29: zero of each).
+async function liveReferencedPropertyIds(knex, ids) {
   const out = new Set();
-  const tables = ['scheduled_services', 'estimates', 'service_visits'];
-  for (const table of tables) {
+  if (await knex.schema.hasColumn('scheduled_services', 'property_id')) {
+    const rows = await knex('scheduled_services')
+      .whereIn('property_id', ids)
+      .whereNotIn('status', TERMINAL_VISIT_STATUSES)
+      .select('property_id');
+    for (const r of rows) if (r.property_id) out.add(r.property_id);
+  }
+  for (const table of ['estimates', 'service_visits']) {
     if (!(await knex.schema.hasTable(table))) continue;
     if (!(await knex.schema.hasColumn(table, 'property_id'))) continue;
     const rows = await knex(table).whereIn('property_id', ids).select('property_id');
@@ -150,7 +161,7 @@ exports.up = async function up(knex) {
     }
   }
   if (candidates.length) {
-    const referenced = await referencedPropertyIds(knex, candidates.map((p) => p.id));
+    const referenced = await liveReferencedPropertyIds(knex, candidates.map((p) => p.id));
     for (const p of candidates) {
       if (referenced.has(p.id)) continue;
       const n = await knex('customer_properties')
