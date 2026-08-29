@@ -463,9 +463,8 @@ function buildTermiteReportV2({
   // 'action'. A tech's explicit activity selection is never understated
   // because pins were left unmarked.
   const pinActivity = visitBackedSummary(stationSummary)?.activity || 0;
-  const statusBase = pinActivity > 0 && (formStatus.key === 'protected' || formStatus.key === 'monitoring')
-    ? { key: 'action', tone: 'watch' }
-    : formStatus;
+  const statusEscalatedByPins = pinActivity > 0 && (formStatus.key === 'protected' || formStatus.key === 'monitoring');
+  const statusBase = statusEscalatedByPins ? { key: 'action', tone: 'watch' } : formStatus;
   const activityObserved = statusBase.key === 'action' || statusBase.key === 'evidence';
   const feedingNoted = statusBase.key === 'monitoring'
     && (FEEDING_VALUES.has(values.bait_consumption) || /\bbait feeding\b/i.test(String(values.activity_signs || '')));
@@ -509,6 +508,11 @@ function buildTermiteReportV2({
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
     stationSyncPartial,
+    // The activity gauge (score / trend) is computed from the FROZEN
+    // termite_activity select; when station pins overrode it, that trend
+    // describes a reading the report no longer shows — the client must not
+    // print it (codex P2 #3600 r22).
+    statusEscalatedByPins,
     nextStep: nextStepText,
     nextVisit: nextVisit && nextVisit.scheduledDate ? nextVisit : null,
     primaryMove: buildPrimaryMove({ values }),

@@ -430,6 +430,9 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(out.status.key).toBe('action');
     expect(out.status.label).toBe('Termite activity observed at 2 stations');
     expect(out.metrics[1].value).toBe('2 stations');
+    // the payload says the frozen select was overridden (the gauge trend is stale)
+    expect(out.statusEscalatedByPins).toBe(true);
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).statusEscalatedByPins).toBe(false);
     // pins never DOWNGRADE an explicit activity selection
     const kept = buildTermiteReportV2({
       typedSnapshotValues: { ...CLEAN_VALUES, termite_activity: 'Previous feeding noted' },

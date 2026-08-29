@@ -223,6 +223,16 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(hero).getByText('Moderate feeding')).toBeInTheDocument();
   });
 
+  it('suppresses the gauge trend when station pins overrode the frozen activity select', async () => {
+    const escalated = JSON.parse(JSON.stringify(termiteReportV2));
+    escalated.activity = { score: 0, label: 'Termite Activity', levelWord: 'none', trend: 'stable', trendWord: 'about the same as the last visit', isBaseline: false };
+    escalated.termiteReportV2.statusEscalatedByPins = true;
+    const { container } = renderReport(escalated);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).queryByText(/about the same as the last visit/)).toBeNull();
+  });
+
   it('the visit-history current row restates the reconciled V2 headline, not the frozen snapshot headline', async () => {
     const history = JSON.parse(JSON.stringify(termiteReportV2));
     history.typedVisitTimeline = { visits: [
