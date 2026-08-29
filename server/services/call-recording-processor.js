@@ -14548,23 +14548,42 @@ CallRecordingProcessor.summarizePriorCall = summarizePriorCall;
  */
 function composeLeadAddress(line1, line2) {
   const street = String(line1 || '').trim();
+  if (!street) return null;
+  const { formatAddressBounded } = require('./customer-address-fanout');
+  const {
+    splitStreetLineUnitParts, normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS,
+  } = require('../utils/address-normalizer');
+  const clampUnit = (u) => String(u || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
   // Same 100-char unit clamp as the customer insert / booking linkage —
   // the extraction schema bounds street_line_2 by type only, and an
   // overlong unit would otherwise consume the whole 255 budget as the
   // protected tail and drop the street (codex r4 P2).
-  const unit = String(line2 || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
-  if (!street) return null;
-  const { formatAddressBounded } = require('./customer-address-fanout');
+  let unit = clampUnit(line2);
   if (!unit) return formatAddressBounded({ line1: street }, LEAD_ADDRESS_MAX_LENGTH);
-  const { splitStreetLineUnit, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
-  const split = splitStreetLineUnit(street);
-  const embedded = String(split?.unit || '').trim().slice(0, LEAD_UNIT_MAX_LENGTH).trim();
-  if (embedded && unitLineValueKey(normalizeUnitLine(embedded)) === unitLineValueKey(normalizeUnitLine(unit))) {
-    // Bound from the PARSED parts so the embedded unit is the protected
-    // tail, not the first thing a long street's truncation eats.
-    return formatAddressBounded({ line1: split.street, line2: embedded }, LEAD_ADDRESS_MAX_LENGTH);
-  }
-  return formatAddressBounded({ line1: street, line2: unit }, LEAD_ADDRESS_MAX_LENGTH);
+  // A BARE unit ("4B", "102") gains its designator ("Unit 4B") before it is
+  // stored: the shared parser and the ownership key only recognize a
+  // comma-separated unit that leads with a designator or '#', so a bare
+  // segment would key the address as unitless and read as a city in the
+  // place tail — a later call restating the exact address could never
+  // reaffirm it (codex r6 P1). Designator-bearing spellings are kept as
+  // the caller said them.
+  const firstTok = unit.split(/\s+/)[0].replace(/\./g, '').toLowerCase();
+  if (!firstTok.startsWith('#') && !UNIT_DESIGNATORS.has(firstTok)) unit = clampUnit(normalizeUnitLine(unit));
+  // Rebuild from the PARSED parts — street, its inline unit, and the place
+  // tail a full-address line1 may carry ("100 Main St, Apt 4, Sarasota, FL
+  // 34236") — so the unit and the place are the protected tail of the
+  // bound, never the first thing a long street's truncation eats, and a
+  // full-address line1 never loses its city/ZIP (codex r3 + r6 P2).
+  const parts = splitStreetLineUnitParts(street);
+  const embedded = clampUnit(parts.unit);
+  const key = (u) => unitLineValueKey(normalizeUnitLine(u));
+  const duplicate = !!embedded && key(embedded) === key(unit);
+  const rebuiltStreet = embedded && !duplicate ? `${parts.street} ${embedded}` : parts.street;
+  return formatAddressBounded({
+    line1: rebuiltStreet,
+    line2: duplicate ? embedded : unit,
+    city: parts.tail || null,
+  }, LEAD_ADDRESS_MAX_LENGTH);
 }
 // leads.address column width (migration 20260401000095: default string →
 // varchar(255)); a longer composed value makes Postgres reject the whole

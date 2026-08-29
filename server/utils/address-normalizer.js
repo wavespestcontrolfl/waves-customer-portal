@@ -289,7 +289,9 @@ function normalizeZip(value) {
 }
 
 function normalizeUnitToken(token) {
-  return /^[A-Za-z]?\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
+  // Identifier-shaped tokens ("4B", "PH1", "TH12") are upper-cased as a unit;
+  // same letter budget as UNIT_VALUE so the two never disagree.
+  return /^[A-Za-z]{0,3}\d+[A-Za-z]?$/.test(token) ? token.toUpperCase() : titleToken(token);
 }
 
 // Second address line (unit / apt / suite). Kept separate from line1 so the
@@ -358,10 +360,23 @@ function unitLineValueKey(normalizedUnitLine) {
 // ("200-A", "4-B", "A-12") — ordinary suite/apartment spellings. Only ever
 // tested AFTER a designator or hash, so a hyphenated street token never
 // qualifies on its own.
-const UNIT_VALUE = /^#?[A-Za-z]?\d+[A-Za-z]?$|^[A-Za-z]$|^#?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
+// Up to three letters may lead the number ("PH1", "TH2", "A12") — penthouse /
+// townhouse-style identifiers are ordinary unit spellings.
+const UNIT_VALUE = /^#?[A-Za-z]{0,3}\d+[A-Za-z]?$|^[A-Za-z]$|^#?[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/;
 function splitStreetLineUnit(value) {
+  const { street, unit } = splitStreetLineUnitParts(value);
+  return { street, unit };
+}
+
+// splitStreetLineUnit plus the PLACE tail — every comma segment after the
+// street and its unit segments, joined back with ', ' ("100 Main St, Apt 4,
+// Sarasota, FL 34236" → tail "Sarasota, FL 34236"; '' when there is none).
+// Callers that rebuild a single-line address from the parsed street/unit
+// use it so a full-address line1 never loses its city/ZIP in the rebuild.
+function splitStreetLineUnitParts(value) {
   const segments = cleanString(value).split(',').map((s) => s.trim()).filter(Boolean);
   let line = segments[0] || '';
+  let consumed = 1;
   // Legacy values often carry the unit as its own comma segment — possibly
   // several ("123 Main St, Bldg 2, Apt 4, Sarasota") — pull consecutive
   // unit-leading segments back into the line so the peel below sees them
@@ -374,6 +389,7 @@ function splitStreetLineUnit(value) {
       && !isStateZipPair(firstTok, (segTokens[1] || '').replace(/[.,]/g, ''));
     if (!isUnitSegment) break;
     line = `${line} ${segments[i]}`;
+    consumed = i + 1;
   }
   let tokens = line.split(' ').filter(Boolean);
   const unitParts = [];
@@ -413,8 +429,10 @@ function splitStreetLineUnit(value) {
     }
     break;
   }
-  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) return { street: segments[0] || '', unit: '' };
-  return { street: tokens.join(' '), unit: unitParts.join(' ') };
+  if (!unitParts.length || !/^\d/.test(tokens[0] || '')) {
+    return { street: segments[0] || '', unit: '', tail: segments.slice(1).join(', ') };
+  }
+  return { street: tokens.join(' '), unit: unitParts.join(' '), tail: segments.slice(consumed).join(', ') };
 }
 
 function splitStreetAndCity(value) {
@@ -594,6 +612,7 @@ module.exports = {
   normalizeUnitLine,
   unitLineValueKey,
   splitStreetLineUnit,
+  splitStreetLineUnitParts,
   titleCaseWords,
   normalizeState,
   parseRawAddress,

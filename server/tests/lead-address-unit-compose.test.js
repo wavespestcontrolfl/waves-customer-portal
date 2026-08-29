@@ -14,7 +14,7 @@ jest.mock('../config/feature-gates', () => ({
   logGateStatus: jest.fn(),
 }));
 
-const { composeLeadAddress } = require('../services/call-recording-processor')._test;
+const { composeLeadAddress, reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
 
 describe('composeLeadAddress', () => {
   test('appends the unit to the street', () => {
@@ -55,6 +55,27 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress('4501 Space Coast Blvd', 'Apt 4')).toBe('4501 Space Coast Blvd, Apt 4');
   });
 
+  test('multi-letter unit identifiers dedupe (PH1)', () => {
+    expect(composeLeadAddress('100 Main St Unit PH1', 'Unit PH1')).toBe('100 Main St, Unit PH1');
+    expect(composeLeadAddress('100 Main St', 'PH1')).toBe('100 Main St, Unit PH1');
+  });
+
+  test('a full-address line1 keeps its place tail through the rebuild', () => {
+    expect(composeLeadAddress('100 Main St, Apt 4, Sarasota, FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota, FL 34236');
+    expect(composeLeadAddress('100 Main St Apt 4, Sarasota, FL 34236', '#4')).toBe('100 Main St, Apt 4, Sarasota, FL 34236');
+    expect(composeLeadAddress('100 Main St, Sarasota, FL 34236', 'Apt 4')).toBe('100 Main St, Apt 4, Sarasota, FL 34236');
+    expect(composeLeadAddress('100 Main St, Sarasota, FL 34236', null)).toBe('100 Main St, Sarasota, FL 34236');
+  });
+
+  test('a BARE unit gains its designator so the parser and ownership key see it', () => {
+    expect(composeLeadAddress('100 Main St', '4B')).toBe('100 Main St, Unit 4B');
+    expect(composeLeadAddress('100 Main St', '102')).toBe('100 Main St, Unit 102');
+    expect(composeLeadAddress('100 Main St Apt 4', '4')).toBe('100 Main St, Apt 4');
+    expect(leadAddressCompareKey('100 Main St, Unit 4B')).toBe('100 main st|4b');
+    const locked = { address: '100 Main St, Unit 4B', city: 'Sarasota', zip: '34236' };
+    expect(reaffirmedFilledLeadFields({ address: composeLeadAddress('100 Main St', '4B'), city: 'Sarasota', zip: '34236' }, locked).address).toBe('100 Main St, Unit 4B');
+  });
+
   test('bounded to the leads.address varchar(255) — street trims, unit tail survives', () => {
     const longStreet = `100 ${'Verylongstreetname '.repeat(20)}Blvd`;
     expect(longStreet.length).toBeGreaterThan(255);
@@ -75,7 +96,6 @@ describe('composeLeadAddress', () => {
   });
 });
 
-const { reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
 
 describe('leadAddressCompareKey', () => {
   test('equivalent unit notations key the same', () => {
