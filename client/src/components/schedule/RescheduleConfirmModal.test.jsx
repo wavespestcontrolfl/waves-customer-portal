@@ -114,6 +114,22 @@ describe('RescheduleConfirmModal — collective series moves', () => {
     await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({ notificationType: 'none', scope: 'this_only' }));
   });
 
+  it('gate on, same-day time move: not collective, so the series chooser stays (the server never widens it)', async () => {
+    const sameDay = { enabled: true, collective: false, deltaDays: 0, movableCount: 0, skippedCount: 0, exceptionCount: 0, conflictCount: 0, firstAffectedDate: null, lastAffectedDate: null };
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/series-move-preview?newDate=2026-09-01')) {
+        return { ok: true, status: 200, json: async () => sameDay, text: async () => JSON.stringify(sameDay) };
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const { onConfirm } = renderModal({ toDate: '2026-09-01', toMinutes: 600, toWindow: '10:00-11:00' });
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reschedule series' })).toBeInTheDocument());
+    expect(screen.queryByTestId('series-move-notice')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Reschedule series' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith({ notificationType: 'none', scope: 'series' }));
+  });
+
   it('never fetches a preview for a one-time visit', async () => {
     mockPreview(PREVIEW);
     renderModal({ isRecurring: false });

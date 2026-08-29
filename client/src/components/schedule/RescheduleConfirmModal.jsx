@@ -84,13 +84,14 @@ export default function RescheduleConfirmModal({
     enabled: open && !!isRecurring,
   });
   const collective = isCollectivePreview(seriesPreview.preview);
-  // The explicit "Reschedule series" button is the gate-OFF chooser. It only
-  // renders once the preview has said so (`enabled: false`): while the plan
-  // is still being read, or when the preview request failed, offering
-  // `scope: 'series'` would move the series past the disclosure the server
-  // enforces on `this_only` (hook P1). Without it the primary submits
-  // `this_only`; a gated server answers with the preview to confirm.
-  const gateKnownOff = !!seriesPreview.preview && seriesPreview.preview.enabled === false;
+  // The explicit "Reschedule series" button stays for every move the server
+  // does NOT widen — gate off, or a same-day time move (the choke point only
+  // widens DATE moves; GH codex P1: staff must still be able to shift the
+  // time of the later visits together). It renders only once the preview
+  // has answered: while the plan is still being read, or when the preview
+  // request failed, offering `scope: 'series'` would move the series past
+  // the disclosure the server enforces on `this_only` (hook P1).
+  const seriesChooser = !!seriesPreview.preview && !collective;
   // Hold the confirm while the plan is still being read — submitting ahead
   // of the preview would only bounce off the server's ack check.
   const awaitingPreview = !!isRecurring && seriesPreview.loading && !seriesPreview.preview;
@@ -276,10 +277,11 @@ export default function RescheduleConfirmModal({
           >
             {busy ? 'Saving…' : (collective ? 'Move visit + later visits' : 'Reschedule appointment')}
           </Button>
-          {/* With collective moves on the server decides the scope — no
-              this/series chooser; the explicit series button is the gate-off
-              world only (never on a failed or pending preview). */}
-          {isRecurring && gateKnownOff && (
+          {/* With collective moves on the server decides the scope of a DATE
+              move — no this/series chooser there; the explicit series button
+              stays for moves the server doesn't widen (never on a failed or
+              pending preview). */}
+          {isRecurring && seriesChooser && (
             <Button
               variant="secondary"
               onClick={() => submit('series')}

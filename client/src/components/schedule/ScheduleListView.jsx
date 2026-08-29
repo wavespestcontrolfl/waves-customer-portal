@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Badge, Button, cn } from '../ui';
 import { addETDays, etDateString } from '../../lib/timezone';
 import { useBulkSlotConflicts } from './useSlotConflicts';
+import { fetchSeriesMovePreview, isCollectivePreview } from './seriesMove';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -53,6 +54,10 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
       windowStart: s.windowStart,
       windowEnd: s.windowEnd,
       durationMinutes: s.estimatedDuration,
+      // The bulk reschedule pre-flight below needs these for rows selected
+      // on other pages.
+      scheduledDate: s.scheduledDate ? String(s.scheduledDate).split('T')[0] : '',
+      isRecurring: !!(s.isRecurring ?? s.is_recurring),
     });
   };
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -179,6 +184,35 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
     if (!bulkAction || selected.size === 0) return;
     setBulkBusy(true);
     try {
+      // Collective series moves (GATE_ADMIN_COLLECTIVE_MOVE): this bulk mover
+      // writes one row per visit and cannot shift a recurring plan's later
+      // visits — the server refuses those rows (failed[]) while the one-time
+      // rows commit. Read each recurring plan first and refuse the WHOLE
+      // batch before anything moves, naming where the plan can be moved
+      // (GH codex P1). Gate off: previews say collective:false, nothing
+      // changes.
+      if (bulkAction === 'reschedule') {
+        const recurring = Array.from(selected)
+          .map((id) => selectedMetaRef.current.get(id))
+          .filter((m) => m && m.isRecurring && m.scheduledDate !== bulkDate);
+        if (recurring.length > 0) {
+          const previews = await Promise.allSettled(recurring.map((m) => fetchSeriesMovePreview(m.id, bulkDate)));
+          const unreadable = previews.filter((p) => p.status !== 'fulfilled').length;
+          if (unreadable > 0) {
+            window.alert(`Couldn't read the recurring plan for ${unreadable} selected visit${unreadable === 1 ? '' : 's'} — nothing was moved. Try again.`);
+            setBulkBusy(false);
+            return;
+          }
+          const collective = previews.filter((p) => isCollectivePreview(p.value)).length;
+          if (collective > 0) {
+            window.alert(
+              `${collective} selected visit${collective === 1 ? ' is' : 's are'} part of a recurring plan — with collective moves on, each moves with its later visits, which this list can't do. Nothing was moved. Move ${collective === 1 ? 'it' : 'them'} from the Day/Week grid or the Edit appointment modal, then bulk-move the rest.`,
+            );
+            setBulkBusy(false);
+            return;
+          }
+        }
+      }
       let payload = {};
       if (bulkAction === 'reassign') payload = { technicianId: bulkTechId || null };
       else if (bulkAction === 'reschedule') payload = { scheduledDate: bulkDate, notifyCustomer: bulkNotify === 'text' };
@@ -195,6 +229,15 @@ export default function ScheduleListView({ technicians = [], onEdit, onRefresh }
         const lines = res.notificationFailures.slice(0, 8).map(f => `• ${f.reason}`);
         window.alert(
           `${bulkAction === 'cancel' ? 'Cancelled' : 'Rescheduled'}, but ${res.notificationFailures.length} customer(s) were not texted:\n${lines.join('\n')}`,
+        );
+      }
+      // Rows the server refused (a recurring plan under the collective gate,
+      // a terminal row, …) — say so before the selection is cleared instead
+      // of reading the HTTP 200 as a full success.
+      if (Array.isArray(res?.failed) && res.failed.length > 0) {
+        const lines = res.failed.slice(0, 8).map((f) => `• ${f.reason}`);
+        window.alert(
+          `${res.updatedCount ?? 0} updated, ${res.failed.length} not updated:\n${lines.join('\n')}`,
         );
       }
       // Advisory schedule-overlap notes — the moves committed (conflicts no

@@ -16,6 +16,7 @@
 // rendered, no ack is sent, the move stays a single-visit move.
 
 import { useEffect, useRef, useState } from 'react';
+import { formatETDateOnly } from '../../lib/timezone';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -48,12 +49,10 @@ export function seriesAckPayload(preview) {
   return { seriesAck: true, seriesAckIds: preview.occurrenceIds.map(String) };
 }
 
+// Calendar dates from the server (YYYY-MM-DD) go through the canonical
+// ET date-only formatter — never a local-time Date (GH codex P1).
 function formatDateShort(dateStr) {
-  const m = dateOnly(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return '';
-  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return formatETDateOnly(dateOnly(dateStr), { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 // The one informational line every surface renders. Singular/plural and the
