@@ -533,19 +533,30 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     try {
       const res = await fetch(`${API_BASE}/pay/${token}`);
       const fresh = await res.json().catch(() => null);
-      const freshVersion = fresh?.manualPayOptions?.version ?? fresh?.invoice?.version ?? null;
-      const freshAmount = fresh?.manualPayOptions?.amountDue ?? fresh?.invoice?.amountDue;
+      const freshOpts = fresh?.manualPayOptions;
+      const freshVersion = freshOpts?.version ?? fresh?.invoice?.version ?? null;
+      const freshAmount = freshOpts?.amountDue ?? fresh?.invoice?.amountDue;
+      // codex r4 P1 ×2: the fresh read is the only truth the tab may act on —
+      //  • creditPending on the fresh read (credit landed after the first GET
+      //    while the version/gross stayed put) means /setup will reduce the
+      //    invoice, so a gross transfer would overpay → refuse, refresh;
+      //  • the recipient rides env, not the invoice row, so a rotated handle
+      //    arrives with an unchanged version → refuse and re-render the row
+      //    (the Copy button must show the new handle too) rather than
+      //    silently sending to whichever handle this render captured.
       const unchanged = res.ok
-        && !!fresh?.manualPayOptions
+        && !!freshOpts
+        && !freshOpts.creditPending
         && (version == null || freshVersion === version)
-        && Number(freshAmount) === Number(amountDue);
+        && Number(freshAmount) === Number(amountDue)
+        && row.recipientOf(freshOpts) === row.recipient;
       if (!unchanged) {
         if (tab) tab.close();
         setStaleNotice('This invoice was just updated — the amounts above have been refreshed. Please try again.');
         if (fresh?.invoice) onInvoiceChanged?.(fresh);
         return;
       }
-      const url = row.buildHref(Number(freshAmount));
+      const url = row.buildHref(Number(freshAmount), freshOpts);
       if (tab) tab.location.href = url;
       else if (typeof window !== 'undefined') window.location.assign(url);
     } catch {
@@ -583,14 +594,18 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     rows.push({
       key: 'venmo', name: 'Venmo', value: options.venmo.handle, copyValue: options.venmo.handle,
       hint: 'Send to', openLabel: 'Open Venmo',
-      buildHref: (amt) => venmoPayHref(options.venmo.handle, amt, memo),
+      recipient: options.venmo.handle,
+      recipientOf: (opts) => opts?.venmo?.handle,
+      buildHref: (amt, opts) => venmoPayHref(opts.venmo.handle, amt, memo),
     });
   }
   if (options.paypal?.handle) {
     rows.push({
       key: 'paypal', name: 'PayPal', value: `paypal.me/${options.paypal.handle}`, copyValue: `https://paypal.me/${options.paypal.handle}`,
       hint: 'Send to', openLabel: 'Open PayPal',
-      buildHref: (amt) => paypalMeHref(options.paypal.handle, amt),
+      recipient: options.paypal.handle,
+      recipientOf: (opts) => opts?.paypal?.handle,
+      buildHref: (amt, opts) => paypalMeHref(opts.paypal.handle, amt),
     });
   }
   const names = rows.map((r) => r.name);

@@ -164,6 +164,50 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     await waitFor(() => expect(screen.getAllByText('$175.00').length).toBeGreaterThan(0));
   });
 
+  it('refuses to open a transfer when the fresh read flags pending credit (codex r4 P1)', async () => {
+    const first = payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+    // Same version + gross: credit landed after render, /setup will reduce the invoice.
+    const credited = payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, creditPending: true, version: 1 } });
+    let gets = 0;
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets === 1 ? first : credited); }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const tab = { close: vi.fn(), location: { href: '' } };
+    vi.stubGlobal('open', vi.fn(() => tab));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Open Venmo' }));
+    await waitFor(() => expect(tab.close).toHaveBeenCalled());
+    expect(tab.location.href).toBe('');
+    // Re-rendered from the fresh payload: creditPending + no /setup answer withholds the block entirely.
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Other ways to pay/ })).not.toBeInTheDocument());
+  });
+
+  it('refuses to open a transfer when the recipient rotated since render (codex r4 P1)', async () => {
+    const first = payload({ manualPayOptions: { paypal: { handle: 'WavesPest' }, amountDue: 150, version: 1 } });
+    const rotated = payload({ manualPayOptions: { paypal: { handle: 'WavesPestControl' }, amountDue: 150, version: 1 } });
+    let gets = 0;
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets === 1 ? first : rotated); }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const tab = { close: vi.fn(), location: { href: '' } };
+    vi.stubGlobal('open', vi.fn(() => tab));
+    renderPage();
+    fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    expect(screen.getByText('paypal.me/WavesPest')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open PayPal' }));
+    await waitFor(() => expect(tab.close).toHaveBeenCalled());
+    expect(tab.location.href).toBe('');
+    expect(await screen.findByRole('status')).toHaveTextContent(/just updated/);
+    // The row now shows (and copies) the rotated recipient, never the captured one.
+    await waitFor(() => expect(screen.getByText('paypal.me/WavesPestControl')).toBeInTheDocument());
+    expect(screen.queryByText('paypal.me/WavesPest')).not.toBeInTheDocument();
+  });
+
   it('withholds the block while account credit is pending and Stripe setup has not answered (codex r3 P1)', async () => {
     stubFetch(payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, creditPending: true, version: 1 } }));
     renderPage();
