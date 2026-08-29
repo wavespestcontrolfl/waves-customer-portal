@@ -103,6 +103,8 @@ const {
 const {
   isCommercialProperty,
   buildCommercialManualQuoteResult,
+  COMMERCIAL_SCOPED_ONETIME_SERVICES,
+  markCommercialOneTimeLine,
 } = require('./commercial-helpers');
 const { resolveCommercialCadence, resolveCommercialPestCadenceOverride, resolveCommercialLawnCadenceOverride } = require('./commercial-risk-type');
 
@@ -713,9 +715,20 @@ function generateEstimate(input) {
       lineItems.push(result);
     }
   };
-  const useCommercialManualQuote = (selected, service = 'pest_control') => {
+  // GATE_COMMERCIAL_ONETIME_SCOPED (read at call time, like
+  // GATE_BERMUDA_SUPPRESSION): unit-scoped one-time services price identically
+  // on commercial properties instead of collapsing to the generic manual line.
+  // Call sites opt out with { scopedOneTime: true } and their priced lines are
+  // re-marked commercial (tax family, flat/no-discount) by the post-pass below
+  // — only services in COMMERCIAL_SCOPED_ONETIME_SERVICES are marked, so an
+  // opted-out pricer emitting an unlisted key is a test failure, not a silent
+  // residential line. Gate off → exactly today's manual-quote behavior.
+  const commercialScopedOneTimeArmed = propertyIsCommercial
+    && require('../../config/feature-gates').gateEnvValue('GATE_COMMERCIAL_ONETIME_SCOPED');
+  const useCommercialManualQuote = (selected, service = 'pest_control', opts = {}) => {
     if (!selected) return false;
     if (!propertyIsCommercial) return false;
+    if (opts.scopedOneTime === true && commercialScopedOneTimeArmed) return false;
     addCommercialManualQuote(service);
     return true;
   };
@@ -938,7 +951,7 @@ function generateEstimate(input) {
 
   // Palm Injection
   const palmService = services.palmInjection || services.palm;
-  if (palmService && !useCommercialManualQuote(palmService, 'lawn_care')) {
+  if (palmService && !useCommercialManualQuote(palmService, 'lawn_care', { scopedOneTime: true })) {
     const palmOptions = serviceOptions(palmService);
     const palmCountResolution = resolvePalmCount(property, palmOptions);
     if (!Number.isInteger(palmCountResolution.palmCount) || palmCountResolution.palmCount <= 0) {
@@ -1281,7 +1294,7 @@ function generateEstimate(input) {
     });
     lineItems.push(result);
   }
-  if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control')) {
+  if (services.trenching && !useCommercialManualQuote(services.trenching, 'pest_control', { scopedOneTime: true })) {
     const result = priceTrenching(property, serviceOptions(services.trenching));
     lineItems.push(result);
   }
@@ -1349,7 +1362,7 @@ function generateEstimate(input) {
     lineItems.push(result);
   }
   const boraCareService = services.boraCare || services.bora_care;
-  if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control')) {
+  if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control', { scopedOneTime: true })) {
     const boraCareOptions = serviceOptions(boraCareService);
     // Surface-treatment measurements may arrive via service options (route path)
     // or at the top level of the estimate input (direct generateEstimate
@@ -1367,14 +1380,14 @@ function generateEstimate(input) {
   const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;
   const legacyPreSlabService = services.preSlabTermidor || services.pre_slab_termidor;
   const preSlabService = canonicalPreSlabService || legacyPreSlabService;
-  if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control')) {
+  if (preSlabService && !useCommercialManualQuote(preSlabService, 'pest_control', { scopedOneTime: true })) {
     const preSlabOptions = serviceOptions(preSlabService);
     const result = legacyPreSlabService && !canonicalPreSlabService
       ? pricePreSlabTermidor(property, preSlabOptions)
       : pricePreSlabTermiticide(property, preSlabOptions);
     lineItems.push(result);
   }
-  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control')) {
+  if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: true })) {
     const bedBugOptions = typeof services.bedBug === 'object' ? services.bedBug : {};
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
     const result = priceBedBugTreatment(property, {
@@ -1386,7 +1399,7 @@ function generateEstimate(input) {
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
-  if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
+  if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control', { scopedOneTime: true })) {
     const result = priceWDO(property);
     lineItems.push(result);
   }
@@ -1468,7 +1481,7 @@ function generateEstimate(input) {
     );
     lineItems.push(result);
   }
-  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control')) {
+  if (services.foam && !useCommercialManualQuote(services.foam, 'pest_control', { scopedOneTime: true })) {
     const foamOptions = typeof services.foam === 'object' && services.foam !== null
       ? services.foam
       : {};
@@ -1495,7 +1508,7 @@ function generateEstimate(input) {
     lineItems.push(result);
     // foam_recurring does NOT add to activeServiceKeys for tier determination
   }
-  if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control')) {
+  if (services.stinging && !useCommercialManualQuote(services.stinging, 'pest_control', { scopedOneTime: true })) {
     const result = priceStingingInsect({
       species: services.stinging.species || 'PAPER_WASP',
       tier: services.stinging.tier || 2,
@@ -1569,7 +1582,7 @@ function generateEstimate(input) {
   // exclusion is active (V2 folds these into the unified calculation).
   const exclusionIsV2 = services.exclusion?.pricingVersion === 'v2';
 
-  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control')) {
+  if (services.rodentWireMesh && !exclusionIsV2 && !useCommercialManualQuote(services.rodentWireMesh, 'pest_control', { scopedOneTime: true })) {
     const opts = typeof services.rodentWireMesh === 'object' ? services.rodentWireMesh : {};
     lineItems.push(priceRodentWireMesh({
       meshLinearFeet: opts.meshLinearFeet,
@@ -1581,7 +1594,7 @@ function generateEstimate(input) {
     }));
   }
 
-  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control')) {
+  if (services.rodentBirdBoxes && !exclusionIsV2 && !useCommercialManualQuote(services.rodentBirdBoxes, 'pest_control', { scopedOneTime: true })) {
     const opts = typeof services.rodentBirdBoxes === 'object' ? services.rodentBirdBoxes : {};
     const result = priceRodentBirdBoxes({
       birdBoxType: opts.birdBoxType,
@@ -1592,7 +1605,7 @@ function generateEstimate(input) {
 
   // Rodent sanitation (bleach + wipe; tier = light/standard/heavy)
   // Legacy 'medium' resolves to 'standard' inside priceSanitation.
-  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control')) {
+  if (services.sanitation && !useCommercialManualQuote(services.sanitation, 'pest_control', { scopedOneTime: true })) {
     const result = priceSanitation({
       tier: services.sanitation.tier || 'standard',
       affectedSqFt: services.sanitation.affectedSqFt
@@ -1617,7 +1630,7 @@ function generateEstimate(input) {
   }
 
   // Standalone rodent inspection (paid diagnostic, creditable)
-  if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control')) {
+  if (services.rodentInspection && !useCommercialManualQuote(services.rodentInspection, 'pest_control', { scopedOneTime: true })) {
     lineItems.push(priceRodentInspection());
   }
 
@@ -1709,15 +1722,15 @@ function generateEstimate(input) {
     const result = calculatePluggingPrice(services.rodentPlugging);
     lineItems.push(result);
   }
-  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control')) {
+  if (services.termiteFoam && !useCommercialManualQuote(services.termiteFoam, 'pest_control', { scopedOneTime: true })) {
     const result = calculateFoamPrice(services.termiteFoam);
     lineItems.push(result);
   }
-  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control')) {
+  if (services.stingingV2 && !useCommercialManualQuote(services.stingingV2, 'pest_control', { scopedOneTime: true })) {
     const result = calculateStingingPrice(services.stingingV2);
     lineItems.push(result);
   }
-  if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control')) {
+  if (services.exclusionV2 && !useCommercialManualQuote(services.exclusionV2, 'pest_control', { scopedOneTime: true })) {
     const result = calculateExclusionPrice({
       sqft: services.exclusionV2.sqft || property.footprint,
       stories: services.exclusionV2.stories || property.stories,
@@ -1741,6 +1754,23 @@ function generateEstimate(input) {
       guaranteeTerm: services.rodentGuaranteeCombo.guaranteeTerm || 12,
     });
     lineItems.push(result);
+  }
+
+  // Commercial re-marking for scoped one-time lines (GATE_COMMERCIAL_ONETIME_
+  // SCOPED): lines priced by the { scopedOneTime: true } bypasses above carry
+  // residential line identity — re-mark them with the commercial tax family and
+  // the flat-commercial discount rules BEFORE the WaveGuard/discount passes so
+  // discountable:false / excludeFromPctDiscount are in force when discounts
+  // apply. Keyed by the allowlist (not by "was bypassed") so a pricer emitting
+  // an unlisted service key is left untouched and visible in review, and
+  // manual-quote lines (quoteRequired) are never re-marked.
+  if (commercialScopedOneTimeArmed) {
+    for (let i = 0; i < lineItems.length; i += 1) {
+      const line = lineItems[i];
+      if (line && line.quoteRequired !== true && COMMERCIAL_SCOPED_ONETIME_SERVICES.has(line.service)) {
+        lineItems[i] = markCommercialOneTimeLine(line, property, { commercialSubtype });
+      }
+    }
   }
 
   // ── 4. Determine WaveGuard tier ────────────────────────────

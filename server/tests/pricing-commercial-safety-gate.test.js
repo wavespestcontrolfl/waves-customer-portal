@@ -1091,3 +1091,157 @@ describe('commercial safety metadata survives the admin v2 adapter', () => {
     expect(commercialDethatchConfirmation).toBeNull();
   });
 });
+
+describe('GATE_COMMERCIAL_ONETIME_SCOPED — scoped one-time commercial auto-pricing', () => {
+  const GATE = 'GATE_COMMERCIAL_ONETIME_SCOPED';
+  const priorGate = process.env[GATE];
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env[GATE];
+    else process.env[GATE] = priorGate;
+  });
+
+  const scopedRequests = [
+    { services: { preSlab: true }, input: { slabSqFt: 1500 }, service: 'pre_slab_termiticide' },
+    { services: { trenching: { perimeterLF: 200 } }, service: 'trenching' },
+    { services: { boraCare: { surfaceLinearFt: 120, surfaceHeightFt: 8 } }, service: 'bora_care' },
+    { services: { wdo: true }, service: 'wdo_inspection' },
+    { services: { bedBug: { method: 'CHEMICAL', rooms: 3, severity: 'light', prepStatus: 'ready', occupancyType: 'hotel' } }, service: 'bed_bug' },
+    { services: { stinging: { species: 'PAPER_WASP' } }, service: 'stinging_insect' },
+    { services: { stingingV2: { species: 'PAPER_WASP' } }, service: 'stinging_insect_v2' },
+    { services: { exclusionV2: { meshPoints: 4 } }, service: 'exclusion_v2' },
+    { services: { rodentWireMesh: { linearFeet: 20 } }, service: 'rodent_wire_mesh' },
+    { services: { rodentBirdBoxes: { birdBoxType: 'standard_bird_box', birdBoxQuantity: 2 } }, service: 'rodent_bird_box' },
+    { services: { sanitation: { tier: 'standard' } }, service: 'rodent_sanitation' },
+    { services: { rodentInspection: true }, service: 'rodent_inspection' },
+    { services: { foam: { points: 6 } }, service: 'foam_drill' },
+    { services: { termiteFoam: { points: 6 } }, service: 'termite_foam' },
+    { services: { palmInjection: { palmCount: 4, treatmentType: 'nutrition' } }, service: 'palm_injection' },
+  ];
+
+  test('gate OFF: every scoped one-time still collapses to the commercial manual quote', () => {
+    delete process.env[GATE];
+    for (const req of scopedRequests) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      }));
+      const manualFamily = req.service === 'palm_injection' ? 'commercial_lawn' : 'commercial_pest';
+      expect(estimate.lineItems).toEqual([
+        expect.objectContaining({
+          service: manualFamily,
+          quoteRequired: true,
+          requiresManualReview: true,
+        }),
+      ]);
+    }
+  });
+
+  test('gate ON: scoped one-times price with commercial marking instead of a manual quote', () => {
+    process.env[GATE] = 'true';
+    for (const req of scopedRequests) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      }));
+      const line = estimate.lineItems.find((l) => l.service === req.service);
+      expect(line).toBeDefined();
+      expect(line.quoteRequired).not.toBe(true);
+      expect(line.isCommercial).toBe(true);
+      expect(line.propertyType).toBe('commercial');
+      expect(line.commercialPricingMode).toBe('auto_estimate');
+      expect(line.discountable).toBe(false);
+      expect(line.excludeFromPctDiscount).toBe(true);
+      const amount = line.price ?? line.total ?? line.annual;
+      expect(Number.isFinite(amount)).toBe(true);
+      expect(amount).toBeGreaterThan(0);
+    }
+  });
+
+  test('gate ON: commercial price equals the residential price for the same scoped inputs', () => {
+    process.env[GATE] = 'true';
+    for (const req of scopedRequests) {
+      const commercial = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services: req.services,
+        ...(req.input || {}),
+      })).lineItems.find((l) => l.service === req.service);
+      const residential = generateEstimate(baseInput({
+        services: req.services,
+        ...(req.input || {}),
+      })).lineItems.find((l) => l.service === req.service);
+      expect(residential).toBeDefined();
+      expect(commercial.price ?? commercial.total ?? commercial.annual)
+        .toBe(residential.price ?? residential.total ?? residential.annual);
+    }
+  });
+
+  test('gate ON: FL tax family — pest-family taxed, inspections and palm exempt', () => {
+    process.env[GATE] = 'true';
+    const taxed = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    })).lineItems.find((l) => l.service === 'pre_slab_termiticide');
+    expect(taxed.taxable).toBe(true);
+    expect(taxed.taxCategory).toBe('nonresidential_pest_control');
+
+    const wdo = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { wdo: true },
+    })).lineItems.find((l) => l.service === 'wdo_inspection');
+    expect(wdo.taxable).toBe(false);
+
+    const palm = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      services: { palmInjection: { palmCount: 4, treatmentType: 'nutrition' } },
+    })).lineItems.find((l) => l.service === 'palm_injection');
+    expect(palm.taxable).toBe(false);
+    expect(palm.taxCategory).toBe('lawn_spraying_or_treatment');
+  });
+
+  test('gate ON: home-size-bracket one-times STAY manual (no commercial basis yet)', () => {
+    process.env[GATE] = 'true';
+    const stillManual = [
+      { oneTimePest: true },
+      { germanRoach: true },
+      { pestInitialRoach: { roachType: 'regular' } },
+      { flea: true },
+      { exclusion: true },
+      { rodentTrapping: true },
+      { rodentGuarantee: true },
+      { oneTimeMosquito: true },
+      { dethatching: true },
+      { topDressing: true },
+      { plugging: true },
+    ];
+    for (const services of stillManual) {
+      const estimate = generateEstimate(baseInput({
+        propertyType: 'commercial',
+        services,
+      }));
+      const family = ('dethatching' in services || 'topDressing' in services || 'plugging' in services)
+        ? 'commercial_lawn' : 'commercial_pest';
+      expect(estimate.lineItems).toEqual([
+        expect.objectContaining({
+          service: family,
+          quoteRequired: true,
+          requiresManualReview: true,
+        }),
+      ]);
+    }
+  });
+
+  test('gate ON: residential estimates are untouched (no commercial marking)', () => {
+    process.env[GATE] = 'true';
+    const estimate = generateEstimate(baseInput({
+      services: { preSlab: true },
+      slabSqFt: 1500,
+    }));
+    const line = estimate.lineItems.find((l) => l.service === 'pre_slab_termiticide');
+    expect(line).toBeDefined();
+    expect(line.isCommercial).not.toBe(true);
+    expect(line.propertyType).not.toBe('commercial');
+  });
+});

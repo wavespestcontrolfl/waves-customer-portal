@@ -237,9 +237,74 @@ function buildCommercialManualQuoteResult(service, property = {}, options = {}) 
   };
 }
 
+// One-time services whose price is already UNIT-SCOPED (slab sqft, linear
+// feet, drill points, rooms, entry points, stations, palm counts) rather than
+// derived from residential home-size brackets. Behind
+// GATE_COMMERCIAL_ONETIME_SCOPED these price identically on commercial
+// properties — the work is the same scoped work — and carry commercial line
+// marking from markCommercialOneTimeLine. Every key must match the pricer's
+// own `service` value; an unlisted service stays on the manual-quote path
+// (fail closed). Home-size-bracket one-times (one_time_pest, one_time_lawn,
+// german_roach*, wdo, flea, rodent_trapping family, dethatching/top-dressing/
+// plugging) are deliberately NOT here — they need commercial sizing bases and
+// owner-approved numbers before they can auto-price.
+const COMMERCIAL_SCOPED_ONETIME_SERVICES = new Set([
+  'pre_slab_termiticide',
+  'trenching',
+  'bora_care',
+  'foam_drill',
+  'termite_foam',
+  'stinging_insect',
+  'stinging_insect_v2',
+  'exclusion_v2', // V1 'exclusion' stays manual — its minimum floors key off HOME sqft
+  'rodent_wire_mesh',
+  'rodent_bird_box',
+  'rodent_sanitation',
+  'bed_bug',
+  'rodent_inspection',
+  'wdo_inspection',
+  'palm_injection',
+]);
+
+// palm_injection follows the lawn/ornamental FL tax family (like
+// COMMERCIAL_LAWN / COMMERCIAL_TREE_SHRUB). Inspections follow the existing
+// service_taxability rows (termite/wdo inspection is_taxable=false, FL
+// §212.08(6) professional services) — the commercial-inspections taxability
+// question is an open owner ruling; until it lands the table is the
+// authority. Everything else is nonresidential pest control, which FL taxes.
+const COMMERCIAL_LAWN_FAMILY_ONETIME = new Set(['palm_injection']);
+const COMMERCIAL_EXEMPT_INSPECTION_ONETIME = new Set(['wdo_inspection', 'rodent_inspection']);
+
+// Re-marks a residential-pricer line for a commercial property: commercial
+// identity fields, FL tax family, and the flat-commercial discount rules the
+// recurring commercial pricers carry (never WaveGuard/recurring-discountable).
+// Scope inputs (slab sqft, linear ft, counts) are rep-entered, not
+// satellite-estimated, so the line is NOT flagged estimatedPricing and keeps
+// the pricer's own detail/disclaimer.
+function markCommercialOneTimeLine(result, property = {}, options = {}) {
+  if (!result || typeof result !== 'object') return result;
+  const isLawnFamily = COMMERCIAL_LAWN_FAMILY_ONETIME.has(result.service);
+  const isExemptInspection = COMMERCIAL_EXEMPT_INSPECTION_ONETIME.has(result.service);
+  return {
+    ...result,
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    commercialPricingMode: 'auto_estimate',
+    discountable: false,
+    excludeFromPctDiscount: true,
+    taxable: !isLawnFamily && !isExemptInspection,
+    taxCategory: isLawnFamily
+      ? 'lawn_spraying_or_treatment'
+      : (isExemptInspection ? (result.taxCategory || null) : 'nonresidential_pest_control'),
+  };
+}
+
 module.exports = {
   normalizeCommercialString,
   normalizePropertyType,
   isCommercialProperty,
   buildCommercialManualQuoteResult,
+  COMMERCIAL_SCOPED_ONETIME_SERVICES,
+  markCommercialOneTimeLine,
 };
