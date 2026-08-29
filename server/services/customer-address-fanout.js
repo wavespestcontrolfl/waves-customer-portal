@@ -186,7 +186,9 @@ function snapshotMatchesLine1(snapshot, line1) {
 // with the customer merge (a duplicate pair can be the old and new home).
 function homesDiffer(a, b) {
   const zip5 = (v) => String(v || '').replace(/\D/g, '').slice(0, 5);
-  return addressMatchKey(a?.address_line1) !== addressMatchKey(b?.address_line1)
+  // Suffix-normalized ("Main Street" == "Main St") like every other street
+  // compare in this file — a spelling correction is never a move.
+  return addressMatchKey(normalizeStreetLine(a?.address_line1)) !== addressMatchKey(normalizeStreetLine(b?.address_line1))
     || unitKey(a?.address_line2) !== unitKey(b?.address_line2)
     || zip5(a?.zip) !== zip5(b?.zip)
     || addressMatchKey(a?.city) !== addressMatchKey(b?.city);

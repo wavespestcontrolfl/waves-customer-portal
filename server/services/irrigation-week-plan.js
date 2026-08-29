@@ -24,7 +24,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildWeekPlan, HEAD_LABELS, normalizeRuntimeInputs } = require('@waves/irrigation-runtime');
-const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS } = require('./email-template-library');
+const { queuedRowInFlight, QUEUED_IN_FLIGHT_MS, ABORTED_BEFORE_DISPATCH } = require('./email-template-library');
 const { stampedAddressDiverges, premiseStampConflicts } = require('./stamped-address');
 const { currentRestrictionPolicy } = require('../config/irrigation-restrictions');
 const { lastCompletedWeekEndingET } = require('../utils/datetime-et');
@@ -108,6 +108,9 @@ function decideWeekPlan({
   planWeekEnd = null,
   // Last week's SENT plan's event count — cool-season cadence input.
   priorWeekEvents = null,
+  // Unconfirmed schedule after a move: carryover from observed RAIN only
+  // (the former home's programmed irrigation is withheld).
+  rainOnlyCarryover = false,
   now = new Date(),
 } = {}) {
   const restriction = currentRestrictionPolicy(now, { county, horizonEnd: planWeekEnd });
@@ -132,6 +135,7 @@ function decideWeekPlan({
     rainSensor,
     rainKnown: advice?.rainKnown !== false,
     priorWeekEvents,
+    rainOnlyCarryover,
   });
   const runtime = normalizeRuntimeInputs({ runMinutes, wateringDays, systemType });
   // Everything the decision was made from, for the snapshot (the report
@@ -141,6 +145,7 @@ function decideWeekPlan({
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     appliedInches: advice?.appliedInchesPerWeek ?? null,
     priorWeekEvents,
+    rainOnlyCarryover: rainOnlyCarryover === true,
     lastWeekRainInches,
     rainKnown: advice?.rainKnown !== false,
     forecastRainInches,
@@ -476,8 +481,10 @@ async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
     // reconciliation the sweep and the merge use (codex gh-r20).
     if (!row.sent_at) {
       const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${prior}` });
-      if (delivery.state !== 'sent') return null;
-      if (delivery.decisionHash && delivery.decisionHash !== row.decision_hash) return null;
+      // The delivery must NAME this decision: a sent record with no
+      // plan:<hash> (a legacy template under the same customer-week trigger)
+      // is not proof this plan went out.
+      if (delivery.state !== 'sent' || !delivery.decisionHash || delivery.decisionHash !== row.decision_hash) return null;
     }
     const plan = typeof row.week_plan === 'string' ? JSON.parse(row.week_plan) : row.week_plan;
     const events = Number(plan?.events);
@@ -567,7 +574,7 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
   const where = triggerEventId ? { trigger_event_id: triggerEventId } : (idempotencyKey ? { idempotency_key: idempotencyKey } : null);
   if (!where) return { state: null, decisionHash: null };
   try {
-    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id', 'queued_at', 'updated_at');
+    const rows = await db('email_messages').where(where).select('status', 'categories', 'provider_message_id', 'queued_at', 'updated_at', 'error_message');
     if (!rows || !rows.length) return { state: null, decisionHash: null };
     // 'failed' splits on whether the provider ever accepted the message: a
     // failed row WITH a provider_message_id is a post-provider bookkeeping
@@ -584,7 +591,10 @@ async function weekPlanDeliveryState({ triggerEventId, idempotencyKey } = {}) {
       const status = String(row.status || '').toLowerCase();
       if (['sent', 'delivered', 'opened', 'clicked'].includes(status)) return 'sent';
       if (status === 'blocked') return 'blocked';
-      if (status === 'failed') return failedIsAmbiguous(row) ? 'pending' : 'failed';
+      // An attempt its own caller aborted at the queue transition never
+      // reached the provider — retryable now, not a 30-minute ambiguity
+      // (the reclaiming owner must proceed, or a weekly cron loses the email).
+      if (status === 'failed') return (row.error_message === ABORTED_BEFORE_DISPATCH || !failedIsAmbiguous(row)) ? 'failed' : 'pending';
       if (status === 'queued') return queuedRowInFlight(row) ? 'pending' : 'stale';
       return 'pending';
     };

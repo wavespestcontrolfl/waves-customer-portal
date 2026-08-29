@@ -848,6 +848,11 @@ function isUniqueViolation(err) {
 // automation executor's stale-running cutoff.
 const QUEUED_IN_FLIGHT_MS = 2 * 60 * 1000;
 
+// error_message of a queued attempt the caller aborted at the queue
+// transition (onQueued → false): a pre-provider failure that is IMMEDIATELY
+// retryable — never a delivery, never ambiguous.
+const ABORTED_BEFORE_DISPATCH = 'aborted_by_caller_before_dispatch';
+
 function queuedRowInFlight(message, now = Date.now()) {
   if (String(message?.status || '').toLowerCase() !== 'queued') return false;
   const queuedAt = message.queued_at ? new Date(message.queued_at).getTime() : null;
@@ -1193,7 +1198,7 @@ async function sendTemplate({
       // a pre-provider failure — no provider id — so the customer-week
       // reconciliation reads it as retryable, not as a delivery
       // (codex #3565 gh-r20).
-      const reason = 'aborted_by_caller_before_dispatch';
+      const reason = ABORTED_BEFORE_DISPATCH;
       let aborted;
       try {
         // Scoped to THIS queued attempt (id + queued + send_attempt_token),
@@ -1320,6 +1325,7 @@ module.exports = {
   dedupedResultForExistingMessage,
   shouldRetryExistingMessage,
   queuedRowInFlight,
+  ABORTED_BEFORE_DISPATCH,
   QUEUED_IN_FLIGHT_MS,
   createDraftVersion,
   publishVersion,

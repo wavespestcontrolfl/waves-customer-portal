@@ -60,6 +60,18 @@ describe('buildWeekPlan — sizing', () => {
     expect(rotor.minutesPerEvent).toBe(60);
   });
 
+  test('rainOnlyCarryover: observed rain is the applied total, the programmed irrigation is withheld (codex gh-r23)', () => {
+    const rainy = { targetInchesPerWeek: 0.75, lastWeekRainInches: 1.4, lastWeekAppliedInches: 3, season: 'peak', restriction: ONE_DAY, ...SPRAY };
+    const withSchedule = buildWeekPlan(rainy);
+    expect(withSchedule.reasons).toContain('prior_week_overwatered');
+    const rainOnly = buildWeekPlan({ ...rainy, rainOnlyCarryover: true });
+    expect(rainOnly.reasons).toContain('prior_week_rain_surplus');
+    expect(rainOnly.reasons).not.toContain('prior_week_overwatered');
+    expect(rainOnly.carryoverInches).toBe(0.5); // capped at root-zone storage, from RAIN
+    // Programmed irrigation alone (no rain) earns no carryover in rain-only mode.
+    expect(buildWeekPlan({ ...rainy, lastWeekRainInches: 0, rainOnlyCarryover: true }).carryoverInches).toBe(0);
+  });
+
   test('cool season honors the advertised 10–14-day cadence: a run last week → hold this week (codex gh-r19)', () => {
     const after = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'cool', restriction: TWO_DAYS, priorWeekEvents: 1, ...SPRAY });
     expect(after.action).toBe('hold');

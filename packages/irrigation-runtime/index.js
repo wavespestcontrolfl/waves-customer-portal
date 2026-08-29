@@ -276,6 +276,10 @@ function buildWeekPlan({
   rainKnown = true,
   // Last week's SENT plan's event count (null = unknown / no plan).
   priorWeekEvents = null,
+  // Carry over from observed rain only (the programmed irrigation is not
+  // trusted — e.g. settings saved for a former home): same treatment as a
+  // rain sensor.
+  rainOnlyCarryover = false,
 } = {}) {
   const reasons = [];
   const legalMaxEvents = restriction && Number.isInteger(Number(restriction.maxDaysPerWeek)) && Number(restriction.maxDaysPerWeek) >= 0
@@ -311,12 +315,13 @@ function buildWeekPlan({
   // have skipped runs — which ones is unknowable), so only the observed rain
   // can prove a surplus; assumed irrigation never tells a sensor customer to
   // skip a run.
-  const applied = finiteOrNull(rainSensor === true ? lastWeekRainInches : lastWeekAppliedInches);
+  const rainOnly = rainSensor === true || rainOnlyCarryover === true;
+  const applied = finiteOrNull(rainOnly ? lastWeekRainInches : lastWeekAppliedInches);
   const lastTarget = finiteOrNull(lastWeekTargetInches) ?? target;
   let carryover = 0;
   if (applied != null && applied > lastTarget) {
     carryover = round2(clamp(applied - lastTarget, 0, ROOT_ZONE_STORAGE_INCHES));
-    if (carryover > 0) reasons.push(rainSensor === true ? 'prior_week_rain_surplus' : 'prior_week_overwatered');
+    if (carryover > 0) reasons.push(rainOnly ? 'prior_week_rain_surplus' : 'prior_week_overwatered');
   }
   const need = round2(Math.max(0, target - carryover));
   if (season === 'cool') reasons.push('cool_season');

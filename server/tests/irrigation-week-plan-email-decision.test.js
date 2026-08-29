@@ -41,7 +41,7 @@ describe('weekly email decision — plan mode', () => {
     expect(d.payload.week_plan).toContain('turf zone');
     expect(d.payload.restriction_note).toContain('one day a week');
     // Numbers block still fed; "needs right now" is THIS week's target (the plan's).
-    expect(d.payload.total_inches).toBe('2.6');
+    expect(d.payload.total_inches).toBe('2.6"'); // the plan template renders the unit from the payload (gh-r23)
     expect(d.payload.target_inches).toBe(String(d.weekPlan.targetInches));
     expect(d.payload.target_inches).toBe('1.25');
   });
@@ -179,7 +179,7 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
     expect(sweep).toMatch(/const priorWeekEvents = weekPlanEnabled \? await loadPriorWeekPlanEvents\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
-    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*now,/);
+    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
@@ -227,5 +227,12 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(moved.payload.summary_line).toMatch(/^Rain near your home last week came to/);
     expect(moved.decisionInputs.scheduleUnconfirmed).toBe(true);
     expect(moved.decisionInputs.runMinutes ?? null).toBe(null);
+    // gh-r23: the details block never quotes the former home's setting / a mixed total.
+    expect(moved.payload.irrigation_inches).toBe('Not on file — re-enter after your move');
+    expect(moved.payload.total_inches).toMatch(/^0\.2" \(rain only\)$/);
+    expect(ok.payload.irrigation_inches).toMatch(/^[\d.]+"$/);
+    expect(ok.payload.total_inches).toMatch(/^[\d.]+"$/);
+    expect(moved.decisionInputs.rainOnlyCarryover).toBe(true);
+    expect(ok.decisionInputs.rainOnlyCarryover).toBe(false);
   });
 });

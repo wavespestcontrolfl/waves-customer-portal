@@ -674,6 +674,7 @@ function buildWeeklyEmailDecision({
       home,
       planWeekEnd,
       priorWeekEvents,
+      rainOnlyCarryover: scheduleUnconfirmed,
       now,
     });
     // A derived schedule's provenance sentence (below) already names the
@@ -723,6 +724,12 @@ function buildWeeklyEmailDecision({
         decisionInputs: { ...decisionInputs, rainfallInches7d, et0Inches, rainSource, scheduleSource, scheduleUnconfirmed },
         payload: {
           ...payload,
+          // The plan template renders these WITH their unit here (its rows
+          // carry no hard-coded inch mark) so an unconfirmed schedule can say
+          // so instead of quoting the former home's setting and a total that
+          // mixes it with the new home's rain (codex gh-r23).
+          irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move' : `${irrigationFmt}"`,
+          total_inches: scheduleUnconfirmed ? `${rain}" (rain only)` : `${total}"`,
           // "What your grass needs right now" = THIS week's target (the plan's),
           // not the completed week's — they differ at month boundaries and
           // with a different forecast ET₀.

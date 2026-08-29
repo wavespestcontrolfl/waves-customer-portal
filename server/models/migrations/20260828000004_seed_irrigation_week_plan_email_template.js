@@ -42,8 +42,10 @@ const TEMPLATE = {
       type: 'details',
       rows: [
         { label: 'Rain at your home last week', value: '{{rain_last_week}}"' },
-        { label: 'Your weekly irrigation setting', value: '{{irrigation_inches}}"' },
-        { label: 'Total water your lawn received', value: '{{total_inches}}"' },
+        // Unit rendered by the payload (so "Not on file — re-enter after your
+        // move" / "0.2\" (rain only)" read cleanly after an address change).
+        { label: 'Your weekly irrigation setting', value: '{{irrigation_inches}}' },
+        { label: 'Total water your lawn received', value: '{{total_inches}}' },
         { label: 'What your {{grass_label}} needs right now', value: '{{target_inches}}"' },
       ],
     },
@@ -65,8 +67,8 @@ const PREVIEW_PAYLOAD = {
   plan_note: 'Your area is limited to one watering day a week right now, so this plan stays inside that even though your St. Augustine could use a little more — one deeper soak does more good than two light ones. Minutes assume typical spray heads rates from University of Florida turf guidance. If you know your system\'s actual weekly output, enter Weekly Inches in your portal and we\'ll tighten this to your numbers.',
   grass_label: 'St. Augustine',
   rain_last_week: '0.6',
-  irrigation_inches: '2',
-  total_inches: '2.6',
+  irrigation_inches: '2"',
+  total_inches: '2.6"',
   target_inches: '1.25',
   forecast_line: 'Looking ahead: about 0.3" of rain is in the forecast for your area over the next 7 days.',
   restriction_note: 'SWFWMD Modified Phase III water shortage order: lawn watering is limited to one day a week, on your assigned day, during your area\'s allowed hours, through 2026-10-01. Water on your assigned day only.',

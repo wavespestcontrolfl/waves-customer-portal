@@ -577,6 +577,9 @@ describe('sprinkler settings follow the home (codex #3565 gh-r19)', () => {
     expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: '#4' })).toBe(false);
     expect(homesDiffer({ ...BEFORE, address_line2: 'Apt 4' }, { ...BEFORE, address_line2: 'Apt 7' })).toBe(true);
     expect(homesDiffer(BEFORE, { ...BEFORE, zip: '34211-1234' })).toBe(false);
+    // gh-r23: suffix spelling is a correction, never a move.
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main Street' }, { ...BEFORE, address_line1: '123 Main St' })).toBe(false);
+    expect(homesDiffer({ ...BEFORE, address_line1: '123 Main St' }, { ...BEFORE, address_line1: '123 Main Ave' })).toBe(true);
   });
   test('a formatting-only correction of the same home (case, unit spelling) does not stamp', async () => {
     const conn = makeConn({ leads: [], estimates: [] });

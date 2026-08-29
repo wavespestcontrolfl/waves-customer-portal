@@ -372,9 +372,17 @@ describe('snapshot lifecycle — exactness contract', () => {
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
     expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
-    // …a record naming a DIFFERENT decision, or no delivery at all, does not.
+    // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['irrigation']) }]);
+    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    // gh-r23: an attempt aborted at the queue transition is immediately retryable, never 'pending'.
+    const { weekPlanDeliveryState } = require('../services/irrigation-week-plan');
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: NOW, error_message: 'aborted_by_caller_before_dispatch' }] }));
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).state).toBe('failed');
+    db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: new Date(), error_message: 'sendgrid 500' }] }));
+    expect((await weekPlanDeliveryState({ triggerEventId: 't' })).state).toBe('pending');
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'failed', categories: JSON.stringify(['plan:h1']) }]);
     expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     rig(null);
