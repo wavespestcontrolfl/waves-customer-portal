@@ -481,15 +481,18 @@ describe('createEstimateMeasurementReview', () => {
 });
 
 describe('bell + lifecycle guards (codex r2 P1s)', () => {
-  test('estimate_measurement_review rings under the admin bell policy', () => {
-    // The admin notification is the flow's ONLY handoff — if the bell policy
-    // suppresses the category, the office never learns a customer is waiting
-    // on a promised same-day re-check.
+  test('estimate_measurement_review is owner-overridable under the admin bell policy (silent by default, owner ruling 2026-08-28)', () => {
+    // Owner ruling 2026-08-28: this lane no longer rings by default. The
+    // policy INVARIANT still holds — a silenced category must be listed as
+    // overridable so the owner can re-enable it from Settings → Notifications
+    // (a suppressible category nobody can re-enable is a dead letterbox).
     const policySrc = require('fs').readFileSync(
       require.resolve('../services/notification-bell-policy'), 'utf8'
     );
     const allowlistBlock = policySrc.split('CATEGORY_BELL_ALLOWLIST')[1].split(']')[0];
-    expect(allowlistBlock).toContain("'estimate_measurement_review'");
+    expect(allowlistBlock).not.toContain("'estimate_measurement_review'");
+    const overridableBlock = policySrc.split('OVERRIDABLE_CATEGORIES = [')[1].split(']')[0];
+    expect(overridableBlock).toContain("'estimate_measurement_review'");
   });
 
   test('admin-requests lifecycle email skips measurement_review rows', () => {

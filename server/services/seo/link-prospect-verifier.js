@@ -42,10 +42,33 @@ function expectedTargetUrl(prospect) {
   const q = parseQuality(prospect && prospect.quality_signals);
   return q.cited_homepage ? OUR_HOMEPAGE : (prospect && prospect.target_page);
 }
-const SOURCE_URL_COMPARABLE_SQL = "regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(source_url), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')";
+// SQL twin of normalizeComparableUrl() for any URL column: scheme/www/trailing
+// slash dropped, lower-cased. Shared with backlink-monitor's link identity.
+function comparableUrlSql(column) {
+  return `regexp_replace(regexp_replace(regexp_replace(regexp_replace(lower(${column}), '^https://', ''), '^http://', ''), '^www\\.', ''), '/+$', '')`;
+}
+const SOURCE_URL_COMPARABLE_SQL = comparableUrlSql('source_url');
+
+// Case-PRESERVING canonical link URL for backlink identity (backlink-monitor):
+// scheme + www dropped, HOST lower-cased, path/query kept as-is (paths are
+// case-sensitive: /Post and /post are different pages), trailing slashes
+// dropped. `canonicalLinkUrlSql` is its SQL twin (no bare '?' — knex slot).
+function canonicalLinkUrl(u) {
+  const s = String(u || '').trim().replace(/&amp;/gi, '&').replace(/^https?:\/\//i, '').replace(/^\/\//, '').replace(/^www\./i, '');
+  const slash = s.indexOf('/');
+  const host = (slash === -1 ? s : s.slice(0, slash)).toLowerCase();
+  const path = slash === -1 ? '' : s.slice(slash);
+  return host + path.replace(/\/+$/, '');
+}
+function canonicalLinkUrlSql(column) {
+  const stripped = `regexp_replace(regexp_replace(regexp_replace(${column}, '^https://', '', 'i'), '^http://', '', 'i'), '^www\\.', '', 'i')`;
+  const host = `split_part(${stripped}, '/', 1)`;
+  return `(lower(${host}) || regexp_replace(substr(${stripped}, length(${host}) + 1), '/+$', ''))`;
+}
 
 function stripUrl(u) {
-  return String(u || '').trim().replace(/^https?:\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
+  // Also decodes &amp; (hrefs in HTML) and accepts protocol-relative //host/path.
+  return String(u || '').trim().replace(/&amp;/gi, '&').replace(/^https?:\/\//, '').replace(/^\/\//, '').replace(/^www\./, '').replace(/\/+$/, '');
 }
 
 function normalizeComparableUrl(u) {
@@ -137,10 +160,17 @@ function firstSeenOnOrAfter(row, floorDate) {
 // live_url. Active-only: a 'disavowed' or 'lost' row must not promote a prospect to
 // live (loss is then detected by the crawl/wasLive fallback in verifyOne, which is
 // more authoritative than a possibly-stale scan row).
+// Only SCAN-TRACKED rows are evidence a link is live today: a GSC-export row
+// is historical (it stays active forever and is excluded from loss detection
+// for the same reason), so it must never promote a prospect — least of all a
+// lost_recovery row whose loss was just crawl-verified.
+const scanTrackedOnly = (qb) => qb.whereNull('discovery_source').orWhere('discovery_source', 'dataforseo');
+
 async function reconcileFromProfile(prospect) {
   const liveStripped = normalizeComparableUrl(prospect.live_url);
   const rows = await db('seo_backlinks')
     .where({ status: 'active' })
+    .where(scanTrackedOnly)
     .whereRaw(`${SOURCE_URL_COMPARABLE_SQL} = ?`, [liveStripped.toLowerCase()])
     .orderBy('last_checked', 'desc')
     .limit(10);
@@ -179,6 +209,7 @@ async function reconcileByDomain(prospect) {
   const rows = await db('seo_backlinks')
     // Active only — never promote/index from a 'disavowed' (or 'lost') link.
     .where({ status: 'active' })
+    .where(scanTrackedOnly)
     .whereRaw("lower(regexp_replace(source_domain, '^www\\.', '')) = ?", [dom])
     .orderBy('last_checked', 'desc')
     .limit(25);
@@ -297,41 +328,82 @@ async function pushForIndexing(prospect, liveUrl, isDofollow, now, { dofollowCon
   return false;
 }
 
-// Best-effort crawl: does live_url contain an <a> to wavespestcontrol.com, and is it dofollow?
-async function crawlForLink(liveUrl, targetPage) {
-  let to = null;
-  try {
-    const expectedTarget = normalizeComparableUrl(targetPage);
-    if (!expectedTarget) return { found: false };
-    const controller = new AbortController();
-    to = setTimeout(() => controller.abort(), 12000);
-    const res = await fetch(liveUrl, {
-      signal: controller.signal,
-      redirect: 'follow',
-      headers: { 'User-Agent': 'WavesBacklinkVerifier/1.0 (+https://wavespestcontrol.com)' },
-    });
-    if (!res.ok) return { found: false };
-    const html = await res.text();
+// Exact-page match: same normalized path, optional trailing slash / query /
+// fragment — never a descendant path. Inbound loss verification uses this so a
+// surviving link to /service/article can't stand in for the lost link to /service.
+function matchesExactTargetUrl(candidate, expected) {
+  if (!candidate || !expected) return false;
+  const strip = (u) => String(u).split('#')[0].split('?')[0].replace(/\/+$/, '');
+  return strip(candidate) === strip(expected);
+}
 
-    // Find anchor tags whose href points at the intended Waves target page.
-    const anchorRe = /<a\b([^>]*?)href=["']([^"']*wavespestcontrol\.com[^"']*)["']([^>]*)>([\s\S]*?)<\/a>/gi;
-    let m;
-    while ((m = anchorRe.exec(html)) !== null) {
-      const href = normalizeComparableUrl(m[2]);
-      if (!matchesTargetUrl(href, expectedTarget)) continue;
-      const attrs = `${m[1]} ${m[3]}`;
-      const relMatch = /rel=["']([^"']*)["']/i.exec(attrs);
-      const rel = relMatch ? relMatch[1].toLowerCase() : '';
-      const isDofollow = !/\bnofollow\b|\bugc\b|\bsponsored\b/.test(rel);
-      const anchorText = m[4].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
-      return { found: true, isDofollow, anchorText: anchorText || null };
-    }
-    return { found: false };
-  } catch (err) {
-    return { found: false, error: err.message };
-  } finally {
-    if (to) clearTimeout(to);
+// A 200 that is not really the page: bot-challenge interstitials (Cloudflare
+// "Just a moment…", Turnstile, hCaptcha/reCAPTCHA walls, WAF blocks) or a
+// non-HTML body. Absence of our link in such a response proves nothing.
+const CHALLENGE_RE = /just a moment|attention required|verify you are human|checking your browser|cf-chl|challenge-platform|turnstile|hcaptcha|g-recaptcha|access denied|request blocked|enable javascript and cookies/i;
+function classifyPageBody(html, contentType) {
+  if (contentType && !/html|xhtml|text\/plain|^\s*$/i.test(String(contentType))) return 'non_html';
+  const head = String(html || '').slice(0, 20000);
+  if (!/<(html|body|a|div|p|title)\b/i.test(head)) return 'non_html';
+  if (CHALLENGE_RE.test(head) && !/wavespestcontrol\.com/i.test(html)) return 'challenge';
+  return 'html';
+}
+
+// Pure: find the first <a> in html pointing at the intended Waves target page.
+// opts.exact → matchesExactTargetUrl instead of the prefix/boundary match.
+function findLinkInHtml(html, targetPage, { exact = false } = {}) {
+  const expectedTarget = normalizeComparableUrl(targetPage);
+  if (!expectedTarget || typeof html !== 'string') return { found: false };
+  // href may be double-quoted, single-quoted or unquoted; absolute, protocol-
+  // relative (//host/…) or entity-encoded. Any <a> whose href mentions our
+  // host is a candidate; the target match decides.
+  const anchorRe = /<a\b([^>]*?)\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))([^>]*)>([\s\S]*?)<\/a>/gi;
+  const matches = exact ? matchesExactTargetUrl : matchesTargetUrl;
+  let m;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const rawHref = m[2] ?? m[3] ?? m[4] ?? '';
+    if (!/wavespestcontrol\.com/i.test(rawHref)) continue;
+    const href = normalizeComparableUrl(rawHref);
+    if (!matches(href, expectedTarget)) continue;
+    const attrs = `${m[1]} ${m[5]}`;
+    const relMatch = /\brel\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i.exec(attrs);
+    const rel = relMatch ? String(relMatch[1] ?? relMatch[2] ?? relMatch[3] ?? '').toLowerCase() : '';
+    const isDofollow = !/\bnofollow\b|\bugc\b|\bsponsored\b/.test(rel);
+    const anchorText = m[6].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    return { found: true, isDofollow, anchorText: anchorText || null };
   }
+  return { found: false };
+}
+
+// Best-effort crawl: does liveUrl contain an <a> to wavespestcontrol.com, and is it
+// dofollow? Goes through contact-finder's SSRF-pinned fetcher (private-IP lookup
+// guard + per-hop redirect revalidation): live_url / source_url values come from
+// operators, Hermes and DataForSEO — never trust them with a plain fetch.
+// Returns { found, isDofollow?, anchorText?, status, blocked, truncated, error } so
+// callers can tell a page that is gone (4xx) from a page that dropped the link
+// (2xx, complete body, not found); a truncated body never proves absence.
+async function crawlForLink(liveUrl, targetPage, { fetchPageFn, exact = false } = {}) {
+  const expectedTarget = normalizeComparableUrl(targetPage);
+  if (!expectedTarget) return { found: false, status: 0, blocked: false, truncated: false, error: 'no_target' };
+  const fetchPage = fetchPageFn || require('./contact-finder').fetchPage;
+  const page = await fetchPage(liveUrl, { timeoutMs: 12000 });
+  if (!page || !page.html || !String(page.html).trim()) {
+    // No body at all. A 2xx with nothing in it (204, blank 200) proves nothing
+    // about the link — report it unverifiable, never "not found on the page".
+    const status = page ? page.status : 0;
+    const empty2xx = !!page && status >= 200 && status < 300 && !page.blocked;
+    return {
+      found: false, status, blocked: !!(page && page.blocked), truncated: !!(page && page.truncated),
+      ...(empty2xx ? { unverifiable: 'empty' } : {}),
+      error: page ? page.error : 'fetch_failed',
+    };
+  }
+  const kind = classifyPageBody(page.html, page.contentType);
+  if (kind !== 'html') {
+    // Unparseable or interstitial response: report it as such, never as "not found on the page".
+    return { found: false, status: page.status, blocked: false, truncated: !!page.truncated, unverifiable: kind, error: null };
+  }
+  return { ...findLinkInHtml(page.html, targetPage, { exact }), status: page.status, blocked: false, truncated: !!page.truncated, error: null };
 }
 
 // Apply a live transition + fire indexing for a confirmed link. `discoveredUrl`
@@ -367,7 +439,24 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   if (parseQuality(prospect.quality_signals).pending) {
     patch.quality_signals = db.raw("quality_signals - 'pending'");
   }
-  await db('seo_link_prospects').where({ id: prospect.id }).update(patch);
+  // An un-pitched 'prospect' (e.g. a lost-link recovery row enrolled here via
+  // live_url) is promoted with the SAME unsent-state guard as
+  // resolveRecoveredLink: only none/drafted + never sent. A parked draft is
+  // withdrawn; a row whose send is in flight ('sending') or already sent is left
+  // to the send finalizer / operator reconciliation — a 0-row update here means
+  // exactly that, and the row is not touched.
+  let q = db('seo_link_prospects').where({ id: prospect.id });
+  if (prospect.status === 'prospect') {
+    q = q.where({ status: 'prospect' })
+      .whereRaw("COALESCE(outreach_status, 'none') IN ('none', 'drafted')")
+      .whereNull('outreach_sent_at');
+    Object.assign(patch, { claimed_at: null, claimed_by: null, outreach_status: 'none', outreach_send_token: null });
+  }
+  const n = await q.update(patch);
+  if (!n) {
+    logger.info(`[link-verifier] ${prospect.id} (${prospect.target_domain}) link is live but the row is mid-send — left for reconciliation`);
+    return 'pending';
+  }
   // Hand pushForIndexing the POST-patch view so its already-indexed guard and URL
   // dedupe see the reset state, not the stale snapshot. (omega_* still read from
   // its own atomic claim against the live column.)
@@ -381,9 +470,24 @@ async function markLive(prospect, { isDofollow, anchorText, backlinkId, discover
   return 'live';
 }
 
+// Same rule as backlink-monitor's verifyLoss: only a page that is gone (404/410)
+// or that rendered a COMPLETE HTML body without our link (2xx, not truncated,
+// not a challenge/non-HTML/empty body) proves the link is absent. 403/429/5xx,
+// redirect budget, truncation past the body cap, DNS/TLS/timeouts and
+// SSRF-blocked hosts prove nothing.
+function crawlProvesAbsence(crawl) {
+  if (!crawl || crawl.found) return false;
+  const status = Number(crawl.status) || 0;
+  if (status === 404 || status === 410) return true;
+  return status >= 200 && status < 300 && !crawl.truncated && !crawl.blocked && !crawl.unverifiable && !crawl.error;
+}
+
 async function verifyOne(prospect) {
   const now = new Date();
   const wasLive = ['live', 'indexed'].includes(prospect.status);
+  // A live/indexed row is demoted only on definitive evidence. With no live_url
+  // there is no page to crawl, so the domain reconcile alone decides (as before).
+  let crawlDefinitive = !prospect.live_url;
 
   // 1 & 2 need a known live_url. Pending placements (null live_url) skip straight
   // to the domain reconcile below.
@@ -399,12 +503,15 @@ async function verifyOne(prospect) {
 
     // 2. Crawl fallback — fresh links, or a moved/false-lost page. The crawl parses
     // the real rel attribute, so its dofollow verdict is authoritative.
-    const crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect));
+    let crawl;
+    try { crawl = await crawlForLink(prospect.live_url, expectedTargetUrl(prospect)); }
+    catch (err) { crawl = { found: false, status: 0, error: err.message }; }
     if (crawl.found) {
       return markLive(prospect, {
         isDofollow: crawl.isDofollow, anchorText: crawl.anchorText, dofollowConfirmed: true,
       }, now);
     }
+    crawlDefinitive = crawlProvesAbsence(crawl);
   }
 
   // 3. Domain reconcile — covers pending placements with no known live_url, a
@@ -418,15 +525,18 @@ async function verifyOne(prospect) {
     }, now);
   }
 
-  // Not found active anywhere. Regression if it used to be live; otherwise touch.
-  if (wasLive) {
+  // Not found active anywhere. Regression if it used to be live AND the crawl
+  // was definitive; an unverifiable crawl (blocked, truncated, non-HTML, error)
+  // keeps the row as it was — a temporary DataForSEO absence plus a crawl that
+  // could not read the page is not a loss.
+  if (wasLive && crawlDefinitive) {
     await db('seo_link_prospects').where({ id: prospect.id }).update({
       status: 'lost', last_live_check: now, updated_at: now,
     });
     return 'lost';
   }
   await db('seo_link_prospects').where({ id: prospect.id }).update({ last_live_check: now, updated_at: now });
-  return 'pending';
+  return wasLive ? 'unverified' : 'pending';
 }
 
 async function run({ limit = 200 } = {}) {
@@ -439,24 +549,25 @@ async function run({ limit = 200 } = {}) {
     .orderByRaw('last_live_check NULLS FIRST')
     .limit(limit);
 
-  let live = 0, lost = 0, pending = 0;
+  let live = 0, lost = 0, pending = 0, unverified = 0;
   for (const p of prospects) {
     try {
       const r = await verifyOne(p);
       if (r === 'live') live++;
       else if (r === 'lost') lost++;
+      else if (r === 'unverified') unverified++;
       else pending++;
     } catch (err) {
       logger.error(`[link-verifier] ${p.id} (${p.target_domain}) failed: ${err.message}`);
     }
   }
-  logger.info(`[link-verifier] checked ${prospects.length}: ${live} live, ${lost} lost, ${pending} pending`);
-  return { checked: prospects.length, live, lost, pending };
+  logger.info(`[link-verifier] checked ${prospects.length}: ${live} live, ${lost} lost, ${pending} pending, ${unverified} unverified`);
+  return { checked: prospects.length, live, lost, pending, unverified };
 }
 
-module.exports = { run, verifyOne, crawlForLink, reconcileByDomain, pushForIndexing, markLive };
+module.exports = { run, verifyOne, crawlForLink, findLinkInHtml, matchesExactTargetUrl, classifyPageBody, crawlProvesAbsence, reconcileByDomain, pushForIndexing, markLive };
 module.exports._test = {
-  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL,
+  backlinkTargetsProspect, matchesTargetUrl, normalizeComparableUrl, SOURCE_URL_COMPARABLE_SQL, comparableUrlSql, canonicalLinkUrl, canonicalLinkUrlSql,
   comparableDomain, parseQuality, expectedTargetUrl,
   comparableFirstSeen, placementFloorEt, firstSeenOnOrAfter,
 };

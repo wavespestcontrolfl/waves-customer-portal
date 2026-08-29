@@ -157,6 +157,8 @@ describe('is_billing_party flows through the extraction mapping', () => {
 describe('extraction schema version', () => {
   test('SCHEMA_VERSION is at least 1.6.0 (the additive is_billing_party bump)', () => {
     const { SCHEMA_VERSION } = require('../schemas/validate-extraction');
-    expect(SCHEMA_VERSION >= '1.6.0').toBe(true);
+    // Numeric compare — a string compare read '1.10.0' as below '1.6.0'.
+    const [major, minor] = SCHEMA_VERSION.split('.').map(Number);
+    expect(major > 1 || (major === 1 && minor >= 6)).toBe(true);
   });
 });

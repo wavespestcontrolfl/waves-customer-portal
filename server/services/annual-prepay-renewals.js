@@ -3546,31 +3546,142 @@ function clearCardExpiryExemptCache() {
   cardExpiryExemptCache.clear();
 }
 
-async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
-  if (conn !== db) return computeCardExpiryExemptCustomerIds(horizon, conn);
+// Plain copy for callers — the cached structure stays immutable and the
+// lookupFailed marker never leaks.
+function copyCardExpiryExemptions(result) {
+  return {
+    customerIds: new Set(result.customerIds),
+    chargeMethodIdsByCustomer: new Map(
+      [...result.chargeMethodIdsByCustomer].map(([customerId, ids]) => [customerId, ids instanceof Set ? new Set(ids) : null]),
+    ),
+  };
+}
+
+// Per-method exemption (shape documented in services/card-expiry-exemptions.js):
+// { customerIds, chargeMethodIdsByCustomer }. Memoized per horizon exactly
+// like the customer-level set below, which is now derived from it.
+async function getCardExpiryExemptions(horizon = etDateString(), conn = db) {
+  if (conn !== db) return copyCardExpiryExemptions(await computeCardExpiryExemptions(horizon, conn));
   const hit = cardExpiryExemptCache.get(horizon);
   if (hit && Date.now() - hit.at < CARD_EXPIRY_EXEMPT_TTL_MS) {
-    return new Set(await hit.promise);
+    return copyCardExpiryExemptions(await hit.promise);
   }
   // evict expired horizons on insert — callers derive a fresh horizon as
   // calendar time advances, so without eviction the map grows with uptime
   for (const [key, staleEntry] of cardExpiryExemptCache) {
     if (Date.now() - staleEntry.at >= CARD_EXPIRY_EXEMPT_TTL_MS) cardExpiryExemptCache.delete(key);
   }
-  const entry = { at: Date.now(), promise: computeCardExpiryExemptCustomerIds(horizon, conn) };
+  const entry = { at: Date.now(), promise: computeCardExpiryExemptions(horizon, conn) };
   cardExpiryExemptCache.set(horizon, entry);
   const result = await entry.promise;
   if (result.lookupFailed && cardExpiryExemptCache.get(horizon) === entry) {
     cardExpiryExemptCache.delete(horizon);
   }
-  // callers get a plain copy — the cached set stays immutable and the
-  // lookupFailed marker never leaks
-  return new Set(result);
+  return copyCardExpiryExemptions(result);
 }
 
-async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+// Customer-level view: covered customers with NO card charge coming inside
+// the window. A covered customer whose charge is coming on SOME method is
+// not here — consult isCardExpiryExemptMethod for the per-method verdict.
+async function getCardExpiryExemptCustomerIds(horizon = etDateString(), conn = db) {
+  return (await getCardExpiryExemptions(horizon, conn)).customerIds;
+}
+
+async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) {
   const today = etDateString();
   let covered;
+  // Per-covered-customer charge vectors (payment_methods.id each forthcoming
+  // charge will use; null = a charge is coming but its method could not be
+  // resolved → every method keeps its warning). A covered customer absent
+  // from this map has no charge coming → fully exempt.
+  const chargeMethodIdsByCustomer = new Map();
+  const recordCharge = (customerId, methodId) => {
+    const key = String(customerId);
+    if (chargeMethodIdsByCustomer.get(key) === null) return;
+    if (methodId == null) { chargeMethodIdsByCustomer.set(key, null); return; }
+    if (!chargeMethodIdsByCustomer.has(key)) chargeMethodIdsByCustomer.set(key, new Set());
+    chargeMethodIdsByCustomer.get(key).add(String(methodId));
+  };
+  // Still worth evaluating: covered, and not already known to charge an
+  // unresolvable method (once every method warns, nothing more can change).
+  const evaluable = (customerId) => covered.has(String(customerId)) && chargeMethodIdsByCustomer.get(String(customerId)) !== null;
+  const anyEvaluable = () => [...covered].some((customerId) => evaluable(customerId));
+  const finish = () => ({
+    customerIds: new Set([...covered].filter((customerId) => !chargeMethodIdsByCustomer.has(customerId))),
+    chargeMethodIdsByCustomer,
+  });
+  const failedExemptions = () => ({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map(), lookupFailed: true });
+  // The method(s) the Auto Pay rails will charge — the retry sweep
+  // (StripeService.charge) and every completion Auto Pay lane
+  // (chargeInvoiceWithSavedCard → getChargeableAutopayMethod under lock)
+  // walk the SAME pointer-first, newest-default order. TWO walks, both
+  // recorded (hook P1): with ignoreCardExpiry the walk lands on the
+  // expiring card itself (the card the warning exists to replace —
+  // charge()'s expiry fallback would route past it); without, it is the
+  // card charge() falls back to TODAY when that pointer/default is
+  // already expired — a real charge on a card that must keep its warning
+  // too. No method on either walk → [] (unresolved: every method warns —
+  // noise, never a missed charge). Lookup failures propagate to the outer
+  // catch (exempt nobody). One pair of walks per customer.
+  const walkNow = new Date();
+  const horizonNoon = parseETDateTime(`${dateOnly(horizon)}T12:00`);
+  const autopayWalkMemo = new Map();
+  const autopayWalkMethodIds = async (customerLike) => {
+    const key = String(customerLike.id);
+    if (!autopayWalkMemo.has(key)) {
+      const { listChargeableAutopayMethods, isExpiredCardMethod, isBankMethodType } = require('./autopay-eligibility');
+      // (a) the expiring card the warning exists to replace; (b) today's
+      // eligible methods in walk order, AS FAR AS the horizon can make
+      // each predecessor fall through: the charge lands on some date
+      // inside the horizon and eligibility only shrinks with time (cards
+      // expire), so charge() moves past a method only once it has
+      // expired — a method still valid AT the horizon (or a bank row) is
+      // selected on every date in the window and nothing behind it can be
+      // (GitHub P1 + r2 P2: a pointer valid today but expiring mid-window
+      // hands the charge to the next default; a pointer valid through the
+      // horizon never does).
+      autopayWalkMemo.set(key, Promise.all([
+        listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow, ignoreCardExpiry: true }),
+        listChargeableAutopayMethods(customerLike, conn, { rethrow: true, now: walkNow }),
+      ]).then(([expiringFirst, eligibleToday]) => {
+        // Expiry as a month index (bank rows never expire). charge() only
+        // moves PAST a method once it has expired, so a fallback is
+        // reachable only if it is still valid AFTER every method ahead of
+        // it has expired — one expiring the same month as (or before) its
+        // predecessor is skipped in the same breath (r3 P2).
+        const expiryIndex = (m) => {
+          if (isBankMethodType(m.method_type)) return Infinity;
+          const rawYear = Number(m.exp_year);
+          const year = Number.isFinite(rawYear) && rawYear > 0 && rawYear < 100 ? rawYear + 2000 : rawYear;
+          return year * 12 + Number(m.exp_month);
+        };
+        const reachable = [];
+        let latestPredecessorExpiry = -Infinity;
+        for (const m of eligibleToday) {
+          const expiry = expiryIndex(m);
+          if (reachable.length && !(expiry > latestPredecessorExpiry)) continue;
+          reachable.push(m);
+          latestPredecessorExpiry = Math.max(latestPredecessorExpiry, expiry);
+          if (isBankMethodType(m.method_type) || !isExpiredCardMethod(m, horizonNoon)) break;
+        }
+        return [...new Set(
+          [...expiringFirst.slice(0, 1), ...reachable].filter((m) => m?.id != null).map((m) => String(m.id)),
+        )];
+      }));
+    }
+    return autopayWalkMemo.get(key);
+  };
+  const recordAutopayWalk = async (customerId, customerLike) => {
+    const ids = await autopayWalkMethodIds(customerLike);
+    if (!ids.length) { recordCharge(customerId, null); return; }
+    for (const id of ids) recordCharge(customerId, id);
+  };
+  // A hold charges the card frozen on it. That card is exempt-worthy only
+  // when it will still be VALID at charge time (through the horizon) —
+  // an expiring hold card is a charge that will fail, and no surface
+  // scans hold cards (saved enableAutopay:false), so the Auto Pay card's
+  // warning must stay as the customer's only notice (hook P1): record it
+  // as unresolved. Malformed expiry reads as expired (isExpiredCardMethod).
   try {
     // Paid coverage must span the whole window [today, horizon], but it may
     // be SPLIT across adjacent terms (createTermForAnnualPrepay writes a
@@ -3600,11 +3711,9 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: coverage lookup failed, exempting nobody: ${err.message}`);
-    const failed = new Set();
-    failed.lookupFailed = true;
-    return failed;
+    return failedExemptions();
   }
-  if (!covered.size) return covered;
+  if (!covered.size) return finish();
   try {
     // (a) armed retries, classified by the SAME verdict the sweep acts on
     // (retry-collectibility.js — one implementation, so the two cannot
@@ -3634,7 +3743,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     const retryCtx = loadRetryContext({ asOf: horizon, conn });
     for (const row of retrying || []) {
       const customerId = String(row.customer_id);
-      if (!covered.has(customerId)) continue;
+      if (!evaluable(customerId)) continue;
       // A missing customer row is unreadable state, not proof the sweep
       // would skip: only the row-level guards may exempt then (the
       // verdict's customer_missing skip is the sweep's own posture).
@@ -3645,7 +3754,8 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         conn,
         allowMissingCustomer: true,
       });
-      if (verdict.collectible) covered.delete(customerId);
+      // The sweep charges through StripeService.charge — the Auto Pay walk.
+      if (verdict.collectible) await recordAutopayWalk(customerId, { id: customerId });
     }
     // The verdict's prepay lookups fail OPEN for the sweep (collect rather
     // than stall); this surface must fail the other way — a lookup failure
@@ -3653,7 +3763,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
     if (retryCtx.lookupWarnings.length) {
       throw new Error(`retry-collectibility lookup failed: ${retryCtx.lookupWarnings.map((w) => w.message).join('; ')}`);
     }
-    if (!covered.size) return covered;
+    if (!anyEvaluable()) return finish();
 
     // (b) still-completable visits inside the window, judged by the shared
     // completion predicate with the schedule sheet's inputs.
@@ -3706,7 +3816,7 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       );
     for (const v of visits || []) {
       const customerId = String(v.customer_id);
-      if (!covered.has(customerId)) continue;
+      if (!evaluable(customerId)) continue;
       // Strict validation, and its failure PROPAGATES to the outer catch:
       // a malformed stamp (no amount / no term) or a failed coverage query
       // must fail toward the warning, not fall back to trusting the stamp
@@ -3846,6 +3956,14 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // A reused invoice with FROZEN payer ownership is owed by the payer's
       // AP inbox — every saved-card rail requires !invoice.payer_id.
       if (reused && reused.payer_id) continue;
+      // Account credit is deliberately NOT a projected exemption: the route
+      // applies the customer's balance to this invoice at completion, but
+      // that balance is unreserved and fungible — dunning touches, sends
+      // and any invoice minted before the visit draw it down first
+      // (autoApplyAccountCreditIfEnabled) — so no snapshot can prove a
+      // future completion will not reach the card (hook + GitHub P1s).
+      // Credit that HAS been applied is already modeled: a fully covered
+      // invoice is 'prepaid' and excluded above.
       // The invoice completion will charge: the reused row, else the row it
       // is about to MINT — priced by the same completionInvoiceAmount
       // precedence the prediction reports (the setup-fee allowance rides
@@ -3938,12 +4056,13 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
       // appointment-card consent row (requireNoAppointmentCardLane), and for
       // an invoice not bound to this visit.
       let holdCharges = false;
+      let holdRow = null;
       const oneTimeLineage = v.is_recurring !== true && !v.recurring_parent_id && !v.recurring_pattern;
       if (oneTimeLineage && isCardHoldEnabled() && !anyConsentRow) {
-        const holdRow = await conn('estimate_card_holds')
+        holdRow = await conn('estimate_card_holds')
           .where({ scheduled_service_id: v.id, status: 'held' })
           .orderBy('held_at', 'desc')
-          .first('id', 'accepted_amount', 'parked_at');
+          .first('id', 'accepted_amount', 'parked_at', 'stripe_payment_method_id');
         if (holdRow && !holdRow.parked_at) {
           const acceptedRaw = Number(holdRow.accepted_amount);
           if (Number.isFinite(acceptedRaw) && acceptedRaw > 0) {
@@ -3987,16 +4106,33 @@ async function computeCardExpiryExemptCustomerIds(horizon = etDateString(), conn
         if (parkedHere) continue;
       }
       // Only an auto_charge touches the saved card at completion ('invoice'
-      // — gate off or a priced callback — goes out as a pay-link).
-      covered.delete(customerId);
+      // — gate off or a priced callback — goes out as a pay-link). Record
+      // the METHOD each firing rail will use: the Auto Pay lanes charge the
+      // walk's method(s); the hold rail charges the card frozen on the hold
+      // (attachCardHoldPaymentMethod saves it enableAutopay:false, so it
+      // is routinely NOT the Auto Pay card — matched back to its
+      // payment_methods row; no row → unresolved, every method warns).
+      if (autopayLaneCharges) {
+        await recordAutopayWalk(customerId, {
+          id: v.customer_id, ach_status: v.customer_ach_status, autopay_payment_method_id: v.customer_autopay_payment_method_id,
+        });
+      }
+      if (holdCharges) {
+        const { isExpiredCardMethod } = require('./autopay-eligibility');
+        const holdMethod = holdRow?.stripe_payment_method_id
+          ? await conn('payment_methods')
+            .where({ customer_id: v.customer_id, stripe_payment_method_id: holdRow.stripe_payment_method_id })
+            .first('id', 'method_type', 'exp_month', 'exp_year')
+          : null;
+        const holdCardValidThroughHorizon = holdMethod?.id != null && !isExpiredCardMethod(holdMethod, horizonNoon);
+        recordCharge(customerId, holdCardValidThroughHorizon ? String(holdMethod.id) : null);
+      }
     }
   } catch (err) {
     logger.warn(`[annual-prepay] card-expiry exemption: charge lookup failed, exempting nobody: ${err.message}`);
-    const failed = new Set();
-    failed.lookupFailed = true;
-    return failed;
+    return failedExemptions();
   }
-  return covered;
+  return finish();
 }
 
 /**
@@ -5182,6 +5318,8 @@ module.exports = {
   reconcileCoveredTermsSweep,
   getActivelyCoveredCustomerIds,
   getCardExpiryExemptCustomerIds,
+  getCardExpiryExemptions,
+  computeCardExpiryExemptions,
   clearCardExpiryExemptCache,
   getPaymentPendingCustomerIds,
   getOpenRenewalAlerts,

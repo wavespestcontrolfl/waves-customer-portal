@@ -419,6 +419,9 @@ router.get('/me', authenticate, async (req, res, next) => {
     memberSince: customer.member_since,
     referralCode: customer.referral_code,
     accountCredit,
+    // Portal slider (owner ruling 2026-08-28): automatic credit application
+    // is the customer's choice; default OFF.
+    autoApplyAccountCredit: customer.auto_apply_account_credit === true,
     credits,
     annualPrepay,
     notificationPrefs: prefs ? {
@@ -430,6 +433,23 @@ router.get('/me', authenticate, async (req, res, next) => {
       emailEnabled: prefs.email_enabled,
     } : null,
   });
+  } catch (err) { next(err); }
+});
+
+// =========================================================================
+// PUT /api/auth/credit-preference — the portal's "apply my credit
+// automatically" slider (owner ruling 2026-08-28). Scoped to the signed-in
+// property's customer row; every automatic apply seam reads this flag
+// (customer-credit.applyAccountCreditToInvoice).
+// =========================================================================
+router.put('/credit-preference', authenticate, async (req, res, next) => {
+  try {
+    const schema = Joi.object({ autoApplyAccountCredit: Joi.boolean().required() });
+    const { autoApplyAccountCredit } = await schema.validateAsync(req.body || {});
+    await db('customers')
+      .where({ id: req.customer.id })
+      .update({ auto_apply_account_credit: autoApplyAccountCredit, updated_at: db.fn.now() });
+    res.json({ autoApplyAccountCredit });
   } catch (err) { next(err); }
 });
 

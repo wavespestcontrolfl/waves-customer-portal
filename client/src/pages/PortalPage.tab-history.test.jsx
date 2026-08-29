@@ -106,14 +106,14 @@ describe('portal tab history sync', () => {
   it('restores the focused plan row when Back returns to a plan deep link', async () => {
     window.history.replaceState({}, '', '/?tab=plan&service=lawn_care');
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
-    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /lawn care/i, expanded: true })).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Billing' })[0]);
     await waitFor(() => expect(window.location.search).toBe('?tab=billing'));
 
     window.history.back();
     await waitFor(() => expect(window.location.search).toBe('?tab=plan&service=lawn_care'));
-    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /lawn care/i, expanded: true })).toBeInTheDocument();
   });
 
   it('encodes the showing sub-tab when the plain Visits nav is used', async () => {
@@ -151,7 +151,7 @@ describe('portal tab history sync', () => {
   it('keeps the plan service param when the active Plan tab is re-clicked', async () => {
     window.history.replaceState({}, '', '/?tab=plan&service=lawn_care');
     render(<BrowserRouter><PortalPage /></BrowserRouter>);
-    expect(await screen.findByRole('button', { name: /lawn care program/i, expanded: true })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /lawn care/i, expanded: true })).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Plan' })[0]);
     await new Promise((r) => setTimeout(r, 50));

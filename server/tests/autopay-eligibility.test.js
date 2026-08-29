@@ -326,6 +326,34 @@ describe('charge-path parity (cron-gap audit B4)', () => {
     expect(isChargeableAutopayMethod({ ...chargeableCard, ach_status: 'pending_verification' }, frozenNow)).toBe(true);
   });
 
+  test('listChargeableAutopayMethods returns every eligible method in walk order — pointer first, then defaults — and its head IS the single-method walk', async () => {
+    const { listChargeableAutopayMethods, getChargeableAutopayMethod } = require('../services/autopay-eligibility');
+    const rows = [
+      { ...chargeableCard, id: 'pm-newest' },
+      { ...chargeableCard, id: 'pm-ptr' },
+      { ...chargeableCard, id: 'pm-expired', exp_month: '1', exp_year: '2020' },
+      { ...chargeableAch, id: 'pm-bank', ach_status: 'pending_verification' },
+      { ...chargeableCard, id: 'pm-older' },
+    ];
+    const query = {
+      where() { return query; },
+      orderBy() { return query; },
+      select() { return Promise.resolve(rows); },
+      first() { return Promise.resolve(rows[0]); },
+    };
+    const customer = { id: 'customer-1', autopay_enabled: true, ach_status: null, autopay_payment_method_id: 'pm-ptr' };
+    const listed = await listChargeableAutopayMethods(customer, () => query, { now: frozenNow });
+    expect(listed.map((m) => m.id)).toEqual(['pm-ptr', 'pm-newest', 'pm-older']);
+    expect((await getChargeableAutopayMethod(customer, () => query, { now: frozenNow })).id).toBe('pm-ptr');
+    // ignoreCardExpiry admits the expired card in its walk position
+    const lenient = await listChargeableAutopayMethods(customer, () => query, { now: frozenNow, ignoreCardExpiry: true });
+    expect(lenient.map((m) => m.id)).toEqual(['pm-ptr', 'pm-newest', 'pm-expired', 'pm-older']);
+    // read errors: [] by default, throw under rethrow — same contract as the single walk
+    const broken = { where() { throw new Error('down'); } };
+    expect(await listChargeableAutopayMethods(customer, () => broken)).toEqual([]);
+    await expect(listChargeableAutopayMethods(customer, () => broken, { rethrow: true })).rejects.toThrow('down');
+  });
+
   test('walks all default methods before declaring autopay inactive (multi-default legacy data)', async () => {
     // A pending-verification bank row beside a chargeable card must not
     // make customerOnAutopay() false — mirror the charge path's candidate

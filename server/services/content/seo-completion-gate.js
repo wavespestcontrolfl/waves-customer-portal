@@ -35,7 +35,9 @@ const P1_CODES = new Set([
   'P1_MISSING_ARTICLE_SCHEMA',
   'P1_MISSING_SERVICE_LINK',
   'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC',
+  'P1_UNSUPPORTED_BODY_SYNTAX',
   'P1_MISSING_CONVERSION_CTA',
+  'P1_FORBIDDEN_CTA_WORDING',
   'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ',
   'P1_MISSING_PEST_PRACTICES',
 ]);
@@ -121,8 +123,38 @@ function evaluate(input = {}) {
   if (brief.city && !hasIncludedLinkReason(contract, 'city')) {
     findings.push(finding('P1', 'P1_MISSING_CITY_LINK_WHEN_CITY_TOPIC', 'City-focused blog draft is missing a city page link in the body.', 'Add the matching local service page link.'));
   }
-  if (!hasLinkReason(contract, 'conversion') || !hasConversionCta(body)) {
-    findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA linking to contact, quote, inspection, or estimate paths.'));
+  // Fail-closed PARK (owner ruling 2026-08-28): the link/CTA scanners are
+  // trusted only on the plain Markdown subset the writer emits. Any other
+  // form (raw HTML anchors/tables, hidden or styled markup, reference-style
+  // or wrapped links, titles, escapes, CRLF, …) parks the draft for a human
+  // instead of being parsed — see content-guardrails.unsupportedBodySyntax.
+  {
+    const g = require('./content-guardrails');
+    const unsupported = typeof g.unsupportedBodySyntax === 'function' ? g.unsupportedBodySyntax(body) : [];
+    if (unsupported.length) {
+      findings.push(finding('P1', 'P1_UNSUPPORTED_BODY_SYNTAX', `Body uses Markdown/HTML syntax outside the supported writer subset (${unsupported.join(', ')}) — parked for human review.`, 'Rewrite the body with plain Markdown: one-line inline links [text](/path/), no raw HTML anchors/tables, no hidden or styled markup, no reference-style links; use ComparisonTable for tabular data.'));
+    }
+  }
+  // Judged on the RENDERED link set (inline + reference-style + HTML anchors)
+  // — the contract's inline-only parser must not park a compliant
+  // reference-style CTA.
+  if (!hasConversionCta(body, brief)) {
+    findings.push(finding('P1', 'P1_MISSING_CONVERSION_CTA', 'Draft is missing a clear conversion CTA.', 'Add an early and final CTA with estimate/quote wording linking to contact, quote, or estimate paths.'));
+  }
+  {
+    // Every CTA anchor must comply — one valid CTA does not excuse a
+    // forbidden one elsewhere in the body.
+    const badAnchor = forbiddenCtaAnchor(body);
+    if (badAnchor) {
+      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badAnchor}" uses inspection-request wording — owner rule 2026-08-27: CTA anchors use estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording, e.g. "Get My Free Termite Estimate".'));
+    }
+    // Skip when it is the SAME anchor the inspection check already flagged —
+    // one anchor, one finding (a duplicate would double-count toward
+    // AUTONOMOUS_CONTENT_MAX_P1_FINDINGS).
+    const badCta = badCtaAnchor(body, brief);
+    if (badCta && badCta !== badAnchor) {
+      findings.push(finding('P1', 'P1_FORBIDDEN_CTA_WORDING', `CTA link anchor "${badCta}" violates the CTA-wording rule — owner rule 2026-08-27: every conversion CTA anchor uses estimate/quote wording tied to the post's service.`, 'Reword the CTA anchor to estimate/quote wording for this post\'s service, e.g. "Get My Free Termite Estimate" on a termite post.'));
+    }
   }
   if (faqRequired(brief) && !contract.faq.length) {
     findings.push(finding('P1', 'P1_MISSING_FAQ_WHEN_BRIEF_REQUIRED_FAQ', 'Brief requires a visible FAQ section, but none was found.', 'Add a Frequently Asked Questions section with question-style H3 headings.'));
@@ -245,9 +277,935 @@ function hasIncludedLinkReason(contract, reason) {
     && contract.includedInternalLinks.some((link) => link.reason === reason);
 }
 
-function hasConversionCta(body) {
-  return /\b(request a quote|schedule|contact waves|call waves|free inspection|estimate|book|inspection)\b/i.test(String(body || ''))
-    && /\]\(\/(?:contact|[^)]*quote|[^)]*estimate|pest-control-calculator)[^)]*\)/i.test(String(body || ''));
+// Request-action verbs, shared by the coordinated-clause classifier and
+// the forbidden inspection-anchor gate (single source — partial verb lists
+// drifted apart across rounds).
+const REQUEST_VERB_SOURCE = 'request|ask|schedule|book|get|arrange|order|buy|start|claim|reserve|secure';
+
+// Which service a CTA anchor names, if any — used to reject a wrong-service
+// CTA ("Get a Lawn Care Quote" on a termite post, "Get a Cockroach Quote"
+// on a bed-bug post). Broad-service keys match normalizeService's output;
+// specialty keys match the raw brief topics the engine briefs carry.
+const CTA_ANCHOR_SERVICE_TERMS = {
+  pest: /\bpest\b/i,
+  lawn: /\blawn\b/i,
+  termite: /\btermite/i,
+  mosquito: /\bmosquito/i,
+  rodent: /\brodent|\brats?\b|\bmice\b|\bmouse\b/i,
+  // "Deep Root Fertilization" is the established tree & shrub treatment
+  // name (the lawn-fertilization entry already excludes "root fertiliz").
+  'tree-shrub': /\btree\b|\bshrub|\bpalms?\b|\bornamentals?\b|\bdeep[ -]?root/i,
+  'bed-bug': /\bbed[ -]?bug/i,
+  // "Palmetto bug" is the established Florida roach alias (blog-writer's
+  // TAG_ALIASES uses the same equivalence).
+  cockroach: /\b(?:cock)?roach(?:es)?\b|\bpalmetto[ -]?bugs?\b/i,
+  ant: /\bants?\b/i,
+  // Whole word only — "spiderwort" is a lawn WEED, not the spider service.
+  spider: /\bspiders?\b/i,
+  flea: /\bfleas?\b/i,
+  tick: /\bticks?\b/i,
+  // "Stinging insects", "yellow jackets" and "flying insects" are the
+  // canonical aliases for this service (blog-writer's TAG_ALIASES maps all
+  // three to Stinging Insects).
+  wasp: /\bwasps?\b|\bhornets?\b|\bbees?\b|\bstinging[ -]insects?\b|\byellow[ -]?jackets?\b|\bflying[ -]insects?\b/i,
+  // WDI (wood-destroying insect) is the established inspection-report
+  // acronym alongside WDO — both name this service in CTA wording.
+  wdo: /\bwd[oi]\b|wood[- ]destroying/i,
+  // Lawn specialties (established brief service IDs) — their own terms name
+  // the lawn family. Fertilization is lawn wording only when not the
+  // tree/shrub/palm treatment ("Deep Root Fertilization").
+  'lawn-fertilization': /\b(?<!tree[ -])(?<!shrub[ -])(?<!palm[ -])(?<!root[ -])(?<!ornamental[ -])fertiliz/i,
+  'lawn-aeration': /\baerat/i,
+  'lawn-weed-control': /\bweed/i,
+};
+
+// Specialty → the broad service whose conversion path it books through. A
+// bed-bug post's CTA may say "bed bug" OR "pest" ("Get My Free Pest Control
+// Estimate" is that post's real conversion page); it may NOT say
+// "cockroach" or "lawn".
+const CTA_SERVICE_FAMILY = {
+  'bed-bug': 'pest',
+  cockroach: 'pest',
+  ant: 'pest',
+  spider: 'pest',
+  flea: 'pest',
+  tick: 'pest',
+  wasp: 'pest',
+  wdo: 'termite',
+  // Commercial variants convert with their residential family's wording
+  // ("Request a Commercial Lawn Quote") — CTA vocabulary only; the
+  // brief-builder's conversion-path aliases are untouched.
+  'commercial-lawn': 'lawn',
+  'commercial-pest': 'pest',
+  'lawn-fertilization': 'lawn',
+  'lawn-aeration': 'lawn',
+  'lawn-weed-control': 'lawn',
+  // The catch-all specialty lane converts through the pest paths.
+  specialty: 'pest',
+};
+
+function allowedAnchorServices(briefService) {
+  const allowed = new Set([briefService]);
+  if (CTA_SERVICE_FAMILY[briefService]) allowed.add(CTA_SERVICE_FAMILY[briefService]);
+  // A broad-service brief accepts its own specialties ("Get an Ant Control
+  // Quote" on a pest post).
+  for (const [svc, fam] of Object.entries(CTA_SERVICE_FAMILY)) {
+    if (fam === briefService) allowed.add(svc);
+  }
+  return allowed;
+}
+
+// A conversion-path link is an actionable CTA unless its anchor is
+// POSITIVELY prose-shaped — a noun phrase with an article/possessive
+// lead-in ("our contact page", "the pest control calculator"). Every
+// actionable CTA ("Contact Waves", "Talk to Us", "View Options", "Schedule
+// Service", "Click here") must carry estimate/quote wording; prose
+// references stay out of scope (P2_GENERIC_ANCHOR_TEXT nudges those).
+const PROSE_REFERENCE_LEADIN_RE = /^(?:our|the|this|these|that|a|an|its|their|waves'?s?)\b/i;
+// Derived from the SHARED request-verb set (plus contact/navigation verbs)
+// — parallel partial verb lists drifted apart across rounds. An anchor is
+// ACTIONABLE when the verb leads it (imperative, with optional
+// please/click-to lead-in) or appears as an INFINITIVE invitation
+// ("…page to reserve service"); a subordinate verb with its own subject
+// ("…customers get after an inspection") is still prose.
+// Contact verbs are ONE source for the actionable-anchor test and the
+// service-page request-led classifier — "Contact Waves for a Termite
+// Estimate" / "Text Us for a Quote" are CTAs in both.
+const CONTACT_VERB_SOURCE = 'call|contact|text';
+const ACTION_VERB_SET = `(?:${REQUEST_VERB_SOURCE}|${CONTACT_VERB_SOURCE}|click|visit|open|tap|reach|talk|see|view|learn)`;
+// Invitation-shaped conversion anchors ("Ready for Your Free Estimate?",
+// "Need a Termite Estimate?", "Want a Quote?", "Looking for an Estimate?")
+// carry no leading verb yet are plainly CTAs — accepted for PRESENCE only.
+// Each shape is anchored at the START and word-bound, so descriptive noun
+// phrases ("Needed Estimate Documents", "Wanted: Estimates") stay out.
+const INVITATION_CTA_RE = /^(?:(?:are\s+you\s+)?(?:get\s+)?ready\s+for|(?:do\s+you\s+)?(?:need|want)|(?:are\s+you\s+)?looking\s+for)\b/i;
+const ACTION_VERB_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+)?${ACTION_VERB_SET}\\b|\\bto\\s+${ACTION_VERB_SET}\\b`, 'i');
+function isProseReferenceAnchor(anchor) {
+  return PROSE_REFERENCE_LEADIN_RE.test(anchor) && !ACTION_VERB_RE.test(anchor);
+}
+
+// Canonicalize a brief's service for CTA-anchor validation. Specialty
+// topics with their own anchor vocabulary (bed-bug, cockroach, …) stay
+// themselves — the family map above already grants them their real
+// conversion wording — while compound service IDs canonicalize through the
+// SAME alias table the brief builder uses (termite-inspection → termite,
+// lawn-fertilization → lawn), so an established brief service can never be
+// parked by a partial local normalization.
+// The canonical BLOG_TAGS taxonomy (blog-writer.js) includes tags that
+// name MULTIPLE services or don't reduce to a vocabulary key by
+// suffix-stripping — resolve them explicitly so a tag-shaped service value
+// still arms the service-aware checks. Multi-service entries union in
+// collectForbiddenCtaAnchors; the single-service brief path takes the
+// first entry.
+const CANONICAL_TAG_SERVICES = {
+  'fleas & ticks': ['flea', 'tick'],
+  'fleas and ticks': ['flea', 'tick'],
+  'stinging insects': ['wasp'],
+  'lawn disease': ['lawn'],
+  'lawn pests': ['lawn'],
+  'lawn pest': ['lawn'],
+};
+
+// A service value may resolve to SEVERAL vocabulary keys (the compound
+// canonical tags: "Fleas & Ticks" → flea + tick) — the brief-aware paths
+// union every entry's vocabulary rather than collapsing to the first.
+// The brief's CTA topic: a specialty-family brief keeps the coarse
+// 'pest' service but names the real topic on gsc_signal.specialty_topic
+// (same field guardrail-options preserves for FAQ_BLOCKED_SERVICE) — the
+// CTA must be tied to THAT topic, or every pest specialty would be allowed
+// on a bed-bug post.
+function ctaBriefTopic(brief = {}) {
+  // Only when the topic resolves to KNOWN CTA vocabulary — a blocklist-
+  // derived topic like "drywood" has no anchor terms of its own, so the
+  // broad service (termite) stays the CTA target.
+  const specialty = brief?.gsc_signal?.specialty_topic;
+  if (specialty) {
+    const key = ctaBriefService(specialty);
+    if (key && (CTA_ANCHOR_SERVICE_TERMS[key] || CTA_SERVICE_FAMILY[key]) && !CANONICAL_TAG_SERVICES[String(specialty).toLowerCase().trim()]) return specialty;
+  }
+  return brief.service;
+}
+
+function ctaBriefServices(rawService) {
+  const one = ctaBriefService(rawService);
+  if (!one) return [];
+  const canonical = CANONICAL_TAG_SERVICES[String(rawService).toLowerCase().trim()];
+  return canonical || [one];
+}
+
+function ctaBriefService(rawService) {
+  if (!rawService) return null;
+  const canonical = CANONICAL_TAG_SERVICES[String(rawService).toLowerCase().trim()];
+  if (canonical) return canonical[0];
+  const base = String(rawService).toLowerCase().trim().replace(/\s+/g, '-');
+  // Try the id itself, then plural-stripped and "-control"/"-care"/
+  // "-treatment"-stripped forms against the anchor vocabulary first, so
+  // every supported service id (rodent-control, bed-bug-control, bed-bugs,
+  // cockroaches, …) lands on its own key before any broad-service aliasing.
+  // Plural stripping is tried as CANDIDATES only — never applied blindly
+  // (that turned "termite" into "termit").
+  const stripped = base.replace(/-(?:control|care|treatment)s?$/, '');
+  const candidates = [base, stripped]
+    .flatMap((v) => [v, v.replace(/es$/, ''), v.replace(/s$/, '')]);
+  for (const c of candidates) {
+    if (CTA_ANCHOR_SERVICE_TERMS[c] || CTA_SERVICE_FAMILY[c]) return c;
+    // Brief values spell cockroaches as "roach"/"roaches" too.
+    if (c === 'roach') return 'cockroach';
+  }
+  const { SERVICE_ID_ALIASES } = require('./content-brief-builder')._internals;
+  const aliased = SERVICE_ID_ALIASES[base] || SERVICE_ID_ALIASES[stripped] || rawService;
+  // normalizeService output is already canonical (pest/lawn/termite/…).
+  return normalizeService(aliased).replace(/\s+/g, '-');
+}
+
+// All conversion-path links in the body, with anchor + estimate/quote flag
+// + the services the anchor names.
+// Canonical conversion ENDPOINTS only — the SERVICE_CONVERSION_LINK routes
+// (/pest-control-calculator/, /contact/) plus the quote/estimate entry
+// pages the writer is steered to (/pest-control-quote/, the city
+// /pest-control-quote-{city}-fl/ pages, /quote/, /estimate/). An
+// informational path that merely CONTAINS "estimate" (/blog/how-estimates-
+// work/) is not a conversion link.
+function conversionEndpoints() {
+  const { SERVICE_CONVERSION_LINK } = require('./content-brief-builder')._internals;
+  return new Set([...Object.values(SERVICE_CONVERSION_LINK || {}), '/contact/', '/book/', '/pest-control-calculator/', '/pest-control-quote/', '/quote/', '/estimate/']);
+}
+function isConversionPath(href) {
+  const path = String(href || '').replace(/[?#].*$/, '').replace(/\/?$/, '/').toLowerCase();
+  if (!path.startsWith('/')) return false;
+  if (conversionEndpoints().has(path)) return true;
+  return /^\/pest-control-quote-[a-z0-9-]+-fl\/$/.test(path);
+}
+
+// Markdown links AND literal HTML anchors (the passive-HTML allowlist admits
+// <a>, so a forbidden CTA could otherwise hide in one).
+// Non-rendered regions never reach a reader — reuse the guardrails'
+// fence/comment-aware stripper (single Markdown scanner, no parallel parser)
+// so the gate judges rendered CTAs only.
+function renderedTextWithDepths(body) {
+  const g = require('./content-guardrails');
+  // Rendered text plus each line's original QUOTE DEPTH — the markers are
+  // stripped, but depth still separates paragraphs (a deeper quote line
+  // interrupts, so a link label cannot continue across it). A test double
+  // without the depth-aware variant degrades to depthless text (the
+  // quote-boundary checks become inert, everything else holds).
+  if (typeof g.blankNonRenderedMarkdownWithDepths === 'function') return g.blankNonRenderedMarkdownWithDepths(body);
+  return { text: g.blankNonRenderedMarkdown(body), depths: null };
+}
+
+function extractLinks(body) {
+  const { text: s, depths: lineDepths } = renderedTextWithDepths(body);
+  const links = [];
+  const lineStarts = [0];
+  for (let p = s.indexOf('\n'); p !== -1; p = s.indexOf('\n', p + 1)) lineStarts.push(p + 1);
+  const lineIndexAt = (pos) => {
+    let lo = 0; let hi = lineStarts.length - 1;
+    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (lineStarts[mid] <= pos) lo = mid; else hi = mid - 1; }
+    return lo;
+  };
+  const depthAtPos = (pos) => (lineDepths ? (lineDepths[lineIndexAt(pos)] || 0) : 0);
+  let m;
+  // CommonMark allows angle-bracketed destinations: [x](</contact/>) and
+  // [ref]: </contact/> — strip the brackets; and an absolute first-party
+  // URL (hub or any spoke host, per the guardrails' hubHostSet) IS the
+  // site-relative path spelled long-form.
+  const { hubHostSet, decodeEntitiesForScan } = require('./content-guardrails');
+  const firstParty = hubHostSet();
+  // Destinations are judged as RENDERED: character references decoded
+  // ("/&#99;ontact/" is /contact/) and dot segments resolved
+  // ("/x/../contact/" is /contact/) before classification.
+  const dest = (h) => {
+    let raw = decodeEntitiesForScan(String(h || '')).replace(/^<|>$/g, '');
+    // CommonMark backslash escapes render in destinations too —
+    // "(\/contact/)" is /contact/ in the browser.
+    raw = raw.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+    // Authority parsed with URL — default ports (":443") drop and hostnames
+    // lowercase, exactly as the browser resolves them.
+    if (/^https?:\/\//i.test(raw)) {
+      let parsed = null;
+      try { parsed = new URL(raw); } catch (err) { parsed = null; }
+      // A NONDEFAULT port is a different origin — only the canonical
+      // (default-port) first-party origin reads as a site-relative path.
+      if (parsed && parsed.port === '' && firstParty.has(parsed.hostname.toLowerCase())) raw = `${parsed.pathname || '/'}${parsed.search}${parsed.hash}`;
+    }
+    // Site-relative paths resolve dot segments through WHATWG URL — the
+    // same normalization the internal-route scanner uses — so ENCODED
+    // segments resolve exactly as the browser does ("/x/%2e%2e/contact/"
+    // is /contact/), not just literal "." and "..". Protocol-relative
+    // destinations ("//host/x") are a different authority, not a path.
+    if (raw.startsWith('/') && !raw.startsWith('//')) {
+      try {
+        const u = new URL(raw, 'https://resolve.invalid');
+        raw = `${u.pathname || '/'}${u.search}${u.hash}`;
+      } catch (err) { /* malformed — judged as written */ }
+    }
+    return raw;
+  };
+  // Quoted ATTRIBUTE VALUES do not render Markdown — link syntax inside
+  // `<span title="[x](/contact/)">` is tooltip text, not a clickable link —
+  // so a LENGTH-PRESERVING copy with those values blanked (newlines kept)
+  // feeds the definition parse and the Markdown walk. The HTML-anchor and
+  // autolink passes keep the original: href values live in quotes.
+  let sMd = s;
+  // Absolute intervals of quoted attribute VALUES — the HTML-anchor and
+  // autolink passes (which must keep the original text for real hrefs)
+  // skip matches STARTING inside one: `<span title='<a href=…>…</a>'>` is
+  // tooltip text, not a clickable anchor.
+  // A STATIC template-literal expression value (`title={\`…\`}`, MDX) is an
+  // attribute value too — evaluated as a string, never rendered as
+  // Markdown — so it is masked the same way (its `{\`` / `\`}` delimiters
+  // are kept, the inner text blanked).
+  const attrValueRanges = [];
+  {
+    const tagScan = /<\/?[a-zA-Z][\w-]*(?:"[^"]*"|'[^']*'|\{`[^`]*`\}|[^>"'])*>/g;
+    const quoted = /"[^"]*"|'[^']*'|\{`[^`]*`\}/g;
+    const edge = (q) => (q[0] === '{' ? 2 : 1);
+    let tm;
+    while ((tm = tagScan.exec(s)) !== null) {
+      let qm;
+      quoted.lastIndex = 0;
+      while ((qm = quoted.exec(tm[0])) !== null) attrValueRanges.push([tm.index + qm.index + edge(qm[0]), tm.index + qm.index + qm[0].length - edge(qm[0])]);
+      const local = tm[0].replace(/"[^"]*"|'[^']*'|\{`[^`]*`\}/g, (q) => q.slice(0, edge(q)) + q.slice(edge(q), -edge(q)).replace(/[^\n]/g, ' ') + q.slice(-edge(q)));
+      if (local !== tm[0]) sMd = sMd.slice(0, tm.index) + local + sMd.slice(tm.index + tm[0].length);
+    }
+  }
+  const inAttrValue = (pos) => attrValueRanges.some(([a, b]) => pos >= a && pos < b);
+  // Regions the Markdown passes CONSUME (definition lines, whole inline
+  // links) — the autolink pass must not re-read an angle-bracketed
+  // destination inside them as a separate bare-URL link.
+  const consumed = [];
+  // Reference definitions are registered FIRST so the single link walk
+  // below can resolve full and shortcut references as it goes.
+  // CommonMark label matching is case-insensitive with internal whitespace
+  // collapsed — normalize both the definition and the reference the same way.
+  const label = (l) => String(l || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  // A label cannot cross a PARAGRAPH boundary — a blank line (a blank
+  // quote line included), an ATX heading, a thematic break, a list-item
+  // opener (bullet, or ordered numbered 1), or a line that DEEPENS the
+  // blockquote context (the quote interrupts the paragraph) ends the
+  // paragraph, so "[Get a Termite" + blank line (or "> Estimate](…)")
+  // renders no link and must not satisfy CTA presence. Same-depth quoted
+  // continuation and lazy continuation still soft-wrap.
+  // An HTML BLOCK opener that can interrupt a paragraph (CommonMark HTML
+  // block types 1–6: the flow-element tag list, script/pre/style/textarea,
+  // comments, processing instructions, declarations, CDATA) and an MDX
+  // COMPONENT opener (PascalCase JSX tag at the start of a line) end the
+  // paragraph too — "[Get a Termite" + "<div></div>" + "Estimate](…)"
+  // renders no link. Type-7 (any other complete tag on its own line)
+  // cannot interrupt a paragraph and is NOT a boundary.
+  const HTML_FLOW_OPENER_RE = /^ {0,3}<(?:\/?(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)(?:[ \t]|\/?>|$)|(?:script|pre|style|textarea)(?:[ \t]|>|$)|!--|\?|![a-z]|!\[CDATA\[)/i;
+  const MDX_FLOW_COMPONENT_RE = /^ {0,3}<[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*(?:[ \t]|\/?>|$)/;
+  const labelBoundaryLine = (line, openQuoteDepth, lineQuoteDepth) => {
+    if (lineQuoteDepth > openQuoteDepth) return true;
+    if (!line.trim()) return true;
+    if (HTML_FLOW_OPENER_RE.test(line) || MDX_FLOW_COMPONENT_RE.test(line)) return true;
+    // A setext UNDERLINE ("===", "---") turns the line above into a
+    // heading — the paragraph ends there too.
+    return /^ {0,3}(?:#{1,6}(?:[ \t]|$)|(?:\*[ \t]*){3,}$|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:=+|-+)[ \t]*$|(?:[-*+]|1[.)])[ \t]+\S)/.test(line);
+  };
+  // Duplicate definitions: CommonMark resolves references against the FIRST
+  // definition of a label; later repeats are inert.
+  const defs = new Map();
+  // A definition may be a LIST ITEM's content ("- [cta]: /contact/") —
+  // CommonMark registers it document-wide after removing the marker.
+  // The destination may sit on the NEXT line but never across a blank
+  // line ("[cta]:\n\n/contact/" registers nothing).
+  // Labels may contain backslash-ESCAPED brackets ("[cta\]]: /contact/") —
+  // CommonMark accepts them; matching is on the raw label text, identical
+  // on the definition and reference sides, so no unescaping is needed.
+  // The WHOLE definition must be valid: after the destination, only
+  // whitespace or a valid title may follow — "[cta]: /contact/ garbage"
+  // is ordinary text, not a definition (CommonMark).
+  const def = /^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])\s+)?\[((?:\\[\s\S]|[^\]\\])+)\]:[ \t]*(?:\r?\n[ \t]*)?(\S+)([^\n]*)/gm;
+  const defTail = /^[ \t]*$|^[ \t]+(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^()\\])*\))[ \t]*$/;
+  // A BARE definition destination must balance its parentheses (escapes
+  // aside) — "[cta]: /x(/../contact/" is ordinary text, not a definition
+  // (same rule the inline-destination walk enforces).
+  const balancedBareDest = (d) => {
+    if (/^<[^<>\n]*>$/.test(d)) return true;
+    let depth = 0;
+    for (let k = 0; k < d.length; k += 1) {
+      if (d[k] === '\\') { k += 1; continue; }
+      if (d[k] === '(') depth += 1;
+      else if (d[k] === ')') { depth -= 1; if (depth < 0) return false; }
+    }
+    return depth === 0;
+  };
+  // A definition's LABEL (and the single newline allowed before its
+  // destination) obeys the same paragraph boundaries as a link label —
+  // "[cta\n\nlabel]: /contact/" registers nothing, so a later
+  // "[…][cta label]" renders as text.
+  const defCrossesBoundary = (mt) => {
+    const openDepth = depthAtPos(mt.index);
+    for (let k = 0; k < mt[0].length; k += 1) {
+      if (mt[0][k] !== '\n') continue;
+      const abs = mt.index + k + 1;
+      const le = sMd.indexOf('\n', abs);
+      if (labelBoundaryLine(sMd.slice(abs, le === -1 ? undefined : le), openDepth, depthAtPos(abs))) return true;
+    }
+    return false;
+  };
+  while ((m = def.exec(sMd)) !== null) {
+    if (!defTail.test(m[3])) continue;
+    if (!balancedBareDest(m[2])) continue;
+    if (defCrossesBoundary(m)) continue;
+    const key = label(m[1]);
+    if (!defs.has(key)) defs.set(key, dest(m[2]));
+    consumed.push([m.index, m.index + m[0].length]);
+  }
+  // Markdown links — inline, full-reference, and shortcut-reference — in one
+  // procedural walk. Link TEXT is matched with a balanced-bracket scan, so
+  // it supports the renderer's FULL nesting depth ("[Schedule [Our
+  // [Trusted] Service]]"), which no fixed-depth regex can. Escape parity
+  // carries over from the regex forms: an odd backslash run before "[" (or
+  // before the "!" of image syntax) makes it literal; "\\[text](url)" (even
+  // run) is a live link.
+  const oddEscaped = (str, i) => {
+    let n = 0;
+    while (i - 1 - n >= 0 && str[i - 1 - n] === '\\') n += 1;
+    return n % 2 === 1;
+  };
+  const balancedLabelEnd = (str, open, openQuoteDepth, depthAt) => {
+    let depth = 0;
+    for (let i = open; i < str.length; i += 1) {
+      const ch = str[i];
+      if (ch === '\\') { i += 1; continue; }
+      if (ch === '\n') {
+        const le = str.indexOf('\n', i + 1);
+        if (labelBoundaryLine(str.slice(i + 1, le === -1 ? undefined : le), openQuoteDepth, depthAt(i + 1))) return -1;
+        continue;
+      }
+      if (ch === '[') depth += 1;
+      else if (ch === ']') { depth -= 1; if (depth === 0) return i; }
+    }
+    return -1;
+  };
+  // The inline DESTINATION may contain balanced parentheses at ANY depth
+  // ("/x(a(b(c)))/../contact/" — CommonMark accepts them; the browser
+  // resolves the full path), so it is parsed procedurally: an
+  // angle-bracketed form, or a bare run tracking paren depth, ending at
+  // whitespace (an optional title may follow) or the link's closing ")".
+  // Whitespace is allowed inside the parentheses ("( /contact/ )"); an
+  // UNBALANCED destination is not a link.
+  // Whitespace INSIDE the link syntax may include single newlines but
+  // never a BLANK line — that ends the paragraph, so "(\n\n/contact/)"
+  // renders no link.
+  // A single newline inside the link syntax still cannot cross a
+  // PARAGRAPH boundary — "[Get a Termite Estimate](\n> /contact/)" (the
+  // quote interrupts the paragraph), "(\n# /contact/)", "(\n- /contact/)"
+  // render no link. `atBoundary(k)` answers for the line that starts at
+  // `str[k]`, using the SAME rule as link labels.
+  const skipInlineWs = (str, from, atBoundary) => {
+    let k = from;
+    let nl = 0;
+    // "\r" rides along with its "\n" (CRLF is one line ending); only the
+    // second NEWLINE — a blank line — rejects the link.
+    while (k < str.length && /[ \t\n\r]/.test(str[k])) {
+      if (str[k] === '\n') {
+        nl += 1;
+        if (nl > 1) return -1;
+        if (atBoundary && atBoundary(k + 1)) return -1;
+      }
+      k += 1;
+    }
+    return k;
+  };
+  // `base` = absolute offset of `str[0]` in `sMd`; `openQuoteDepth` = the
+  // quote depth the link opened at. Together they let every newline inside
+  // the syntax be judged against the real line it starts.
+  const parseInlineDest = (str, base, openQuoteDepth, depthAt) => {
+    if (str[0] !== '(') return null;
+    const atBoundary = (k) => {
+      const le = str.indexOf('\n', k);
+      return labelBoundaryLine(str.slice(k, le === -1 ? undefined : le), openQuoteDepth, depthAt(base + k));
+    };
+    let i = skipInlineWs(str, 1, atBoundary);
+    if (i === -1) return null;
+    let destRaw;
+    if (str[i] === '<') {
+      const close = str.indexOf('>', i + 1);
+      const nl = str.indexOf('\n', i + 1);
+      if (close === -1 || (nl !== -1 && nl < close)) return null;
+      destRaw = str.slice(i, close + 1);
+      i = close + 1;
+    } else {
+      let depth = 0;
+      const from = i;
+      while (i < str.length) {
+        const ch = str[i];
+        if (ch === '\\' && i + 1 < str.length) { i += 2; continue; }
+        if (/\s/.test(ch)) break;
+        if (ch === '(') depth += 1;
+        else if (ch === ')') { if (depth === 0) break; depth -= 1; }
+        i += 1;
+      }
+      if (depth > 0 || i === from) return null;
+      destRaw = str.slice(from, i);
+    }
+    // Only whitespace, then an optional VALID title ('"…"', "'…'", "(…)"),
+    // then whitespace and the closing ")" may follow the destination —
+    // "(/contact/ garbage)" renders no link.
+    let j = skipInlineWs(str, i, atBoundary);
+    if (j === -1) return null;
+    if (str[j] === '"' || str[j] === "'" || str[j] === '(') {
+      const closeCh = str[j] === '(' ? ')' : str[j];
+      const parenTitle = str[j] === '(';
+      j += 1;
+      // A title may wrap lines, but never across a paragraph boundary
+      // (blank line, deepening quote, heading/list/HTML-block opener).
+      while (j < str.length && str[j] !== closeCh) {
+        if (str[j] === '\\') { j += 1; }
+        else if (parenTitle && str[j] === '(') return null;
+        else if (str[j] === '\n' && (str[j + 1] === '\n' || str[j + 1] === '\r' || atBoundary(j + 1))) return null;
+        j += 1;
+      }
+      if (j >= str.length) return null;
+      j = skipInlineWs(str, j + 1, atBoundary);
+      if (j === -1) return null;
+    }
+    if (str[j] !== ')') return null;
+    return { destRaw, end: j };
+  };
+  const refLabel = /^\[((?:\\[\s\S]|[^\]\\])*)\]/;
+  // CommonMark forbids a link INSIDE a link: when an outer bracket pair's
+  // label itself contains a live link (inline, full-reference, or
+  // shortcut), the INNER link wins and the outer brackets render as
+  // literal text — so an outer candidate whose label carries one is
+  // rejected without advancing, letting the walk find the inner link.
+  const labelContainsLink = (text, openQuoteDepth) => {
+    for (let j = 0; j < text.length; j += 1) {
+      if (text[j] !== '[' || oddEscaped(text, j)) continue;
+      if (text[j - 1] === '!' && !oddEscaped(text, j - 1)) continue; // images MAY nest in links
+      const lEnd = balancedLabelEnd(text, j, openQuoteDepth, () => openQuoteDepth);
+      if (lEnd === -1) continue;
+      const after = text.slice(lEnd + 1);
+      if (parseInlineDest(after, 0, openQuoteDepth, () => openQuoteDepth)) return true;
+      const fullRef = after.match(refLabel);
+      if (fullRef && defs.get(label(fullRef[1] || text.slice(j + 1, lEnd)))) return true;
+      if (after[0] !== '(' && after[0] !== ':' && after[0] !== '[' && defs.get(label(text.slice(j + 1, lEnd)))) return true;
+      j = lEnd;
+    }
+    return false;
+  };
+  for (let i = 0; i < sMd.length; i += 1) {
+    if (sMd[i] !== '[' || oddEscaped(sMd, i)) continue;
+    // An UNESCAPED "!" directly before means image syntax `![alt](src)` —
+    // not a link; "\\![link]" is a literal "!" followed by a real link.
+    if (sMd[i - 1] === '!' && !oddEscaped(sMd, i - 1)) continue;
+    const openQuoteDepth = depthAtPos(i);
+    const end = balancedLabelEnd(sMd, i, openQuoteDepth, depthAtPos);
+    if (end === -1) continue;
+    const text = sMd.slice(i + 1, end);
+    if (!text) { i = end; continue; }
+    if (labelContainsLink(text, openQuoteDepth)) continue;
+    const rest = sMd.slice(end + 1);
+    const inline = parseInlineDest(rest, end + 1, openQuoteDepth, depthAtPos);
+    if (inline) {
+      links.push({ anchor: text, href: dest(inline.destRaw) });
+      consumed.push([i, end + 2 + inline.end]);
+      i = end + 1 + inline.end;
+      continue;
+    }
+    // A following "(" without a parseable destination, or a ":" (this is a
+    // definition line, registered above), is never a shortcut reference.
+    if (rest[0] === '(' || rest[0] === ':') { i = end; continue; }
+    const full = rest.match(refLabel);
+    if (full) {
+      // The reference LABEL half obeys the same paragraph boundaries as the
+      // visible label — a blank line inside "[cta\n\nlabel]" ends the
+      // paragraph and the reference renders as text.
+      let labelSplit = false;
+      for (let k = 0; k < full[0].length; k += 1) {
+        if (full[0][k] !== '\n') continue;
+        const abs = end + 1 + k + 1;
+        const le = sMd.indexOf('\n', abs);
+        if (labelBoundaryLine(sMd.slice(abs, le === -1 ? undefined : le), openQuoteDepth, depthAtPos(abs))) { labelSplit = true; break; }
+      }
+      if (labelSplit) { i = end; continue; }
+      // Full reference `[text][label]` (an empty label collapses to text).
+      const href = defs.get(label(full[1] || text));
+      if (href) links.push({ anchor: text, href });
+      i = end + full[0].length;
+      continue;
+    }
+    if (rest[0] === '[') { i = end; continue; }
+    // Shortcut reference: a bare `[Label]` whose label has a definition.
+    const href = defs.get(label(text));
+    if (href) links.push({ anchor: text, href });
+    i = end;
+  }
+  // Quoted OR unquoted href (`<a href=/contact/>` is legal HTML).
+  // Quoted, unquoted, or literal JSX string-expression href — quote OR
+  // non-interpolated template literal (`href={"/contact/"}`,
+  // href={`/contact/`}). The backtick arm mirrors the guardrails'
+  // PLAIN_STRING_LITERAL_RE: `$` excluded, so an interpolated template
+  // (a dynamic destination) never reads as a static one.
+  // The attribute region is QUOTE-AWARE — a quoted value may contain ">"
+  // (`title="1 > 0"`), so quoted strings are consumed atomically and never
+  // char-by-char (the bare class excludes quotes to prevent that).
+  // (?<![\w-])href — the ATTRIBUTE named href, never the suffix of another
+  // attribute (`data-href="…"`).
+  const html = /<a\b(?:"[^"]*"|'[^']*'|[^>"'])*?(?<![\w-])href\s*=\s*(?:\{\s*["']([^"']+)["']\s*\}|\{\s*`([^`$]+)`\s*\}|"([^"]+)"|'([^']+)'|([^\s>"'{]+))(?:"[^"]*"|'[^']*'|[^>"'])*>([\s\S]*?)<\/a\s*>/gi;
+  // Nested-tag stripping is quote-aware too — an inner tag's quoted
+  // attribute may contain ">" (`<span title="1 > 0">`).
+  // Anchor wording is judged as SEEN: text inside a definitely-hidden
+  // descendant (`<span hidden>`, aria-hidden, display:none, <template>…)
+  // is blanked before the tags are stripped, so "<span hidden>Get a
+  // Termite Estimate</span>Click here" is the anchor "Click here".
+  const { blankDefinitelyHiddenContent } = require('./content-guardrails');
+  const seenText = (inner) => (typeof blankDefinitelyHiddenContent === 'function' ? blankDefinitelyHiddenContent(inner) : inner);
+  while ((m = html.exec(s)) !== null) {
+    if (inAttrValue(m.index)) continue;
+    links.push({ anchor: seenText(m[6]).replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, ''), href: dest(m[1] || m[2] || m[3] || m[4] || m[5]) });
+  }
+  // CommonMark AUTOLINKS (`<https://…>`) render as live links whose anchor
+  // is the bare URL — first-party ones canonicalize through dest(). A
+  // bracketed URL already CONSUMED as an inline-link destination or a
+  // reference definition is not a separate autolink.
+  const auto = /<(https?:\/\/[^<>\s]+)>/gi;
+  while ((m = auto.exec(s)) !== null) {
+    const at = m.index;
+    if (consumed.some(([a, b]) => at >= a && at < b) || inAttrValue(at)) continue;
+    links.push({ anchor: m[1], href: dest(m[1]) });
+  }
+  return links;
+}
+
+// Anchor text as RENDERED: HTML character references decoded (through the
+// guardrails' fail-closed decoder), markdown decoration stripped,
+// whitespace collapsed.
+function plainAnchor(raw) {
+  const { decodeEntitiesForScan } = require('./content-guardrails');
+  return decodeEntitiesForScan(String(raw || ''))
+    .replace(/&(amp|lt|gt|quot|apos|nbsp);/gi, (m, n) => ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' })[n.toLowerCase()])
+    .replace(/<(?:"[^"]*"|'[^']*'|[^>"'])*>/g, '')
+    .replace(/\\([!-/:-@[-`{-~])/g, '$1')
+    .replace(/[*_~`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function conversionCtaLinks(body) {
+  return ctaLinksWhere(body, (link) => isConversionPath(link.href));
+}
+// Estimate/quote CTAs pointing at a SERVICE or CITY page ("Request a Lawn
+// Care Quote" → /lawn-care-sarasota-fl/) are CTAs too — the wrong-service
+// rule applies to every CTA anchor, not just conversion endpoints. Same
+// classifier, different destination filter, so the two can never drift.
+function serviceQuoteCtaLinks(body) {
+  return ctaLinksWhere(body, (link) => {
+    const href = String(link.href || '');
+    if (!href.startsWith('/') || isConversionPath(href) || !isServiceOrCityPath(href)) return false;
+    const anchor = plainAnchor(link.anchor);
+    return ESTIMATE_KW_RE.test(anchor) && (ACTION_VERB_RE.test(anchor) || INVITATION_CTA_RE.test(anchor));
+  });
+}
+function ctaLinksWhere(body, accept) {
+  const out = [];
+  for (const link of extractLinks(body)) {
+    if (!accept(link)) continue;
+    // Classify on the DECORATION-STRIPPED anchor — `[**Request a Quote**]`
+    // must be read as "Request a Quote", not evade the gate on a leading
+    // asterisk.
+    const anchor = plainAnchor(link.anchor);
+    // Service names count only in the estimate/quote SUBJECT — the words up
+    // to and including the estimate/quote keyword. Trailing context ("…for
+    // Your Lawn", "…on your property") is not a service declaration.
+    const kw = anchor.match(/\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i);
+    const termsIn = (text) => Object.entries(CTA_ANCHOR_SERVICE_TERMS)
+      .filter(([, re]) => re.test(text))
+      .map(([svc]) => svc);
+    let subject = anchor;
+    let named;
+    const contextNamed = [];
+    if (kw) {
+      const end = kw.index + kw[0].length;
+      subject = anchor.slice(0, end);
+      named = termsIn(subject);
+      // A "for/on <phrase>" suffix can NAME the service ("…for Termite
+      // Control", "…for Your Termite Problem") — count service terms in it.
+      // Property-context nouns after a determiner/possessive ("for your
+      // lawn", "on the trees") describe WHERE, not a service, so the
+      // place-shaped services (lawn, tree-shrub) are dropped in that form.
+      // CTA modifiers may sit between the keyword and the preposition
+      // ("Request a Quote Today for Termite Control"). "about" introduces
+      // the topic the same way ("Get a Quote About Termite Treatment").
+      const after = anchor.slice(end).match(/^(?:\s+(?:today|now|online|fast|free|here))*\s+(?:for|on|to|against|about)\s+((?:[a-z0-9&.'-]+\s?){1,5})/i);
+      if (after) {
+        const phrase = after[1];
+        // Place-shaped when a determiner sits directly before the place
+        // noun anywhere in the phrase ("for your lawn", "to protect your
+        // lawn") — "to Control Termites" names the service.
+        const environmental = /\b(?:your|my|our|the|a|an|this|that)\s+(?:[a-z&-]+\s+)?(?:lawn|tree|shrub)/i.test(phrase);
+        for (const svc of termsIn(phrase)) {
+          // "…for your lawn" names a PLACE unless lawn is this post's own
+          // service — recorded separately; the brief-aware checks below
+          // count it only when allowed.
+          if (environmental && (svc === 'lawn' || svc === 'tree-shrub')) contextNamed.push(svc);
+          else if (!named.includes(svc)) named.push(svc);
+        }
+      }
+      // Coordinated subjects ("Termite and Pool Cleaning Quote") must be
+      // service-bearing in EVERY part — a part naming no known service is an
+      // unrecognized service, not harmless filler.
+      // Coordination is judged across the FULL anchor ("Get a Termite Quote
+      // and Pool Cleaning Estimate"), not just the text before the first
+      // keyword.
+      // "&" and "/" coordinate without surrounding whitespace too
+      // ("Termite/Pool Cleaning Quote", "Termite&Pool"); a slash between
+      // digits ("24/7") is a figure, not coordination.
+      const parts = anchor.split(/\s*,\s*|\s*\+\s*|\s+(?:and|or|plus)\s+|\s*&\s*|(?<=[a-z])\s*\/\s*(?=[a-z])/i);
+      if (parts.length > 1) {
+        // Filler + service DESCRIPTORS ("Control and Prevention Quote") are
+        // not separate services; an unlisted noun ("Pool Cleaning") is.
+        const filler = /^(?:(?:get|request|book|schedule|claim|start|see|view|a|an|my|your|our|the|free|fast|quick|instant|online|estimate|estimates|quote|quotes|pricing|price|control|prevention|treatment|treatments|removal|protection|management|service|services|plan|plans|program|programs|care|maintenance|exclusion|monitoring)\s*)+$/i;
+        // A trailing "for/on …" context clause is not a coordinated part.
+        const coordinated = parts.map((part) => part.replace(/\s+(?:for|on|about)\s+.*$/i, '').trim()).filter(Boolean);
+        const keywordRe = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
+        const requestVerbRe = new RegExp(`^(?:${REQUEST_VERB_SOURCE})\\b`, 'i');
+        // A part is a SERVICE-REQUEST clause when it carries the estimate/
+        // quote keyword OR opens with a request verb ("Schedule Pool
+        // Cleaning") — such a clause naming no known service is an unknown
+        // service. A bare NOUN PHRASE part ("…Quote and Pool Cleaning")
+        // shares the anchor's request/quote context — the CTA is requesting
+        // that service too — so it is judged the same way. Only editorial
+        // clauses led by a non-request verb ("…and See Our Approach") are
+        // exempt.
+        const editorialLeadRe = /^(?:see|view|learn|read|explore|discover|compare|browse|check|watch|meet|find|download|visit|contact|call|why|how|what)\b/i;
+        const unknownPart = coordinated.some((part) => {
+          if (termsIn(part).length > 0 || filler.test(part)) return false;
+          if (keywordRe.test(part) || requestVerbRe.test(part)) return true;
+          return !editorialLeadRe.test(part);
+        });
+        if (unknownPart) named = [...named, 'unknown'];
+        for (const part of coordinated) for (const svc of termsIn(part)) if (!named.includes(svc)) named.push(svc);
+      }
+    } else {
+      named = termsIn(subject);
+    }
+    // "Lawn pest control" is ONE service (lawn-pest-control → lawn), not
+    // lawn + pest — don't let the compound phrase read as a wrong-service mix.
+    if (/\blawn[- ]pest/i.test(subject)) named = named.filter((svc) => svc !== 'pest');
+    out.push({
+      anchor,
+      hasEstimateWording: Boolean(kw),
+      named,
+      contextNamed,
+    });
+  }
+  return out;
+}
+
+// "Pest" is an umbrella word ("Get a Termite Pest Control Quote"): when the
+// anchor ALSO positively names the brief's own service (or family), the
+// umbrella term is dropped from the named set. A pest-only anchor on a
+// non-pest-family brief still does not qualify.
+function effectiveNamed(link, allowed) {
+  // Place-shaped nouns ("…for your lawn") count as the service only when
+  // they ARE this post's allowed service.
+  const named = [...link.named, ...(allowed ? link.contextNamed.filter((svc) => allowed.has(svc)) : [])];
+  if (!allowed || !named.includes('pest')) return named;
+  const own = named.some((svc) => svc !== 'pest' && allowed.has(svc));
+  return own ? named.filter((svc) => svc !== 'pest') : named;
+}
+
+function hasConversionCta(body, brief = {}) {
+  // Owner rule 2026-08-27: the conversion CTA is judged on the LINK ANCHOR,
+  // not loose body wording — at least one link to a conversion path whose
+  // anchor carries estimate/quote wording ("Get My Free Termite Estimate",
+  // "Request a Quote"), and if the anchor names a service it must be the
+  // brief's own service (or its family). Discussion text stays independent:
+  // a termite post may talk about inspections all it wants;
+  // `[Schedule Service](/contact/)`, "Get an estimate. [Click here](/contact/)",
+  // and a lawn-care quote anchor on a termite post all fail to qualify.
+  const briefServices = ctaBriefServices(ctaBriefTopic(brief));
+  const allowed = briefServices.length
+    ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
+    : null;
+  // With a known brief service the qualifying CTA must POSITIVELY name it
+  // (or its family) — a generic "Request a Quote" or an unrecognized phrase
+  // can ride along as an extra CTA but does not satisfy "tied to the
+  // post's service" on its own.
+  return conversionCtaLinks(body).some((link) => {
+    if (!link.hasEstimateWording) return false;
+    // Presence requires an ACTIONABLE anchor — a request verb leading it,
+    // an infinitive invitation, or an established invitation shape
+    // ("Ready for Your Free Termite Estimate?"). A prose reference ("our
+    // termite estimate process") AND a bare noun phrase ("Termite Estimate
+    // Process") are descriptions, not CTAs — neither can satisfy presence.
+    if (!ACTION_VERB_RE.test(link.anchor) && !INVITATION_CTA_RE.test(link.anchor)) return false;
+    if (!allowed) return true;
+    const named = effectiveNamed(link, allowed);
+    return named.length > 0 && named.every((svc) => allowed.has(svc));
+  });
+}
+
+// EVERY conversion CTA anchor must comply — violations are flagged even
+// when a valid CTA exists elsewhere in the body:
+//   - an estimate/quote anchor naming ANY service outside the brief's own
+//     (+ family + generic pest) — "Get a Termite and Lawn Quote" on a
+//     termite post is mixed wording, not a pass;
+//   - an imperative CTA-shaped anchor with no estimate/quote wording at
+//     all ("Schedule Service", "Click here").
+function badCtaAnchor(body, brief = {}) {
+  const briefServices = ctaBriefServices(ctaBriefTopic(brief));
+  const allowed = briefServices.length
+    ? new Set(briefServices.flatMap((svc) => [...allowedAnchorServices(svc)]))
+    : null;
+  const bad = conversionCtaLinks(body).find((link) => {
+    if (link.hasEstimateWording) {
+      // With a known brief service, EVERY estimate/quote anchor must name it
+      // (or its family) — a generic "Request a Quote" is not tied to the post.
+      if (!allowed) return false;
+      const named = effectiveNamed(link, allowed);
+      return named.length === 0 || !named.every((svc) => allowed.has(svc));
+    }
+    return !isProseReferenceAnchor(link.anchor);
+  });
+  if (bad) return bad.anchor;
+  if (!allowed) return null;
+  // Service/city-page estimate CTAs obey the same brief-service tie.
+  const wrong = serviceQuoteCtaLinks(body).find((link) => {
+    const named = effectiveNamed(link, allowed);
+    return named.length === 0 || !named.every((svc) => allowed.has(svc));
+  });
+  return wrong ? wrong.anchor : null;
+}
+
+// Deterministic backstop to the writer prompt's CTA-wording rule (owner
+// 2026-08-27): a markdown link whose ANCHOR TEXT is inspection-request
+// wording is the forbidden CTA shape, wherever it points.
+// Inspection-REQUEST phrasing only ("Request an Inspection", "Book a Termite
+// Inspection", "Schedule your inspection") — editorial anchors like "Get
+// ready for your termite inspection" are not CTAs and must not be flagged.
+// optional CTA lead-in ("Click to", "Tap here to") + verb + optional
+// determiner + up to four qualifier words + "inspection":
+// "Request an Inspection", "Get a Termite Inspection", "Schedule a Free
+// Professional Termite Inspection", "Click to Schedule a Termite
+// Inspection". Qualifiers exclude the function words that mark EDITORIAL
+// phrasing ("Get ready for your termite inspection" — "ready"/"for" break
+// the request shape), so those anchors still pass.
+const FORBIDDEN_CTA_ANCHOR_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE})\\s+(?:(?:a|an|your|my|the|our|free)\\s+)?(?:(?!(?:for|to|of|with|about|before|after|during|from|by|on|in|at|ready|prepared|set)\\b)[a-z0-9&-]+\\s+){0,4}inspections?\\b(?!\\s+(?:checklist|guide|tips|report|article|faq|faqs|questions|cost|costs|process|prep|preparation|requirements|basics|overview|explained))`, 'i');
+// A REQUEST-VERB-LED anchor on a SERVICE or CITY page destination is a
+// conversion CTA in disguise ("Schedule Termite Service" →
+// /termite-control/) — the estimate/quote wording rule covers it too.
+// Descriptive service links (bare noun phrases, prose references,
+// editorial "Get ready …" shapes) stay exempt.
+const REQUEST_LED_RE = new RegExp(`^(?:please\\s+)?(?:(?:click|tap)\\s+(?:here\\s+)?to\\s+|(?:get\\s+)?ready\\s+to\\s+)?(?:please\\s+)?(?:${REQUEST_VERB_SOURCE}|${CONTACT_VERB_SOURCE})\\s+(?!(?:ready|prepared|set)\\b)`, 'i');
+const ESTIMATE_KW_RE = /\b(?:estimates?|estimated|estimating|estimation|quotes?|quotation)\b/i;
+// A destination is a SERVICE or CITY page when the contract's link-reason
+// heuristic says so OR when it matches the canonical city-service route
+// set (content-guardrails CITY_SERVICE_LINK_RE — the same mechanism the
+// internal-route gate validates against), so every enumerated city
+// service page ("/palm-tree-injections-bradenton-fl/") is classified the
+// same way, not just the families the heuristic spells out.
+function isServiceOrCityPath(href) {
+  const { inferLinkReason } = require('./blog-seo-contract')._internals;
+  if (['service', 'city'].includes(inferLinkReason(href))) return true;
+  const { CITY_SERVICE_LINK_RE, normalizeInternalPath } = require('./content-guardrails')._internals;
+  const norm = normalizeInternalPath(href);
+  if (!norm) return false;
+  if (CITY_SERVICE_LINK_RE.test(norm)) return true;
+  // Canonical service HUBS (brief builder's SERVICE_HUB_LINKS — the same
+  // routes the hub_link_present check accepts): "/waveguard-memberships/"
+  // is a service destination even though the reason heuristic reads it as
+  // a related blog.
+  // The pest LIBRARY is an informational hub, not a service page — a
+  // "Get the … Checklist" link there is a resource link (r13 ruling), so it
+  // stays out.
+  const { SERVICE_HUB_LINKS } = require('./content-brief-builder')._internals;
+  const hubs = new Set(Object.values(SERVICE_HUB_LINKS).flat().map((h) => normalizeInternalPath(h)));
+  hubs.delete(normalizeInternalPath('/pest-library/'));
+  return hubs.has(norm);
+}
+// The invitation shapes the conversion classifier already treats as
+// actionable ("Need Termite Control?", "Ready for Termite Control?",
+// "Looking for …") are CTAs on a service page too. "Get ready for your
+// termite inspection" is the editorial prep shape — its "get ready" opener
+// is the same exemption FORBIDDEN_CTA_ANCHOR_RE grants — so it stays a
+// descriptive link.
+const EDITORIAL_READY_RE = /^(?:please\s+)?get\s+ready\b/i;
+function isServicePageRequestCta(href, anchor) {
+  if (!String(href || '').startsWith('/') || isConversionPath(href)) return false;
+  if (!isServiceOrCityPath(href)) return false;
+  if (ESTIMATE_KW_RE.test(anchor)) return false;
+  if (REQUEST_LED_RE.test(anchor)) return true;
+  return INVITATION_CTA_RE.test(anchor) && !EDITORIAL_READY_RE.test(anchor);
+}
+
+function forbiddenCtaAnchor(body) {
+  // Any link (markdown or HTML, any destination — the legacy pattern points
+  // at service pages, not conversion paths) whose decoration-stripped anchor
+  // is inspection-request wording, or a request-led service-page CTA
+  // without estimate/quote wording.
+  for (const link of extractLinks(body)) {
+    const anchor = plainAnchor(link.anchor);
+    if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) return anchor;
+    if (isServicePageRequestCta(link.href, anchor)) return anchor;
+  }
+  return null;
+}
+
+// CTA violations shared with content-guardrails so EVERY blog publish lane
+// (manual publish-astro, legacy BlogWriter, refresh) enforces the owner
+// rule 2026-08-27: the brief-INDEPENDENT half (inspection-request anchors
+// and wording-free actionable conversion anchors) always runs; the
+// SERVICE-TYING half runs whenever the caller knows the post's service —
+// refresh and legacy lanes hold it on the post row, not a brief, so a
+// termite refresh adding "[Request a Lawn Care Quote]" parks there too.
+// Legacy rows may carry the topic on several fields (category + tag). The
+// MOST SPECIFIC resolvable candidates win: a specialty (it rides a
+// family's conversion path) over a broad service, and any of those over
+// the "pest" umbrella — the family target of every pest specialty — so a
+// coarse legacy category ("pest-control") never authorizes sibling
+// specialties when a more specific tag resolves too ("Termites" must not
+// admit a cockroach quote). Equally specific candidates still union.
+function collectForbiddenCtaAnchors(body, { service = null } = {}) {
+  const out = [];
+  let allowed = null;
+  const resolvedCandidates = [];
+  const addResolved = (resolved) => {
+    resolvedCandidates.push({ resolved, rank: CTA_SERVICE_FAMILY[resolved] ? 2 : (resolved === 'pest' ? 0 : 1) });
+  };
+  for (const candidate of [].concat(service ?? []).filter(Boolean)) {
+    let resolvedList = [];
+    try { resolvedList = ctaBriefServices(candidate); } catch (err) { resolvedList = []; }
+    for (const resolved of resolvedList) {
+      // Unresolvable candidates (a non-service category like "seasonal")
+      // carry no CTA vocabulary — they contribute nothing.
+      if (!(CTA_ANCHOR_SERVICE_TERMS[resolved] || CTA_SERVICE_FAMILY[resolved])) continue;
+      addResolved(resolved);
+    }
+  }
+  if (resolvedCandidates.length) {
+    const top = Math.max(...resolvedCandidates.map((c) => c.rank));
+    allowed = new Set();
+    for (const c of resolvedCandidates) {
+      if (c.rank !== top) continue;
+      for (const svc of allowedAnchorServices(c.resolved)) allowed.add(svc);
+    }
+  }
+  for (const link of extractLinks(body)) {
+    const anchor = plainAnchor(link.anchor);
+    if (FORBIDDEN_CTA_ANCHOR_RE.test(anchor)) { out.push(anchor); continue; }
+    if (!isConversionPath(link.href)) {
+      // Request-led service/city-page CTAs (see isServicePageRequestCta).
+      if (isServicePageRequestCta(link.href, anchor)) out.push(anchor);
+      continue;
+    }
+    if (!ESTIMATE_KW_RE.test(anchor) && !isProseReferenceAnchor(anchor)) out.push(anchor);
+  }
+  if (allowed) {
+    // Same posture as badCtaAnchor: EVERY estimate/quote conversion anchor
+    // must positively name an allowed service — a wrong-service or fully
+    // generic anchor is flagged even when a valid CTA exists elsewhere.
+    for (const link of [...conversionCtaLinks(body), ...serviceQuoteCtaLinks(body)]) {
+      if (!link.hasEstimateWording) continue;
+      const named = effectiveNamed(link, allowed);
+      if (named.length === 0 || !named.every((svc) => allowed.has(svc))) out.push(link.anchor);
+    }
+  }
+  return out;
 }
 
 function faqRequired(brief = {}) {
@@ -405,6 +1363,7 @@ function escapeRegExp(value) {
 
 module.exports = {
   evaluate,
+  collectForbiddenCtaAnchors,
   summarizeFindings,
   P0_CODES,
   P1_CODES,

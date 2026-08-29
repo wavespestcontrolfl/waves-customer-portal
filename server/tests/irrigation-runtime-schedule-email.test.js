@@ -109,7 +109,11 @@ describe('derived schedule → confirm_schedule with a derived schedule_note', (
     // the ask must say so instead of claiming the schedule is missing.
     const d = buildWeeklyEmailDecision({ ...BASE, ...RUNTIME, irrigationSystem: false, turfIrrigationType: 'in_ground' });
     expect(d.reason).toBe('setup_schedule');
-    expect(d.payload.schedule_ask).toContain('switched off');
+    expect(d.payload.schedule_ask).toContain('marked off');
+    // The portal toggle is retired — the ask must route to us, never to a
+    // control the customer no longer has.
+    expect(d.payload.schedule_ask).toContain('reply to this email');
+    expect(d.payload.schedule_ask).not.toMatch(/switch it on/i);
     expect(d.payload.schedule_ask).toContain("the schedule on file isn't being counted");
     expect(d.payload.schedule_ask).not.toContain('but not how');
   });

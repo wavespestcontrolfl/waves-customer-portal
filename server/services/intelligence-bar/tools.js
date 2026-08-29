@@ -258,7 +258,7 @@ IMPORTANT: Always show the operator exactly what you plan to set and ask for app
   {
     name: 'create_appointment',
     description: `Create a new scheduled service appointment.
-service_type examples: "Pest Control", "Lawn Care Visit", "Mosquito Barrier Treatment", "Tree & Shrub Care", "Quarterly Pest Control".
+service_type examples (catalog names): "Quarterly Pest Control Service", "Bi-Monthly Lawn Care Service", "Seasonal Mosquito Control Service", "Quarterly Tree & Shrub Care Service", "Waves Assessment".
 time_window: "morning" (8-12), "afternoon" (12-5), or specific like "9:00 AM".`,
     input_schema: {
       type: 'object',

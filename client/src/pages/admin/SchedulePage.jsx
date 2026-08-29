@@ -1156,7 +1156,7 @@ const EDIT_FALLBACK_SERVICES = [
     category: "termite",
     items: [
       { name: "Termite Monitoring Service", serviceKey: "termite_monitoring" },
-      { name: "Termite Active Bait Station Service", serviceKey: "termite_active_bait_quarterly" },
+      { name: "Quarterly Termite Active Bait Station Service", serviceKey: "termite_active_bait_quarterly" },
       { name: "Termite Spot Treatment Service", serviceKey: "termite_spot_treatment" },
       { name: "Termite Trenching Service", serviceKey: "termite_trenching" },
     ],

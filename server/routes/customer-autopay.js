@@ -9,10 +9,13 @@ const stripeConfig = require('../config/stripe-config');
 const { logAutopay, getRecent } = require('../services/autopay-log');
 const {
   isChargeableAutopayMethod,
+  getChargeableAutopayMethod,
+  getAutopaySelectedMethodIds,
   isBankMethodType,
   isExpiredCardMethod,
   isPaused,
 } = require('../services/autopay-eligibility');
+const { isEnabled } = require('../config/feature-gates');
 const { etDateString } = require('../utils/datetime-et');
 const { computeChargeAmount, isCardMethodType } = require('../services/stripe-pricing');
 const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
@@ -99,18 +102,30 @@ router.get('/', async (req, res, next) => {
 
     const autopayPaused = isPaused(customer);
 
-    const chargeableAutopayMethod = await db('payment_methods')
-      .where({
-        customer_id: req.customerId,
-        processor: 'stripe',
-        is_default: true,
-        autopay_enabled: true,
-      })
-      .first(
-        'id', 'processor', 'method_type', 'stripe_payment_method_id',
-        'is_default', 'autopay_enabled', 'card_funding', 'card_brand',
-        'exp_month', 'exp_year'
-      );
+    // The method this page calls "Charging … ending in" must be the one
+    // charge() would actually bill (owner ruling 2026-08-27, P1): the old
+    // unordered .first() on default+enabled ignored the enrollment pointer,
+    // so with legacy duplicate defaults the portal could show 1234 while
+    // collection charged 5678. Same resolver as stripe.js charge() and the
+    // expiry warnings; re-read the full row for the funding/brand fields.
+    const resolvedAutopayMethod = await getChargeableAutopayMethod(customer, db);
+    // The resolver returns the pointer row NORMALIZED (is_default:true —
+    // charge() honors the pointer regardless of the stored flag); the
+    // re-read only adds the display fields, it must not overwrite that
+    // (GH codex r4 P1: a raw is_default:false would fail the recheck
+    // below and show "off" while collection still charges the pointer).
+    const chargeableAutopayMethod = resolvedAutopayMethod
+      ? {
+        ...(await db('payment_methods')
+          .where({ id: resolvedAutopayMethod.id, customer_id: req.customerId })
+          .first('card_funding', 'card_brand', 'stripe_payment_method_id', 'method_type', 'exp_month', 'exp_year', 'ach_status') || {}),
+        ...resolvedAutopayMethod,
+      }
+      : null;
+    // Row-hierarchy identity for the Payment Methods list: every row Auto
+    // Pay is USING (resolver pick + pointer, expired included) — the same
+    // set DELETE /cards/:id refuses under the removal guard.
+    const selectedMethodIds = await getAutopaySelectedMethodIds(customer, db);
     // Mirror customerOnAutopay's ACH-health rule (Codex round-12): when
     // customers.ach_status is non-empty and not 'active'
     // (needs_verification / suspended), collection refuses everything but a
@@ -181,6 +196,8 @@ router.get('/', async (req, res, next) => {
       monthly_rate: customer.monthly_rate,
       waveguard_tier: customer.waveguard_tier,
       payment_methods: paymentMethods,
+      autopay_selected_method_ids: selectedMethodIds,
+      removal_guard: isEnabled('portalMethodRemovalGuard'),
       recent_events: recentEvents,
     });
   } catch (err) { next(err); }
@@ -368,7 +385,46 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       }
     }
 
+    let selectedGone = false;
+    // True only for the request that performs the enabled→disabled
+    // transition under the lock: two overlapping disables both read
+    // "enabled" before either locks, and the second must not send a
+    // second Auto Pay-off email (GH codex r1 P2).
+    let disabledTransition = false;
+    let disabledMethodId = null;
     await db.transaction(async (trx) => {
+      // Lock order = CUSTOMER first, then the method row (pre-push r2 P1:
+      // every Auto Pay mutation — enrollment, removal, set-default, the
+      // detached webhook — takes the same order, so removal vs replacement
+      // can never deadlock).
+      const locked = await trx('customers').where({ id: req.customerId }).forUpdate().first('id', 'autopay_enabled', 'autopay_payment_method_id');
+      // Nullable flag: only explicit false is "off" (customerOnAutopay
+      // parity, GH codex r3 P2) — a NULL-flag customer turning Auto Pay off
+      // IS a transition and gets the notice.
+      disabledTransition = updates.autopay_enabled === false && locked?.autopay_enabled !== false;
+      // The method the notice names = the one in charge immediately before
+      // the disable, read under the lock — the pre-lock `current` read can
+      // be stale if a switch landed in between (GH codex r2 P2).
+      disabledMethodId = locked?.autopay_payment_method_id || null;
+      if (disabledTransition && !disabledMethodId) {
+        // Legacy enrollment without a pointer: the method in charge is the
+        // default+enabled fallback collection would bill — resolve it under
+        // the lock BEFORE the flags are cleared below (GH codex r4 P2).
+        const fallback = await getChargeableAutopayMethod({ id: req.customerId, ...locked }, trx);
+        disabledMethodId = fallback?.id || null;
+      }
+      // Re-verify the method under lock (pre-push r1 P0 — shared protocol
+      // with DELETE /cards/:id, which holds the row FOR UPDATE across its
+      // detach): pointing Auto Pay at a row a concurrent removal just
+      // deleted would strand collection with a dangling pointer.
+      if (willBeEnabled && selectedPaymentMethod?.id) {
+        const locked = await trx('payment_methods')
+          .where({ id: selectedPaymentMethod.id, customer_id: req.customerId })
+          .forUpdate()
+          .first('id');
+        if (!locked) { selectedGone = true; return; }
+      }
+
       if (Object.keys(updates).length > 0) {
         await trx('customers').where({ id: req.customerId }).update(updates);
       }
@@ -398,6 +454,10 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       }
     });
 
+    if (selectedGone) {
+      return res.status(409).json({ code: 'payment_method_removed', error: 'That payment method was just removed. Refresh and choose another one.' });
+    }
+
     for (const evt of events) {
       // autopay_disabled already committed INSIDE the transaction above
       // (guard input, not just audit) — don't write it twice.
@@ -414,7 +474,18 @@ router.put('/', autopayWriteLimiter, async (req, res, next) => {
       ? updates.autopay_payment_method_id
       : (selectedPaymentMethod?.id || current.autopay_payment_method_id || null);
 
-    if (enabledEvent && activePaymentMethodId) {
+    if (updates.autopay_enabled === false) {
+      // Negative counterpart of the enabled notice (gated inside the
+      // sender); the pointer that was in charge names the method. Only the
+      // request that actually flipped the flag under the lock sends.
+      if (disabledTransition) void PaymentLifecycleEmail.sendAutopayDisabled({
+        customerId: req.customerId,
+        paymentMethodId: disabledMethodId,
+        disabledAt: new Date(),
+      }).catch((emailErr) => {
+        logger.warn(`[customer-autopay] autopay disabled email failed for customer ${req.customerId}: ${emailErr.message}`);
+      });
+    } else if (enabledEvent && activePaymentMethodId) {
       PaymentLifecycleEmail.sendAutopayEnabled({
         customerId: req.customerId,
         paymentMethodId: activePaymentMethodId,

@@ -12,7 +12,7 @@ const { tryClaimInboundWebhook, releaseInboundWebhook } = require('../services/m
 const { updateByTwilioSid } = require('../services/conversations');
 const { uploadTwilioMedia } = require('../services/sms-media');
 const { alertTwilioFailure, isFailureStatus } = require('../services/twilio-failure-alerts');
-const { hasSchedulingIntent, isSmsReaction, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
+const { hasSchedulingIntent, isSmsReaction, isQuietSmsReaction, isCourtesyOnly, hasRescheduleOrAwayIntent } = require('../services/sms-intent');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { properCase } = require('../utils/name-case');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -238,6 +238,31 @@ router.post('/sms', async (req, res) => {
     }
 
     const inboundMedia = await uploadTwilioMedia(req.body);
+    // Pure courtesy closer ("Thanks!", "Ok great", "👍"): lands in the thread
+    // already read, no bell/push/owner forward, no AI auto-reply. The shadow
+    // drafter still sees it (knowing when NOT to reply is a judged class).
+    // isCourtesyOnly is fail-safe: any question/scheduling/mixed content → false.
+    // An attachment is content — a photo captioned "Thanks" stays loud.
+    // (Computed after the media upload: needs inboundMedia — hook P0.)
+    // Bare affirmatives / 👍 are closers only when OUR last text did not ask
+    // a question; that context comes from sms_log, fail-closed (unknown →
+    // treated as awaiting an answer → stays loud). The DB read only runs for
+    // grammar candidates, never on every inbound.
+    let courtesyOnly = false;
+    if (!smsReaction && inboundMedia.length === 0 && isCourtesyOnly(Body, { awaitingAnswer: false })) {
+      courtesyOnly = isCourtesyOnly(Body, { awaitingAnswer: await lastOutboundAskedQuestion(From, To) });
+    }
+    // Quiet tapback = explicitly affirmative (Liked/Loved/👍/undo) AND its
+    // quoted target asked nothing. "Reacted 👍 to \"Does 9am work?\"" is the
+    // ANSWER; "Disliked …" / "Questioned …" / ❓ express concern — all loud
+    // (hook P1 ×2). Loud reactions take a dedicated path below: persisted
+    // unread + the same guarded bell a text gets, never the business
+    // automations (reschedule, lead intake, estimator).
+    const quietReaction = smsReaction && isQuietSmsReaction(Body);
+    // Hoisted from the AI-reply section: the reaction path below needs it too.
+    const AI_ASSISTANT_NUMBER = '+18559260203';
+    const toClean = (To || '').replace(/\D/g, '');
+    const isAiNumber = toClean === '18559260203' || toClean === '8559260203' || To === AI_ASSISTANT_NUMBER;
 
     // Try to match sender to a single active customer. Twilio sends E.164,
     // while older customer rows may still have local formatting.
@@ -294,10 +319,12 @@ router.post('/sms', async (req, res) => {
       else logger.warn(`[contact-correction] enqueue deferred to stale sweep for customer ${customer.id}, sms_log ${smsLogId || 'n/a'}`);
     };
 
-    // Dual-write to unified messages table. Wrapped in fire-and-forget
-    // because old sms_log writes still happen below; if this errors the
-    // legacy path keeps Virginia's inbox working.
-    require('../services/conversations').recordTouchpoint({
+    // Dual-write to unified messages table. Awaited (fail-soft — the catch
+    // keeps the legacy sms_log path serving Virginia's inbox on error) so the
+    // message row exists BEFORE the sms_reply bell below is written: the
+    // thread-read bell cross-clear only clears bells for threads with no
+    // unread message, which needs message-before-bell ordering (hook P1).
+    await require('../services/conversations').recordTouchpoint({
       customerId: customer?.id,
       channel: 'sms',
       ourEndpointId: To,
@@ -307,7 +334,14 @@ router.post('/sms', async (req, res) => {
       authorType: 'customer',
       twilioSid: MessageSid,
       media: inboundMedia,
-      metadata: { location: numberConfig?.label, numberType: numberConfig?.type },
+      // Reactions and pure courtesy closers never needed a human to "open"
+      // them — write the row already read so the Messages unread dot and
+      // the Unread chip only count messages that want an answer.
+      isRead: quietReaction || courtesyOnly,
+      // Loud reactions are typed as ordinary inbound so the unanswered digest
+      // and completion guard count them (codex r3).
+      messageType: quietReaction ? 'sms_reaction' : undefined,
+      metadata: { location: numberConfig?.label, numberType: numberConfig?.type, ...(courtesyOnly ? { courtesyOnly: true } : {}) },
     }).catch(() => {});
 
     // ── STOP / UNSUBSCRIBE keyword handling ──
@@ -604,7 +638,8 @@ router.post('/sms', async (req, res) => {
         customer_id: customer?.id || null,
         direction: 'inbound', from_phone: From, to_phone: To,
         message_body: Body, twilio_sid: MessageSid, status: 'received',
-        message_type: 'sms_reaction',
+        message_type: quietReaction ? 'sms_reaction' : 'inbound', // loud = ordinary inbound for the watchers
+        is_read: quietReaction, // closers read on arrival — mirrors the unified messages row
         metadata: JSON.stringify({
           locationId: numberConfig.locationId,
           source: numberConfig.type,
@@ -612,8 +647,39 @@ router.post('/sms', async (req, res) => {
           media: inboundMedia,
         }),
       }).catch(() => {});
+      if (!quietReaction) {
+        // Same SELECT→INSERT window as the general path: if the thread was
+        // read while this legacy row was being written, mirror it now.
+        const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+          .then((r) => r?.is_read === true).catch(() => false);
+        if (readNow) await db('sms_log').where({ twilio_sid: MessageSid, direction: 'inbound' }).update({ is_read: true }).catch(() => {});
+      }
 
       logger.info('[sms-intent] SMS reaction detected; skipping automated inbound handling');
+      if (!quietReaction && !isAiNumber) {
+        // Loud reaction (answer to a question, or a dislike/question mark):
+        // same alert lifecycle as a text — guarded thread bell for known
+        // customers on any customer-facing number, legacy owner forward when
+        // the bell didn't land — then stop: no reschedule/lead/estimator
+        // automation ever sees a tapback (codex r2/r3).
+        const notifyTypes = ['location', 'gbp_tracking', 'domain_tracking', 'van_tracking'];
+        let landed = false;
+        if (customer && notifyTypes.includes(numberConfig.type)) {
+          try {
+            const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body });
+            landed = Boolean(stats && !stats.error && (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
+          } catch (e) {
+            if (e.alreadyRead) landed = true;
+            else logger.error(`[notifications] sms_reply (reaction) trigger failed: ${e.message}`);
+          }
+        }
+        if (!landed && process.env.ADAM_PHONE && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+          try {
+            const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
+            await TwilioService.sendSMS(process.env.ADAM_PHONE, `📩 New SMS\nFrom: ${senderName}\n"${(Body || '').slice(0, 120)}"`, { messageType: 'internal_alert' });
+          } catch (e) { logger.error(`SMS notification failed: ${e.message}`); }
+        }
+      }
       return res.type('text/xml').send('<Response></Response>');
     }
 
@@ -799,18 +865,35 @@ router.post('/sms', async (req, res) => {
     const messageType = numberConfig.type === 'domain_tracking' ? 'domain_lead'
       : numberConfig.type === 'van_tracking' ? 'van_lead' : 'inbound';
 
+    // The unified row was written above; if the thread was opened in the
+    // meantime that row is already read and this legacy row must agree, or
+    // it would sit unread forever (no later mirror can find it — hook P1).
+    const unifiedAlreadyRead = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+      .then((r) => r?.is_read === true).catch(() => false);
     const [smsLogEntry] = await db('sms_log').insert({
       customer_id: customer?.id || null,
       direction: 'inbound', from_phone: From, to_phone: To,
       message_body: Body, twilio_sid: MessageSid, status: 'received',
       message_type: messageType,
+      // Courtesy closers are read on arrival in the legacy log too, so the
+      // sms_log-backed unread counts agree with the unified messages row.
+      ...((courtesyOnly || unifiedAlreadyRead) ? { is_read: true } : {}),
       metadata: JSON.stringify({
         locationId: numberConfig.locationId,
         source: numberConfig.type,
         domain: numberConfig.domain,
         media: inboundMedia,
+        ...(courtesyOnly ? { courtesyOnly: true } : {}),
       }),
     }).returning(['id', 'created_at']);
+    // Close the SELECT→INSERT window (hook P1): if the thread was read between
+    // the check above and this insert, the read mirror found no legacy row —
+    // re-check now that the row exists and mirror the state ourselves.
+    if (!courtesyOnly && !unifiedAlreadyRead && smsLogEntry?.id) {
+      const readNow = await db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+        .then((r) => r?.is_read === true).catch(() => false);
+      if (readNow) await db('sms_log').where({ id: smsLogEntry.id }).update({ is_read: true }).catch(() => {});
+    }
     // The inbound message is now durably recorded — releasing the claim on a
     // later error would let a retry duplicate this row (twilio_sid not unique).
     persisted = true;
@@ -946,21 +1029,18 @@ router.post('/sms', async (req, res) => {
     // for this message — the legacy owner-SMS forward must not re-alert
     // (codex #3232 r4).
     let knownInboundNotified = rescheduleFlagged;
-    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !rescheduleFlagged) {
+    if (customer && (Body || inboundMedia.length) && shouldNotifyKnownInbound && !smsReaction && !courtesyOnly && !rescheduleFlagged) {
       try {
-        const { triggerNotification } = require('../services/notification-triggers');
-        const stats = await triggerNotification('sms_reply', {
-          fromName: `${customer.first_name} ${customer.last_name}`,
-          fromPhone: From,
-          message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}`,
-          threadId: customer.id,
-        });
+        const stats = await ringSmsReplyBell({ customer, From, MessageSid, message: Body || `${inboundMedia.length} photo${inboundMedia.length === 1 ? '' : 's'}` });
         // suppressed counts as HANDLED: an internal-test/demo customer's
         // inbound must not fall through to the legacy owner-SMS forward —
         // that would re-create the exact alert the suppression removed.
         knownInboundNotified = Boolean(stats && !stats.error &&
           (stats.suppressed || stats.bellWritten || Number(stats.push?.sent || 0) > 0));
-      } catch (e) { logger.error(`[notifications] sms_reply trigger failed: ${e.message}`); }
+      } catch (e) {
+        if (e.alreadyRead) { knownInboundNotified = true; logger.info('[notifications] sms_reply skipped — thread read before the bell'); }
+        else logger.error(`[notifications] sms_reply trigger failed: ${e.message}`);
+      }
     }
 
     // Notify Adam of regular inbound SMS. Domain/van tracking leads use the
@@ -993,7 +1073,7 @@ router.post('/sms', async (req, res) => {
       } catch (e) { logger.warn(`[twilio-webhook] repeat-sender check failed: ${e.message}`); }
     }
 
-    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
+    if ((Body || inboundMedia.length) && process.env.ADAM_PHONE && !smsReaction && !courtesyOnly && !isTrackingLeadInbound && !knownInboundNotified && !repeatUnknownSender && !(From === process.env.ADAM_PHONE && To === process.env.ADAM_PHONE)) {
       try {
         const senderName = customer ? `${customer.first_name} ${customer.last_name}` : From;
         const mediaText = inboundMedia.length
@@ -1022,9 +1102,6 @@ router.post('/sms', async (req, res) => {
 
     // WAVES AI ASSISTANT — route through conversational AI engine
     // Only active on the dedicated AI assistant number
-    const AI_ASSISTANT_NUMBER = '+18559260203';
-    const toClean = (To || '').replace(/\D/g, '');
-    const isAiNumber = toClean === '18559260203' || toClean === '8559260203' || To === AI_ASSISTANT_NUMBER;
 
     let aiAutoReplyOn = false;
     if (isAiNumber) {
@@ -1045,7 +1122,7 @@ router.post('/sms', async (req, res) => {
     // through to Virginia's inbox.
     const legacyAiDraftsEnabled = isEnabled('legacyAiDrafts');
 
-    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction) {
+    if (Body && (customer || numberConfig.type === 'location') && aiAutoReplyOn && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
         const WavesAssistant = require('../services/ai-assistant/assistant');
         const aiResult = await WavesAssistant.processMessage({
@@ -1139,10 +1216,12 @@ router.post('/sms', async (req, res) => {
       logger.info('[sms-intent] scheduling-intent detected; skipping auto-reply, routing to human inbox');
     } else if (smsReaction && aiAutoReplyOn) {
       logger.info('[sms-intent] SMS reaction detected; skipping auto-reply');
+    } else if (courtesyOnly && aiAutoReplyOn) {
+      logger.info('[sms-intent] courtesy-only closer; skipping auto-reply');
     }
 
     // LEGACY AI DRAFT — still create drafts for admin review alongside the AI assistant
-    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction) {
+    if (customer && numberConfig.type === 'location' && Body && legacyAiDraftsEnabled && !schedulingIntent && !rescheduleAsk && !smsReaction && !courtesyOnly) {
       try {
         const ContextAggregator = require('../services/context-aggregator');
         const ResponseDrafter = require('../services/response-drafter');
@@ -1736,6 +1815,58 @@ router.post('/status', async (req, res) => {
 // the kill-switch state — the lane must not add awaited DB work or persist
 // duplicate SMS/PII on the webhook path at all; the worker-side gate_off
 // outcome is the backstop, not the boundary.
+/**
+ * Did the most recent customer-facing outbound from OUR receiving number to
+ * this phone (last 24h) end on a question? Internal alerts are excluded. Fail CLOSED: any error or no
+ * recent outbound → true, so a bare "👍" stays loud when in doubt.
+ */
+/**
+ * The ONE way an inbound rings the admin thread bell/push, with the
+ * thread-read race guards: skip if the unified message is already read
+ * (throws { alreadyRead }), re-check right before the push leaves, and
+ * retire the SID-scoped bell if the thread was read while it was written.
+ */
+async function ringSmsReplyBell({ customer, From, MessageSid, message }) {
+  const { triggerNotification } = require('../services/notification-triggers');
+  const unifiedStillUnread = () => db('messages').where({ channel: 'sms', twilio_sid: MessageSid }).first('is_read')
+    .then((r) => r?.is_read !== true).catch(() => true); // fail open: unknown → still ring
+  if (!(await unifiedStillUnread())) throw Object.assign(new Error('thread already read'), { alreadyRead: true });
+  const stats = await triggerNotification('sms_reply', {
+    fromName: `${customer.first_name} ${customer.last_name}`,
+    fromPhone: From,
+    message,
+    threadId: customer.id,
+    twilioSid: MessageSid, // stored in metadata.payload — correlates THIS bell to THIS message
+  }, { beforePush: unifiedStillUnread });
+  try {
+    if (!(await unifiedStillUnread())) {
+      await require('../services/notification-service').markInboundSmsReadAdmin({ customerId: customer.id, twilioSid: MessageSid });
+    }
+  } catch (e) { logger.warn(`[notifications] sms_reply post-check failed: ${e.message}`); }
+  return stats;
+}
+
+async function lastOutboundAskedQuestion(toPhone, ourNumber) {
+  try {
+    // Scoped to the Waves number the customer replied on: a question asked
+    // from a different line is a different thread (hook P1).
+    const last = await db('sms_log')
+      .where({ direction: 'outbound', to_phone: toPhone, from_phone: ourNumber })
+      .whereIn('status', ['queued', 'sent', 'delivered']) // a failed/blocked send never reached them (hook P1)
+      .where(function notInternal() { this.whereNot('message_type', 'internal_alert').orWhereNull('message_type'); })
+      .where('created_at', '>', new Date(Date.now() - 24 * 60 * 60 * 1000))
+      .orderBy('created_at', 'desc')
+      .first('message_body');
+    if (!last) return true;
+    // A question mark OR an explicit reply directive ("Reply YES to confirm",
+    // "let us know", "text back") — templates ask without "?" (hook P1).
+    return /\?|\breply\b|\brespond\b|\btext\s+(?:us\s+)?back\b|\blet\s+(?:us|me)\s+know\b|\bconfirm\b/i.test(String(last.message_body || ''));
+  } catch (e) {
+    logger.warn(`[twilio-webhook] awaiting-answer lookup failed: ${e.message}; treating as awaiting`);
+    return true;
+  }
+}
+
 function shouldReserveCorrectionJob(body, smsReaction) {
   return Boolean(body && !smsReaction
     && require('../config/feature-gates').isEnabled('contactCorrection')

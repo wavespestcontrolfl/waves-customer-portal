@@ -153,8 +153,10 @@ describe('buildRelayTwiML — authenticates the upgrade + disclosure greeting', 
     expect(xml).not.toContain('shh-secret-123'); // the minting key stays server-side
     expect(xml).not.toContain('key=');
     expect(xml).toContain('welcomeGreeting=');
-    expect(DEFAULT_WELCOME_GREETING.toLowerCase()).toContain('automated assistant');
-    // The disclosure greeting must play in full — non-interruptible (FL §934.03).
+    // Owner ruling 2026-08-28: the opener carries NO recording/AI notice — the
+    // greeting MP3 that precedes the relay on every production path does.
+    expect(DEFAULT_WELCOME_GREETING.toLowerCase()).not.toMatch(/recorded|automated|assistant|ai\b/);
+    // The opener plays in full — non-interruptible.
     expect(xml).toContain('welcomeGreetingInterruptible="none"');
     expect(xml).not.toContain('<Dial');
   });
@@ -206,13 +208,25 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('voice="custom-voice-id"');
   });
 
-  test('default greeting names the agent AND keeps the §934.03 recorded-line + AI disclosure', () => {
+  test('default greeting is the bare owner-ruled opener — name + day-part, no notice', () => {
     const greeting = defaultWelcomeGreeting();
     expect(greeting).toContain('Sandy');
-    expect(greeting.toLowerCase()).toContain('recorded');
-    expect(greeting.toLowerCase()).toContain('automated assistant');
-    expect(greeting).toContain('How can I help you today?');
+    expect(greeting.toLowerCase()).not.toMatch(/recorded|automated|assistant/);
+    expect(greeting).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
+    expect(greeting).toMatch(/How can I help you this (morning|afternoon|evening)\?$/);
+    expect(greeting).not.toContain('{dayPart}');
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Sandy');
+  });
+
+  test('the greeting day-part follows the ET clock at render time (owner ruling 2026-08-28)', () => {
+    const { greetingDayPart } = require('../services/voice-agent/relay-protocol');
+    expect(greetingDayPart(new Date('2026-08-28T12:30:00Z'))).toBe('this morning');   // 08:30 ET
+    expect(greetingDayPart(new Date('2026-08-28T15:59:00Z'))).toBe('this morning');   // 11:59 ET
+    expect(greetingDayPart(new Date('2026-08-28T16:00:00Z'))).toBe('this afternoon'); // 12:00 ET
+    expect(greetingDayPart(new Date('2026-08-28T20:59:00Z'))).toBe('this afternoon'); // 16:59 ET
+    expect(greetingDayPart(new Date('2026-08-28T21:00:00Z'))).toBe('this evening');   // 17:00 ET
+    expect(greetingDayPart(new Date('2026-08-29T03:30:00Z'))).toBe('this evening');   // 23:30 ET
+    expect(defaultWelcomeGreeting(new Date('2026-08-28T21:00:00Z'))).toContain('How can I help you this evening?');
   });
 
   test('VOICE_AGENT_NAME renames her; VOICE_RELAY_GREETING overrides the whole line', () => {
@@ -220,46 +234,30 @@ describe('buildRelayTwiML — Sandy persona parity (voice + greeting)', () => {
     process.env.VOICE_AGENT_NAME = 'Marge';
     expect(agentName()).toBe('Marge');
     expect(defaultWelcomeGreeting()).toContain('Marge');
-    // ⚠️ THE GREETING *IS* THE FL §934.03 DISCLOSURE (the /voice backstop relies
-    // on it), so a verbatim override could delete a legal disclosure with an
-    // env-var edit. An override missing it gets the disclosure APPENDED rather
-    // than rejected — refusing would strand live calls on a bad env value.
+    // The override is used VERBATIM — nothing is appended (the notice lives in
+    // the greeting MP3, not here).
     process.env.VOICE_RELAY_GREETING = 'Hi, this is Sandy! How can I help you today?';
-    const patched = defaultWelcomeGreeting();
-    expect(patched).toContain('Hi, this is Sandy! How can I help you today?');
-    expect(patched).toMatch(/record(ed|ing)/i);
-    expect(patched).toMatch(/automated assistant/i);
+    expect(defaultWelcomeGreeting()).toBe('Hi, this is Sandy! How can I help you today?');
     expect(buildRelayTwiML({ wsUrl: RELAY_URL })).toContain('Hi, this is Sandy! How can I help you today?');
-
-    // An override that ALREADY discloses both is used verbatim — no double-up.
-    process.env.VOICE_RELAY_GREETING =
-      'Thanks for calling Waves. This call may be recorded and you are speaking with our automated assistant.';
-    expect(defaultWelcomeGreeting()).toBe(process.env.VOICE_RELAY_GREETING);
-    expect((defaultWelcomeGreeting().match(/automated assistant/gi) || []).length).toBe(1);
   });
 
-  // ⭐ A FALSE DISCLOSURE IS DISCARDED, NOT PATCHED. Appending the canonical
-  // line to "this call is not recorded / you're speaking with a human" made
-  // the caller hear BOTH statements — a contradictory legal notice is no
-  // notice at all. Negation ⇒ the override is thrown away entirely; only a
-  // merely-INCOMPLETE override keeps its copy with the missing half appended.
-  test('a NEGATED override is replaced wholesale by the canonical greeting', () => {
+  // ⭐ THE ONE GUARD LEFT: an override may not CLAIM to be human. The identity
+  // lie — with or without a denial word — is discarded wholesale and the
+  // canonical opener speaks instead.
+  test('an override that claims to be human is replaced wholesale by the canonical opener', () => {
     for (const bad of [
-      'Hi! This call is not recorded, and you are speaking with a human assistant.',
-      "Welcome to Waves — don't worry, nothing here is recorded.",
-      // The identity lie stated AFFIRMATIVELY — no denial word at all.
-      'This call may be recorded. You are speaking with a human assistant today!',
+      'Hi! You are speaking with a human assistant.',
+      'This is a real person at Waves, how can I help?',
+      "Thanks for calling Waves — I'm a live agent, what can I do for you?",
     ]) {
       process.env.VOICE_RELAY_GREETING = bad;
       const spoken = defaultWelcomeGreeting();
-      expect(spoken).toBe(DEFAULT_WELCOME_GREETING); // canonical, alone
-      expect(spoken).not.toContain('not recorded'); // the false text is GONE
-      expect(spoken).not.toContain('human assistant');
+      expect(spoken).toMatch(/^Waves, this is Sandy\. How can I help you this (morning|afternoon|evening)\?$/);
+      expect(spoken).not.toMatch(/human|real person|live agent/);
     }
-    // …while an incomplete-but-honest override still keeps its copy.
-    process.env.VOICE_RELAY_GREETING = 'Thanks for calling Waves!';
-    expect(defaultWelcomeGreeting()).toContain('Thanks for calling Waves!');
-    expect(defaultWelcomeGreeting()).toMatch(/may be recorded/i);
+    // …while any honest override is used exactly as written.
+    process.env.VOICE_RELAY_GREETING = 'Thanks for calling Waves, this is Sandy.';
+    expect(defaultWelcomeGreeting()).toBe('Thanks for calling Waves, this is Sandy.');
   });
 });
 

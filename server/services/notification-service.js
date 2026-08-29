@@ -338,6 +338,43 @@ const NotificationService = {
     ).whereNull('read_at').update({ read_at: new Date() });
   },
 
+  // Mark a customer's inbound_sms admin bells read — the ONE writer for
+  // thread-scoped bell reads (thread open in Communications, and the webhook's
+  // "thread was read while the bell was being written" post-check). Same
+  // recipient/role scoping as every other admin read. `before` bounds to bells
+  // that existed when the read request entered; `twilioSid` narrows to the
+  // single bell written for one inbound message.
+  async markInboundSmsReadAdmin({ customerId, before = new Date(), twilioSid = null, role } = {}) {
+    if (!customerId) return 0;
+    let q = scopeAdminFeedToRole(
+      db('notifications').where({ recipient_type: 'admin', category: 'inbound_sms' }),
+      role,
+    )
+      .whereNull('read_at')
+      .where('link', `/admin/communications?thread=${customerId}`)
+      .where('created_at', '<=', before);
+    if (twilioSid) q = q.whereRaw("metadata->'payload'->>'twilioSid' = ?", [twilioSid]);
+    return q.update({ read_at: new Date() });
+  },
+
+  // A voicemail landed for a call the missed-call lane already rang for
+  // (the recording callback can persist after the 2-minute missed-call
+  // claim): the voicemail bell supersedes — retire the missed-call bell so
+  // the owner never holds two contradictory alerts for one call. System
+  // writer (no role scoping): every admin copy of that bell is retired.
+  async supersedeMissedCallAdmin({ callLogId, callSid } = {}) {
+    if (!callLogId && callSid) {
+      const row = await db('call_log').where('twilio_call_sid', callSid).first('id');
+      callLogId = row?.id || null;
+    }
+    if (!callLogId) return 0;
+    return db('notifications')
+      .where({ recipient_type: 'admin', category: 'missed_call' })
+      .whereNull('read_at')
+      .whereRaw("metadata->'payload'->>'callLogId' = ?", [String(callLogId)])
+      .update({ read_at: new Date() });
+  },
+
   // Mark all read for customer
   async markAllReadCustomer(customerId) {
     await db('notifications').where({ recipient_type: 'customer', recipient_id: customerId }).whereNull('read_at').update({ read_at: new Date() });

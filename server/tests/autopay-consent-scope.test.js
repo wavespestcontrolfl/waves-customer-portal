@@ -8,6 +8,9 @@
 // BEFORE any flag moves.
 
 jest.mock('stripe', () => jest.fn(() => ({})));
+// The router's per-customer write limiter (6/min) is shared across every
+// test in this file; it is not under test here.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../middleware/auth', () => ({
   authenticate: (req, _res, next) => {
     req.customerId = 'cust-1';
@@ -25,7 +28,9 @@ jest.mock('../services/autopay-log', () => ({
 }));
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn().mockResolvedValue(null),
+  sendAutopayDisabled: jest.fn().mockResolvedValue(null),
   sendPaymentMethodUpdated: jest.fn().mockResolvedValue(null),
+  sendPaymentMethodRemoved: jest.fn().mockResolvedValue(null),
 }));
 jest.mock('../services/card-enrollment-email', () => ({
   sendAutopayEnrollmentConfirmation: jest.fn().mockResolvedValue(null),
@@ -53,7 +58,7 @@ function builderFor(table) {
     }
     return b;
   });
-  for (const method of ['select', 'orderBy', 'whereNotNull', 'whereIn']) {
+  for (const method of ['select', 'orderBy', 'whereNotNull', 'whereIn', 'forUpdate']) {
     b[method] = jest.fn(() => b);
   }
   b.first = jest.fn(async () => rows()[0] || null);
@@ -94,6 +99,93 @@ beforeEach(() => {
 });
 
 afterEach(() => jest.clearAllMocks());
+
+describe('PUT /billing/autopay — selected method re-verified under lock (pre-push r1 P0)', () => {
+  const router = () => require('../routes/customer-autopay');
+
+  test('a method deleted between the pre-read and the transaction → 409 payment_method_removed, nothing written', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      ConsentService.hasEnrollmentScopedConsent.mockResolvedValue(true);
+      db.transaction = async (fn) => {
+        // Simulate a concurrent portal removal committing first.
+        state.payment_methods = state.payment_methods.filter((p) => p.id !== 'pm-hold');
+        return fn((table) => builderFor(table));
+      };
+      const res = await fetch(`${baseUrl}/billing/autopay`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autopay_enabled: true, autopay_payment_method_id: 'pm-hold' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('payment_method_removed');
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(state.customers[0].autopay_payment_method_id).toBe(null);
+    }));
+});
+
+describe('PUT /billing/autopay — Auto Pay-off notice sent once (GH codex r1 P2)', () => {
+  const router = () => require('../routes/customer-autopay');
+  const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+  const disable = (baseUrl) => fetch(`${baseUrl}/billing/autopay`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autopay_enabled: false }),
+  });
+
+  test('the request that flips enabled→disabled under the lock sends the notice', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', paymentMethodId: 'pm-old' }));
+    }));
+
+  test('a NULL autopay_enabled customer turning Auto Pay off IS a transition (only explicit false is off) → notice sent', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = null;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(state.customers[0].autopay_enabled).toBe(false);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledTimes(1);
+    }));
+
+  test('no pointer (legacy enrollment) → the notice names the default+enabled fallback collection would bill', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = null;
+      state.payment_methods.find((p) => p.id === 'pm-old').autopay_enabled = true; // is_default already true
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-old' }));
+    }));
+
+  test('the notice names the method in charge UNDER THE LOCK, not the stale pre-read pointer', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      state.customers[0].autopay_payment_method_id = 'pm-old';
+      db.transaction = async (fn) => {
+        // A concurrent switch moved Auto Pay to pm-hold between pre-read and lock.
+        state.customers[0].autopay_payment_method_id = 'pm-hold';
+        return fn((table) => builderFor(table));
+      };
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).toHaveBeenCalledWith(expect.objectContaining({ paymentMethodId: 'pm-hold' }));
+    }));
+
+  test('an overlapping disable that finds the flag already off under the lock does NOT send a second notice', () =>
+    withServer('/billing/autopay', router(), async (baseUrl) => {
+      state.customers[0].autopay_enabled = true;
+      db.transaction = async (fn) => {
+        // The first disable committed between this request's pre-read and its lock.
+        state.customers[0].autopay_enabled = false;
+        return fn((table) => builderFor(table));
+      };
+      const res = await disable(baseUrl);
+      expect(res.status).toBe(200);
+      expect(PaymentLifecycleEmail.sendAutopayDisabled).not.toHaveBeenCalled();
+    }));
+});
 
 describe('PUT /billing/autopay consent scope', () => {
   const router = () => require('../routes/customer-autopay');

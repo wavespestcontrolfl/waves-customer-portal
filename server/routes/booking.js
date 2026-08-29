@@ -1955,6 +1955,7 @@ async function createSelfBooking(payload = {}) {
     // and fetch the estimate's ownership columns.
     let sourceEstimateId = null;
     let sourceEstimateRow = null;
+    let pendingAcceptanceClaim = null;
     if (source_estimate_id) {
       const srcEstIdStr = String(source_estimate_id).trim();
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(srcEstIdStr)) {
@@ -1962,7 +1963,7 @@ async function createSelfBooking(payload = {}) {
       }
       const srcEst = (estimate && String(estimate.id) === srcEstIdStr)
         ? estimate
-        : await db('estimates').where('id', srcEstIdStr).first('id', 'customer_id', 'customer_phone', 'customer_email');
+        : await db('estimates').where('id', srcEstIdStr).first('id', 'customer_id', 'customer_phone', 'customer_email', 'status', 'terms_version');
       if (srcEst) {
         sourceEstimateRow = srcEst;
       } else {
@@ -2049,6 +2050,14 @@ async function createSelfBooking(payload = {}) {
       }
       if (owned) {
         sourceEstimateId = srcEstIdStr;
+        // A customer-less ACCEPTED estimate with a recorded acceptance
+        // (phoneless one-time accept) now has a proven owner. The ownership
+        // fan-out itself runs only AFTER the booking commits (see below):
+        // a request that later 400s/409s must not attach a legal acceptance
+        // record to a customer with no booking (pre-push Codex P1).
+        if (!sourceEstimateRow.customer_id && sourceEstimateRow.status === 'accepted' && sourceEstimateRow.terms_version) {
+          pendingAcceptanceClaim = { estimateId: srcEstIdStr, customerId: custId };
+        }
       } else {
         logger.warn(`[booking:confirm] source_estimate_id ${srcEstIdStr} does not belong to booking customer ${custId} — booking proceeds unlinked`);
       }
@@ -3761,6 +3770,30 @@ async function createSelfBooking(payload = {}) {
         source_estimate_id: pricing_estimate_id,
       });
     };
+
+    // Acceptance ownership fan-out, post-commit only (the booking exists —
+    // new or a double-submit replay). Best-effort here: a lost claim means
+    // another booking already attached the record (the link on this visit
+    // stays correlation-only); a transient failure is reconciled by the
+    // daily runAcceptanceOwnershipSweep from scheduled_services.source_estimate_id.
+    if (pendingAcceptanceClaim && txResult && txResult.ok !== false) {
+      const { attachAcceptanceOwnership } = require('../services/estimate-acceptance-record');
+      const claim = await attachAcceptanceOwnership(db, pendingAcceptanceClaim);
+      if (!claim.attached && claim.outcome === 'not_claimable') {
+        // Another booking's customer won the claim: this visit must not keep
+        // correlating to someone else's estimate (GH Codex r7 P2). A replay
+        // for the SAME customer is fine — the link is theirs.
+        const owner = await db('estimates').where({ id: pendingAcceptanceClaim.estimateId }).first('customer_id');
+        if (owner && owner.customer_id && String(owner.customer_id) !== String(custId)) {
+          await db('scheduled_services')
+            .where({ source_estimate_id: pendingAcceptanceClaim.estimateId, customer_id: custId })
+            .update({ source_estimate_id: null });
+          logger.warn(`[booking:confirm] estimate ${pendingAcceptanceClaim.estimateId} was claimed by another customer — unlinked this booking's visit(s)`);
+        }
+      } else if (!claim.attached) {
+        logger.error(`[booking:confirm] acceptance ownership fan-out failed for estimate ${pendingAcceptanceClaim.estimateId} → customer ${custId}; the daily sweep will reconcile`);
+      }
+    }
 
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);

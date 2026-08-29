@@ -79,12 +79,18 @@ function checkSendPreconditions({ prospect, gateOn, dailyCount, cap }) {
  * may have reached Gmail) all count, so a timeout can't quietly let the cap be
  * exceeded. Cleared on re-draft. Parameterized so it can run inside the claim txn.
  */
+// A reopened lost-recovery row keeps every previous attempt in the append-only
+// quality_signals.prior_outreach_attempts array (lost-link-recovery appends the
+// stamp there so the resend can write its own); each in-window element counts.
+const PRIOR_ATTEMPTS_SQL = "jsonb_array_elements_text(CASE WHEN jsonb_typeof(quality_signals -> 'prior_outreach_attempts') = 'array' THEN quality_signals -> 'prior_outreach_attempts' ELSE '[]'::jsonb END)";
+const PRIOR_IN_WINDOW_COUNT_SQL = `(SELECT count(*) FROM ${PRIOR_ATTEMPTS_SQL} AS a WHERE a::timestamptz >= ?)`;
 async function dailySendCount(q = db) {
   const since = new Date(Date.now() - 24 * 3600 * 1000);
   const row = await q('seo_link_prospects')
-    .whereNotNull('outreach_attempted_at')
-    .where('outreach_attempted_at', '>=', since)
-    .count('* as c')
+    .whereRaw(`(outreach_attempted_at >= ? OR ${PRIOR_IN_WINDOW_COUNT_SQL} > 0)`, [since, since])
+    // Current side COALESCEd: a NULL timestamp compares to NULL, and NULL + n is
+    // NULL — which SUM would drop, counting an ordinary attempt as zero.
+    .select(q.raw(`COALESCE(SUM(COALESCE((outreach_attempted_at >= ?)::int, 0) + ${PRIOR_IN_WINDOW_COUNT_SQL}), 0) AS c`, [since, since]))
     .first();
   return parseInt(row && row.c, 10) || 0;
 }

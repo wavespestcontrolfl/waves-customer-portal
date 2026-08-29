@@ -258,7 +258,12 @@ async function importCsv(csvText, {
           anchor_text: candidate.anchor_text || existingAnchor || null,
           notes: existingNotes || patch.notes,
           discovery_source: discoverySourcePatch,
-          status: existing.status === 'disavowed' ? 'disavowed' : patch.status,
+          // A GSC export is historical — it cannot prove the link is live today.
+          // A verified-lost row stays lost (its lost_at/lost_reason/recovery
+          // marker intact) until the scan's crawl-backed recovery flips it;
+          // disavowed stays disavowed; a 'merged' twin (legacy spelling retired
+          // into its canonical row by the scan) stays retired.
+          status: ['disavowed', 'lost', 'merged'].includes(existing.status) ? existing.status : patch.status,
           is_dofollow: existingDofollow ?? null,
           first_seen: existing.first_seen || candidate.first_seen || today,
         });

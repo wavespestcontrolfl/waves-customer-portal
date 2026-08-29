@@ -336,7 +336,11 @@ PAGE-TYPE OUTPUT STANDARDS:
     the first 25% of the post and a final CTA near the end; at least one
     CTA must be a markdown link to a conversion path — the
     /pest-control-calculator/ or /contact/ URL from internal_links_to_add
-    satisfies this (a phone mention alone does not pass the gate). For pest,
+    satisfies this (a phone mention alone does not pass the gate). CTA link
+    text uses estimate/quote wording tied to the post's service — e.g.
+    "Get My Free Termite Estimate", "Request a Lawn Care Quote" — never
+    "Request an Inspection", bare "Click here", or wording unrelated to
+    the topic (owner rule 2026-08-27). For pest,
     termite, mosquito, rodent, lawn-pest, WDO/WDI, and Florida pest ID
     topics, include practical homeowner guidance: identify what the issue
     likely is, why it happens in Southwest Florida, safe checks the
@@ -425,7 +429,9 @@ tel: markdown links per the rule above.)
   rows={[{ label: "...", values: ["...","..."] }]} highlight={1} caption="..." />
   — side-by-side comparison (e.g. quarterly program vs one-time, DIY vs pro).
   columns + rows are REQUIRED; highlight is the 0-based option column to
-  emphasize. Prefer this over a plain markdown comparison table. For a
+  emphasize. NEVER emit a raw markdown pipe table ("| … |" rows) for ANY
+  tabular data — always this component (owner rule 2026-08-27; the quality
+  gate hard-blocks a raw markdown table in the body). For a
   decision / "which option is right for me" / "best [service] in [city]" brief
   you may anchor the whole post on this component — see BUYER'S-GUIDE COMPARISON.
 

@@ -32,6 +32,7 @@ const knex = require('knex');
 const { etDateString } = require('../server/utils/datetime-et');
 const dataforseo = require('../server/services/seo/dataforseo');
 const scorer = require('../server/services/seo/prospect-scorer');
+const { claimProspectDomain, findPlacementRow } = require('../server/services/seo/prospect-domain-lock');
 const discovery = require('../server/services/seo/competitor-discovery');
 const { DEFAULT_COMPETITOR_DOMAINS } = require('../server/services/seo/competitor-gap-miner')._internals;
 
@@ -235,17 +236,26 @@ async function harvest(db, args) {
   }
   for (const s of promotable) {
     const targetPage = moneyPages[s.target_topic] || HOME;
-    const dup = await db('seo_link_prospects').where({ target_domain: s.candidate.domain, target_page: targetPage }).first();
-    if (dup) continue;
-    await db('seo_link_prospects').insert({
-      target_domain: s.candidate.domain, target_page: targetPage,
-      anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,
-      domain_rating: s.candidate.domain_rating, score: s.score, tier: s.tier,
-      contact_email: s.contact?.contact_email || null, contact_url: s.contact?.contact_url || null, contact_checked_at: new Date(),
-      notes: `deep harvest; topic=${s.target_topic}; links to ${s.candidate.links_to_competitors.join(', ')}`,
-      quality_signals: JSON.stringify({ relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl, intent_class: s.intent_class, scored_by: 'deep_harvest' }),
-      source: `deep_harvest_${todayTag()}`, owner: 'strategy_agent',
+    // Same admission guard as every other board writer (prospect-domain-lock):
+    // lock the domain, skip if a row is already in active outreach, re-check the
+    // exact pair under the lock, then insert.
+    const landed = await db.transaction(async (trx) => {
+      const { inFlight } = await claimProspectDomain(trx, s.candidate.domain);
+      if (inFlight) return false;
+      const dup = await findPlacementRow(trx, s.candidate.domain, targetPage);
+      if (dup) return false;
+      await trx('seo_link_prospects').insert({
+        target_domain: s.candidate.domain, target_page: targetPage,
+        anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,
+        domain_rating: s.candidate.domain_rating, score: s.score, tier: s.tier,
+        contact_email: s.contact?.contact_email || null, contact_url: s.contact?.contact_url || null, contact_checked_at: new Date(),
+        notes: `deep harvest; topic=${s.target_topic}; links to ${s.candidate.links_to_competitors.join(', ')}`,
+        quality_signals: JSON.stringify({ relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl, intent_class: s.intent_class, scored_by: 'deep_harvest' }),
+        source: `deep_harvest_${todayTag()}`, owner: 'strategy_agent',
+      });
+      return true;
     });
+    if (!landed) continue;
     promoted++;
   }
   console.log(`\n[harvest] wrote ${intelWrites} intel rows; promoted ${promoted} prospects to the board.`);

@@ -1225,7 +1225,14 @@ async function strictExistingDraftForCall(callLogId) {
     .select('id', 'status', 'estimate_data');
 }
 
-async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null }) {
+async function maybeDraftEstimateForCall({
+  callLogId, dryRun = false, refreshLookup = false, quotePromised = true, ownerProcToken = null, ownerProcGeneration = null,
+  // Clarify-reply re-draft for a VOICE-origin draft: re-run from the
+  // original call context (enriched extraction + transcript — the quote
+  // evidence lives there, not in the SMS thread) with the customer's
+  // answer applied; the stale draft is retired atomically on insert.
+  supersedeEstimateId = null, supersedeReason = null, supersedeAttempt = null, bedroomCountOverride = null,
+}) {
   const result = { callLogId, dryRun, lane: null, created: false };
   let context = null;
   // This pass's ordering stamp: markers written after it began belong to
@@ -1240,6 +1247,12 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
     // generation is the arm that stays valid after that claim finalizes.
     if (context && ownerProcToken) context.ownerProcToken = ownerProcToken;
     if (context && ownerProcGeneration != null) context.ownerProcGeneration = ownerProcGeneration;
+    if (context && !context.error && supersedeEstimateId) {
+      context.supersedeEstimateId = String(supersedeEstimateId);
+      context.supersedeReason = supersedeReason || null;
+      context.supersedeAttempt = supersedeAttempt || null;
+    }
+    if (context && !context.error && bedroomCountOverride != null) context.bedroomCountOverride = bedroomCountOverride;
     // A CONCLUSIVELY clean context retires the call-side conflict verdict.
     if (!dryRun && context && !context.error) {
       await clearDraftBlockOnCall(callLogId, { notNewerThan: passStartedAt, generation: ownerProcGeneration });
@@ -1314,7 +1327,11 @@ async function maybeDraftEstimateForCall({ callLogId, dryRun = false, refreshLoo
 
     if (!dryRun) {
       const existing = await existingDraftForCall(callLogId);
-      if (existing) {
+      // The draft a re-run supersedes IS the existing draft for this call —
+      // it is replaced inside the dedupe transaction, not returned as-is.
+      const supersedesExisting = existing && supersedeEstimateId
+        && String(existing.id) === String(supersedeEstimateId);
+      if (existing && !supersedesExisting) {
         // Stale-linkage reconciliation (codex P1, PR #3304) — shared with
         // the duplicate-guard exit below, where a corrected retry that
         // lost the insert race to a stale detached run lands instead. An
@@ -1750,6 +1767,52 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
       }
     }
 
+    // Residential-unit bedroom band (GATE_UNIT_BAND_PRICING, default OFF):
+    // resolve the DB rate rows HERE (the pricing engine is synchronous)
+    // and hand them to the engine inside its input. Gate off → null →
+    // engine input byte-identical to today's. Fail-open: a resolver error
+    // never sinks a draft, it just prices on the standard ladder (yellow).
+    let unitBandPricing = null;
+    try {
+      const { unitBandPricingEnabled, resolveUnitBandPricing } = require('../pricing-engine/unit-band-pricing');
+      if (unitBandPricingEnabled() && intent.decision === 'draft') {
+        unitBandPricing = await resolveUnitBandPricing(db, {
+          intent,
+          unitScope: propertyFacts.unitScope,
+          // The SAME facts object the engine input reads below (post V2 +
+          // unit-scope applies): a cleared whole-building area must read
+          // as unresolved here too, or the band never applies.
+          propertyFacts: (require('./unit-scope-model').unitScopeGuardrailsEnabled() && crossPropertyRegather)
+            ? fenceCrossPropertyFacts(propertyFacts)
+            : propertyFacts,
+          // Cross-property fence, same as the unit-scope model input: the
+          // primary extraction's bedroom count describes the ORIGINAL unit.
+          extraction: crossPropertyRegather ? null : context.extraction,
+          // A clarify reply's bedroom answer (voice re-run or SMS re-draft).
+          bedroomCountOverride: context.bedroomCountOverride ?? null,
+        });
+        if (unitBandPricing && propertyFacts.unitScope) {
+          const priced = unitBandPricing.pest || unitBandPricing.oneTimePest;
+          // Audit stamps (ruling #1): the band is a pricing basis, never a
+          // synthesized sqft — propertyFacts.home stays as arbitrated.
+          Object.assign(propertyFacts.unitScope, {
+            bedroomCount: unitBandPricing.bedroomCount,
+            bedroomSource: unitBandPricing.bedroomSource,
+            ...(priced ? {
+              sizeBasis: unitBandPricing.sizeBasis,
+              pricingBasis: unitBandPricing.pricingBasis,
+              pricingBand: unitBandPricing.pricingBand,
+              scopeExclusions: priced.scopeExclusions || [],
+            } : {}),
+          });
+        }
+      }
+    } catch (err) {
+      logger.warn(`[estimator-engine] unit band pricing resolve failed: ${err.message}`);
+      unitBandPricing = null;
+    }
+    result.unitBandPricing = unitBandPricing;
+
     let engineResult = null;
     let engineInput = null;
     let totals = { monthly: 0, annual: 0, oneTime: 0 };
@@ -1778,6 +1841,7 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
         // (effectiveSignals tracks the re-gather) — pool/cage, landscaping,
         // water adjacency feed real pricing adjustments.
         lookupEnriched: effectiveSignals.enriched,
+        unitBandPricing,
       });
       // Stamp what ACTUALLY fed pricing (gate ON only — the kill switch
       // must restore the previous lane behavior exactly, codex r1 P2): a
@@ -2133,6 +2197,40 @@ async function runDraftPipeline({ context, origin, result, dryRun = false, refre
 
     result.created = true;
     result.estimateId = draft.estimate.id;
+    // One-question bedroom ask (ruling: the clarify mechanic asks for the
+    // unit size the call didn't state). The draft already landed yellow
+    // with the gap named; the clarify service parks the SMS for owner
+    // approval and never sends. Same phone/linkage rules as the red-path
+    // ask; dedupe is the clarify service's own.
+    if (!dryRun && unitBandPricing?.missing?.includes('bedroom_count') && context.phone) {
+      try {
+        // The reply re-prices through the path that can re-draft THIS
+        // draft: a voice-origin draft re-runs its call (this engine — on,
+        // or we would not be here); an SMS-origin draft re-drafts from the
+        // thread, which needs GATE_ESTIMATOR_SMS_DRAFTS. With that gate off
+        // an SMS-origin ask would be consumed with nothing able to act on
+        // it — so it is not parked; the yellow reason still names the gap.
+        const { smsThreadDraftsEnabled } = require('./sms-thread');
+        if (origin.channel === 'sms_thread' && !smsThreadDraftsEnabled()) {
+          throw Object.assign(new Error('sms-thread drafts gated off — bedroom ask not parked'), { expected: true });
+        }
+        const { parkClarifyAsk } = require('../estimate-clarify-asks');
+        await parkClarifyAsk({
+          missing: ['bedroom_count'],
+          phone: context.phone,
+          firstName: context.lead?.first_name || context.customer?.first_name || null,
+          customerId: (!context.customerPhoneAmbiguous && context.customer?.id) || null,
+          leadId: (context.leadIsForThisCall && context.lead?.id) || null,
+          estimateId: draft.estimate.id,
+          source: origin.channel === 'sms_thread' ? 'estimator_engine_sms_unit_band' : 'estimator_engine_unit_band',
+          channelProvenance: origin.channel === 'sms_thread' ? 'sms' : 'voice',
+          contextSummary: 'Residential-unit quote drafted without a stated bedroom count — the unit band cannot price until the customer says how many bedrooms. Clarifying question drafted; review and approve to send.',
+        });
+      } catch (askErr) {
+        if (askErr.expected) logger.info(`[estimator-engine] ${askErr.message}`);
+        else logger.warn(`[estimator-engine] bedroom clarify ask failed: ${askErr.message}`);
+      }
+    }
     const laneWord = lane === LANES.GREEN ? 'ready to send' : 'needs a look before send';
     await notify({
       call: context.call,

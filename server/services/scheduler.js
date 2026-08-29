@@ -628,6 +628,23 @@ function initScheduledJobs() {
   setTimeout(bookingFunnelCanaryTick, 90 * 1000);
   cron.schedule('37 */6 * * *', bookingFunnelCanaryTick, { timezone: 'America/New_York' });
 
+  // BOOT (+120s, then EVERY 6H at :49) — payment-method guard "firsts" watch
+  // (#3556 rollout, owner ask 2026-08-28): one ops email the first time the
+  // removal guard refuses a detach and the first time each negative Auto Pay
+  // lifecycle email goes out. Markers in system_settings make each notice
+  // one-time across restarts; the tick retires itself once all three are
+  // recorded. Kill switch PM_GUARD_FIRSTS_WATCH=off. runExclusive so a deploy
+  // overlap can't double-email the same first.
+  const pmGuardFirstsTick = async () => {
+    try {
+      await runExclusive('pm-guard-firsts-watch', () => require('./payment-method-firsts-watch').runPaymentMethodFirstsWatch());
+    } catch (err) {
+      logger.error(`[pm-guard-firsts] tick failed: ${err.message}`);
+    }
+  };
+  setTimeout(pmGuardFirstsTick, 120 * 1000);
+  cron.schedule('49 */6 * * *', pmGuardFirstsTick, { timezone: 'America/New_York' });
+
   // EVERY 5 MIN — mark deploy-killed SEO pipeline/site-audit runs as failed.
   cron.schedule('*/5 * * * *', async () => {
     try {
@@ -1520,7 +1537,11 @@ function initScheduledJobs() {
     logger.info('Running: Backlink scan');
     try {
       const BacklinkMonitor = require('./seo/backlink-monitor');
-      await BacklinkMonitor.scan();
+      // snapshot:true — the trend/velocity cards read seo_backlink_snapshots;
+      // before this the snapshot only advanced on the manual Scan button or a
+      // GSC import. Taken inside the scan's exclusive section, complete scans only.
+      const r = await BacklinkMonitor.scan({ snapshot: true });
+      if (r && r.snapshotOk === false) logger.error(`Backlink scan: snapshot NOT taken — ${r.snapshotError}`);
     } catch (err) { logger.error(`Backlink scan failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
@@ -3931,6 +3952,20 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // EVERY 2 MINUTES — Missed-call bell durable retry (owner ruling
+  // 2026-08-28). Its own callback, NOT chained after the Gmail sync: the
+  // post-call timer is in-memory and the sweep window is 24h, so a Gmail
+  // hang must never be able to starve it (hook P1).
+  // =========================================================================
+  cron.schedule('*/2 * * * *', async () => {
+    try {
+      await require('./missed-call-bell').sweepMissedCalls();
+    } catch (err) {
+      logger.warn(`[scheduler] missed-call sweep failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // DAILY 6:50 AM — Inbox hygiene: quarantine sweep + spam-folder rescue.
   // Runs before the 7:30 digest so the digest reports what actually happened.
   // =========================================================================
@@ -5456,6 +5491,40 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Review sequence processing failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 5 MIN — Automatic Google review replies. Rows the GBP sync queued
+  // (jittered due time) are claimed atomically and drafted; 4-5★ post to
+  // Google in `auto` mode, everything else parks for a human. Mode gate
+  // GATE_REVIEW_AUTO_REPLY (off|shadow|auto) is read inside the runner so
+  // an unset gate is a no-op tick.
+  // =========================================================================
+  cron.schedule('*/5 * * * *', async () => {
+    if (!isEnabled('reviewAutoReply')) {
+      // Gate off: only the failed-bell sweep runs (a bell_failed stamp left
+      // while the lane was on must still be re-rung) — codex r54.
+      try {
+        await runExclusive('review-auto-reply', async () => {
+          const { retryFailedEditedBells } = require('./review-reply/runner');
+          const n = await retryFailedEditedBells();
+          if (n > 0) logger.info(`Review auto-reply (off): re-rang ${n} failed bell(s)`);
+        });
+      } catch (err) { logger.warn(`Review auto-reply bell sweep (gate off) failed: ${err.message}`); }
+      return;
+    }
+    try {
+      await runExclusive('review-auto-reply', async () => {
+        const { processDueAutoReplies } = require('./review-reply/runner');
+        const stats = await processDueAutoReplies();
+        if (stats.bellsRetried > 0) logger.info(`Review auto-reply: re-rang ${stats.bellsRetried} failed bell(s)`);
+        if (stats.claimed > 0) {
+          logger.info(`Review auto-reply (${stats.mode}): ${stats.claimed} claimed, ${stats.posted} posted, ${stats.drafted} drafted, ${stats.parked} parked, ${stats.skipped} skipped, ${stats.retry} retry, ${stats.errors} errors`);
+        }
+      });
+    } catch (err) {
+      logger.error(`Review auto-reply processing failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

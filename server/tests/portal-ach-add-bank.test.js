@@ -23,7 +23,9 @@ jest.mock('../services/payment-router', () => ({}));
 jest.mock('../config/stripe-config', () => ({ publishableKey: 'pk_test_mock', secretKey: null }));
 jest.mock('../services/payment-lifecycle-email', () => ({
   sendAutopayEnabled: jest.fn(async () => {}),
+  sendAutopayDisabled: jest.fn(async () => {}),
   sendPaymentMethodUpdated: jest.fn(async () => {}),
+  sendPaymentMethodRemoved: jest.fn(async () => {}),
 }));
 jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}), getRecent: jest.fn(async () => []) }));
 jest.mock('../services/autopay-eligibility', () => ({
@@ -68,6 +70,7 @@ jest.mock('../models/db', () => {
     q.whereNotNull = jest.fn(() => q);
     q.orderBy = jest.fn(() => q);
     q.select = jest.fn(() => q);
+    q.forUpdate = jest.fn(() => q);
     q.first = jest.fn(async () => rows()[0] || null);
     q.update = jest.fn(async (patch) => { state.updates.push({ table, patch }); return 1; });
     q.then = (ok, bad) => Promise.resolve(rows()).then(ok, bad);

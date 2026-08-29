@@ -7,8 +7,8 @@
 // billing day. Used inside the customer portal billing tab.
 //
 // Endpoints:
-//   GET  /api/customer/autopay              (state)
-//   PUT  /api/customer/autopay              (enable/disable/pause/billing-day)
+//   GET  /api/billing/autopay               (state)
+//   PUT  /api/billing/autopay               (enable/disable/pause/billing-day)
 //
 // Server orchestrators (Codex follows via api.put):
 //   server/routes/customer-autopay.js       (rate-limited 6 ops/min
@@ -48,6 +48,7 @@ import { createPortal } from 'react-dom';
 import { COLORS as B, FONTS } from '../../theme-brand';
 import { CUSTOMER_SURFACE } from '../../theme-customer';
 import api from '../../utils/api';
+import { cardBrandLabel } from '../../lib/cardBrand';
 import { etDateString, addETDays } from '../../lib/timezone';
 import { getStripe } from '../../lib/stripeLoader';
 import {
@@ -65,7 +66,13 @@ import useModalFocus from '../../hooks/useModalFocus';
 // Bank rows arrive under BOTH aliases — the server guards handle 'ach'
 // and 'us_bank_account' equally (Codex #2706 r6), and the portal UI must
 // too or alias rows lose the pending/failed affordances.
-const isBankMethod = (t) => t === 'ach' || t === 'us_bank_account';
+// FOUR aliases, matching server/services/autopay-eligibility.js
+// isBankMethodType ('bank' / 'bank_account' are the defensive aliases the
+// server already treats as bank) — GH codex #3556 r3.
+const isBankMethod = (t) => {
+  const v = String(t || '').toLowerCase();
+  return v === 'ach' || v === 'us_bank_account' || v === 'bank' || v === 'bank_account';
+};
 
 // Local alias kept for the many call sites below; values come from the
 // shared customer palette (this used to be a hand-copied hex block).
@@ -103,10 +110,11 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
           <Icon name={icon} size={18} strokeWidth={2} />
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.muted, textTransform: 'uppercase', letterSpacing: 0 }}>
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
+            <Icon name="card" size={14} strokeWidth={2} />
             Auto Pay
           </div>
-          <div style={{ marginTop: 4, fontSize: 17, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.3 }}>
+          <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>
             {title}
           </div>
           {message && (
@@ -143,7 +151,12 @@ function AutopayStateCard({ icon = 'card', tone = 'brand', title, message, actio
  * 3 visual states: active (green), paused (amber), disabled (neutral).
  * Controls: toggle on/off, pause until date, change card, change billing day.
  */
-export default function AutopayCard({ onStateChange }) {
+// openRequest: { modal: 'card', seq } — the Payment Methods list's
+// "Replace card" hands off to THIS card's method picker, so replacing is
+// the existing atomic workflow (choose/add → server repoints Auto Pay in
+// one transaction → old card untouched until then). onOpenRequestHandled
+// lets the parent clear the request so a later remount doesn't replay it.
+export default function AutopayCard({ onStateChange, openRequest = null, onOpenRequestHandled, embedded = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -201,6 +214,16 @@ export default function AutopayCard({ onStateChange }) {
   useEffect(() => {
     if (modal !== 'card' && addingCard) resetAddCard();
   }, [modal]);
+
+  const handledOpenSeqRef = useRef(null);
+  useEffect(() => {
+    if (!openRequest?.seq || loading || !data) return;
+    if (handledOpenSeqRef.current === openRequest.seq) return;
+    handledOpenSeqRef.current = openRequest.seq;
+    setErr('');
+    setModal(openRequest.modal || 'card');
+    onOpenRequestHandled?.(openRequest.seq);
+  }, [openRequest?.seq, loading, data]);
 
   useEffect(() => {
     if (processedReturnRef.current) return;
@@ -295,7 +318,7 @@ export default function AutopayCard({ onStateChange }) {
   // Status dot is a live indicator (owner directive 2026-07-06): blinking
   // green = charges are running automatically, solid red = they are not.
   const themeMap = {
-    active: { bg: '#F0FDF4', border: '#BBF7D0', dot: B.green, label: 'Active' },
+    active: { bg: PORTAL_BILLING.soft, border: PORTAL_BILLING.softBorder, dot: B.green, label: 'Active' },
     paused: { bg: `${B.orange}10`, border: `${B.orange}33`, dot: B.red, label: 'Paused' },
     disabled: { bg: PORTAL_BILLING.page, border: PORTAL_BILLING.border, dot: B.red, label: 'Off' },
   };
@@ -484,43 +507,48 @@ export default function AutopayCard({ onStateChange }) {
   ) : null;
 
   return (
-    <div data-glass="card" style={card}>
-      <style>{`@keyframes autopayDotPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.25); } }`}</style>
+    <div id="billing-autopay" {...(embedded ? {} : { 'data-glass': 'card' })} style={embedded ? { marginTop: 16, paddingTop: 16, borderTop: '1px solid #E7E2D7' } : card}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10 }}>
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-            <span style={{ width: 10, height: 10, borderRadius: 5, background: theme.dot, display: 'inline-block', animation: state === 'active' ? 'autopayDotPulse 2s ease-in-out infinite' : 'none' }} />
-            <span style={{ fontSize: 12, fontWeight: 850, color: PORTAL_BILLING.text, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+          {/* Embedded in Payment Methods (owner 08-28) the card's own
+              eyebrow is dropped — the parent card already carries one. */}
+          {!embedded && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, background: PORTAL_BILLING.soft, border: `1px solid ${PORTAL_BILLING.softBorder}`, color: PORTAL_BILLING.text, fontSize: 12, fontWeight: 850, marginLeft: -10 }}>
+              <Icon name="card" size={14} strokeWidth={2} />
               Auto Pay / {theme.label}
             </span>
-          </div>
-          <div style={{ fontSize: 18, fontWeight: 850, color: PORTAL_BILLING.text, fontFamily: FONTS.heading, lineHeight: 1.25 }}>
-            {state === 'active'
+          </div>}
+          {/* Eyebrow / short title / muted subline — the same header rhythm
+              as Plan Charges and Payment Methods. The old 18px title carried
+              the whole explanatory sentence (08-28 sub-header pass). */}
+          {(() => {
+            const head = state === 'active'
               ? (perApplicationBilling
-                ? 'Auto Pay is on — your saved payment method is charged after each application.'
+                ? ['Auto Pay is on', 'Your saved payment method is charged after each application.']
                 : annualPrepayBilling
-                  ? 'Auto Pay is on — your plan is prepaid; your saved method is used at renewal.'
+                  ? ['Auto Pay is on', 'Your plan is prepaid; your saved method is used at renewal.']
                   : perVisitBilling
-                    ? 'Your payment method is saved — we send an invoice after each completed service.'
+                    ? ['Payment method saved', 'We send an invoice after each completed service.']
                     : monthlyUnpriced
-                    ? 'Auto Pay is on — your monthly rate is being finalized, so no charge is scheduled yet.'
+                    ? ['Auto Pay is on', 'Your monthly rate is being finalized, so no charge is scheduled yet.']
                     // No date → drop the "on <date>" clause instead of
                     // rendering "on Not scheduled" (eyeball 07-12 finding 4).
                     : formatDate(next_charge_date) === 'Not scheduled'
-                      ? `Next charge: $${nextChargeAmount.toFixed(2)}`
-                      : `Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`)
+                      ? [`Next charge: $${nextChargeAmount.toFixed(2)}`, null]
+                      : [`Next charge: $${nextChargeAmount.toFixed(2)} on ${formatDate(next_charge_date)}`, null])
               : state === 'paused'
-                ? `Paused until ${formatDate(paused_until)}`
-                : 'Auto Pay is off. Charges will not run automatically.'}
-          </div>
+                ? [`Paused until ${formatDate(paused_until)}`, null]
+                : ['Auto Pay is off', 'Charges will not run automatically.'];
+            return (
+              <>
+                <div style={{ marginTop: 6, fontSize: 20, fontWeight: 850, color: PORTAL_BILLING.text, lineHeight: 1.25 }}>{head[0]}</div>
+                {head[1] && <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 4, lineHeight: 1.45 }}>{head[1]}</div>}
+              </>
+            );
+          })()}
           {state === 'active' && nextChargeSurcharge > 0 && (
             <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
               ${nextChargeBase.toFixed(2)} + ${nextChargeSurcharge.toFixed(2)} credit card surcharge
-            </div>
-          )}
-          {activeCard && state !== 'disabled' && (
-            <div style={{ fontSize: 14, color: PORTAL_BILLING.muted, marginTop: 5 }}>
-              Charging {isBankMethod(activeCard.method_type) ? 'bank account' : (activeCard.brand || 'card')} ending in {activeCard.last4}
             </div>
           )}
         </div>
@@ -543,7 +571,9 @@ export default function AutopayCard({ onStateChange }) {
         </div>
       )}
 
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+      {/* Actions fill the row (owner 08-28: centered, not a stub button
+          hugging the left edge). */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8 }}>
         {state === 'active' && (
           <button type="button" {...btnGlass('primary')} style={btn('primary')} disabled={saving} onClick={() => setModal('manage')}>
             Manage Auto Pay
@@ -573,7 +603,7 @@ export default function AutopayCard({ onStateChange }) {
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('pause')}>Pause payments</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('card')}>Change payment method</button>
               <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={() => setModal('day')}>Change billing day</button>
-              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off Auto Pay</button>
+              <button type="button" {...btnGlass('secondary')} style={{ ...btn('secondary'), width: '100%' }} disabled={saving} onClick={toggleAutopay}>Turn off</button>
             </div>
           )}
           {modal === 'pause' && (
@@ -622,7 +652,7 @@ export default function AutopayCard({ onStateChange }) {
                       <span style={{ fontSize: 14, color: PORTAL_BILLING.body }}>
                         {isBankMethod(pm.method_type)
                           ? `${pm.bank_name || 'Bank account'} ending in ${pm.last4}${pm.ach_status === 'verification_failed' ? ' - verification failed' : (pendingBank ? ' - verification pending' : '')}`
-                          : `${pm.brand || 'Card'} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
+                          : `${cardBrandLabel(pm.brand)} ending in ${pm.last4}${pm.exp_month && pm.exp_year ? ` - exp ${String(pm.exp_month).padStart(2, '0')}/${String(pm.exp_year).slice(-2)}` : ''}`}
                       </span>
                     </label>
                   );

@@ -374,12 +374,33 @@ router.post('/:id/cancel', async (req, res, next) => {
     let alreadyCancelledContractId = null;
 
     await db.transaction(async (trx) => {
+      // Shared Auto Pay lock protocol (#3556): CUSTOMER row FOR UPDATE
+      // first, then the contract. Locking the contract first cycled with a
+      // portal removal — DELETE holds customer + method, the method delete
+      // fires this contract's payment_method_id ON DELETE SET NULL and
+      // waits on the contract lock, while this route waits on the customer
+      // row. Same peek → customer lock → re-verify shape as /:token/sign.
+      const peek = await trx('customer_contracts')
+        .where({ id: req.params.id })
+        .first('id', 'customer_id');
+      if (!peek) {
+        response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (peek.customer_id) {
+        await trx('customers').where({ id: peek.customer_id }).forUpdate().first('id');
+      }
       const contract = await trx('customer_contracts')
         .where({ id: req.params.id })
         .forUpdate()
         .first();
       if (!contract) {
         response = { status: 404, body: { error: 'Contract not found' } };
+        return;
+      }
+      if (String(contract.customer_id || '') !== String(peek.customer_id || '')) {
+        // Repointed while we waited (a merge-undo) — retry under the right lock.
+        response = { status: 409, body: { error: 'This contract was just updated — reload and try again.' } };
         return;
       }
       if (contract.status === 'cancelled') {

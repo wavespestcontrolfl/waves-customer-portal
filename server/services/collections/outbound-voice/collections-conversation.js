@@ -51,6 +51,20 @@ const { isStaffedHours } = require('./staffed-hours');
 const { callSupervision } = require('./supervision');
 const { writeCallOutcome } = require('./outcomes');
 const flags = require('./flags');
+const { invoiceAmountDue } = require('../../invoice-helpers');
+const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
+const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
+
+// The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
+// CLAIMS its SEND_CLAIMABLE_STATUSES (the one sendability authority). The
+// eligible set also admits legacy 'unpaid' rows, which the send path would
+// refuse after the customer already agreed (gh r1) — the link rides the
+// oldest-due SENDABLE invoice instead; the dunning clock still anchors on
+// the oldest-due invoice of any status.
+function linkAnchorOf(invoices = []) {
+  const { SEND_CLAIMABLE_STATUSES } = require('../../invoice');
+  return orderByDue(invoices).find((inv) => SEND_CLAIMABLE_STATUSES.includes(String(inv.status || ''))) || null;
+}
 
 const MODEL = process.env.VOICE_RELAY_MODEL || MODELS.VOICE;
 const VOICE_EFFORT = 'low'; // live phone call — same rationale as relay-conversation
@@ -214,7 +228,65 @@ const HUMAN_REQUEST_RE = /\b(human|real person|actual person|representative|oper
 const SPOKEN_OPT_OUT_RE = /\b(stop calling|stop(?: \w+){0,2} calls|don'?t call|do not call|no more calls|take me off|remove me from|never call|revoke (my )?consent|opt(-| )?out|quit calling|don'?t contact|do not contact)\b/i;
 const BROAD_OPT_OUT_RE = /\b(?:all|any) calls?\b|\bdon'?t contact\b|\bdo not contact\b|\bnever call\b|\bno more calls\b|\btake me off\b|\bremove me from\b/i;
 
-function buildSystemPrompt({ firstName, today }) {
+// The consequences (A2's account dunning sequence, GATE_ACCOUNT_DUNNING)
+// exist ONLY as state on customer_dunning_sequences: hold_applied_at = the
+// service hold A2 actually placed (tier 30); consequence_due_at = the
+// cancellation deadline it actually set (tier 60). customers.service_paused_at
+// is NOT a scheduling hold (it only stops the dues cron — see migration
+// 20260801200000), so it never authorizes "service is paused". Until the
+// table ships, or when the read fails, both are null — and null is never
+// spoken. Read-only, best-effort.
+function etDayOfDeadline(value) {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const t = new Date(value);
+  return Number.isNaN(t.getTime()) ? null : etDateString(t);
+}
+
+// A2's table does not exist yet: the read is gated on a process-memoized
+// hasTable so no call issues a predictably failing query (gh r7); it lights
+// up on A2's own deploy without a code change here.
+let dunningTableKnown = null;
+async function dunningTableExists() {
+  if (dunningTableKnown === null) {
+    try { dunningTableKnown = Boolean(await db.schema.hasTable('customer_dunning_sequences')); } catch { return false; }
+  }
+  return dunningTableKnown;
+}
+
+async function readDunningState(customerId) {
+  if (!customerId) return { holdAppliedAt: null, consequenceDueAt: null };
+  try {
+    if (!(await dunningTableExists())) return { holdAppliedAt: null, consequenceDueAt: null };
+    const row = await db('customer_dunning_sequences').where({ customer_id: customerId }).first('hold_applied_at', 'consequence_due_at');
+    return {
+      holdAppliedAt: row && row.hold_applied_at ? row.hold_applied_at : null,
+      // Normalized ONCE to the ET calendar day it is spoken as: `_at` is a
+      // timestamptz by house convention (a UTC-midnight instant is the
+      // PREVIOUS day in ET — never read as date-only); a plain DATE string
+      // passes through literally (hook r11).
+      consequenceDueAt: row && row.consequence_due_at ? etDayOfDeadline(row.consequence_due_at) : null,
+    };
+  } catch {
+    return { holdAppliedAt: null, consequenceDueAt: null }; // table absent (pre-A2) or unreadable ⇒ no consequence
+  }
+}
+
+// The three registers (owner ruling 2026-08-28). Consequence sentences are
+// spoken ONLY when the gated truth is present in the tool result — the
+// prompt never carries them on its own.
+const REGISTER_RULES = {
+  friendly: [
+    '- REGISTER: FRIENDLY REMINDER. Assume they simply missed or forgot the invoice. Warm, brief, no pressure; no mention of holds, cancellation, or consequences of any kind.',
+  ],
+  firm: [
+    '- REGISTER: FIRM. Be direct and matter-of-fact: the account is past due. No cheerfulness, no exclamation marks, shorter sentences. State a consequence ONLY if the balance tool result explicitly authorizes it — otherwise state none.',
+  ],
+  final: [
+    '- REGISTER: FINAL NOTICE. Calm, direct, serious; this is the last automated call about this balance. State the consequence ONLY if the balance tool result explicitly authorizes it, using its exact wording — otherwise say only that this is a final reminder and the office will follow up.',
+  ],
+};
+
+function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
   const who = firstName || 'the customer';
   return [
     'You are Sandy, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.',
@@ -227,9 +299,11 @@ function buildSystemPrompt({ firstName, today }) {
     `- FIRST confirm you are speaking with ${who} (call confirm_right_party). Until confirmed AND verified, never mention any balance, invoice, service, or account detail of any kind.`,
     '- If it is the wrong person, apologize for the interruption and end the call without saying why you called.',
     '- After confirmation, verify identity: ask the customer to tell you their street number OR their billing ZIP code, then call verify_identity with what they said. NEVER read out, suggest, or confirm any address, ZIP, or account detail yourself — they must supply it.',
-    '- Only after verification, use get_balance_details and share the open balance plainly and courteously.',
+    '- Only after verification, use get_balance_details and share the open balance plainly and courteously: state the TOTAL account balance, then name each open invoice briefly (service and date) as the tool lists them, and ask to take care of the full balance today. If they can only cover part of it, accept that gracefully and record the date they give for the rest.',
+    '- Never mention late fees, interest, or collection costs — Waves charges none on this account.',
+    ...(REGISTER_RULES[register] || REGISTER_RULES.friendly),
     '- Say "open balance" or "billing follow-up". NEVER say "collections", "debt", or "delinquent". Never threaten, pressure, negotiate, settle, or discount. You have no authority over amounts.',
-    '- NEVER take a payment or any card, bank, or account numbers on this call. If they want to pay, offer to text a secure payment link (send_pay_link) after they agree to receive the text.',
+    '- NEVER take a payment or any card, bank, or account numbers on this call. ALWAYS offer to text the secure payment link (send_pay_link) — the balance tool result says what it covers; send it as soon as they agree to receive the text.',
     '- If they give a date they intend to pay, record it with record_payment_intent and thank them. Do not press for a date if they do not offer one; asking once is fine.',
     '- If they dispute the bill, use record_dispute and assure them the office will review it before any further notices.',
     '- If they ask you to stop calling, use record_do_not_call immediately and confirm it is done.',
@@ -337,7 +411,6 @@ class CollectionsConversation {
       // their account was settled). Read-only; the policy decided
       // collectibility at dial, this only supplies data.
       const { loadEligibleInvoices } = require('../contact-policy');
-      const { invoiceAmountDue } = require('../../invoice-helpers');
       const eligibleInvoices = await loadEligibleInvoices(customer.id);
       const balance = {
         total: eligibleInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
@@ -351,15 +424,18 @@ class CollectionsConversation {
         caseVersion: caseRow.case_version,
         customer,
         balance,
+        // register / holdActive / consequenceDueAt —
+        // refreshed again at disclosure time (see _accountState).
+        ...(await this._accountState(customer.id, eligibleInvoices)),
         // The number this call was DIALED to (gh prb-r16): verification and
         // SMS consent happened on this number — a send must never follow a
         // mid-call phone edit to a number that did neither.
         dialedPhone: row.to_phone || null,
-        // The pay-link target is the LIVE eligible set's oldest invoice (gh
-        // prb-r5): the balance disclosed in-call is computed from it, and a
-        // link to a snapshot invoice paid since dialing would contradict the
-        // spoken figure. Snapshot ids remain on the case row for audit.
-        invoiceId: eligibleInvoices[0]?.id || null,
+        // The pay-link target is the LIVE eligible set's OLDEST-DUE invoice
+        // (gh prb-r5 + hook r2): the balance disclosed in-call is computed
+        // from it, and a link to a snapshot invoice paid since dialing would
+        // contradict the spoken figure. Snapshot ids stay on the case row.
+        invoiceId: linkAnchorOf(eligibleInvoices)?.id || null,
       };
       return true;
     } catch (err) {
@@ -675,25 +751,112 @@ class CollectionsConversation {
     return TOOLS.filter((t) => names.has(t.name));
   }
 
-  async _modelTurn() {
-    if (!this._systemBlocks) {
-      // ET calendar day + weekday via datetime-et / an explicit timeZone —
-      // never raw new Date() ET math (the timestamptz trap).
-      let today = null;
-      try {
-        const { etCalendarDayOf } = require('../../../utils/datetime-et');
-        const now = this._now();
-        const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
-        today = `${weekday}, ${etCalendarDayOf(now)}`;
-      } catch (err) {
-        logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
+  // ONE clock per customer: the register (friendly / firm / final) comes
+  // from the OLDEST-due open invoice, and the consequence lines are gated on
+  // TRUE state — never asserted (owner ruling + FCCPA: no consequence the
+  // system does not carry out). Read at init AND again at disclosure (hook
+  // P1): a payment, a cleared hold, or a withdrawn deadline during
+  // verification must not leave a stale authorization. Fail closed: an
+  // unreadable hold / deadline is NO consequence.
+  async _accountState(customerId, invoices) {
+    const tier = dunningTierForOverdue(accountDaysOverdue(this._now(), invoices));
+    // Consequence state = what A2 actually did (hook r5): a placed hold, a
+    // set deadline. Nothing else authorizes a consequence sentence.
+    const { holdAppliedAt, consequenceDueAt } = await readDunningState(customerId);
+    const holdActive = Boolean(holdAppliedAt);
+    return { tier, register: registerForTier(tier), holdActive, consequenceDueAt };
+  }
+
+  // The FRESH eligible set → balance, link anchor, register/hold/deadline
+  // and pay-link scope, in one place (disclosure, send time, credit-cover
+  // re-read). Returns { incomplete, fresh }; on an incomplete read NOTHING
+  // is updated — the caller discloses/sends nothing on a partial account.
+  // Denials that are about THIS call's own existence or timing — they were
+  // satisfied at dial time and cannot legitimately re-deny a connected call
+  // (the 24h/7d windows would find this very call's ledger row; the call
+  // window can close while the customer is on the line).
+  static get MID_CALL_IGNORED_DENIALS() {
+    return new Set(['outside_call_window', 'contact_within_24h', 'voice_contact_within_7d', 'live_conversation_within_7d']);
+  }
+
+  // The FRESH eligible set → balance, link anchor, register/hold/deadline
+  // and pay-link scope, in one place (disclosure, send time, credit-cover
+  // re-read). `callable` = the LIVE contact policy still allows this
+  // account (hook r7: a payment-plan flag, a microdeposit-pending invoice,
+  // a joined older invoice, a cleared anchor, a missing touch floor — every
+  // account-shaped denial the policy knows, not a hand-rolled subset).
+  // Returns { incomplete, fresh, callable, notCallable }; on an incomplete
+  // read NOTHING is updated — the caller discloses/sends nothing.
+  async _refreshBalance() {
+    const ContactPolicy = require('../contact-policy');
+    let incomplete = null;
+    const fresh = await ContactPolicy.loadEligibleInvoices(this._ctx.customer.id, { onIncomplete: (reason) => { incomplete = reason; } });
+    if (incomplete) return { incomplete, fresh, callable: false, notCallable: 'incomplete' };
+    let notCallable = null;
+    if (fresh.length) {
+      const verdict = await ContactPolicy.evaluate(this._ctx.customer.id, {
+        channel: 'voice', purpose: 'late_payment', now: this._now(),
+        supervisedDial: this._supervised === true, excludeCollectionCaseId: this._ctx.caseId,
+      });
+      // The verdict's own set — ids, per-invoice cents, anchor day — must be
+      // the set we are about to disclose (hook r8): an invoice edited
+      // between the two reads leaves `fresh` stale while the policy judged
+      // newer data. Two reads that disagree are an incomplete picture.
+      if (Array.isArray(verdict.eligibleInvoiceIds)) {
+        const a = fresh.map((inv) => String(inv.id)).sort().join(',');
+        const b = verdict.eligibleInvoiceIds.map(String).sort().join(',');
+        if (a !== b) return { incomplete: 'policy set differs from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
       }
-      this._systemBlocks = [{
-        type: 'text',
-        text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today }),
-        cache_control: { type: 'ephemeral' },
-      }];
+      if (verdict.eligibleInvoiceCents && typeof verdict.eligibleInvoiceCents === 'object') {
+        const centsAgree = fresh.every((inv) => Math.round(invoiceAmountDue(inv) * 100) === Number(verdict.eligibleInvoiceCents[String(inv.id)]));
+        if (!centsAgree) return { incomplete: 'policy amounts differ from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
+      }
+      if (verdict.eligibleAnchorDueDate && dueDayOf(anchorInvoiceOf(fresh)) !== String(verdict.eligibleAnchorDueDate)) {
+        return { incomplete: 'policy anchor differs from the loaded set', fresh, callable: false, notCallable: 'incomplete' };
+      }
+      const live = (verdict.denialReasons || []).filter((r) => !CollectionsConversation.MID_CALL_IGNORED_DENIALS.has(String(r).split(':')[0]));
+      if (!verdict.allowed && live.length) notCallable = live[0];
     }
+    this._ctx.balance = {
+      total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
+      count: fresh.length,
+      invoices: fresh,
+    };
+    this._ctx.invoiceId = linkAnchorOf(fresh)?.id || null;
+    Object.assign(this._ctx, await this._accountState(this._ctx.customer.id, fresh));
+    return { incomplete: null, fresh, callable: fresh.length > 0 && !notCallable, notCallable };
+  }
+
+  // ONE neutral copy for a refreshed account the policy no longer allows
+  // (hook r7): the anchor may have been paid, stopped, re-dated or joined
+  // by an older invoice — nothing here is proven, so nothing is asserted.
+  _notCallableCopy(notCallable, { atSend = false } = {}) {
+    logger.info(`[collections-voice] account no longer callable mid-call callSid=${this.callSid}: ${notCallable}`);
+    return `${atSend ? 'Do not send the link: ' : ''}The account has changed since we dialed and this call may not collect on it now. Do NOT state any figure, do NOT ask for payment or offer a link, and do NOT say anything was paid, is current, or is settled. Say the office will follow up, thank the customer, and end politely.`;
+  }
+
+  _ensureSystemBlocks() {
+    if (this._systemBlocks && this._promptRegister === this._ctx.register) return;
+    // ET calendar day + weekday via datetime-et / an explicit timeZone —
+    // never raw new Date() ET math (the timestamptz trap).
+    let today = null;
+    try {
+      const now = this._now();
+      const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'long' }).format(now);
+      today = `${weekday}, ${etCalendarDayOf(now)}`;
+    } catch (err) {
+      logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
+    }
+    this._promptRegister = this._ctx.register;
+    this._systemBlocks = [{
+      type: 'text',
+      text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
+      cache_control: { type: 'ephemeral' },
+    }];
+  }
+
+  async _modelTurn() {
+    this._ensureSystemBlocks();
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
       let msg;
@@ -986,6 +1149,26 @@ class CollectionsConversation {
     return 'That did not match. Ask them to try the other detail (street number or billing ZIP). Do not hint at any value.';
   }
 
+  // "Settled" is a stronger claim than "not collectible right now": the
+  // eligible set DROPS rows on resolve failures and dunning-stopped
+  // invoices. Only a raw zero-open-rows read proves it. Returns 'settled'
+  // | 'open' (a surviving raw row) | 'unknown' (probe failed).
+  async _settledProof() {
+    try {
+      const rawOpen = await db('invoices')
+        .where({ customer_id: this._ctx.customer.id })
+        .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
+        .whereNull('payer_id')
+        .whereNull('payer_statement_id')
+        .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
+        .first('id');
+      return rawOpen ? 'open' : 'settled';
+    } catch (err) {
+      logger.error(`[collections-voice] settled-claim probe failed callSid=${this.callSid}: ${err.message}`);
+      return 'unknown';
+    }
+  }
+
   async _toolGetBalance() {
     if (!this.verified) return 'Refused: the customer is not verified.';
     // Re-read at DISCLOSURE time (gh prb-r7): the init-time snapshot ages
@@ -993,15 +1176,22 @@ class CollectionsConversation {
     // credit, or payer reassignment landing meanwhile must not be
     // contradicted. Fail closed: an unreadable balance discloses nothing.
     try {
-      const { loadEligibleInvoices } = require('../contact-policy');
-      const { invoiceAmountDue } = require('../../invoice-helpers');
-      const fresh = await loadEligibleInvoices(this._ctx.customer.id);
-      this._ctx.balance = {
-        total: fresh.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0),
-        count: fresh.length,
-        invoices: fresh,
-      };
-      this._ctx.invoiceId = fresh[0]?.id || null;
+      // A read that DROPPED an unprovable row or hit the bound understates
+      // the account (gh r1): never present the survivors as "the total".
+      const { incomplete, fresh, callable, notCallable } = await this._refreshBalance();
+      if (incomplete) {
+        logger.warn(`[collections-voice] disclosure-time balance read incomplete callSid=${this.callSid}: ${incomplete} — disclosing nothing`);
+        return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
+      }
+      if (fresh.length && !callable) {
+        // The refreshed account no longer clears the policy this call was
+        // dialed on — never dunned here, no figure spoken.
+        this.state = 'RESOLUTION';
+        return this._notCallableCopy(notCallable);
+      }
+      // Register / hold / deadline from the FRESH set (hook P1) — and the
+      // prompt follows the register if it moved during verification.
+      this._ensureSystemBlocks();
     } catch (err) {
       logger.error(`[collections-voice] disclosure-time balance read failed callSid=${this.callSid}: ${err.message}`);
       return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
@@ -1015,20 +1205,11 @@ class CollectionsConversation {
       // zero-open-rows read earns the settled copy; a surviving raw row
       // (resolution failure, dunning-stopped) is indeterminate and
       // discloses nothing.
-      try {
-        const rawOpen = await db('invoices')
-          .where({ customer_id: this._ctx.customer.id })
-          .whereIn('status', ['sent', 'viewed', 'overdue', 'unpaid'])
-          .whereNull('payer_id')
-          .whereNull('payer_statement_id')
-          .whereRaw('GREATEST(total - COALESCE(credit_applied, 0), 0) > 0')
-          .first('id');
-        if (rawOpen) {
-          return 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.';
-        }
-      } catch (err) {
-        logger.error(`[collections-voice] settled-claim probe failed callSid=${this.callSid}: ${err.message}`);
-        return 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
+      const proof = await this._settledProof();
+      if (proof !== 'settled') {
+        return proof === 'open'
+          ? 'The balance could not be verified right now. Apologize, give the office number, and end politely — do NOT state any figure and do NOT say the account is settled.'
+          : 'The balance could not be checked right now. Apologize, give the office number, and end politely — do NOT state any figure.';
       }
       // The balance genuinely cleared between dial and now — say so and wrap up.
       this.state = 'RESOLUTION';
@@ -1037,11 +1218,45 @@ class CollectionsConversation {
     }
     this.state = 'RESOLUTION';
     this.disclosed = true;
-    const inv = (b.invoices && b.invoices[0]) || null;
-    const invLine = inv
-      ? ` The oldest open invoice is ${inv.invoice_number || 'on file'}${inv.due_date ? `, due ${String(inv.due_date).slice(0, 10)}` : ''}.`
-      : '';
-    return `Open balance: $${Number(b.total).toFixed(2)} across ${b.count} invoice(s).${invLine} Share the amount plainly. You may offer to text a secure payment link.`;
+    // ITEMIZED (owner ruling 2026-08-28): every open invoice — service and
+    // date — oldest first, the overdue ones marked, then ONE total. She asks
+    // for the whole balance.
+    const now = this._now();
+    const ordered = orderByDue(b.invoices || []);
+    const nameOf = (inv) => {
+      const label = inv.title || inv.service_type || 'service';
+      // service_date / due_date are DATE columns (literal); the created_at
+      // fallback is a timestamp rendered as its ET day (hook r5/r6).
+      const when = inv.service_date ? etCalendarDayOf(inv.service_date) : dueDayOf(inv);
+      return `${label}${when ? ` on ${when}` : ''}`;
+    };
+    const lines = ordered.map((inv) => {
+      const days = invoiceDaysOverdue(now, inv);
+      const age = days > 0 ? `${days} day${days === 1 ? '' : 's'} past due` : 'not yet due';
+      return `${nameOf(inv)}: $${Number(invoiceAmountDue(inv)).toFixed(2)} (${age})`;
+    });
+    const anchor = anchorInvoiceOf(ordered);
+    const anchorDays = anchor ? invoiceDaysOverdue(now, anchor) : 0;
+    // Consequence lines — spoken ONLY on true state (never asserted):
+    const ctx = this._ctx || {};
+    let consequence = '';
+    if (ctx.register === 'firm' && ctx.holdActive === true) {
+      consequence = ' AUTHORIZED consequence: future service is paused until the account is current — you may say exactly that.';
+    } else if (ctx.register === 'final' && ctx.consequenceDueAt) {
+      // A2's deadline comes back from Knex as a Date (timestamptz) or a
+      // DATE string — etCalendarDayOf renders either as its ET calendar day
+      // (hook r9), never String(Date) in the box's UTC.
+      consequence = ` AUTHORIZED consequence: if payment is not received by ${ctx.consequenceDueAt}, service will be cancelled and the account closed — you may say exactly that.`;
+    } else if (ctx.register === 'firm' || ctx.register === 'final') {
+      consequence = ' No consequence is authorized on this call — do not mention holds, cancellation, agencies, or legal action.';
+    }
+    // The link is /pay/:token of the OLDEST-DUE sendable invoice. That page
+    // re-runs its own sibling selection when the customer OPENS it (under
+    // GATE_PAY_INCLUDE_BALANCE it bundles the open invoices it can into one
+    // payment), so no send-time snapshot of "which invoices" is durable
+    // (hook r10): she describes the page's behaviour and promises no set.
+    const linkScope = 'offer to text the secure payment link — it opens our secure payment page, which lists the open invoices it can take together and lets them pay in one go; do not promise which invoices it will bundle — anything it cannot take, the office will send separately.';
+    return `Total account balance: $${Number(b.total).toFixed(2)} across ${b.count} open invoice${b.count === 1 ? '' : 's'}; the oldest is ${anchorDays} day${anchorDays === 1 ? '' : 's'} past due. Invoices: ${lines.join('; ')}. State the total, name each invoice briefly, and ask to take care of the full balance today; ${linkScope}${consequence}`;
   }
 
   async _toolRecordPaymentIntent(input) {
@@ -1319,6 +1534,20 @@ class CollectionsConversation {
       return 'The pay-link text is not available. Offer the office number for payment instead.';
     }
     if (this.payLinkSent) return 'Already sent this call — do not send again.';
+    // Scope re-proven at SEND time (gh r2): a sibling paid, stopped, or
+    // claimed by a live PaymentIntent since disclosure must be neither
+    // promised nor recorded as contacted. Fail closed on an unreadable set.
+    try {
+      const { incomplete, fresh, callable, notCallable } = await this._refreshBalance();
+      if (incomplete) {
+        logger.warn(`[collections-voice] send-time balance read incomplete callSid=${this.callSid}: ${incomplete} — not sending`);
+        return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
+      }
+      if (fresh.length && !callable) return this._notCallableCopy(notCallable, { atSend: true });
+    } catch (err) {
+      logger.error(`[collections-voice] send-time balance read failed callSid=${this.callSid}: ${err.message}`);
+      return 'The balance could not be re-checked right now — do not send the link. Offer the office number for payment instead.';
+    }
     const invoiceId = this._ctx.invoiceId;
     if (!invoiceId) return 'No sendable invoice. Offer the office number instead.';
 
@@ -1364,6 +1593,8 @@ class CollectionsConversation {
         customerId: this._ctx.customer.id,
         channel: 'sms',
         purpose: 'late_payment',
+        // The invoice the link CARRIES. /pay/:token bundles siblings by its
+        // own live selection at open time — never recorded here as contacted.
         invoiceIds: [invoiceId],
         source: 'collections_voice_paylink',
         metadata: {
@@ -1390,13 +1621,54 @@ class CollectionsConversation {
       this.payLinkSent = true;
       const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
       if (result && result.covered_by_credit) {
-        // Account credit fully covered the invoice — nothing was texted and
-        // nothing is owed on it. The truth, not a false "link sent".
-        return 'No text was needed: account credit covered that invoice in full. Tell the customer it is settled.';
+        // Account credit settled the ANCHOR invoice — nothing was texted.
+        // The balance is the account's (hook r3 P1): re-read the eligible
+        // set; anything still open re-opens the latch and re-anchors so a
+        // second send_pay_link collects the remainder. Never "settled" on
+        // an unproven remainder.
+        // No SMS went out: the reservation above must not stand as a
+        // contact (gh r1) — it would trip the any-channel 24h window on the
+        // retry and suppress other outreach. never_contacted rows are
+        // excluded from the policy's recent-contact read. The stamp is
+        // best-effort, so it is CHECKED with one retry (gh r5, same pattern
+        // as origination): if it cannot be made durable the latch stays
+        // CLOSED — a retry would only be refused by the phantom contact.
+        const stamp = { stage: 'send_via_sms', code: 'covered_by_credit', never_contacted: true };
+        let released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) released = await ContactLedger.markSendFailed(entry, stamp);
+        if (!released) {
+          logger.error(`[collections-voice] never_contacted stamp FAILED TWICE for ledger ${entry.id} callSid=${this.callSid} — pay link stays closed this call`);
+          return 'No text was sent: account credit covered that invoice in full, but the link cannot be re-offered on this call. Say the office will follow up on any remaining balance — do NOT state a figure and do NOT say the account is settled.';
+        }
+        let refreshed;
+        try {
+          refreshed = await this._refreshBalance();
+        } catch (err) {
+          logger.error(`[collections-voice] balance re-read after credit cover failed callSid=${this.callSid}: ${err.message}`);
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be checked. Say the office will follow up — do NOT say the account is settled.';
+        }
+        if (refreshed.incomplete) {
+          logger.warn(`[collections-voice] balance re-read after credit cover incomplete callSid=${this.callSid}: ${refreshed.incomplete}`);
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be verified. Say the office will follow up — do NOT say the account is settled.';
+        }
+        const remaining = refreshed.fresh;
+        if (!remaining.length) {
+          // An EMPTY eligible set is not proof of settlement (hook r13 —
+          // same bar as disclosure): only zero raw open rows earns it.
+          if ((await this._settledProof()) === 'settled') {
+            return 'No text was needed: account credit covered the balance in full. Tell the customer the account is settled.';
+          }
+          return 'No text was sent: account credit covered that invoice in full, but the remaining balance could not be verified. Say the office will follow up — do NOT state a figure and do NOT say the account is settled.';
+        }
+        if (!refreshed.callable) {
+          return `No text was needed: account credit covered that invoice in full. ${this._notCallableCopy(refreshed.notCallable)}`;
+        }
+        this.payLinkSent = false;
+        return `No text was sent: account credit covered that invoice in full, but $${this._ctx.balance.total.toFixed(2)} across ${remaining.length} invoice${remaining.length === 1 ? '' : 's'} is still open. Tell the customer, and if they still want the link, call send_pay_link again for the remaining balance.`;
       }
       if (result && (result.sent || result.ok)) {
         this._captures.payLinkSent = true;
-        return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and goes to our secure payment page.';
+        return 'The payment link was texted to the customer. Let them know it is from Waves Pest Control and opens our secure payment page, where they can pay the open invoices it lists together; anything it cannot take, the office will send separately.';
       }
       this.payLinkSent = false; // provider REPORTED non-delivery — retry is safe
       await ContactLedger.markSendFailed(entry, { stage: 'send_via_sms', code: result?.code || null });
@@ -1606,6 +1878,10 @@ class CollectionsConversation {
 }
 
 module.exports = {
+  buildSystemPrompt,
+  readDunningState,
+  _resetDunningTableMemo: () => { dunningTableKnown = null; },
+  REGISTER_RULES,
   CollectionsConversation,
   STATE_TOOLS,
   TOOLS,
@@ -1614,5 +1890,4 @@ module.exports = {
   VERIFY_MAX_ATTEMPTS,
   utteranceHasSensitiveDetails,
   HUMAN_REQUEST_RE,
-  buildSystemPrompt,
 };

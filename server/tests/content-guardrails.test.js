@@ -2146,6 +2146,385 @@ describe('meta description contract on refresh (owner rule 2026-07-29)', () => {
   });
 });
 
+describe('unsupported body syntax on the manual lanes (owner ruling 2026-08-28)', () => {
+  const HTML_ANCHOR = 'Intro.\n\n<a href="/contact/">Get a Termite Estimate</a>\n';
+
+  test('blog body outside the writer subset P1s; non-blog and plain bodies pass', () => {
+    const r = guardrails.evaluate({ body: HTML_ANCHOR, frontmatter: {} }, { targetIsBlog: true });
+    const f = r.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX');
+    expect(f && f.severity).toBe('P1');
+    expect(f.message).toMatch(/raw_html_anchor/);
+    expect(guardrails.evaluate({ body: HTML_ANCHOR, frontmatter: {} }, {}).findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+    expect(guardrails.evaluate({ body: 'Plain [Get a Termite Estimate](/contact/) text.', frontmatter: {} }, { targetIsBlog: true }).findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+  });
+
+  test('refresh grandfathers exact constructs the live prior body already carried — never the category', () => {
+    const kept = guardrails.evaluate({ body: HTML_ANCHOR + '\nMore text.', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(kept.findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(false);
+    const added = guardrails.evaluate({ body: HTML_ANCHOR + '\n<span hidden>x</span>', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    const f = added.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX');
+    expect(f && f.message).toMatch(/hidden_or_styled_markup/);
+    expect(f.message).not.toMatch(/raw_html_anchor/);
+    // Same category, DIFFERENT markup — a swapped-in anchor is not licensed
+    // by the legacy one (prior multiset is consumed per construct).
+    const swapped = guardrails.evaluate({ body: '<a href="/contact/" style="opacity:0">Get a Termite Estimate</a>', frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(swapped.findings.find((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX').message).toMatch(/raw_html_anchor/);
+    const duplicated = guardrails.evaluate({ body: HTML_ANCHOR + HTML_ANCHOR, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: HTML_ANCHOR });
+    expect(duplicated.findings.some((x) => x.code === 'UNSUPPORTED_BODY_SYNTAX')).toBe(true);
+    expect(guardrails.unsupportedBodySyntaxAdded(HTML_ANCHOR, HTML_ANCHOR)).toEqual([]);
+  });
+});
+
+describe('raw markdown tables in blog bodies (owner rule 2026-08-27)', () => {
+  const TABLE_BODY = 'Intro.\n\n| Method | Cost |\n| --- | --- |\n| DIY | $10 |\n';
+
+  test('blog body with a raw pipe table P1s', () => {
+    const r = guardrails.evaluate({ body: TABLE_BODY, frontmatter: {} }, { targetIsBlog: true });
+    expect(r.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE' && f.severity === 'P1')).toBe(true);
+  });
+
+  test('non-blog bodies and table-free blog bodies pass', () => {
+    expect(guardrails.evaluate({ body: TABLE_BODY, frontmatter: {} }, {}).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+    expect(guardrails.evaluate({ body: 'No tables here.', frontmatter: {} }, { targetIsBlog: true }).findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+  });
+
+  test('refresh grandfathers by table CONTENT — preserved tables pass; added or swapped tables block', () => {
+    const grandfathered = guardrails.evaluate(
+      { body: TABLE_BODY, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(grandfathered.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+    const added = guardrails.evaluate(
+      { body: TABLE_BODY, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: 'old table-free body' },
+    );
+    expect(added.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Prior body had ONE table; the refresh keeping it AND adding a second
+    // still blocks — a legacy table never licenses new ones.
+    const secondAdded = guardrails.evaluate(
+      { body: `${TABLE_BODY}\nMore.\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n`, frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(secondAdded.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Same COUNT but different table content — deleting the legacy table
+    // and swapping in a new one is NOT grandfathered.
+    const swapped = guardrails.evaluate(
+      { body: 'Intro.\n\n| X | Y |\n| --- | --- |\n| 1 | 2 |\n', frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(swapped.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    // Whitespace-only reflow of the SAME table stays grandfathered.
+    const reflowed = guardrails.evaluate(
+      { body: 'Intro.\n\n| Method   | Cost |\n| ---   | --- |\n| DIY   | $10 |\n', frontmatter: {} },
+      { targetIsBlog: true, isRefresh: true, priorBody: TABLE_BODY },
+    );
+    expect(reflowed.findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+  });
+
+  test('CTA-wording hard rule covers every blog lane (brief-independent half)', () => {
+    const ev = (body, opts = {}) => guardrails
+      .evaluate({ body, frontmatter: {} }, { targetIsBlog: true, ...opts })
+      .findings.some((f) => f.code === 'FORBIDDEN_CTA_WORDING');
+    // Inspection-request anchors and wording-free actionable conversion
+    // anchors are flagged on any blog body — no brief required.
+    expect(ev('Text [Request an Inspection](/termite-inspection/) more.')).toBe(true);
+    expect(ev('Text [Schedule Service](/contact/) more.')).toBe(true);
+    expect(ev('Text [Get My Free Termite Estimate](/contact/) more.')).toBe(false);
+    // Non-blog surfaces are exempt.
+    expect(guardrails.evaluate({ body: '[Schedule Service](/contact/)', frontmatter: {} }, {})
+      .findings.some((f) => f.code === 'FORBIDDEN_CTA_WORDING')).toBe(false);
+    // Refresh drafts grandfather anchors the prior body carried; writer
+    // ADDITIONS are still flagged.
+    expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old [Schedule Service](/contact/) text.' })).toBe(false);
+    expect(ev('Text [Schedule Service](/contact/) more.', { isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+    // Refresh grandfather compares RAW cell content — editing a code-span
+    // cell is a modified table, not a preserved legacy one; a truly
+    // unchanged table still grandfathers.
+    const codeCellTable = 'Intro.\n\n| `foo` | x |\n| --- | --- |\n| 1 | 2 |';
+    const editedCellTable = 'Intro.\n\n| `bar` | x |\n| --- | --- |\n| 1 | 2 |';
+    expect(guardrails.evaluate({ body: editedCellTable, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: codeCellTable })
+      .findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(true);
+    expect(guardrails.evaluate({ body: codeCellTable, frontmatter: {} }, { targetIsBlog: true, isRefresh: true, priorBody: codeCellTable })
+      .findings.some((f) => f.code === 'RAW_MARKDOWN_TABLE')).toBe(false);
+    // SERVICE-TYING half arms when the lane knows the post's service: a
+    // wrong-service estimate anchor parks a refresh (the completion gate
+    // never sees refreshes), a right-service one stays clean, and the
+    // grandfather covers anchors the live prior body already carried.
+    const termite = 'S. [Get My Free Termite Estimate](/contact/) and [Request a Lawn Care Quote](/contact/).';
+    expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: 'Old clean text.' })).toBe(true);
+    expect(ev(termite, { service: 'termite-control', isRefresh: true, priorBody: termite })).toBe(false);
+    expect(ev('S. [Get My Free Termite Estimate](/contact/) now.', { service: 'termite-control' })).toBe(false);
+    // Multi-candidate services (legacy rows: category + tag): the MOST
+    // SPECIFIC resolvable candidates win — a rodent tag is not constrained
+    // by the coarse pest category…
+    expect(ev('R. [Get a Rodent Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(false);
+    expect(ev('R. [Get a Lawn Care Quote](/contact/) now.', { service: ['pest-control', 'Rodents'] })).toBe(true);
+    // …and the coarse category must not authorize SIBLING specialties when
+    // the tag names the real topic; the topic's own wording stays clean.
+    expect(ev('T. [Request a Cockroach Quote](/contact/) now.', { service: ['pest-control', 'Termites'] })).toBe(true);
+    expect(ev('T. [Get My Free Termite Estimate](/contact/) now.', { service: ['pest-control', 'Termites'] })).toBe(false);
+    // A category-ONLY post keeps its family vocabulary.
+    expect(ev('P. [Get an Ant Control Quote](/contact/) now.', { service: 'pest-control' })).toBe(false);
+    // An unresolvable service value (a non-service category) arms nothing —
+    // brief-independent behavior only.
+    expect(ev('S. [Get a Lawn Care Quote](/contact/) now.', { service: 'seasonal' })).toBe(false);
+    // Canonical BLOG_TAGS resolve too — multi-service and non-strippable
+    // tags arm the check instead of silently dropping.
+    expect(ev('W. [Request a Cockroach Quote](/contact/) now.', { service: ['pest-control', 'Stinging Insects'] })).toBe(true);
+    expect(ev('W. [Get a Wasp Control Quote](/contact/) now.', { service: ['pest-control', 'Stinging Insects'] })).toBe(false);
+    expect(ev('F. [Get a Tick Control Estimate](/contact/) now.', { service: ['Pest Control', 'Fleas & Ticks'] })).toBe(false);
+    expect(ev('L. [Get My Free Termite Estimate](/contact/) now.', { service: 'Lawn Disease' })).toBe(true);
+    expect(ev('L. [Request a Lawn Care Quote](/contact/) now.', { service: 'Lawn Disease' })).toBe(false);
+  });
+
+  test('hasRawMarkdownTable is exported for the quality gate (single source)', () => {
+    expect(guardrails.hasRawMarkdownTable(TABLE_BODY)).toBe(true);
+    // A table inside a fenced code example is documentation, not a table.
+    expect(guardrails.hasRawMarkdownTable('Example:\n\n```markdown\n| A | B |\n| --- | --- |\n```\n')).toBe(false);
+    // Single-dash GFM delimiters count; 4-space-indented examples are code.
+    expect(guardrails.hasRawMarkdownTable('A | B\n- | -\n1 | 2')).toBe(true);
+    // An ATX heading is already a block — a delimiter under "# DIY | Pro"
+    // renders a heading plus text, not a table (list-item headings too).
+    expect(guardrails.hasRawMarkdownTable('# DIY | Professional\n--- | ---\nx | y')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('- # DIY | Professional\n  --- | ---')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('#DIY | Professional\n--- | ---')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('Example:\n\n    | A | B |\n    | --- | --- |\n')).toBe(false);
+    // Raw HTML tables are tables too — including whitespace before the
+    // closing tag's ">".
+    expect(guardrails.hasRawMarkdownTable('Intro <table><tr><th>Method</th></tr><tr><td>DIY</td></tr></table>')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('Intro <table><tr><td>A</td></tr></table >')).toBe(true);
+    // A ``` inside a ~~~ block does not close it; a table after the block still counts.
+    expect(guardrails.hasRawMarkdownTable('~~~\n```\n| A | B |\n| --- | --- |\n~~~\n')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('~~~\n```\n~~~\n| A | B |\n| --- | --- |\n')).toBe(true);
+    // A 4-space-indented ``` is indented code, not a fence — the later table is live.
+    expect(guardrails.hasRawMarkdownTable('    ```\n| A | B |\n| --- | --- |\n')).toBe(true);
+    // A same-marker line with trailing text does not close a fence.
+    expect(guardrails.hasRawMarkdownTable('```\n``` not a close\n| A | B |\n| --- | --- |\n```\n')).toBe(false);
+    // A table indented under a list item is a live table (list child block), not code.
+    expect(guardrails.hasRawMarkdownTable('1. Comparison:\n\n    | Option | Cost |\n    | --- | --- |\n    | DIY | $10 |\n')).toBe(true);
+    // Code nested INSIDE a list item (4+ past the item's content column) is code, not a table.
+    expect(guardrails.hasRawMarkdownTable('1. Example\n\n       | A | B |\n       | --- | --- |\n')).toBe(false);
+    // Tables inside HTML/MDX comments render nothing.
+    expect(guardrails.hasRawMarkdownTable('<!--\n| A | B |\n| --- | --- |\n-->\nText')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('{/* <table><tr><td>x</td></tr></table> */}')).toBe(false);
+    // Inline code spans render literally, not as tables.
+    expect(guardrails.hasRawMarkdownTable('Use `<table><tr><td>x</td></tr></table>` sparingly.')).toBe(false);
+    // A table inside a quoted or static template-literal ATTRIBUTE VALUE
+    // renders as attribute text, not a table; a closing tag hidden in an
+    // attribute does not truncate a REAL table either.
+    expect(guardrails.hasRawMarkdownTable('<span title="<table><tr><td>x</td></tr></table>">x</span>')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable("<span title='<table><tr><td>x</td></tr></table>'>x</span>")).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('<span title={`<table><tr><td>x</td></tr></table>`}>x</span>')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('<table title="</table>"><tr><td>x</td></tr></table>')).toBe(true);
+    expect(guardrails.extractRawMarkdownTables('<table title="</table>"><tr><td>x</td></tr></table>')[0]).toContain('<td>x</td>');
+    // The grandfather compares REAL content — a legacy table whose
+    // attributes changed is a different table.
+    expect(guardrails.hasUnpreservedRawTable('<table><tr><td colspan="3">x</td></tr></table>', '<table><tr><td colspan="2">x</td></tr></table>')).toBe(true);
+    expect(guardrails.hasUnpreservedRawTable('<table><tr><td colspan="2">x</td></tr></table>', '<table><tr><td colspan="2">x</td></tr></table>')).toBe(false);
+  });
+
+  test('unsupportedBodySyntax parks every form outside the writer subset and passes plain bodies', () => {
+    const plain = [
+      '## Heading\n\nA paragraph with a [Get My Free Termite Estimate](/contact/) link.\n\n- item one\n- item two\n\n> A quoted line.',
+      '<ComparisonTable columns={["A", "B"]} rows={[{ "label": "Yellowjacket — hidden ground nest", "values": ["x", "y"] }]} caption="Nests are hidden; style matters." />',
+      '<PestEvidenceGrid title="Spot it" items={[{"label":"Hidden nest","note":"class of wasp with style"}]} />',
+      'Call **(941) 297-5749** today. Prices like $199 & up.',
+      '![Termite damage](/images/blog/termite/a.webp)',
+    ];
+    for (const body of plain) expect(guardrails.unsupportedBodySyntax(body)).toEqual([]);
+    const cases = [
+      ['Line one\r\nLine two', 'cr_line_endings'],
+      ['<!-- note --> text', 'html_comment'],
+      ['<a href="/contact/">Get a Termite Estimate</a>', 'raw_html_anchor'],
+      ['<table><tr><td>x</td></tr></table>', 'raw_html_table'],
+      ['<details open><summary>x</summary></details>', 'unsupported_html_container'],
+      ['<pre>x</pre>', 'unsupported_html_container'],
+      ['[cta]: /contact/\n\n[Get a Termite Estimate][cta]', 'reference_link_definition'],
+      ['- [cta]: /contact/', 'reference_link_definition'],
+      ['[Get a Termite Estimate][cta]', 'reference_link'],
+      ['[Get a Termite\nEstimate](/contact/)', 'wrapped_link_syntax'],
+      ['[Get a Termite Estimate](\n/contact/)', 'wrapped_link_syntax'],
+      ['[Get a Termite Estimate](</contact/>)', 'angle_bracket_destination'],
+      ['[Get a Termite Estimate](/contact/ "Book now")', 'link_title'],
+      ['<https://www.wavespestcontrol.com/contact/>', 'autolink'],
+      ['\\[not a link](/contact/)', 'backslash_escape'],
+      ['[Get a Termite Estimate](/&#99;ontact/)', 'entity_or_encoded_destination'],
+      ['[Get a Termite Estimate](/x/../contact/)', 'entity_or_encoded_destination'],
+      ['<a href={"/contact/"}>x</a>', 'jsx_href_expression'],
+      ['<span title={`x`}>x</span>', 'template_literal_prop'],
+      ['> > nested', 'nested_blockquote'],
+      ['[Get a `Termite` Estimate](/contact/)', 'code_span_in_link_label'],
+      ['<span hidden>Get a Termite Estimate</span>', 'hidden_or_styled_markup'],
+      ['<div aria-hidden="true">x</div>', 'hidden_or_styled_markup'],
+      ['<span style="display:none">x</span>', 'hidden_or_styled_markup'],
+      ['<span class="cta">x</span>', 'hidden_or_styled_markup'],
+      ['<div className="x">x</div>', 'hidden_or_styled_markup'],
+      ['<div {...{hidden: true}}>x</div>', 'jsx_expression_attribute'],
+      ['<div popover>x</div>', 'hidden_or_styled_markup'],
+      ['<div inert>x</div>', 'hidden_or_styled_markup'],
+      ['[See [Our [Termite] Service]](/termite-inspection/)', 'nested_bracket_label'],
+      ['[![alt](/img.webp)](/contact/)', 'nested_bracket_label'],
+      ['<div {...props}>x</div>', 'jsx_expression_attribute'],
+      ['<span title={x}>x</span>', 'jsx_expression_attribute'],
+    ];
+    for (const [body, reason] of cases) expect(guardrails.unsupportedBodySyntax(body)).toContain(reason);
+    // Attribute detection is quote-aware: the word inside a quoted value
+    // is not an attribute.
+    expect(guardrails.unsupportedBodySyntax('<span title="hidden style class">x</span>')).toEqual([]);
+    // 4 spaces before ">" is indented code, not a live blockquote table.
+    expect(guardrails.hasRawMarkdownTable('Example:\n\n    > | A | B |\n    > | --- | --- |\n')).toBe(false);
+    // A backtick "fence" whose info string contains a backtick is not a fence.
+    expect(guardrails.hasRawMarkdownTable('```js`example`\n| A | B |\n| --- | --- |\n')).toBe(true);
+    // Indented code inside a blockquote ("> " + 4 spaces) is code, not a table.
+    expect(guardrails.hasRawMarkdownTable('>     | A | B |\n>     | --- | --- |\n')).toBe(false);
+    // Raw <pre> blocks are preformatted text, not tables.
+    expect(guardrails.hasRawMarkdownTable('<pre>\nA | B\n- | -\n</pre>')).toBe(false);
+    // Nested blockquote markers with spaces between them still expose the table.
+    expect(guardrails.hasRawMarkdownTable('>   > | A | B |\n>   > | - | - |\n')).toBe(true);
+    // A delimiter row needs a hyphen run in EVERY cell.
+    expect(guardrails.hasRawMarkdownTable('A | B\n: | -\n1 | 2')).toBe(false);
+    expect(guardrails.hasRawMarkdownTable('| A | B |\n| :--- | ---: |\n| 1 | 2 |')).toBe(true);
+    // Header/delimiter column counts must match for GFM to render a table.
+    expect(guardrails.hasRawMarkdownTable('A | B | C\n- | -\n1 | 2')).toBe(false);
+    // Multiline code spans render as code.
+    expect(guardrails.hasRawMarkdownTable('``\n| A | B |\n| --- | --- |\n``')).toBe(false);
+    // Escaped pipes are cell content — counts still match, table detected.
+    expect(guardrails.hasRawMarkdownTable('A \\| B | C\n- | -\n1 | 2')).toBe(true);
+    // A VALID fence-opener line ("``` here" — info string carries no
+    // backtick) interrupts the paragraph and opens a fence (CommonMark:
+    // "Foo" / "```" / "bar" fences bar), so the mid-prose run before it
+    // cannot pair as a span — the pipe lines between them stay visible.
+    expect(guardrails.hasRawMarkdownTable('See ```\nA | B\n--- | ---\n``` here')).toBe(true);
+    // A rejected backtick-fence candidate (backtick in the info string) is
+    // reprocessed inline: with a later matching run it opens a code SPAN,
+    // hiding the table inside it.
+    expect(guardrails.hasRawMarkdownTable('```js`x\nA | B\n- | -\nsee ``` here')).toBe(false);
+    // A fence nested in a list item ends when the list ends — dedented
+    // top-level content after it is live.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  code\nA | B\n- | -\n1 | 2')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  A | B\n  - | -\n  ```')).toBe(false);
+    // Backslash PARITY before pipes: "\\\\|" escapes the backslash, the pipe
+    // is a real separator — three header cells match a three-cell delimiter.
+    expect(guardrails.hasRawMarkdownTable('A \\\\| B | C\n- | - | -\n1 | 2 | 3')).toBe(true);
+    // Fence indentation is LIST-RELATIVE: under "10. item" (content column
+    // 4) a 4-space fence is a fence, not indented code — its contents hide.
+    expect(guardrails.hasRawMarkdownTable('10. item\n    ```md\n    | A | B |\n    | --- | --- |\n    ```')).toBe(false);
+    // Code spans never cross a BLANK line (paragraph boundary) — stray
+    // unmatched backticks in different paragraphs stay literal text.
+    expect(guardrails.hasRawMarkdownTable('Tick `code\n\n| A | B |\n| --- | --- |\n\nend` here')).toBe(true);
+    // A backslash-ESCAPED backtick is literal text and cannot open a span.
+    expect(guardrails.hasRawMarkdownTable('A \\` tick\n| A | B |\n| --- | --- |\nlater ` end')).toBe(true);
+    // Inline-code header labels render as visible text — still a header.
+    expect(guardrails.hasRawMarkdownTable('| `Option` | `Cost` |\n| --- | --- |\n| a | b |')).toBe(true);
+    // Blockquote stripping is LIST-RELATIVE: a quoted table nested under
+    // "10. item" (content column 4) renders as a table, not indented code.
+    expect(guardrails.hasRawMarkdownTable('10. comparison\n    > | A | B |\n    > | - | - |')).toBe(true);
+    // …and a quoted FENCE in that position opens, hiding its contents.
+    expect(guardrails.hasRawMarkdownTable('10. example\n    > ```\n    > | A | B |\n    > | - | - |')).toBe(false);
+    // A <pre> block closing as "</pre >" is still preformatted.
+    expect(guardrails.hasRawMarkdownTable('<pre>\nA | B\n- | -\n</pre >')).toBe(false);
+    // GFM allows EMPTY header cells — "| | |" over a matching delimiter is
+    // a table.
+    expect(guardrails.hasRawMarkdownTable('| | |\n|-|-|\n| a | b |')).toBe(true);
+    // NESTED list markers move the content column: a table indented 6 under
+    // "    - inner" is that item's child block, not indented code.
+    expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n      | A | B |\n      | - | - |')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('- outer\n    - inner\n          | A | B |\n          | - | - |')).toBe(false);
+    // A table starting AS a list item's content renders with the marker
+    // removed — the marker-stripped header is a valid signature.
+    expect(guardrails.hasRawMarkdownTable('- | A | B |\n  | - | - |')).toBe(true);
+    // A fence opening DIRECTLY as list-item content ("- ~~~") hides the
+    // item's indented continuation.
+    expect(guardrails.hasRawMarkdownTable('- ~~~\n  | A | B |\n  | - | - |')).toBe(false);
+    // A span never crosses an ATX heading — a heading starts a new block.
+    expect(guardrails.hasRawMarkdownTable('> `sample\n# | A | B | `\n| A | B |\n| - | - |')).toBe(true);
+    // An interrupting heading ends the list even without a blank line —
+    // later 4-space content is indented code again.
+    expect(guardrails.hasRawMarkdownTable('- item\n# Heading\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // A span never crosses a THEMATIC BREAK either.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n***\n| A | B |\n| - | - |\ntail `')).toBe(true);
+    // Comment delimiters INSIDE code spans are code — the content between
+    // them still renders.
+    expect(guardrails.hasRawMarkdownTable('Use `<!--` to open.\n\n| A | B |\n| - | - |\n\nAnd `-->` closes.')).toBe(true);
+    // …and inside FENCES likewise: content between a fence-enclosed "<!--"
+    // and a later "-->" still renders.
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n~~~html\n<!--\n~~~\n| A | B |\n| - | - |\n-->')).toBe(true);
+    // …including a fence opened directly as LIST-ITEM content.
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n- ~~~html\n  <!--\n  ~~~\n| A | B |\n| - | - |\n-->')).toBe(true);
+    // A thematic break ends the list like a heading does.
+    expect(guardrails.hasRawMarkdownTable('- item\n***\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // A dedented BLOCKQUOTE interrupts the list too — later 4-space content
+    // is indented code.
+    expect(guardrails.hasRawMarkdownTable('- item\n> quote\n\n    | A | B |\n    | - | - |')).toBe(false);
+    // GFM parses table rows at BLOCK level, before inline code — a pipe
+    // inside a code span is still a live cell separator ("| `a | b` | c |"
+    // is a 3-cell header).
+    expect(guardrails.hasRawMarkdownTable('Intro.\n\n| `a | b` | c |\n| --- | --- | --- |\n| 1 | 2 | 3 |')).toBe(true);
+    // A DEDENTED fence directly under "- item" ends the list — a 4-space
+    // sample after it is indented code again, not live list content.
+    expect(guardrails.hasRawMarkdownTable('- item\n```\ncode\n```\n\n    | A | B |\n    | --- | --- |')).toBe(false);
+    // …while an INDENTED child fence keeps the list open — the item's
+    // 2-space table stays live.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ```\n  code\n  ```\n  | A | B |\n  | --- | --- |')).toBe(true);
+    // A "<!--" inside a QUOTED tag attribute is attribute text, not a
+    // comment opener — content through a later "-->" still renders.
+    expect(guardrails.hasRawMarkdownTable('<span title="<!--">x</span>\n\n| A | B |\n| - | - |\n\ntail -->')).toBe(true);
+    // A code span cannot pair across a line that DEEPENS the blockquote
+    // context — the quote interrupts the paragraph, so a quoted table
+    // between the backticks stays visible.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n> | A | B |\n> | - | - |\n> tail `')).toBe(true);
+    // …nor across a LIST-ITEM opener — the bullet interrupts the paragraph,
+    // so the item's table (marker-stripped header) stays visible.
+    expect(guardrails.hasRawMarkdownTable('Intro `\n- | A | B |\n  | - | - |\ntail `')).toBe(true);
+    // A quote-scoped fence ends with its QUOTE in the comment pre-scan too —
+    // a top-level comment after the quote is stripped, not treated as fenced.
+    expect(guardrails.hasRawMarkdownTable('> ~~~\n> x\n<!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // A fence nested in BOTH containers ("> - ~~~") scopes to the item's
+    // quote-relative column: quoted content dedenting out of the item ends
+    // the fence, exposing the quoted table…
+    expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   x\n> | A | B |\n> | - | - |')).toBe(true);
+    // …while content still AT the item's column stays fenced.
+    expect(guardrails.hasRawMarkdownTable('> - ~~~\n>   | A | B |\n>   | - | - |\n>   ~~~')).toBe(false);
+    // A fence opened on a list CONTINUATION line ("- item" then "  ~~~")
+    // scopes to the item in the comment pre-scan too — the dedented comment
+    // after it is stripped, not treated as fenced.
+    expect(guardrails.hasRawMarkdownTable('- item\n  ~~~\n<!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // A VALID fence-opener line interrupts the paragraph — a span cannot
+    // close on its run, so the fence opens and hides the table.
+    expect(guardrails.hasRawMarkdownTable('Intro ```\n```\n| A | B |\n| - | - |')).toBe(false);
+    // Header and delimiter pair only at the SAME quote depth — an outer
+    // paragraph over a NESTED quote is not a table…
+    expect(guardrails.hasRawMarkdownTable('> A | B\n> > - | -')).toBe(false);
+    // …but an UNQUOTED delimiter lazily continuing a quoted header's
+    // paragraph is still one table (GFM lazy continuation).
+    expect(guardrails.hasRawMarkdownTable('> A | B\n- | -')).toBe(true);
+    // A delimiter-shaped SIBLING list item is the next bullet, not a
+    // table — a nested table's delimiter is the item's INDENTED content.
+    expect(guardrails.hasRawMarkdownTable('- A | B\n- | -')).toBe(false);
+    // Lazy continuation may drop only SOME quote markers — a depth-1
+    // delimiter still continues a depth-2 header's paragraph.
+    expect(guardrails.hasRawMarkdownTable('> > A | B\n> - | -')).toBe(true);
+    // A REAL comment after a span-protected opener is still stripped —
+    // the protected match must not consume the later opener.
+    expect(guardrails.hasRawMarkdownTable('Use `<!--` here. <!--\n| A | B |\n| - | - |\n-->')).toBe(false);
+    // A fence opened on a QUOTED list continuation line ("> - item" then
+    // ">   ~~~") scopes to the item's quote-relative column — content at
+    // that column stays fenced…
+    expect(guardrails.hasRawMarkdownTable('> - item\n>   ~~~\n>   | A | B |\n>   | - | - |\n>   ~~~')).toBe(false);
+    // …while quoted content dedenting out of the item ends the fence,
+    // exposing the quoted table.
+    expect(guardrails.hasRawMarkdownTable('> - item\n>   ~~~\n> | A | B |\n> | - | - |')).toBe(true);
+    // An ESCAPED pipe inside a code span is cell CONTENT even at block
+    // level — "| `a \| b` | c |" is a 2-cell header, no match for a 3-cell
+    // delimiter.
+    expect(guardrails.hasRawMarkdownTable('H.\n\n| `a \\| b` | c |\n| --- | --- | --- |')).toBe(false);
+    // Icon-only headers are still table headers.
+    expect(guardrails.hasRawMarkdownTable('| ✅ | ❌ |\n| --- | --- |\n| yes | no |')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('> | A | B |\n> | --- | --- |')).toBe(true);
+    expect(guardrails.hasRawMarkdownTable('either|or prose\n\n---\n\nnext')).toBe(false);
+  });
+});
+
 describe('blog meta contract on refresh (owner rule 2026-07-29 refinement)', () => {
   const base = { body: 'Refreshed blog body.', frontmatter: {} };
   const opts = { isRefresh: true, priorBody: 'old body', liveMetaDescription: 'Old blog meta.', targetIsBlog: true };

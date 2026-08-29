@@ -250,3 +250,58 @@ describe('suggest mode — invariants the rest of the loop relies on', () => {
     expect(EXPIRY_HOURS).toBeGreaterThanOrEqual(24);
   });
 });
+
+describe('threadHasLiveAnswer — the inbound must never count as its own "newer inbound"', () => {
+  const { threadHasLiveAnswer } = require('../services/sms-suggest-mode');
+  const SELF = '11111111-1111-4111-8111-111111111111';
+  // pg stores created_at at microsecond precision; the caller's JS Date is
+  // truncated to milliseconds, so `created_at > <Date>` used to match the
+  // inbound row itself. The fake models exactly that: the self row satisfies
+  // a Date bound and is only kept out by an explicit id exclusion or by
+  // comparing against its own stored timestamp (the subquery bound).
+  function fakeTrx(log) {
+    const trx = (table) => {
+      const state = { table, excludedIds: [], boundIsRaw: false, direction: null };
+      const b = {
+        where(a, op, v) {
+          if (typeof a === 'function') { a.call(b); return b; }
+          if (a && typeof a === 'object') { if (a.direction) state.direction = a.direction; return b; }
+          if (a === 'created_at' && op === '>') state.boundIsRaw = Boolean(v && v.__raw);
+          return b;
+        },
+        whereRaw() { return b; },
+        whereIn() { return b; },
+        whereNot(col, v) { if (col === 'id') state.excludedIds.push(v); return b; },
+        modify(fn) { fn(b); return b; },
+        async first() {
+          log.push(state);
+          if (state.direction !== 'inbound') return null;
+          // Self row "matches" only under the truncated Date bound and only
+          // when nothing excludes it — the pre-fix behavior.
+          const selfMatches = !state.boundIsRaw && !state.excludedIds.includes(SELF);
+          return selfMatches ? { id: SELF } : null;
+        },
+      };
+      return b;
+    };
+    trx.raw = (sql, bindings) => ({ __raw: true, sql, bindings });
+    return trx;
+  }
+
+  test('legacy Date-only call reproduces the self-match (documents the bug the id fixes)', async () => {
+    const log = [];
+    const verdict = await threadHasLiveAnswer(fakeTrx(log), { threadLast10: '9415550100', customerId: 'c1', inboundCreatedAt: new Date() });
+    expect(verdict).toBe('newer_inbound');
+  });
+
+  test('with the inbound row id: bound is the row\'s own stored timestamp and the row is excluded → no false newer_inbound', async () => {
+    const log = [];
+    const verdict = await threadHasLiveAnswer(fakeTrx(log), { threadLast10: '9415550100', customerId: 'c1', inboundCreatedAt: new Date(), inboundSmsLogId: SELF });
+    expect(verdict).toBeNull();
+    const inboundQuery = log.find((s) => s.direction === 'inbound');
+    expect(inboundQuery.boundIsRaw).toBe(true);
+    expect(inboundQuery.excludedIds).toEqual([SELF]);
+    // The outbound checks use the same stored-timestamp bound.
+    for (const s of log.filter((x) => x.direction === 'outbound')) expect(s.boundIsRaw).toBe(true);
+  });
+});

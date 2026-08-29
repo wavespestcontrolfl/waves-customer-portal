@@ -150,18 +150,23 @@ async function sendCardExpiryWarnings() {
     .whereNull('deleted_at')
     .select('id', 'first_name', 'phone', 'ach_status', 'autopay_payment_method_id');
 
-  // Prepay-covered customers get NO card warning (getCardExpiryExemptCustomerIds,
+  // Prepay-covered customers get NO card warning (getCardExpiryExemptions,
   // shared with the dashboard alert and the daily payment-expiry workflow):
   // coverage still active at the end of the 60-day outlook means no card
   // charge inside it, so "your card expires, autopay will fail" would be a
   // false alarm to a customer who paid the year up front. Coverage ending
   // inside the window is not covered at the horizon and keeps its warning
   // (that card is needed to renew); so does a covered customer with a
-  // still-collectible pre-term retry.
-  let coveredIds = new Set();
+  // still-collectible pre-term retry. PER METHOD (#3533 follow-up): a
+  // covered customer whose only forthcoming charge rides a DIFFERENT card
+  // (an estimate hold's frozen card) still gets no warning about the Auto
+  // Pay card the charge will never use — isCardExpiryExemptMethod decides
+  // for the method this job actually evaluates.
+  const { emptyCardExpiryExemptions, isCardExpiryExemptMethod } = require('./card-expiry-exemptions');
+  let exemptions = emptyCardExpiryExemptions();
   try {
-    const { getCardExpiryExemptCustomerIds } = require('./annual-prepay-renewals');
-    coveredIds = await getCardExpiryExemptCustomerIds(etDateString(sixty));
+    const { getCardExpiryExemptions } = require('./annual-prepay-renewals');
+    exemptions = await getCardExpiryExemptions(etDateString(sixty));
   } catch (coverErr) {
     logger.warn(`[autopay-notifications] prepay exemption lookup failed, not excluding: ${coverErr.message}`);
   }
@@ -169,7 +174,7 @@ async function sendCardExpiryWarnings() {
 
   const rows = [];
   for (const customer of customers) {
-    if (coveredIds.has(String(customer.id))) { prepayCovered += 1; continue; }
+    if (exemptions.customerIds.has(String(customer.id))) { prepayCovered += 1; continue; }
     try {
       let target = null;
       const current = await getChargeableAutopayMethod(customer, db, { now });
@@ -192,6 +197,7 @@ async function sendCardExpiryWarnings() {
         else target = methods.find((m) => m.is_default === true && !isBankMethodType(m.method_type)) || null;
       }
       if (!target) continue;
+      if (isCardExpiryExemptMethod(exemptions, customer.id, target.id)) { prepayCovered += 1; continue; }
       // Same guarded parsing as the charge path — malformed expiry fields
       // are payment-expiry's unchargeable story, not a dated card warning.
       const expMonth = Number(target.exp_month);

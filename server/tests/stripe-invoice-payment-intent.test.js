@@ -89,7 +89,8 @@ describe('StripeService.createInvoicePaymentIntent', () => {
     // cases have no credit, so the original PI lifecycle must run untouched.
     const customersQuery = {
       where: jest.fn(() => customersQuery),
-      first: jest.fn(async () => ({ account_credits: customerAccountCredits })),
+      // opted in to automatic credit application (owner ruling 2026-08-28: default OFF, this harness models a customer who turned the slider on)
+      first: jest.fn(async () => ({ account_credits: customerAccountCredits, auto_apply_account_credit: true })),
     };
 
     trxMock = jest.fn(table => {

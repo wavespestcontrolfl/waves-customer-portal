@@ -11,13 +11,14 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/mrr-breakdown', () => ({ listAtRiskMrrAccounts: jest.fn() }));
 jest.mock('../services/annual-prepay-renewals', () => ({
-  getCardExpiryExemptCustomerIds: jest.fn(async () => new Set()),
+  getCardExpiryExemptions: jest.fn(async () => ({ customerIds: new Set(), chargeMethodIdsByCustomer: new Map() })),
 }));
 
 const db = require('../models/db');
 const logger = require('../services/logger');
 const { listAtRiskMrrAccounts } = require('../services/mrr-breakdown');
-const { getCardExpiryExemptCustomerIds } = require('../services/annual-prepay-renewals');
+const { getCardExpiryExemptions } = require('../services/annual-prepay-renewals');
+const exemptions = (customerIds = [], charged = []) => ({ customerIds: new Set(customerIds), chargeMethodIdsByCustomer: new Map(charged) });
 const {
   computeDashboardAlerts,
   computeDashboardAlertsUncached,
@@ -31,7 +32,7 @@ const {
 // different db('leads') generators (waiting vs unattributed) get distinct rows.
 const CHAIN_METHODS = [
   'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'whereNotIn',
-  'orWhereRaw', 'orWhereNull', 'orWhere', 'leftJoin', 'join', 'select', 'count',
+  'orWhereRaw', 'orWhereNull', 'orWhere', 'orWhereIn', 'leftJoin', 'join', 'select', 'count',
   'countDistinct', 'orderBy', 'modify',
 ];
 
@@ -85,7 +86,7 @@ beforeEach(() => {
   db.raw.mockImplementation((sql) => ({ sql, rows: [] }));
   db.schema.hasTable.mockResolvedValue(false);
   listAtRiskMrrAccounts.mockResolvedValue([]);
-  getCardExpiryExemptCustomerIds.mockResolvedValue(new Set());
+  getCardExpiryExemptions.mockResolvedValue(exemptions());
   primeDb({});
 });
 
@@ -439,16 +440,36 @@ describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks
   const cardsCalls = (capture) => capture.filter((c) => c.table === 'payment_methods');
 
   test('asks coverage at the 7-day horizon and excludes covered customers from the count', async () => {
-    getCardExpiryExemptCustomerIds.mockResolvedValue(new Set(['cust-prepaid']));
+    getCardExpiryExemptions.mockResolvedValue(exemptions(['cust-prepaid']));
     const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });
     const { alerts } = await computeDashboardAlertsUncached();
 
-    const [asOf] = getCardExpiryExemptCustomerIds.mock.calls[0];
+    const [asOf] = getCardExpiryExemptions.mock.calls[0];
     expect(asOf).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const excl = cardsCalls(capture).find((c) => c.method === 'whereNotIn');
     expect(excl.args).toEqual(['customers.id', ['cust-prepaid']]);
     // Still-present alert reflects the DB count with the exclusion applied.
     expect(alerts.find((a) => a.id === 'cards_expiring_7d')).toMatchObject({ count: 1 });
+  });
+
+  // PER METHOD (#3533 follow-up): a covered customer with a charge coming
+  // counts only the card(s) that charge will use; an unresolved charge
+  // method (null) counts every card — no clause at all for that customer.
+  test('partially covered customers count only their charge methods; unresolved ones count every card', async () => {
+    getCardExpiryExemptions.mockResolvedValue(exemptions(['cust-prepaid'], [
+      ['cust-hold', new Set(['pm-hold'])],
+      ['cust-unknown', null],
+    ]));
+    const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });
+    await computeDashboardAlertsUncached();
+    const calls = cardsCalls(capture);
+    expect(calls.find((c) => c.method === 'whereNotIn' && c.args[0] === 'customers.id' && c.args[1].includes('cust-prepaid')).args)
+      .toEqual(['customers.id', ['cust-prepaid']]);
+    expect(calls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ method: 'whereNotIn', args: ['customers.id', ['cust-hold']] }),
+      expect.objectContaining({ method: 'orWhereIn', args: ['payment_methods.id', ['pm-hold']] }),
+    ]));
+    expect(calls.some((c) => JSON.stringify(c.args).includes('cust-unknown'))).toBe(false);
   });
 
   test('no covered customers → no exclusion clause (query unchanged)', async () => {
@@ -459,7 +480,7 @@ describe('cards_expiring_7d — prepay-covered customers are not "autopay breaks
   });
 
   test('coverage lookup failure fails toward the warning (no exclusion, alert still computed)', async () => {
-    getCardExpiryExemptCustomerIds.mockRejectedValue(new Error('boom'));
+    getCardExpiryExemptions.mockRejectedValue(new Error('boom'));
     const capture = primeDb({ payment_methods: { count: 1 }, leads: { count: 0 } });
     const { alerts } = await computeDashboardAlertsUncached();
     expect(cardsCalls(capture).some((c) => c.method === 'whereNotIn')).toBe(false);

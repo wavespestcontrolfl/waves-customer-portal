@@ -2619,7 +2619,7 @@ describe('public estimate one-time breakdown', () => {
     const nextData = applySelectedLawnTierToEstimateData(estData, frequencies[0]);
     expect(nextData.result.recurring.services[0]).toMatchObject({
       service: 'lawn_care',
-      serviceKey: 'lawn_care_bimonthly',
+      serviceKey: 'lawn_care_recurring',
       frequency: 'bi_monthly',
       tier: 'standard',
       visitsPerYear: 6,

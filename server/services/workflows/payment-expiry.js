@@ -203,14 +203,39 @@ class PaymentExpiry {
     // the horizon is the last day of next month — coverage still active then
     // means no card charge inside the window. Covered customers with a
     // still-collectible pre-term retry stay in (the retry charges the card).
-    let exemptIds = new Set();
+    // PER CARD (#3533 follow-up): a covered customer whose only forthcoming
+    // charge rides an estimate hold's frozen card is exempt for the OTHER
+    // cards — isCardExpiryExemptMethod judges each expiring row.
+    const { emptyCardExpiryExemptions, isCardExpiryExemptMethod, cardExpiryAlertResolvableCustomerIds } = require('../card-expiry-exemptions');
+    let exemptions = emptyCardExpiryExemptions();
     try {
-      const { getCardExpiryExemptCustomerIds } = require('../annual-prepay-renewals');
+      const { getCardExpiryExemptions } = require('../annual-prepay-renewals');
       const lastOfNextMonth = new Date(Date.UTC(nextYear, nextMonth, 0)).toISOString().slice(0, 10);
-      exemptIds = await getCardExpiryExemptCustomerIds(lastOfNextMonth);
+      exemptions = await getCardExpiryExemptions(lastOfNextMonth);
     } catch (exemptErr) {
       logger.warn(`Payment expiry: prepay exemption lookup failed, exempting nobody: ${exemptErr.message}`);
     }
+    // Stale-alert reconciliation: a customer with no charge coming on any
+    // card, or (hook P1) a covered customer whose forthcoming charge rides
+    // only cards valid BEYOND this window (judged from those cards' own
+    // rows — an already-expired charged card is absent from this run's
+    // expiring query and must keep its alert). Alerts carry no method
+    // identity, so any charged card still inside the window keeps every
+    // alert; a failed row read keeps every partially covered customer's.
+    let chargedMethodRows = [];
+    const chargedMethodIds = [...exemptions.chargeMethodIdsByCustomer.values()]
+      .flatMap((ids) => (ids instanceof Set ? [...ids] : []));
+    if (chargedMethodIds.length) {
+      try {
+        chargedMethodRows = await db('payment_methods')
+          .whereIn('id', chargedMethodIds)
+          .select('id', 'method_type', 'exp_month', 'exp_year');
+      } catch (rowErr) {
+        logger.warn(`Payment expiry: charged-method read failed, keeping partially covered customers' alerts: ${rowErr.message}`);
+        chargedMethodRows = [];
+      }
+    }
+    const exemptIds = cardExpiryAlertResolvableCustomerIds(exemptions, chargedMethodRows, { year: nextYear, month: nextMonth });
     let prepayExempt = 0;
 
     // The skip below only prevents FUTURE alerts — an alert created before
@@ -226,7 +251,7 @@ class PaymentExpiry {
     let notified = 0;
 
     for (const rawCard of expiringCards) {
-      if (exemptIds.has(String(rawCard.customer_id))) { prepayExempt += 1; continue; }
+      if (isCardExpiryExemptMethod(exemptions, rawCard.customer_id, rawCard.id)) { prepayExempt += 1; continue; }
       // Normalize legacy 2-digit years for EVERY downstream consumer — the
       // email path's expiry-stage math runs new Date(year, ...), where a raw
       // '26' reads as 1926 and the card emails as already expired.

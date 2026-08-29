@@ -42,7 +42,7 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // additional_properties[].is_primary_residence. All optional/nullable: older
 // payloads still validate. Consumed by property-role-proposals (gated,
 // GATE_CALL_PROPERTY_ROLE) — fill-or-park, never a silent primary flip.
-const SCHEMA_VERSION = '1.9.0';
+const SCHEMA_VERSION = '1.10.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

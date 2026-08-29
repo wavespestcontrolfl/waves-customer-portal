@@ -1,0 +1,200 @@
+// Public-safe grounding: what the reply drafter is allowed to know about a
+// review's customer. The privacy boundary is what this module DOES NOT read
+// (no call_log, sms_log, review_requests feedback, technician notes) — the
+// db mock below throws on any table outside the allowlist to pin that.
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/locations', () => ({
+  WAVES_LOCATIONS: [
+    { id: 'bradenton', name: 'Lakewood Ranch', area: 'Lakewood Ranch / Bradenton' },
+    { id: 'sarasota', name: 'Sarasota', area: 'Sarasota' },
+  ],
+}));
+
+const mockAllowedTables = new Set(['technicians', 'customers', 'scheduled_services']);
+const mockState = { customers: [], scheduled_services: [], technicians: [] };
+
+jest.mock('../models/db', () => {
+  const dbFn = (table) => {
+    if (!mockAllowedTables.has(table)) throw new Error(`grounding must not read ${table}`);
+    dbFn.raw = (sql) => ({ sql });
+    const filters = [];
+    const api = {
+      where(obj) { filters.push((r) => Object.entries(obj).every(([k, v]) => r[k] === v)); return api; },
+      async first() { return mockState[table].filter((r) => filters.every((f) => f(r)))[0] || null; },
+      async select() { return mockState[table].filter((r) => filters.every((f) => f(r))); },
+    };
+    return api;
+  };
+  return dbFn;
+});
+
+const G = require('../services/review-reply/grounding');
+
+const NOW = new Date('2026-08-27T12:00:00Z');
+
+beforeEach(() => {
+  mockState.technicians = [{ name: 'Marcus Reyes', active: true }, { name: 'Bob Ortiz', active: true }, { name: 'Al', active: true }];
+  mockState.customers = [];
+  mockState.scheduled_services = [];
+});
+
+describe('review-derived facts', () => {
+  test('reviewer first name: real names pass, handles and initials do not', () => {
+    expect(G.reviewerFirstName('Dana Whitfield')).toBe('Dana');
+    expect(G.reviewerFirstName('dana w.')).toBe('Dana');
+    expect(G.reviewerFirstName('José Alvarez')).toBe('José');
+    expect(G.reviewerFirstName('Zoë')).toBe('Zoë');
+    expect(G.reviewerFirstName('A Google User')).toBeNull();
+    expect(G.reviewerFirstName('Anonymous')).toBeNull();
+    expect(G.reviewerFirstName('J.')).toBeNull();
+    expect(G.reviewerFirstName('XXBLAZE99')).toBeNull();
+    expect(G.reviewerFirstName('')).toBeNull();
+  });
+  test('technician names only when the reviewer wrote them; 2-letter names never match', () => {
+    expect(G.mentionedTechNames('Marcus was great, so was Al', ['Marcus', 'Bob', 'Al'])).toEqual(['Marcus']);
+    expect(G.mentionedTechNames('marcus was great', ['Marcus'])).toEqual(['Marcus']);
+    expect(G.mentionedTechNames('', ['Marcus'])).toEqual([]);
+    // codex r35: common-word names need name-like usage (capitalized, not sentence-initial).
+    expect(G.mentionedTechNames('We will definitely use Waves again.', ['Will'])).toEqual([]);
+    expect(G.mentionedTechNames('Will was thorough and kind.', ['Will'])).toEqual([]);
+    expect(G.mentionedTechNames('Our tech Will was thorough and kind.', ['Will'])).toEqual(['Will']);
+    expect(G.mentionedTechNames('I hope Hope comes back next time.', ['Hope'])).toEqual(['Hope']);
+    // codex r38: date-like usage of a month-name technician is not a mention.
+    expect(G.mentionedTechNames('They came in May and fixed it.', ['May'])).toEqual([]);
+    expect(G.mentionedTechNames('Treated since June 3rd, no bugs.', ['June'])).toEqual([]);
+    expect(G.mentionedTechNames('Great job, August, our tech was thorough.', ['August'])).toEqual(['August']);
+    expect(G.mentionedTechNames('Our tech May was wonderful.', ['May'])).toEqual(['May']);
+    expect(G.mentionedTechNames('marcus was great', ['Marcus'])).toEqual(['Marcus']);
+  });
+  test('topics come from the reviewer text', () => {
+    expect(G.detectTopics('Came out fast, the ants are gone, highly recommend')).toEqual(
+      expect.arrayContaining(['responsiveness', 'results', 'recommend', 'pest']),
+    );
+    expect(G.detectTopics('')).toEqual([]);
+  });
+});
+
+describe('account-derived facts', () => {
+  test('service types map to public category labels only', () => {
+    expect(G.serviceCategoriesFrom(['pest_control_quarterly', 'lawn_care', 'mosquito_monthly', 'termite_bait'])).toEqual(
+      ['pest control', 'lawn care', 'mosquito control', 'termite protection'],
+    );
+  });
+  test('tenure buckets count ET calendar days (DATE strings never shift; instants read on the ET clock)', () => {
+    expect(G.tenureBucket('2026-08-01', NOW)).toBe('new');
+    expect(G.tenureBucket('2026-01-01', NOW)).toBe('established');
+    expect(G.tenureBucket('2024-06-01', NOW)).toBe('long_term');
+    expect(G.tenureBucket(null, NOW)).toBeNull();
+    // Anniversary boundary: 2026-08-28 03:00Z is still 08-27 in ET → 364 days.
+    expect(G.tenureBucket('2025-08-28', new Date('2026-08-28T03:00:00Z'))).toBe('established');
+    expect(G.tenureBucket('2025-08-28', new Date('2026-08-28T05:00:00Z'))).toBe('long_term');
+    // A UTC-midnight Date (pg DATE deserialized) is the calendar date, not the prior ET evening.
+    expect(G.tenureBucket(new Date('2025-08-28T00:00:00Z'), new Date('2026-08-28T05:00:00Z'))).toBe('long_term');
+  });
+  test('only served cities surface', () => {
+    expect(G.servedCity('sarasota')).toBe('Sarasota');
+    expect(G.servedCity('Tampa')).toBeNull();
+    expect(G.servedCity('')).toBeNull();
+  });
+});
+
+describe('buildReplyGrounding', () => {
+  const review = {
+    id: 'rev-1', location_id: 'sarasota', reviewer_name: 'Dana W.', star_rating: 5,
+    review_text: 'Marcus came out within 2 days and the ants are gone.', customer_id: 'cust-1',
+  };
+
+  test('linked review: derived account facts + provenance + allowlists', async () => {
+    mockState.customers = [{ id: 'cust-1', city: 'Venice', member_since: '2025-01-15', created_at: '2025-01-15' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-05-01' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'lawn_care', scheduled_date: '2026-07-01' },
+      { customer_id: 'cust-1', status: 'cancelled', service_type: 'mosquito', scheduled_date: '2026-08-01' },
+    ];
+    const g = await G.buildReplyGrounding(review);
+    expect(g.review.firstName).toBe('Dana');
+    expect(g.review.mentionedTechNames).toEqual(['Marcus']);
+    expect(g.account).toEqual({ relationship: 'recurring', tenure: 'long_term', serviceCategories: ['pest control', 'lawn care'], city: 'Venice' });
+    expect(g.provenance.relationship).toBe('account');
+    expect(g.provenance.mentionedTechNames).toBe('review');
+    // Verifier allowlists: reviewer + mentioned tech; every other tech forbidden.
+    expect(g.allow.names).toEqual(['Dana', 'Marcus']);
+    expect(g.allow.forbiddenNames).toEqual(['Bob']);
+    expect(g.allow.cities).toEqual(expect.arrayContaining(['Sarasota', 'Venice', 'Florida']));
+    expect(g.allow.digits).toEqual(['2']);
+    // Nothing private is present anywhere in the pack.
+    const json = JSON.stringify(g);
+    for (const k of ['transcript', 'sms', 'call_summary', 'feedback', 'notes', 'phone', 'address', 'invoice']) {
+      expect(json.toLowerCase()).not.toContain(k);
+    }
+  });
+
+  test('recurrence counts distinct visit dates, not completed rows', async () => {
+    mockState.customers = [{ id: 'cust-1', city: 'Sarasota', member_since: '2026-08-01', created_at: '2026-08-01' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-10' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'mosquito', scheduled_date: '2026-08-10' },
+    ];
+    let g = await G.buildReplyGrounding(review);
+    expect(g.account.relationship).toBe('first_visit');
+    mockState.scheduled_services.push({ customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-24' });
+    g = await G.buildReplyGrounding(review);
+    expect(g.account.relationship).toBe('recurring');
+  });
+
+  test('tenure never falls back to customers.created_at (lead intake): member_since, else first completed visit, else null', async () => {
+    // An old lead who converted this month and just had a first visit.
+    mockState.customers = [{ id: 'cust-1', city: 'Sarasota', member_since: null, created_at: '2023-01-15' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-10' },
+    ];
+    let g = await G.buildReplyGrounding(review);
+    expect(g.account.relationship).toBe('first_visit');
+    expect(g.account.tenure).toBe('new');
+    // No conversion date and no completed visit: tenure unknown, never "long_term".
+    mockState.scheduled_services = [];
+    g = await G.buildReplyGrounding(review);
+    expect(g.account.tenure).toBeNull();
+    // member_since wins over visit history when present.
+    mockState.customers = [{ id: 'cust-1', city: 'Sarasota', member_since: '2024-06-01', created_at: '2023-01-15' }];
+    mockState.scheduled_services = [{ customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-08-10' }];
+    g = await G.buildReplyGrounding(review);
+    expect(g.account.tenure).toBe('long_term');
+  });
+
+  test('a click auto-link (unconfirmed) grounds as review-only: no account facts from a probabilistic match', async () => {
+    mockState.customers = [{ id: 'cust-1', city: 'Venice', member_since: '2024-01-15' }];
+    mockState.scheduled_services = [
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-05-01' },
+      { customer_id: 'cust-1', status: 'completed', service_type: 'pest_control', scheduled_date: '2026-07-01' },
+    ];
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: 'click_auto' })).toBeNull();
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: 'manual' })).toBe('cust-1');
+    expect(G.groundingCustomerId({ customer_id: 'cust-1', link_source: null })).toBe('cust-1');
+    const g = await G.buildReplyGrounding({ ...review, link_source: 'click_auto' });
+    expect(g.account).toBeNull();
+    expect(JSON.stringify(g)).not.toContain('Venice');
+    const confirmed = await G.buildReplyGrounding({ ...review, link_source: 'manual' });
+    expect(confirmed.account).toMatchObject({ relationship: 'recurring', city: 'Venice' });
+  });
+
+  test('unlinked review: review-only pack, account null', async () => {
+    const g = await G.buildReplyGrounding({ ...review, customer_id: null });
+    expect(g.account).toBeNull();
+    expect(g.provenance.relationship).toBeUndefined();
+    expect(g.review.topics).toEqual(expect.arrayContaining(['results', 'pest']));
+  });
+
+  test('a failed account read degrades to review-only instead of throwing', async () => {
+    mockState.customers = null; // forces the mock to throw inside loadAccountFacts
+    const g = await G.buildReplyGrounding(review);
+    expect(g.account).toBeNull();
+  });
+
+  test('rating-only review', async () => {
+    const g = await G.buildReplyGrounding({ ...review, review_text: null, customer_id: null });
+    expect(g.review.hasText).toBe(false);
+    expect(g.review.wordCount).toBe(0);
+    expect(g.review.mentionedTechNames).toEqual([]);
+  });
+});

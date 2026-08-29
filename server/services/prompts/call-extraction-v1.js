@@ -112,6 +112,9 @@ EMAIL:
 CALLER RELATIONSHIP (relationship_to_property):
 - A realtor / buyer's or seller's agent calling about a sale, closing, or inspection is "real_estate_agent". A lender, loan officer, or title/closing coordinator is "lender". Use "other" only when no enum value fits.
 
+UNIT BEDROOMS (property.bedroom_count):
+- When the caller states the size of their apartment/condo UNIT in bedrooms ("one-bedroom", "2 bed 2 bath", "studio" = 0), set property.bedroom_count to that integer. Only what was spoken — never infer it from square footage, rent, or the property type; null otherwise.
+
 ADDRESS:
 - raw_text: Verbatim address as spoken by caller.
 - Parse into street_line_1, city, state, postal_code when clearly stated.

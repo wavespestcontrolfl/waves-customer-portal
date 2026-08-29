@@ -165,6 +165,30 @@ describe('GSC Links importer', () => {
     }));
   });
 
+  test('re-import never resurrects a verified-lost row (GSC exports are historical, not live proof)', async () => {
+    const db = require('../models/db');
+    const BacklinkMonitor = require('../services/seo/backlink-monitor');
+    BacklinkMonitor.scoreToxicity.mockReturnValue({ score: 0, severity: 'clean', reasons: [] });
+    const existing = {
+      id: 'backlink-lost', source_url: 'https://example.com/listing', target_url: 'https://wavespestcontrol.com/',
+      status: 'lost', severity: 'clean', toxicity_score: 0, toxicity_reasons: JSON.stringify([]),
+      lost_at: '2026-08-02T07:30:00Z', lost_reason: 'link_removed', first_seen: '2026-05-01',
+    };
+    const updates = [];
+    db.mockImplementation((table) => {
+      if (table !== 'seo_backlinks') throw new Error(`Unexpected table ${table}`);
+      const builder = { where: jest.fn(() => builder), first: jest.fn(async () => existing), update: jest.fn(async (patch) => { updates.push(patch); return 1; }) };
+      return builder;
+    });
+    const importer = require('../services/seo/gsc-links-importer');
+    const result = await importer.importCsv(['Source page,Target page', 'https://example.com/listing,https://wavespestcontrol.com/'].join('\n'), { apply: true });
+    expect(result).toMatchObject({ inserted: 0, updated: 1 });
+    expect(updates[0].status).toBe('lost');
+    expect(updates[0]).not.toHaveProperty('lost_at');
+    expect(updates[0]).not.toHaveProperty('lost_reason');
+    expect(updates[0]).not.toHaveProperty('recovery_queued_at');
+  });
+
   test('re-import preserves existing anchor when GSC CSV has none', async () => {
     const db = require('../models/db');
     const BacklinkMonitor = require('../services/seo/backlink-monitor');

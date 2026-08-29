@@ -237,6 +237,21 @@ router.post('/:token/sign', async (req, res, next) => {
       });
 
       if (isAutopayAuthorization && contract.payment_method_id) {
+        // Shared Auto Pay lock protocol (#3556): the customer row is already
+        // held FOR UPDATE above; re-verify the method row under lock right
+        // before enabling. A portal removal holds customer + card FOR UPDATE
+        // across its Stripe detach, so by the time we get here the row is
+        // either present (safe to enroll) or gone (never point Auto Pay at
+        // a deleted row). The signing itself rolls back with the 409.
+        const methodLocked = await trx('payment_methods')
+          .where({ id: contract.payment_method_id, customer_id: contract.customer_id })
+          .forUpdate()
+          .first('id');
+        if (!methodLocked) {
+          throw Object.assign(new Error('payment_method_removed'), {
+            signResponse: { status: 409, body: { error: 'The selected payment method was just removed. Ask us for a new authorization link.', code: 'payment_method_removed' } },
+          });
+        }
         await trx('customers').where({ id: contract.customer_id }).update({
           autopay_enabled: true,
           autopay_payment_method_id: contract.payment_method_id,
@@ -305,7 +320,12 @@ router.post('/:token/sign', async (req, res, next) => {
     }
 
     res.json(response.body);
-  } catch (err) { next(err); }
+  } catch (err) {
+    // A locked re-verify inside the signing transaction rolled it back
+    // with a customer-facing status (payment_method_removed).
+    if (err?.signResponse) return res.status(err.signResponse.status).json(err.signResponse.body);
+    next(err);
+  }
 });
 
 module.exports = router;

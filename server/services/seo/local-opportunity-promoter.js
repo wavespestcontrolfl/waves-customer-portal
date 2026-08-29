@@ -14,6 +14,7 @@
 const logger = require('../logger');
 const prospector = require('./local-opportunity-prospector');
 const scorer = require('./prospect-scorer');
+const { claimProspectDomain, findPlacementRow } = require('./prospect-domain-lock');
 const { etDateString } = require('../../utils/datetime-et');
 
 const HOME = 'https://wavespestcontrol.com/';
@@ -113,21 +114,31 @@ async function run({
   // throw a unique violation, aborting the rest of the run. `.returning('id')` is empty
   // when the row already existed, so the dupe is counted, not crashed on.
   const tag = `local_opportunity_${todayTag()}`;
+  // Each insert goes through the shared per-domain guard (prospect-domain-lock):
+  // lock, then skip the domain if a row is already in active outreach on any
+  // page / spelling — ON CONFLICT alone only guards the exact pair.
   for (const { s, cand } of writable) {
-    const inserted = await db('seo_link_prospects').insert({
-      target_domain: cand.domain, target_page: HOME, target_url: cand.source_url || null,
-      anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,
-      domain_rating: null, score: s.score, tier: s.tier,
-      contact_email: s.contact?.contact_email || null, contact_url: s.contact?.contact_url || null,
-      contact_checked_at: s.contact ? new Date() : null,
-      notes: `local opportunity (${cand.opportunity_type}); markets=${cand.markets.join('/')}; queries=${cand.queries.slice(0, 2).join(' | ')}`,
-      quality_signals: JSON.stringify({
-        relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl,
-        intent_class: s.intent_class, opportunity_type: cand.opportunity_type, opportunity_types: cand.opportunity_types,
-        scored_by: 'local_opportunity',
-      }),
-      source: tag, owner: 'strategy_agent',
-    }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+    const inserted = await db.transaction(async (trx) => {
+      const { inFlight } = await claimProspectDomain(trx, cand.domain);
+      if (inFlight) return [];
+      // canonical placement check (any host/page spelling) — ON CONFLICT below only
+      // guards the exact textual pair
+      if (await findPlacementRow(trx, cand.domain, HOME)) return [];
+      return trx('seo_link_prospects').insert({
+        target_domain: cand.domain, target_page: HOME, target_url: cand.source_url || null,
+        anchor_planned: s.suggested_anchor || null, link_type: s.intent_class, priority: s.priority,
+        domain_rating: null, score: s.score, tier: s.tier,
+        contact_email: s.contact?.contact_email || null, contact_url: s.contact?.contact_url || null,
+        contact_checked_at: s.contact ? new Date() : null,
+        notes: `local opportunity (${cand.opportunity_type}); markets=${cand.markets.join('/')}; queries=${cand.queries.slice(0, 2).join(' | ')}`,
+        quality_signals: JSON.stringify({
+          relevance: s.relevance_0_100, lead_value_tier: s.lead_value_tier, is_local_swfl: s.is_local_swfl,
+          intent_class: s.intent_class, opportunity_type: cand.opportunity_type, opportunity_types: cand.opportunity_types,
+          scored_by: 'local_opportunity',
+        }),
+        source: tag, owner: 'strategy_agent',
+      }).onConflict(['target_domain', 'target_page']).ignore().returning('id');
+    });
     if (inserted.length) summary.promoted++; else summary.dupes++;
   }
   log.info(`[local-opportunity] promoted=${summary.promoted} dupes=${summary.dupes} held=${heldBack} (discovered=${discovered}, excludedOwned=${excludedOwned}, scored=${scored.length})`);

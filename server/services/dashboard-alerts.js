@@ -184,7 +184,7 @@ async function computeDashboardAlertsUncached() {
   //    and bound it to a forward window so already-expired cards
   //    (which belong in a different alert) don't pile in either.
   //
-  //    Prepay-covered customers are EXCLUDED (getCardExpiryExemptCustomerIds,
+  //    Prepay-covered customers are EXCLUDED (getCardExpiryExemptions,
   //    shared with the Monday warning job and the daily payment-expiry
   //    workflow): coverage still active at the end of the window means no
   //    card charge inside it, so their expiring card is not an "autopay
@@ -192,12 +192,24 @@ async function computeDashboardAlertsUncached() {
   //    own. A term ending INSIDE the window is not covered at the horizon and
   //    stays flagged; so does a covered customer with a still-collectible
   //    pre-term retry (the retry charges through the current card).
+  //    PER METHOD (#3533 follow-up): a covered customer with a charge
+  //    coming counts ONLY the card(s) that charge will use — an estimate
+  //    hold's frozen card, not the Auto Pay card it leaves untouched. A
+  //    charge whose method could not be resolved counts every card.
   try {
     const horizon = etDateString(addETDays(new Date(), 7));
     let coveredIds = [];
+    const partiallyCoveredIds = [];
+    const chargeMethodIds = [];
     try {
-      const { getCardExpiryExemptCustomerIds } = require('./annual-prepay-renewals');
-      coveredIds = [...(await getCardExpiryExemptCustomerIds(horizon))];
+      const { getCardExpiryExemptions } = require('./annual-prepay-renewals');
+      const exemptions = await getCardExpiryExemptions(horizon);
+      coveredIds = [...exemptions.customerIds];
+      for (const [customerId, methodIds] of exemptions.chargeMethodIdsByCustomer) {
+        if (!(methodIds instanceof Set)) continue; // unresolved → every card warns
+        partiallyCoveredIds.push(customerId);
+        chargeMethodIds.push(...methodIds);
+      }
     } catch (coverErr) {
       // Fail toward the warning: an over-flagged card is noise, not money.
       logger.warn(`[dashboard-alerts] cards_expiring_7d: prepay exemption lookup failed, not excluding: ${coverErr.message}`);
@@ -209,6 +221,12 @@ async function computeDashboardAlertsUncached() {
       .where('customers.autopay_enabled', true)
       .where('payment_methods.autopay_enabled', true);
     if (coveredIds.length) expiringQuery = expiringQuery.whereNotIn('customers.id', coveredIds);
+    if (partiallyCoveredIds.length) {
+      expiringQuery = expiringQuery.where(function partiallyCoveredOnlyChargedMethods() {
+        this.whereNotIn('customers.id', partiallyCoveredIds);
+        if (chargeMethodIds.length) this.orWhereIn('payment_methods.id', chargeMethodIds);
+      });
+    }
     const expiring = await expiringQuery
       .whereRaw(
         "(make_date(payment_methods.exp_year::int, payment_methods.exp_month::int, 1) + INTERVAL '1 month - 1 day')::date "
