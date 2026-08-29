@@ -267,6 +267,51 @@ some sounds still stop such sure take thank thanks that that's the their them th
 these they this those though to too up us very was we we'll we're we've welcome well were
 what when where whether which while who why wish with would yes you your you're yours
 `.split(/\s+/).filter(Boolean));
+// Ordinary reply OPENERS — consulted ONLY by the sentence-initial proper-noun
+// check (never by the lowercase role-name / attribution slots, which keep
+// their own SENTENCE_STARTERS exemption — codex #3580 r1). An explicit,
+// bounded allowlist on purpose: a suffix / morphology heuristic cannot tell
+// Jennings, Sanders, Collins or Harding from an ordinary plural or gerund
+// (three pre-push hook rounds). Pest / lawn nouns (PLURAL / mass only — the
+// singulars Roach, Palm, Ant and some plurals such as Moles are surnames),
+// common gerunds — exactly the shapes the dry run produced. Abstract nouns
+// (communication, reliability …) and sentence adverbs (honestly, …) are
+// deliberately absent: they have no safe syntax path without a dictionary or
+// a comma grammar (r5–r10). Nothing that is also
+// a personal name (Trust, Peace, Grace, Hope, Will, May, Going, Walking, Grass,
+// Trees, Weeds stay out). Added after the 2026-08-29 dry run
+// ("Ants are relentless", "Finding a company you can count on", "Skipping the
+// contract" were half of all verifier rejections).
+const ORDINARY_OPENERS = new Set(`
+ants roaches spiders termites mosquitoes mosquitos bugs pests rodents rats mice fleas ticks
+wasps bees hornets silverfish earwigs millipedes centipedes scorpions bedbugs gnats flies
+armadillos grubs fungus lawns yards turf shrubs mulch finding keeping skipping having getting
+being knowing hearing seeing looking making taking staying protecting treating helping showing
+coming letting giving working watching checking
+`.split(/\s+/).filter(Boolean));
+// …and a listed opener is exempt only with POSITIVE ordinary-word syntax
+// directly after it: a plural-only verb ("Ants are / love / need"), a
+// determiner ("Finding a", "Skipping the"), or a pronoun.
+// Nothing a single person's name takes — singular copula / auxiliary /
+// possessive, modal, adverb, past-tense verb, capitalised word — is on the
+// list, AND no coordination of any kind: codex #3580 r1–r10 showed that
+// every conjunction / comma path ("Davis and Marcus", "Truly and his team",
+// "and even we", "and some of our team", "and some who are on our team",
+// "and very talented tasha") can carry a hallucinated staff name and needs
+// a grammar to close, so "Ants and roaches …" simply costs one retry of the
+// drafter ladder instead. There is deliberately NO singular-predicate path
+// ("Treatment is glad …" must fail).
+// …and the follower may not turn the opener into a person (codex #3580
+// r11–r12): prepositions are not followers at all ("Finding from the office
+// is glad …" — origin phrases cannot be enumerated); no follower may lead
+// into a role noun ("Finding the technician …"); and a plural verb may not
+// take a feeling / speech / thanks complement ("Ants are glad …", "Ants have
+// thanked …", "Ants love that …" — a pest plural reading as a speaker); and
+// the verb followers are only the non-agentive ones the dry run used (r13:
+// "Pests know Marcus did well" — know / want / like / make / keep … are out).
+const ORDINARY_FOLLOWER_RE = /^\s*(?:(?:are|were|have|aren't|weren't|haven't|do|don't|love|hate|need|tend|thrive)\b(?!\s+(?:(?:so|very|really|truly|especially|also|always|all|not|never|just|quite|pretty|extremely|genuinely|incredibly|super|still|even|both|certainly|definitely|absolutely|honestly)\s+)*(?:glad|happy|pleased|proud|thrilled|delighted|sorry|grateful|thankful|excited|honou?red|humbled|blessed|lucky|fortunate|here|back|thanked|thanking|thank|thanks|appreciat\w*|said|saying|say|told|telling|tell|hoping|hope|wishing|wish|looking\s+forward|that|how|what|when|why|whether|if|to)\b)|(?:a|an|the|this|that|these|those|your|our|my|its|their|every|any|some|no|each|all|both|you|we|it|they|us|them)\b)(?!\s+(?:(?:the|an?|our|his|her|their|your|my)\s+)?(?:team|teams|crew|crews|staff|technician|technicians|tech|techs|owner|owners|folks|guys|colleague|colleagues|family|people|employee|employees|helper|helpers|assistant|assistants)\b)/u;
+
+
 const BRAND_WORDS = new Set(['waves', 'waveguard', 'pest', 'control', 'lawn', 'care', 'team', 'google', 'florida', 'swfl', 'southwest', 'gulf', 'coast', 'fl', 'wdo', 'hoa', 'ac', 'hvac', 'ok', 'llc']);
 // Any date / relative-time expression. The reply may not state when we were
 // there; a phrase is allowed only if the reviewer wrote it themselves.
@@ -548,6 +593,7 @@ function verifyReplyText(text, grounding, { recentReplies = [], mode } = {}) {
     // word that is neither a starter nor sourced from the review has no
     // provenance wherever it sits.
     if (sentenceInitial && SENTENCE_STARTERS.has(w)) continue;
+    if (sentenceInitial && ORDINARY_OPENERS.has(w) && ORDINARY_FOLLOWER_RE.test(body.slice(pn.index + pn[0].length))) continue;
     return 'unlisted_name';
   }
   // Digits: only what the reviewer typed. The star rating is allowed ONLY in

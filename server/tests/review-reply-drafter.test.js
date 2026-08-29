@@ -405,6 +405,75 @@ describe('verifyReplyText — public-surface safety net', () => {
   });
   test('name-like sentence starters (Will/May/Hope) are not exempt', () => {
     expect(verify(good('Hi Dana,\n\nWill handled the ants quickly and Marcus followed up.'))).toBe('unlisted_name');
+    // 2026-08-29 dry run: sentence-initial ORDINARY reply openers (pest nouns,
+    // gerunds) are on the explicit allowlist and pass when a plural-only verb,
+    // determiner, preposition or pronoun follows directly.
+    expect(verify(good('Hi Dana,\n\nAnts are relentless in this heat, so we are glad Marcus could help. We will pass your note along to him.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nFinding a company you can count on should not be hard, and we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nSkipping the paperwork is how we like to do it. We will pass your note along to Marcus.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches love this heat, so we are glad Marcus could help.'))).not.toBe('unlisted_name');
+    expect(verify(good('Hi Dana,\n\nRoaches need the heat, and Marcus is glad it worked for you.'))).not.toBe('unlisted_name');
+    // No coordination of any kind is exempt (codex #3580 r1–r10): a conjunction
+    // or comma after the opener fails provenance whatever follows — including an
+    // ordinary plural, which costs one retry of the drafter ladder by design —
+    // and neither is a follower that leads into a possessive / role phrase (r11).
+    for (const body of [
+      'Roaches and ants hate this heat, and Marcus is glad it worked for you.',
+      'Honestly, we are glad Marcus could help.',
+      'Davis and Marcus are glad the ants are gone from your kitchen.',
+      'Going and Marcus are glad the ants are gone.',
+      'Roaches and marcus are glad the ants are gone.',
+      'Roaches and tasha are glad the ants are gone. Marcus says thanks.',
+      'Truly and even Marcus are glad the ants are gone.',
+      'Roaches and very talented Marcus are glad the kitchen is quiet.',
+      'Finding as well as Marcus are glad the ants are gone.',
+      'Finding and some of our team appreciate your note about Marcus.',
+      'Finding and some who are on our team appreciate your note about Marcus.',
+      'Finding and even we are glad Marcus handled the ants.',
+      'Roaches, our technician, was glad to help alongside Marcus.',
+      'Finding from our team is glad Marcus came out fast and the ants are gone.',
+      'Roaches in our office are glad Marcus could help.',
+      'Finding the technician was easy, and Marcus is glad the ants are gone.',
+      'Roaches are our team, and Marcus is glad the ants are gone.',
+      'Finding from the office is glad Marcus came out fast and the ants are gone.',
+      'Roaches in the kitchen are gone, and Marcus is glad it worked for you.',
+      'Roaches are glad Marcus handled the ants and they are gone.',
+      'Roaches were pleased Marcus handled the ants.',
+      'Roaches have thanked Marcus for handling the ants.',
+      'Roaches love that Marcus handled the ants.',
+      'Roaches are so glad Marcus handled the ants.',
+      'Roaches are really very glad Marcus handled the ants.',
+      'Roaches are not thrilled Marcus handled them.',
+      'Roaches have never thanked Marcus, but the ants are gone.',
+      'Pests know Marcus did well and we appreciate him.',
+      'Roaches want Marcus, and the ants are gone.',
+      'Roaches like Marcus, and the ants are gone.',
+      'Roaches keep Marcus busy, and the ants are gone.',
+      'Roaches Smith helped with the ants alongside Marcus.',
+    ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
+    // …and a word that is NOT on the list needs provenance whatever follows it
+    // (surnames, first names, abstract nouns, singular pest nouns).
+    for (const body of [
+      'Jennings handled the ants quickly and Marcus followed up.',
+      'Jennings is glad the ants are gone. Marcus says thanks.',
+      'Sanders truly cares, and Marcus says thanks.',
+      'Collins knows his stuff, and Marcus says thanks.',
+      'Jennings will be glad to help alongside Marcus.',
+      'Harding never misses a spot, and Marcus says thanks.',
+      'Rogers and Marcus are glad the ants are gone.',
+      'Hopes are high, and Kevin was glad to help alongside Marcus.',
+      'Peace is glad Marcus handled the ants.',
+      'Trust is glad Marcus handled the ants.',
+      'Truly says thanks, and Marcus is glad the ants are gone.',
+      'Roach says thanks, and Marcus is glad the ants are gone.',
+      'Palm was glad to help alongside Marcus.',
+      'Moles are no match for Marcus.',
+      'Treatment is glad Marcus handled the ants.',
+      'Communication matters, and we are glad Marcus could help.',
+    ]) expect(verify(good(`Hi Dana,\n\n${body}`))).toBe('unlisted_name');
+    // Openers are sentence-start only — never a lowercase name slot (codex r1).
+    expect(verify(good('Hi Dana, we will pass this along to roaches, who handled the kitchen with Marcus.'))).toBe('unlisted_name');
+    expect(verify(good('Hello there, we are glad our technician roaches could help with your ants.'), grounding({ firstName: null, mentionedTechNames: [] }))).toBe('unlisted_name');
     // codex r66: lowercase names outside a role slot.
     const gants = grounding({ text: 'Great service for ants.', mentionedTechNames: [], topics: ['pest'] });
     expect(verify(good('Hi Dana, we will make sure kevin hears your feedback about the ants.'), gants)).toBe('unlisted_name');
