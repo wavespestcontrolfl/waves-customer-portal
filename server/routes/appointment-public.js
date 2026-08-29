@@ -214,7 +214,7 @@ async function loadByToken(token) {
     .first(
       's.id', 's.customer_id', 's.technician_id', 's.status', 's.scheduled_date',
       's.window_start', 's.window_end', 's.service_type', 's.is_recurring',
-      's.recurring_parent_id', 's.reschedule_token',
+      's.recurring_parent_id', 's.reschedule_token', 's.visit_id',
       's.source_action', 's.customer_confirmed',
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
@@ -234,6 +234,22 @@ async function loadByToken(token) {
 // reached FROM those texts that names only the raw parent would silently
 // drop scheduled work. Falls back to the raw column when no reminder row
 // exists.
+async function visitServicesFor(svc) {
+  if (!svc || !svc.visit_id) return {};
+  try {
+    const members = await db('scheduled_services')
+      .where({ visit_id: svc.visit_id })
+      .whereNotIn('status', ['completed', 'cancelled', 'skipped', 'no_show'])
+      .orderBy('window_start', 'asc')
+      .select('id', 'service_type');
+    if (members.length < 2) return {};
+    return { visit: { serviceCount: members.length, services: members.map((m) => m.service_type || 'service') } };
+  } catch (err) {
+    logger.warn(`[appointment-public] visit members lookup failed for ${svc.id}: ${err.message}`);
+    return {};
+  }
+}
+
 async function resolveServiceLabel(svc) {
   try {
     const rem = await db('appointment_reminders')
@@ -319,7 +335,9 @@ router.get('/:token', async (req, res, next) => {
       // so serving the account holder's name both mis-greets them and hands
       // a third party an identity they were never told. The page greets no
       // one; the SMS that carried the link already did (codex r9).
-      service: { type: await resolveServiceLabel(svc) },
+      // Visit group (visit-group-scope.md §4): the page lists every service
+      // at this stop, so one reminder link covers the grouped visit.
+      service: { type: await resolveServiceLabel(svc), ...(await visitServicesFor(svc)) },
       appointment: {
         date: apptDateStr(svc.scheduled_date),
         windowStart: hhmm(svc.window_start),

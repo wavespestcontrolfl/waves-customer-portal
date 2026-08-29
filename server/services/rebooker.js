@@ -943,6 +943,18 @@ class SmartRebooker {
     // `expect` pin (date/window) carries over as the series writer's own
     // expectAnchor fence; excludeServiceIds is a batch-mover concept the
     // series path has no use for.
+    //
+    // Visit group (visit-group-scope.md §2, R3 ruled rev 5): a grouped row
+    // moves its WHOLE visit — every live member, each through this same
+    // choke point with visitPolicy:'single'. "Just this service" is the
+    // explicit split action, never a flag here. Gate-independent: existing
+    // visits keep their lifecycle even if the creation gate is later unset.
+    if (options.visitPolicy !== 'single' && service.visit_id) {
+      const unit = await require('./visit-groups').moveVisitAsUnit({
+        rebooker: this, serviceId, service, newDate, newWindow, reason, initiatedBy, options,
+      });
+      if (unit) return unit;
+    }
     if (options.seriesPolicy !== 'single' && collectiveMoveGateOn() && service.is_recurring === true) {
       // A retry of a series move that already committed finds the anchor ON
       // the target (no date delta) — resolve the prior move by request
@@ -1322,14 +1334,18 @@ class SmartRebooker {
       logger.warn(`[rebooker] legacy outbound activation failed for ${serviceId}: ${activateErr.message}`);
     }
 
-    // Visit-group seam (visit-group-scope.md §2, R3 interim): a moved
-    // child whose stop no longer matches its visit detaches; the remainder
-    // dissolves when one untouched row is left. Unit-moves arrive with the
-    // #3562 collective-move integration. Best-effort post-commit.
-    try {
-      await require('./visit-groups').handleChildStopChanged(serviceId);
-    } catch (vgErr) {
-      logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+    // Visit-group seam (visit-group-scope.md §2): a moved child whose stop
+    // no longer matches its visit detaches; the remainder dissolves when one
+    // untouched row is left. A unit move (moveVisitAsUnit) passes
+    // skipVisitSeam and runs this once for every member AFTER they all
+    // moved — per member it would detach the first mover from siblings
+    // still on the old stop. Best-effort post-commit.
+    if (!options.skipVisitSeam) {
+      try {
+        await require('./visit-groups').handleChildStopChanged(serviceId);
+      } catch (vgErr) {
+        logger.warn(`[rebooker] visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
+      }
     }
 
     if (overlapWarned) {
@@ -2465,7 +2481,10 @@ class SmartRebooker {
       const { handleChildStopChanged } = require('./visit-groups');
       for (const occ of committedResult.rescheduledOccurrences || []) {
         const occId = occ && (occ.id || occ.serviceId || occ);
-        if (occId) await handleChildStopChanged(occId);
+        // The anchor's own seam is deferred by a unit move (skipVisitSeam);
+        // projected future occurrences keep the per-row seam — a series
+        // shift never carries their same-day visit siblings (out of scope).
+        if (occId && !(options.skipVisitSeam && String(occId) === String(serviceId))) await handleChildStopChanged(occId);
       }
     } catch (vgErr) {
       logger.warn(`[rebooker] series visit-group stop seam failed for ${serviceId}: ${vgErr.message}`);
