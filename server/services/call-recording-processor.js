@@ -2699,21 +2699,12 @@ function leadAddressCompareKey(v) {
 // so "Apt 4" never equals "Bldg 2 Apt 4" (different door, same rule as the
 // composer's dedupe) while Apt / Unit / Suite / hash spellings do
 // (#3608 codex r5 + r6).
-const ROUTE_WORDS = new Set(['route', 'rte', 'highway', 'hwy', 'sr', 'cr', 'us', 'interstate']);
-// A hash right after a numbered-route word is the road's number, not a
-// unit: "State Road #64", "County Road #675", "Hwy #41", "US #301" (codex
-// r7 P2). "Main Rd #4" keeps its unit — only State/County Road qualify.
-// `prev`/`prev2` are the lower-cased, punctuation-free tokens before the hash.
-// Fail closed: the route word must directly follow the house number or a
-// State/County/US/Interstate qualifier ("500 Hwy #41", "123 State Road #64",
-// "10 US Hwy #301"). A NAMED highway ("123 Overseas Hwy #4") keeps its hash
-// as a unit, so a different dedicated unit is still a held conflict.
-const ROUTE_QUALIFIERS = new Set(['state', 'county', 'us', 'interstate']);
-function isRouteNumberContext(prev, prev2) {
-  const qualified = /^\d+[a-z]?$/.test(prev2 || '') || ROUTE_QUALIFIERS.has(prev2 || '');
-  if (ROUTE_WORDS.has(prev)) return qualified;
-  return (prev === 'road' || prev === 'rd') && (prev2 === 'state' || prev2 === 'county');
-}
+// A hash is ALWAYS a unit here, exactly as the shared parser and the
+// customer-properties path treat it. A route-number exception ("State Road
+// #64") was tried and produced five successive wrong classes (terminal,
+// leading, named highway, spacing…); SWFL numbered routes are written
+// "State Road 64" without a hash, so the rare hashed spelling is accepted
+// as a unit conflict held for read-back (Adam ruling 2026-08-29).
 function canonicalizeInlineUnits(streetKey) {
   const {
     normalizeUnitLine, unitLineValueKey, UNIT_DESIGNATORS, UNIT_VALUE, isStateZipPair, STREET_SUFFIX_ALIASES,
@@ -2731,8 +2722,7 @@ function canonicalizeInlineUnits(streetKey) {
   // branch — "#A" / "#PH" are units there, so they must be units here too or
   // the whole-line key drifts from the comma form's (#3608 pre-push audit).
   const isHashValue = (t) => /^#\S+$/.test(t);
-  const isRouteHash = (idx) => isRouteNumberContext(tokens[idx - 1] || '', tokens[idx - 2] || '');
-  const hashAt = (idx) => !isRouteHash(idx) && (isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1])));
+  const hashAt = (idx) => isHashValue(tokens[idx]) || (tokens[idx] === '#' && isValue(tokens[idx + 1]));
   const out = [];
   const unitKeys = [];
   const runs = [];
@@ -14799,25 +14789,9 @@ function composeLeadAddress(line1, line2) {
 function splitLeadStreetParts(street) {
   const { splitStreetLineUnitParts } = require('../utils/address-normalizer');
   const parts = splitStreetLineUnitParts(street);
-  let { street: streetPart, unit } = parts;
-  // The shared parser peels a TERMINAL "#64" as a unit; after a numbered-
-  // route word it is the road's number ("123 State Road #64", "500 Hwy
-  // #41") — put it back on the street so a real "Apt 4" is not a conflict
-  // and the road is not rewritten as "State Road, #64" (pre-push audit P1).
-  // The route number may LEAD a longer unit ("#64 Apt 4" for "123 State
-  // Road #64 Apt 4"): only that leading hash token moves; the rest stays
-  // the unit.
-  const leadingHash = String(unit || '').match(/^(#\s*\S+)(?:\s+(.*))?$/);
-  if (leadingHash) {
-    const streetTokens = String(streetPart || '').replace(/[.,]/g, '').toLowerCase().split(/\s+/).filter(Boolean);
-    if (isRouteNumberContext(streetTokens[streetTokens.length - 1] || '', streetTokens[streetTokens.length - 2] || '')) {
-      streetPart = `${streetPart} ${leadingHash[1]}`.trim();
-      unit = String(leadingHash[2] || '').trim();
-    }
-  }
   return {
-    street: streetPart,
-    unit,
+    street: parts.street,
+    unit: parts.unit,
     tail: String(parts.tail || '').slice(0, LEAD_PLACE_TAIL_MAX_LENGTH).trim(),
   };
 }
