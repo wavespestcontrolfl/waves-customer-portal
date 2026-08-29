@@ -110,9 +110,22 @@ function buildTodaysResultCopy({
   inaccessible = 0, activeLocation = null, baitFeeding = false,
 }) {
   if (checked == null || checked <= 0) {
+    // Nothing inspected — but a recorded activity finding (the select is
+    // required independently of the counts) must not be replaced by neutral
+    // copy the metric below contradicts (codex P2 #3600 r20).
+    const accessLine = inaccessible
+      ? ` ${inaccessible} station${plural(inaccessible)} could not be accessed today and will be checked next visit.`
+      : ' Your bait stations could not be inspected today and will be checked next visit.';
+    if (statusKey === 'action' || statusKey === 'evidence') {
+      const noun = statusKey === 'evidence' ? 'Evidence of termite activity' : 'Termite activity';
+      return {
+        headline: `${noun} recorded`,
+        body: `${noun} was recorded on today's visit.${accessLine}`,
+      };
+    }
     return {
       headline: 'Bait stations being monitored',
-      body: 'Your bait station network is in place and being monitored on schedule.',
+      body: `Your bait station network is in place and being monitored on schedule.${inaccessible ? accessLine : ''}`,
     };
   }
   const accessNote = inaccessible
@@ -394,6 +407,11 @@ function buildTermiteReportV2({
   const values = typedSnapshotValues && typeof typedSnapshotValues === 'object' ? typedSnapshotValues : {};
 
   const network = buildStationNetwork({ values, stationSummary });
+  // Visit-backed rows exist but disagree with the frozen typed counts
+  // (partial station sync): the counts above come from the typed record, so
+  // the map / station record — which would draw the partial rows — must not
+  // render beside them (codex P2 #3600 r20). Surfaced to the client.
+  const stationSyncPartial = Boolean(visitBackedSummary(stationSummary)) && !reconciledSummary(stationSummary, values);
   const checked = network?.counts?.checked ?? toCount(values.stations_checked);
   const total = network?.counts?.total ?? toCount(values.total_stations);
   const activityCount = network?.counts?.activity ?? null;
@@ -467,6 +485,7 @@ function buildTermiteReportV2({
     metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, feedingNoted, servicedCount, servicedToday, baitConsumption: values.bait_consumption || null }),
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
+    stationSyncPartial,
     nextStep: nextStepText,
     nextVisit: nextVisit && nextVisit.scheduledDate ? nextVisit : null,
     primaryMove: buildPrimaryMove({ values }),
@@ -605,10 +624,33 @@ function attachTermiteReportV2(data, service = {}) {
 // stage is the render-side authority.
 const INSTALLATION_NAME_RE = /\b(install|installation|setup|set-up)\b/i;
 
+const DETECTION_NAME_RE = /\bmonitor(?:ing)?\b/i;
+const BAIT_NAME_RE = /\bbait\b/i;
+
+/**
+ * Stage from the record alone (no DB): the completion-FROZEN service key
+ * first — the same identity report-data's render stage reads — and the
+ * display name only for legacy records with no frozen identity (codex P1
+ * #3600 r20). Keeps the signature and the render gate on one predicate.
+ */
+function recordStage(service = {}) {
+  const data = serviceDataOf(service);
+  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) {
+    const key = data.completedServiceKey;
+    if (key === 'termite_installation_setup') return 'installation';
+    if (key === 'termite_monitoring') return 'detection';
+    return 'monitoring';
+  }
+  const name = String(service.service_type || '');
+  if (INSTALLATION_NAME_RE.test(name)) return 'installation';
+  if (DETECTION_NAME_RE.test(name) && !BAIT_NAME_RE.test(name)) return 'detection';
+  return 'monitoring';
+}
+
 function termiteReportV2PdfSignature(service = {}) {
   if (process.env.TERMITE_REPORT_V2 !== 'true') return '';
-  if (INSTALLATION_NAME_RE.test(String(service.service_type || ''))) return '';
-  return termiteBaitSnapshotOf(service) ? '-termv2' : '';
+  if (!termiteBaitSnapshotOf(service)) return '';
+  return recordStage(service) === 'monitoring' ? '-termv2' : '';
 }
 
 module.exports = {

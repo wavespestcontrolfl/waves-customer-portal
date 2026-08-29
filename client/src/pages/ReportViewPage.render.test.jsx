@@ -315,6 +315,17 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(screen.queryByText(/All 4/)).toBeNull();
   });
 
+  it('a partial station sync suppresses the map and per-station rows behind an honest note', async () => {
+    const partial = JSON.parse(JSON.stringify(termiteReportV2));
+    partial.termiteReportV2.stationSyncPartial = true;
+    const { container } = renderReport(partial);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    expect(container.querySelector('#station-map')).toBeNull();
+    expect(screen.queryByText('Needs attention')).toBeNull();
+    expect(screen.queryByText(/View all stations/)).toBeNull();
+    expect(screen.getByText(/still being reconciled with your technician/)).toBeInTheDocument();
+  });
+
   it('the work cell keeps a non-numeric "Performed" serviced metric as count-neutral wording', async () => {
     const performed = JSON.parse(JSON.stringify(termiteReportV2));
     performed.termiteReportV2.metrics = performed.termiteReportV2.metrics.map((m) => (m.label === 'Stations serviced' ? { ...m, value: 'Performed' } : m));

@@ -15,6 +15,7 @@ import { StationMapCard } from '../../StationMapCard';
 import {
   TermiteStatusHero,
   TermiteStationRecord,
+  TermiteStationSyncNote,
   TermiteWhatsNext,
   TermiteNextStep,
   TermiteProtection,
@@ -52,12 +53,21 @@ export default function TermiteReportV2Section({
           The wrapper carries the 20px card rhythm: the report's .sr-section
           has no bottom margin of its own (the page grid spaces top-level
           cards), so an unwrapped map sat flush against the card below. */}
-      {mode === 'live' && (
-        <div style={{ marginBottom: 20 }}>
-          <StationMapCard stationMap={stationMap} stationPins={stationPins} />
-        </div>
+      {/* Partial station sync (builder flag): the hero counts come from the
+          technician's typed record, so the map and per-station rows — which
+          would draw only the synced subset — stay off (codex P2 #3600 r20). */}
+      {data.stationSyncPartial ? (
+        <TermiteStationSyncNote />
+      ) : (
+        <>
+          {mode === 'live' && (
+            <div style={{ marginBottom: 20 }}>
+              <StationMapCard stationMap={stationMap} stationPins={stationPins} />
+            </div>
+          )}
+          <TermiteStationRecord stationMap={stationMap} />
+        </>
       )}
-      <TermiteStationRecord stationMap={stationMap} />
       <TermiteWhatsNext nextStep={data.nextStep} />
       <TermiteNextStep primaryMove={data.primaryMove} />
       <TermiteProtection nextVisitLabel={nextVisitLabel} bondLines={bondLines} />

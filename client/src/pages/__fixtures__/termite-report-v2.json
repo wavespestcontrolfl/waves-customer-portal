@@ -396,6 +396,7 @@
         }
       ]
     },
+    "stationSyncPartial": false,
     "nextStep": "Recheck active stations sooner — we will return in 30 days to re-inspect Stations 6 and 10.",
     "nextVisit": {
       "scheduledDate": "2026-11-16",

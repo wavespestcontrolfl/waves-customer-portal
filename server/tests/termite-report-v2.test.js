@@ -155,9 +155,15 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
     expect(noReading.body).toMatch(/2 stations could not be accessed/);
   });
 
-  it('no inspected count → neutral monitoring copy', () => {
+  it('no inspected count → neutral monitoring copy; a recorded activity finding survives zero inspection', () => {
     const copy = buildTodaysResultCopy({ statusKey: 'monitoring', checked: null });
     expect(copy.headline).toBe('Bait stations being monitored');
+    const active = buildTodaysResultCopy({ statusKey: 'action', checked: 0, total: 12, inaccessible: 12 });
+    expect(active.headline).toBe('Termite activity recorded');
+    expect(active.body).toMatch(/12 stations could not be accessed today/);
+    const evidence = buildTodaysResultCopy({ statusKey: 'evidence', checked: 0 });
+    expect(evidence.headline).toBe('Evidence of termite activity recorded');
+    expect(evidence.body).toMatch(/could not be inspected today/);
   });
 });
 
@@ -230,9 +236,13 @@ describe('buildStationNetwork — a RECONCILED station-map summary drives the co
     // the activity pin still escalates the status; serviced pins still count as work
     expect(out.status.key).toBe('action');
     expect(out.metrics[2]).toEqual({ label: 'Stations serviced', value: '2' });
+    // the payload flags the partial sync so the client suppresses the map / rows
+    expect(out.stationSyncPartial).toBe(true);
     // a reconciled summary DOES drive the counts
     const agreed = buildStationNetwork({ values: CLEAN_VALUES, stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } });
     expect(agreed.counts.activity).toBe(1);
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', stationSummary: { total: 12, checked: 12, activity: 1, serviced: 2, inaccessible: 0 } }).stationSyncPartial).toBe(false);
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station' }).stationSyncPartial).toBe(false);
   });
 
   it('partial access without a recorded total derives a safe denominator — never "all N"', () => {
@@ -583,11 +593,18 @@ describe('termiteReportV2PdfSignature — PDF cache-key component', () => {
     expect(termiteReportV2PdfSignature({ service_data: { typedReportSnapshot: { type: 'termite_bait_station' } } })).toBe('-termv2');
   });
 
-  it('is empty for installation / setup visits (the typed record stands)', () => {
+  it('keys the stage from the frozen completedServiceKey first; names only for legacy records without one', () => {
     process.env.TERMITE_REPORT_V2 = 'true';
+    // legacy (no frozen key): names decide
     expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Station Installation' })).toBe('');
     expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Setup' })).toBe('');
+    expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Monitoring Service' })).toBe('');
     expect(termiteReportV2PdfSignature({ ...baitRecord, service_type: 'Termite Bait Station Service' })).toBe('-termv2');
+    // frozen key wins over a customized label in BOTH directions
+    const frozen = (key, service_type) => ({ service_type, service_data: JSON.stringify({ completedServiceKey: key, typedReportSnapshot: { type: 'termite_bait_station', values: {} } }) });
+    expect(termiteReportV2PdfSignature(frozen('termite_bait', 'Termite Bait Station Installation'))).toBe('-termv2');
+    expect(termiteReportV2PdfSignature(frozen('termite_installation_setup', 'Termite Bait Station Service'))).toBe('');
+    expect(termiteReportV2PdfSignature(frozen('termite_monitoring', 'Termite Bait Station Service'))).toBe('');
   });
 
   it('is empty for other typed types, records without a snapshot, and malformed service_data', () => {
