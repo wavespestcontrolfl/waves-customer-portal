@@ -172,7 +172,7 @@ function futurePestRows() {
 }
 
 describe('computeMembershipContext', () => {
-  test('account spend lists non-tier recurring work without using it for WaveGuard qualification', async () => {
+  test('account spend: rodent bait qualifies for WaveGuard (2026-08-29 owner directive); palm stays non-tier', async () => {
     const database = fakeDb({
       scheduledRows: [
         { id: 'p1', service_type: 'pest_control', scheduled_date: '2099-01-05', estimated_price: 120 },
@@ -186,15 +186,16 @@ describe('computeMembershipContext', () => {
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
-    expect(spend.existingServiceKeys).toEqual(['pest_control']);
+    // Pest + rodent bait = 2 qualifying services = Silver.
+    expect(spend.existingServiceKeys).toEqual(['pest_control', 'rodent_bait']);
     expect(spend).toEqual(expect.objectContaining({
-      currentTier: 'bronze',
-      currentTierLabel: 'Bronze',
-      currentDiscountPct: 0,
+      currentTier: 'silver',
+      currentTierLabel: 'Silver',
+      currentDiscountPct: 10,
     }));
     expect(spend.currentServices).toEqual(expect.arrayContaining([
       expect.objectContaining({ key: 'pest_control', currentPerVisit: 117, qualifiesForWaveGuard: true }),
-      expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: false }),
+      expect.objectContaining({ key: 'rodent_bait', currentPerVisit: 42, qualifiesForWaveGuard: true }),
     ]));
     expect(spend.currentSpendPerVisitTotal).toBe(159);
   });
@@ -209,7 +210,8 @@ describe('computeMembershipContext', () => {
 
     const spend = await loadCurrentServiceSpendContext(database, 'cust-1');
 
-    expect(spend.existingServiceKeys).toEqual([]);
+    // Rodent bait qualifies since 2026-08-29; palm stays non-tier.
+    expect(spend.existingServiceKeys).toEqual(['rodent_bait']);
     expect(spend.currentServices.map((service) => service.key).sort()).toEqual(['palm_injection', 'rodent_bait']);
   });
 

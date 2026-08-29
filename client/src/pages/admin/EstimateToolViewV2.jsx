@@ -8915,15 +8915,20 @@ export default function EstimateToolViewV2({
                             <TierGridV2>
                               {" "}
                               <TierRowV2
-                                name="Monthly"
-                                detail={`${R.rodBaitSize} property`}
-                                price={`$${R.rodBaitMo}/mo`}
+                                name={R.rodBait ? "Quarterly" : "Monthly"}
+                                detail={R.rodBait
+                                  ? `Up to ${R.rodBait.stations} stations`
+                                  : `${R.rodBaitSize} property`}
+                                price={R.rodBait
+                                  ? `$${R.rodBait.perVisit}/visit`
+                                  : `$${R.rodBaitMo}/mo`}
                                 recommended
                               />{" "}
                             </TierGridV2>{" "}
                             <div className="text-11 text-ink-secondary mt-1">
-                              Not included in bundle discount — priced
-                              separately
+                              {R.rodBait
+                                ? "WaveGuard qualifying service — tier discount applies; $99 setup waived for members"
+                                : "Not included in bundle discount — priced separately"}
                             </div>{" "}
                           </div>
                         )}

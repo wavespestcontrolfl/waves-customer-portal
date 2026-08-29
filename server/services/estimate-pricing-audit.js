@@ -123,8 +123,11 @@ const NAME_TO_KEY = [
   // "Missing COGS" on the renamed line.
   [/lawn|turf/i, 'lawn_care'],
   [/mosquito/i, 'mosquito'],
-  [/termite|bait station/i, 'termite_bait'],
+  // Rodent-led bait names must resolve BEFORE the generic "bait station"
+  // termite pattern — "Rodent Bait Stations" is a recurring.services row
+  // since 2026-08-29 and would otherwise mis-key as termite_bait.
   [/rodent.*bait/i, 'rodent_bait'],
+  [/termite|bait station/i, 'termite_bait'],
   [/rodent.*trap/i, 'rodent_trapping'],
   [/sanitation/i, 'rodent_sanitation'],
   [/exclusion/i, 'exclusion'],
@@ -215,7 +218,10 @@ function normalizeRecurringLines(result) {
     }
     lines.push(line);
   }
-  if (Number(result?.recurring?.rodentBaitMo || 0) > 0) {
+  // The scalar is legacy fallback only — a 2026-08-29+ estimate carries a
+  // real rodent_bait services row, and reading both double-counts the plan.
+  if (Number(result?.recurring?.rodentBaitMo || 0) > 0
+    && !lines.some((l) => l.serviceKey === 'rodent_bait')) {
     lines.push({
       serviceKey: 'rodent_bait',
       label: 'Rodent Bait',

@@ -6639,10 +6639,12 @@ describe('public estimate one-time breakdown', () => {
     expect(html).toContain('$330.00</span>');
     expect(html).toContain('$147.00</span>');
     expect(html).toContain('<span class="tier-lbl">Recurring service</span>');
-    expect(html).toContain('Add Lawn Care and save more');
-    expect(html).toContain('Silver tier pricing (10% off qualifying services)');
-    expect(html).not.toContain('Add WaveGuard Mosquito and save more');
-    expect(html).not.toContain('Gold tier pricing (15% off qualifying services)');
+    // Rodent bait counts toward the tier since 2026-08-29 (owner directive):
+    // pest + rodent = 2 qualifying services, so the upsell now targets the
+    // NEXT tier (Gold) instead of completing Silver.
+    expect(html).toContain('Add WaveGuard Mosquito and save more');
+    expect(html).toContain('Gold tier pricing (15% off qualifying services)');
+    expect(html).not.toContain('Add Lawn Care and save more');
     expect(html).not.toContain('id="monthly-display"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="palm_injection"');
     expect(html).not.toContain('You save <span data-service-card-savings data-service-kind="rodent_bait"');
@@ -6691,7 +6693,10 @@ describe('public estimate one-time breakdown', () => {
     expect(pricing.combinedRecurring).toEqual(expect.objectContaining({
       monthlySubtotal: 149,
       annualSubtotal: 1788,
-      qualifyingCount: 1,
+      // Rodent bait tier-counts since 2026-08-29 — pest + rodent = 2,
+      // matching the stored Silver tier. The legacy rodent row itself stays
+      // out of the % (waveGuardDiscountEligible false below).
+      qualifyingCount: 2,
     }));
     expect(pricing.services).toHaveLength(1);
     expect(pricing.services[0]).toEqual(expect.objectContaining({

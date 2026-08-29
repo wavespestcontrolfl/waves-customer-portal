@@ -720,11 +720,25 @@ function mapV1ToLegacyShape(v1Result) {
     };
   }
 
-  // Rodent Bait → R.rodBaitMo, R.rodBaitSize
+  // Rodent Bait → R.rodBaitMo (legacy scalar, pre-discount monthly) plus the
+  // bracket fields the 2026-08-29 realignment introduced. rodBaitSize maps
+  // the station allowance onto the legacy Small/Medium/Large vocabulary so
+  // stored-estimate renderers keep working (≤5 → Small, ≤7 → Medium, else
+  // Large); new consumers read stations/perVisit directly.
   if (rbLI) {
     R.rodBaitMo = rbLI.monthly || 0;
-    const sz = (rbLI.size || '').toLowerCase();
-    R.rodBaitSize = sz === 'small' ? 'Small' : sz === 'large' ? 'Large' : 'Medium';
+    const stations = Number(rbLI.stations) || 0;
+    const legacySize = (rbLI.size || '').toLowerCase();
+    R.rodBaitSize = stations > 0
+      ? (stations <= 5 ? 'Small' : stations <= 7 ? 'Medium' : 'Large')
+      : legacySize === 'small' ? 'Small' : legacySize === 'large' ? 'Large' : 'Medium';
+    R.rodBait = {
+      stations: stations || null,
+      perVisit: Number(rbLI.perApp ?? rbLI.perVisit) || null,
+      visitsPerYear: Number(rbLI.visitsPerYear) || 4,
+      annual: Number(rbLI.annual) || null,
+      detail: rbLI.detail || null,
+    };
   }
 
   // Recurring services[] — pre-discount monthlies, matching v2-legacy-mapper
@@ -848,6 +862,19 @@ function mapV1ToLegacyShape(v1Result) {
         countsTowardWaveGuardTier: false,
       });
     }
+  }
+  // Rodent Bait Stations — full WaveGuard recurring line since 2026-08-29
+  // (owner directive): tier-counted, tier-discounted, billed per quarterly
+  // application. The recurring.rodentBaitMo scalar still rides below for
+  // legacy consumers; the converter/render paths dedupe by service key, so
+  // the row is the authority and the scalar is display fallback only.
+  if (rbLI && !rbLI.quoteRequired) {
+    svcAdd('Rodent Bait Stations', rbLI, {
+      service: 'rodent_bait',
+      annual: Number(rbLI.annual) || null,
+      stations: Number(rbLI.stations) || null,
+      detail: rbLI.detail || null,
+    });
   }
   // Recurring Foam — standalone recurring line (cadence-discounted). Stays in
   // summary.recurringAnnual* (so it's part of monthlyTotal/year totals) but does
@@ -1126,19 +1153,23 @@ function mapV1ToLegacyShape(v1Result) {
   }
 
   const waveGuardTier = CAP(wg.tier || 'bronze');
+  // Rodent bait is INSIDE the recurring totals since 2026-08-29 — it is a
+  // real services row above (tier-counted, tier-discounted), so it is no
+  // longer subtracted out of summary.recurringAnnual* or re-added to the
+  // year totals. The scalar below (recurring.rodentBaitMo) remains for
+  // legacy display consumers only.
   const rodentBaitMonthly = rbLI ? (rbLI.monthly || 0) : 0;
-  const rodentBaitAnnual = rodentBaitMonthly * 12;
   const palmInjectionMonthly = palmLI ? palmMonthlyAfterCredits : 0;
   const palmInjectionAnnual = palmLI ? palmAnnualAfterCredits : 0;
-  const recurringAnnualBefore = Math.max(0, Math.round(((summary.recurringAnnualBeforeDiscount || 0) - rodentBaitAnnual - palmAnnualBeforeCredits) * 100) / 100);
-  const recurringAnnual = Math.max(0, Math.round(((summary.recurringAnnualAfterDiscount || 0) - rodentBaitAnnual - palmInjectionAnnual) * 100) / 100);
+  const recurringAnnualBefore = Math.max(0, Math.round(((summary.recurringAnnualBeforeDiscount || 0) - palmAnnualBeforeCredits) * 100) / 100);
+  const recurringAnnual = Math.max(0, Math.round(((summary.recurringAnnualAfterDiscount || 0) - palmInjectionAnnual) * 100) / 100);
   const recurringMonthly = Math.round((recurringAnnual / 12) * 100) / 100;
 
   // year1: recurring year + one-time items + specialty + membership.
   // v1's summary.year1Total doesn't include membership — we fix it here
   // to match v2's year1 convention.
-  const year1 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual + oneTimeTotal) * 100) / 100;
-  const year2 = Math.round((recurringAnnual + rodentBaitAnnual + palmInjectionAnnual) * 100) / 100;
+  const year1 = Math.round((recurringAnnual + palmInjectionAnnual + oneTimeTotal) * 100) / 100;
+  const year2 = Math.round((recurringAnnual + palmInjectionAnnual) * 100) / 100;
   const year2Monthly = Math.round((year2 / 12) * 100) / 100;
   // A mixed estimate can have BOTH manual quote-required rows (e.g. commercial
   // pest) AND priced recurring rows (auto-priced commercial lawn/tree, or any

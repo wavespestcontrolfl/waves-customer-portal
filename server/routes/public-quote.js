@@ -212,7 +212,8 @@ function recurringQuoteLines(estimate) {
 // carry perApp/perVisit too, but commercial is exempt from the
 // per-application unit rule and bills monthly (AGENTS.md).
 const MONTHLY_BILLED_SERVICE_KEYS = new Set([
-  'rodent_bait',
+  // rodent_bait left this set 2026-08-29 (owner directive): bracket pricing
+  // bills per quarterly application like the other recurring programs.
   'commercial_rodent_bait',
   // Rider folded into the bait line at conversion, never a standalone charge —
   // listing it separately would double-count the hardware uplift.

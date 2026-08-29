@@ -426,21 +426,15 @@ function buildRows() {
   add('rodent_bait_program', () => rangeRow({
     key: 'rodent_bait_program',
     name: 'Rodent Bait Station Program',
-    unit: 'per month',
+    unit: 'per visit',
+    // Footprint brackets (owner 2026-08-29): lot size, roof type, and the
+    // retired post-exclusion modifier no longer move the price — one sweep
+    // over the footprint axis covers the full ladder.
     values: sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, {}),
-      (r) => r.monthly).concat(sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      // Tile-roof properties carry the derived rodentRoofAdj the estimate
-      // path forwards.
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: 50 } }),
-      (r) => r.monthly)).concat(sweepValues(
-      LOTS_SQFT.flatMap((lot) => FOOTPRINTS_SQFT.map((f) => ({ f, lot }))),
-      // Metal roofs carry the negative adjustment property lookup forwards.
-      ({ f, lot }) => sp.priceRodentBait({ footprint: f, lotSqFt: lot, features: {} }, { modifiers: { rodentRoofAdj: -5 } }),
-      (r) => r.monthly)),
-    notes: `Monthly-billed monitoring program with ${Number(constants.RODENT.baitVisitsPerYear) || 4} service visits per year.`,
+      FOOTPRINTS_SQFT.map((f) => ({ f })),
+      ({ f }) => sp.priceRodentBait({ footprint: f }, {}),
+      (r) => r.perVisit),
+    notes: `Billed per quarterly visit (${Number(constants.RODENT.baitVisitsPerYear) || 4} service visits per year) with a station allowance by home size; a one-time $${Math.round(constants.RODENT.baitSetupFee)} setup applies only without another WaveGuard recurring service.`,
   }));
 
   add('rodent_trapping', () => rangeRow({

@@ -117,7 +117,7 @@ function requirePalmTierSizes(errors, treatment, name) {
 
 function validatePestPricingConfig(snapshot = constants) {
   const errors = [];
-  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO, PALM, WAVEGUARD } = snapshot;
+  const { PEST, PROPERTY_TYPE_ADJ, ONE_TIME, SPECIALTY, BED_BUG, TERMITE, MOSQUITO, PALM, WAVEGUARD, RODENT } = snapshot;
 
   if (!isPositiveNumber(PEST.base)) errors.push('PEST.base must be positive');
   if (!isPositiveNumber(PEST.floor)) errors.push('PEST.floor must be positive');
@@ -529,6 +529,18 @@ function validatePestPricingConfig(snapshot = constants) {
   if (!palm.internalCostBasis || typeof palm.internalCostBasis !== 'object') {
     errors.push('PALM.internalCostBasis is required');
   }
+
+  // Rodent bait brackets (owner directive 2026-08-29): the ladder must be
+  // non-empty, strictly sorted, and positively priced — a hand-edited DB row
+  // must never boot an engine that can't resolve a bracket.
+  const rodent = RODENT || {};
+  validateSortedBrackets(errors, 'RODENT.baitBrackets', rodent.baitBrackets, 'maxSqFt', 'perVisit');
+  for (const b of rodent.baitBrackets || []) {
+    if (!isPositiveNumber(b.stations)) errors.push('RODENT.baitBrackets stations must be positive');
+  }
+  const rodentExt = rodent.baitBracketExtension || {};
+  if (!isPositiveNumber(rodentExt.perSqFt)) errors.push('RODENT.baitBracketExtension.perSqFt must be positive');
+  if (!isPositiveNumber(rodentExt.perVisitPerStep)) errors.push('RODENT.baitBracketExtension.perVisitPerStep must be positive');
 
   return { valid: errors.length === 0, errors };
 }
@@ -1219,21 +1231,45 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     // ── Rodent ───────────────────────────────────────────────
-    // Bait stations (recurring monthly)
-    if (config.rodent_monthly) {
-      const rm = config.rodent_monthly;
-      if (rm.small) constants.RODENT.baitMonthly.small.monthly = r(rm.small);
-      if (rm.medium) constants.RODENT.baitMonthly.medium.monthly = r(rm.medium);
-      if (rm.large) constants.RODENT.baitMonthly.large.monthly = r(rm.large);
-      if (rm.visits_per_year) constants.RODENT.baitVisitsPerYear = Number(rm.visits_per_year);
+    // Bait stations (footprint brackets, per quarterly visit — owner
+    // directive 2026-08-29). The retired knobs' rows (rodent_monthly,
+    // rodent_setup_fee, rodent_post_exclusion) are deliberately NOT read:
+    // their constants no longer exist, and migration 20260829000040 retires
+    // the rows themselves.
+    if (config.rodent_bait_brackets) {
+      const rb = config.rodent_bait_brackets;
+      if (Array.isArray(rb.brackets) && rb.brackets.length > 0) {
+        const parsed = rb.brackets
+          .map((b) => ({
+            maxSqFt: Number(b.max_sq_ft ?? b.maxSqFt),
+            stations: Number(b.stations),
+            perVisit: r(Number(b.per_visit ?? b.perVisit)),
+          }))
+          .filter((b) => Number.isFinite(b.maxSqFt) && b.maxSqFt > 0
+            && Number.isFinite(b.stations) && b.stations > 0
+            && Number.isFinite(b.perVisit) && b.perVisit > 0)
+          .sort((a, b) => a.maxSqFt - b.maxSqFt);
+        if (parsed.length > 0) constants.RODENT.baitBrackets = parsed;
+      }
+      if (rb.extension) {
+        const ext = rb.extension;
+        if (Number(ext.per_sq_ft ?? ext.perSqFt) > 0) {
+          constants.RODENT.baitBracketExtension.perSqFt = Number(ext.per_sq_ft ?? ext.perSqFt);
+        }
+        if (Number(ext.stations_per_step ?? ext.stationsPerStep) > 0) {
+          constants.RODENT.baitBracketExtension.stationsPerStep = Number(ext.stations_per_step ?? ext.stationsPerStep);
+        }
+        if (Number(ext.per_visit_per_step ?? ext.perVisitPerStep) > 0) {
+          constants.RODENT.baitBracketExtension.perVisitPerStep = r(Number(ext.per_visit_per_step ?? ext.perVisitPerStep));
+        }
+      }
+      if (Number(rb.visits_per_year) > 0) constants.RODENT.baitVisitsPerYear = Number(rb.visits_per_year);
     }
-    if (config.rodent_setup_fee?.value) {
+    // One-time setup fee for non-WaveGuard members (owner 2026-08-29: $99;
+    // migration 20260829000040 rewrites the legacy $199 row). A zero/absent
+    // value disables the fee entirely.
+    if (config.rodent_setup_fee?.value != null) {
       constants.RODENT.baitSetupFee = r(config.rodent_setup_fee.value);
-    }
-    if (config.rodent_post_exclusion) {
-      const pe = config.rodent_post_exclusion;
-      if (pe.multiplier) constants.RODENT.baitPostExclusion.multiplier = pe.multiplier;
-      if (pe.floor_monthly) constants.RODENT.baitPostExclusion.floorMonthly = r(pe.floor_monthly);
     }
 
     // Inspection
@@ -1382,8 +1418,25 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
 
     if (config.rodent_waveguard || config.rodent_rules) {
       const rw = config.rodent_waveguard || config.rodent_rules;
-      if (typeof rw.tier_qualifier === 'boolean') constants.RODENT.tierQualifier = rw.tier_qualifier;
-      if (typeof rw.exclude_from_pct_discount === 'boolean') constants.RODENT.excludeFromPctDiscount = rw.exclude_from_pct_discount;
+      // The RODENT flags and the WAVEGUARD maps must move TOGETHER — the
+      // discount engine reads BOTH (serviceExcludedFromPercentDiscount reads
+      // the map, lineFlagsBlockPercentDiscount reads the line-stamped flag).
+      // Before 2026-08-29 only the RODENT flags synced, so flipping the admin
+      // toggle silently changed nothing (the hard-coded map still excluded).
+      if (typeof rw.tier_qualifier === 'boolean') {
+        constants.RODENT.tierQualifier = rw.tier_qualifier;
+        const idx = constants.WAVEGUARD.qualifyingServices.indexOf('rodent_bait');
+        if (rw.tier_qualifier && idx === -1) constants.WAVEGUARD.qualifyingServices.push('rodent_bait');
+        if (!rw.tier_qualifier && idx !== -1) constants.WAVEGUARD.qualifyingServices.splice(idx, 1);
+      }
+      if (typeof rw.exclude_from_pct_discount === 'boolean') {
+        constants.RODENT.excludeFromPctDiscount = rw.exclude_from_pct_discount;
+        if (rw.exclude_from_pct_discount) {
+          constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait = true;
+        } else {
+          delete constants.WAVEGUARD.excludedFromPercentDiscount.rodent_bait;
+        }
+      }
       if (rw.setup_credit != null) constants.RODENT.setupCredit = r(rw.setup_credit);
     }
 

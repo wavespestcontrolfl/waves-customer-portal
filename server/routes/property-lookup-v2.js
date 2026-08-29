@@ -2202,10 +2202,7 @@ function buildEnrichedProfile(rc, ai, lat, lng, avm = null, addressAuditParam = 
       ),
       // Pest: attached garage modifier
       pestGarageAdj: detectAttachedGarage(rc) ? 8 : 0,
-      // Pest: tile roof modifier (rodent risk)
-      rodentRoofAdj: calcRoofRodentModifier(
-        mergeField(rc?.roofType, ai?.roofMaterial, 'UNKNOWN')
-      ),
+      // (rodentRoofAdj retired 2026-08-29 — bracket pricing ignores roof type)
       // Termite: construction vulnerability
       termiteConstructionMult: calcTermiteConstructionMult(
         mergeField(rc?.constructionMaterial, ai?.constructionVisible, 'UNKNOWN')
@@ -2999,21 +2996,6 @@ function calcConstructionModifier(material) {
     case 'CBS': return 0;          // Standard SWFL, baseline
     case 'BRICK': return -3;       // Slightly better sealed
     case 'METAL': return -5;       // Commercial, fewer entry points
-    default: return 0;
-  }
-}
-
-/**
- * Rodent: roof type modifier
- * Tile roofs = major roof rat harborage
- * Returns dollar adjustment to rodent service pricing
- */
-function calcRoofRodentModifier(roofType) {
-  switch (roofType) {
-    case 'TILE': return 15;     // Barrel tile = rat highway
-    case 'SHINGLE': return 0;   // Standard
-    case 'METAL': return -5;    // Hard to nest in
-    case 'FLAT': return -3;     // Commercial, less harborage
     default: return 0;
   }
 }

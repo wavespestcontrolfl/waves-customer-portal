@@ -3639,24 +3639,40 @@ function recurringServicesWithSupplements(estResult = {}) {
     });
   }
 
+  // 2026-08-29+: rodent bait can be a REAL recurring.services row (WaveGuard
+  // member, per-application billed); the scalar rides as legacy display
+  // fallback. The merge PREFERS supplement values, so when a row already
+  // covers rodent bait the scalar contributes only cadence ENRICHMENT —
+  // never money figures or discount flags (the legacy
+  // `waveGuardDiscountEligible: false` would clobber the row's membership).
   const rodentMonthly = firstPositiveNumber(recurring.rodentBaitMo, resultStats.rodBaitMo);
   if (rodentMonthly) {
     const visitsPerYear = firstPositiveNumber(resultStats.rodBaitVisitsPerYear, resultStats.rodentBait?.visitsPerYear) || 4;
     const annual = Math.round(rodentMonthly * 12 * 100) / 100;
     const size = resultStats.rodBaitSize || resultStats.rodentBait?.size || null;
+    // Only a NEW-MODEL row (service key exactly 'rodent_bait' — the mapper
+    // stamps it) is authoritative over the scalar; a sparse LEGACY row
+    // ("Legacy Rodent Monitoring" etc. that merely canonicalizes to the
+    // key) keeps the pre-2026-08-29 behavior where the scalar supplies the
+    // money figures and the no-discount posture it was priced under.
+    const existingRodentIdx = indexByKey.get('rodent_bait');
+    const hasRodentRow = existingRodentIdx != null
+      && String(services[existingRodentIdx]?.service || '') === 'rodent_bait';
     upsertSupplement('rodent_bait', {
       service: 'rodent_bait',
       name: 'Rodent Bait Stations',
       displayName: 'Rodent Bait Stations',
-      mo: rodentMonthly,
-      monthly: rodentMonthly,
-      annual,
       perTreatment: visitsPerYear > 0 ? Math.round((annual / visitsPerYear) * 100) / 100 : null,
       visitsPerYear,
       cadenceLabel: 'Quarterly monitoring',
-      detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
-      waveGuardDiscountEligible: false,
       tierLabel: 'Recurring service',
+      ...(hasRodentRow ? {} : {
+        mo: rodentMonthly,
+        monthly: rodentMonthly,
+        annual,
+        detail: size ? `${size} property · monitoring stations` : 'Monitoring stations',
+        waveGuardDiscountEligible: false,
+      }),
     });
   }
 

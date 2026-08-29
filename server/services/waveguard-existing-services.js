@@ -75,9 +75,10 @@ async function isActivePlanCustomer(database, customerId) {
 }
 
 // Map a free-text service name (scheduled_services.service_type or an estimate
-// line label) to a WaveGuard qualifying service key. Scoped to the five
-// qualifiers — palm_injection and rodent_bait are explicitly NOT qualifiers,
-// and one-time treatments (one_time_pest etc.) never count toward the tier.
+// line label) to a WaveGuard qualifying service key. Scoped to the six
+// qualifiers (rodent_bait joined 2026-08-29, owner directive) —
+// palm_injection is explicitly NOT a qualifier, and one-time treatments
+// (one_time_pest etc.) never count toward the tier.
 // One rodent-token regex for qualification AND ownership — a second copy
 // would drift (the qualifying classifier additionally requires the row to be
 // rodent-LED; ownership below must not).
@@ -113,6 +114,14 @@ function toQualifyingKeys(raw) {
   if (!palmService && (s.includes('tree') || s.includes('shrub') || s.includes('ornamental'))) keys.add('tree_shrub');
   if (s.includes('mosquito')) keys.add('mosquito');
   if (s.includes('termite') && s.includes('bait')) keys.add('termite_bait');
+  // Rodent bait stations joined WaveGuard 2026-08-29 (owner directive): a
+  // rodent-LED bait/station/monitoring row is a qualifier. Separators are
+  // normalized first so key-shaped text ('rodent_bait_quarterly') fires the
+  // \b-anchored rodent token; pest-primary combined names ("Pest & Rodent
+  // Bait...") stay pest-only, and trapping/exclusion rows (no bait token)
+  // still never qualify.
+  const w = s.replace(/[_-]+/g, ' ');
+  if (isRodentLedText(w) && /bait|station|monitor/.test(w)) keys.add('rodent_bait');
   return [...keys];
 }
 

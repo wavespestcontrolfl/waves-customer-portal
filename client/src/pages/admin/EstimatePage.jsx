@@ -5301,15 +5301,20 @@ function EstimateToolView() {
                             <TierGrid>
                               {" "}
                               <TierRow
-                                name="Monthly"
-                                detail={`${R.rodBaitSize} property`}
-                                price={`$${R.rodBaitMo}/mo`}
+                                name={R.rodBait ? "Quarterly" : "Monthly"}
+                                detail={R.rodBait
+                                  ? `Up to ${R.rodBait.stations} stations`
+                                  : `${R.rodBaitSize} property`}
+                                price={R.rodBait
+                                  ? `$${R.rodBait.perVisit}/visit`
+                                  : `$${R.rodBaitMo}/mo`}
                                 recommended
                               />{" "}
                             </TierGrid>{" "}
                             <div style={sModNote}>
-                              Not included in WaveGuard bundle discount — priced
-                              separately
+                              {R.rodBait
+                                ? "WaveGuard qualifying service — tier discount applies; $99 setup waived for members"
+                                : "Not included in WaveGuard bundle discount — priced separately"}
                             </div>{" "}
                           </div>
                         )}

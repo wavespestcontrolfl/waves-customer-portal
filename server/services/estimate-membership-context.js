@@ -55,6 +55,7 @@ const SERVICE_LABEL = {
   tree_shrub: 'Tree & Shrub',
   mosquito: 'Mosquito',
   termite_bait: 'Termite Bait',
+  rodent_bait: 'Rodent Bait Stations',
 };
 
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }

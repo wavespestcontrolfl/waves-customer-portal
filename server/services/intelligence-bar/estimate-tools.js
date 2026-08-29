@@ -1204,10 +1204,10 @@ function accountPricingFromContext(context = {}) {
     ? [...new Set(account.existing_service_keys.filter(Boolean))]
     : [];
   // Duplicate checks must cover EVERY active recurring service, not just the
-  // WaveGuard-qualifying set — rodent_bait / palm_injection live only in
-  // current_services (loaded for spend recognition) and would otherwise be
-  // quotable again as a duplicate draft. Pricing still uses the qualifying
-  // set only. Each entry carries the property addresses the service is
+  // WaveGuard-qualifying set — palm_injection (and, pre-2026-08-29,
+  // rodent_bait) lives only in current_services (loaded for spend
+  // recognition) and would otherwise be quotable again as a duplicate
+  // draft. Pricing still uses the qualifying set only. Each entry carries the property addresses the service is
   // active at, and commercial_* programs also match their base key so a
   // requested `pest` collides with an active "Commercial Pest Control".
   const activeServices = (Array.isArray(account.current_services) ? account.current_services : [])

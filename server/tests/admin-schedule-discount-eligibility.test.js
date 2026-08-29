@@ -266,8 +266,10 @@ describe('admin schedule appointment discount eligibility', () => {
       { service_key: 'termite_bait', engine_keys: ['termite_bait'] },
       { service_key: 'termite_bond_1yr', engine_keys: null },
     ]);
-    // engine identity wins — including over a would-be prefix guess
-    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(true);
+    // engine identity wins — including over a would-be prefix guess.
+    // rodent_bait joined WaveGuard 2026-08-29 (owner directive): the engine
+    // identity now resolves DISCOUNTABLE.
+    expect(lineExcludedFromPercentDiscount('rodent_bait_quarterly', catalog)).toBe(false);
     expect(lineExcludedFromPercentDiscount('rodent_bait_setup', catalog)).toBe(false);
     expect(lineExcludedFromPercentDiscount('bed_bug_treatment', catalog)).toBe(true);
     expect(lineExcludedFromPercentDiscount('termite_bait', catalog)).toBe(false);
@@ -278,7 +280,7 @@ describe('admin schedule appointment discount eligibility', () => {
     expect(lineExcludedFromPercentDiscount('palm_injection_semiannual', catalog)).toBe(true);
     // the archived nutritional program is NOT an injection variant (r11 P1)
     expect(lineExcludedFromPercentDiscount('palm_treatment', catalog)).toBe(false);
-    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(true);
+    expect(lineExcludedFromPercentDiscount('rodent_bait', catalog)).toBe(false);
     // unknown prefixed keys are NOT inferred
     expect(lineExcludedFromPercentDiscount('rodent_bait_setup', new Map())).toBe(false);
     expect(lineExcludedFromPercentDiscount('pest_general_quarterly', catalog)).toBe(false);

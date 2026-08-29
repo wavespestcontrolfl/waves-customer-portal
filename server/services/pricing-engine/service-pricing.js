@@ -3578,23 +3578,47 @@ function priceCommercialRodentBait(property = {}, options = {}) {
     ? options.rodentVisits
     : cfg.programVisits;
   const rodentCadence = commercialCadenceLabel(rodentVisits);
-  return buildCommercialPestFamilyLine({
-    cfg,
-    visits: rodentVisits,
-    floorsArmed: options.floorsArmed === true,
-    materialPerVisit: cfg.materialPerVisitBase + cfg.materialPerKSqFtPerVisit * (footprint / 1000),
-    onSiteMin: cfg.laborMinutesBase + cfg.laborMinutesPerKSqFt * (footprint / 1000),
+  // Same bracket ladder as residential (owner directive 2026-08-29): the
+  // building footprint resolves the SAME station allowance and per-visit
+  // price; the cost-buildup pricer is retired for rodent bait. A higher
+  // risk-type cadence keeps the same per-visit price × more visits. The
+  // commercial discount posture is unchanged: flat, never WaveGuard.
+  const { stations, perVisit, extended } = rodentBaitBracketFor(footprint);
+  const annual = roundMoney(perVisit * rodentVisits);
+  const monthly = roundMoney(annual / 12);
+  return {
     service: 'commercial_rodent_bait',
     name: 'Commercial Rodent Bait Stations',
     originalRequestedService: 'rodent_bait',
-    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''}. Estimated from property data — final price confirmed on site.`,
-    extra: {
-      commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
-      footprint,
-      footprintSource,
-      pricingConfidence: footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM',
-    },
-  });
+    propertyType: 'commercial',
+    isCommercial: true,
+    commercialPricingMode: 'auto_estimate',
+    estimatedPricing: true,
+    // Flat commercial pricing — never WaveGuard/recurring-discountable.
+    discountable: false,
+    excludeFromPctDiscount: true,
+    quoteRequired: false,
+    requiresManualReview: false,
+    detail: `Commercial rodent bait-station program${rodentCadence ? ` (${rodentCadence})` : ''} · up to ${stations} stations · $${perVisit}/visit.`,
+    disclaimer: 'Estimated from property data — final price confirmed on site.',
+    frequency: rodentVisits,
+    visitsPerYear: rodentVisits,
+    stations,
+    bracketExtended: extended,
+    monthly,
+    annual,
+    perApp: perVisit,
+    internalPerVisitRevenue: perVisit,
+    perVisit,
+    pricingBasis: 'RODENT_BAIT_BRACKET',
+    minApplied: false,
+    taxable: cfg.taxable,
+    taxCategory: cfg.taxCategory,
+    commercialSubtype: options.commercialSubtype || property.commercialSubtype || null,
+    footprint,
+    footprintSource,
+    pricingConfidence: footprint > cfg.lowConfidenceFootprintSf ? 'LOW' : 'MEDIUM',
+  };
 }
 
 // ============================================================
@@ -4769,56 +4793,51 @@ function priceTermiteBait(property, options = {}) {
 // ============================================================
 // RODENT BAIT STATIONS
 // ============================================================
-function priceRodentBait(property, options = {}) {
-  const { modifiers = {}, postExclusion = false } = options;
-  const footprint = property.footprint;
-  const lotSqFt = property.lotSqFt;
-  const f = property.features || {};
-
-  let score = 0;
-  if (footprint >= 2500) score += RODENT.baitScoreFactors.footprint_2500plus;
-  else if (footprint >= 1800) score += RODENT.baitScoreFactors.footprint_1800plus;
-  if (lotSqFt >= 20000) score += RODENT.baitScoreFactors.lot_20000plus;
-  else if (lotSqFt >= 12000) score += RODENT.baitScoreFactors.lot_12000plus;
-  if (f.nearWater) score += RODENT.baitScoreFactors.nearWater;
-  if (f.trees === 'heavy') score += RODENT.baitScoreFactors.trees_heavy;
-  // Tile roof (barrel-tile nesting harborage) bumps size tier
-  if ((property.roofType || '').toUpperCase() === 'TILE') score += 1;
-
-  let size, monthly;
-  if (score <= 1) { size = 'small'; monthly = RODENT.baitMonthly.small.monthly; }
-  else if (score <= 2) { size = 'medium'; monthly = RODENT.baitMonthly.medium.monthly; }
-  else { size = 'large'; monthly = RODENT.baitMonthly.large.monthly; }
-
-  // Add roof-type adjustment (annual) for additional stations on tile/metal roofs
-  const roofAnnualAdj = (modifiers.rodentRoofAdj || 0);
-  let annual = monthly * 12 + roofAnnualAdj;
-  monthly = Math.round(annual / 12 * 100) / 100;
-
-  // Cost estimate: quarterly visits (4/yr) — billed monthly to customer.
-  // On-site time per visit is slightly longer than the old monthly model
-  // because the tech inspects all stations in one pass instead of spreading
-  // checks across the year.
-  const visitsPerYear = RODENT.baitVisitsPerYear || 4;
-  let onSiteMin = size === 'small' ? 25 : size === 'medium' ? 30 : 40;
-  let materialPerVisit = size === 'small' ? 6 : size === 'medium' ? 9 : 12;
-  let stationAmortAnnual = size === 'small' ? 30 : size === 'medium' ? 45 : 60;
-
-  // POST-EXCLUSION MODIFIER — sealed structure = lighter scope
-  // Three independent levers (per post-exclusion-modifier-spec.md):
-  //   1. Station count   ~ -35% (perimeter only, floor 4 stations) → revenue-side ~0.65×
-  //   2. Bait cost       ~ -20% (lower uptake on sealed structure)
-  //   3. Labor           ~ -40% (no diagnostic, lighter visits)
-  // Net combined revenue impact ≈ 0.72×. Floor rebased to $39/mo for new
-  // quarterly-cadence base prices ($49/$59/$69).
-  if (postExclusion) {
-    const cfg = RODENT.baitPostExclusion || { multiplier: 0.72, floorMonthly: 39 };
-    monthly = Math.max(cfg.floorMonthly, Math.round(monthly * cfg.multiplier * 100) / 100);
-    annual = Math.round(monthly * 12);
-    materialPerVisit = Math.round(materialPerVisit * 0.80 * 100) / 100;
-    onSiteMin = Math.round(onSiteMin * 0.60);
+// Footprint-bracket resolver (owner directive 2026-08-29). Inclusive
+// maxSqFt; above the last bracket the ladder EXTENDS (+1 station / +$10
+// per extension step of 1,000 sq ft) — size alone never forces a manual
+// quote. Shared by residential AND commercial (same pricing, owner
+// directive 2026-08-29) — commercial passes the building footprint.
+function rodentBaitBracketFor(footprintSqFt) {
+  const brackets = RODENT.baitBrackets;
+  const ext = RODENT.baitBracketExtension || { perSqFt: 1000, stationsPerStep: 1, perVisitPerStep: 10 };
+  const fp = Number(footprintSqFt);
+  // Default matches the client fallback engine: an unknown footprint prices
+  // the 2,500 sf bracket rather than the smallest home.
+  const fpEff = Number.isFinite(fp) && fp > 0 ? fp : 2500;
+  for (const b of brackets) {
+    if (fpEff <= b.maxSqFt) {
+      return { stations: b.stations, perVisit: b.perVisit, footprintUsed: fpEff, extended: false };
+    }
   }
+  const top = brackets[brackets.length - 1];
+  const steps = Math.ceil((fpEff - top.maxSqFt) / ext.perSqFt);
+  return {
+    stations: top.stations + steps * ext.stationsPerStep,
+    perVisit: Math.round((top.perVisit + steps * ext.perVisitPerStep) * 100) / 100,
+    footprintUsed: fpEff,
+    extended: true,
+  };
+}
 
+function priceRodentBait(property, options = {}) {
+  // Legacy replay compat: postExclusion / modifiers.rodentRoofAdj are
+  // accepted and IGNORED — the post-exclusion modifier and roof adjustment
+  // were retired with the 2026-08-29 bracket realignment (one price for
+  // everyone; a stored options payload must never crash or reprice lower).
+  void options;
+  const { stations, perVisit, footprintUsed, extended } = rodentBaitBracketFor(property.footprint);
+
+  const visitsPerYear = RODENT.baitVisitsPerYear || 4;
+  const annual = Math.round(perVisit * visitsPerYear * 100) / 100;
+  const monthly = Math.round(annual / 12 * 100) / 100;
+
+  // Cost estimate scales with the station allowance: ~5 min on-site + $1.50
+  // bait material per station per visit, $7.50/station/yr hardware
+  // amortization. Report-only — nothing moves the price.
+  const onSiteMin = stations * 5;
+  const materialPerVisit = Math.round(stations * 1.5 * 100) / 100;
+  const stationAmortAnnual = Math.round(stations * 7.5 * 100) / 100;
   const laborPerVisitCost = laborCost(onSiteMin);
   const annualCost =
     (materialPerVisit + laborPerVisitCost) * visitsPerYear
@@ -4828,9 +4847,16 @@ function priceRodentBait(property, options = {}) {
 
   return {
     service: 'rodent_bait',
-    score, size, monthly, annual,
+    name: 'Rodent Bait Stations',
+    stations,
+    monthly,
+    annual,
+    perApp: perVisit,
+    perVisit,
     visitsPerYear,
-    postExclusion,
+    footprintUsed,
+    bracketExtended: extended,
+    detail: `Up to ${stations} stations · $${perVisit}/quarterly visit`,
     costs: {
       materialPerVisit,
       laborPerVisit: Math.round(laborPerVisitCost * 100) / 100,
@@ -5225,10 +5251,13 @@ function priceSanitation(options = {}) {
 }
 
 // ============================================================
-// BAIT-STATION SETUP FEE (waived in standard recurring sign-up)
+// BAIT-STATION SETUP FEE — non-WaveGuard members only (owner 2026-08-29)
 // ============================================================
-// Returns 0 when waived (caller decides). Constant retained on the
-// books so non-recurring edge cases can invoice it explicitly.
+// $99 one-time, charged ONLY when the customer has no OTHER WaveGuard
+// qualifying recurring service (on the estimate or already active). The
+// caller decides membership and passes waived; a waived setup never emits
+// a line. Flat fee: excluded from the recurring-customer one-time perk and
+// every percentage discount.
 function priceBaitSetup(options = {}) {
   const { waived = true } = options;
   return {
@@ -5236,9 +5265,12 @@ function priceBaitSetup(options = {}) {
     name: 'Bait Station Setup',
     price: waived ? 0 : RODENT.baitSetupFee,
     waived,
+    discountable: false,
+    discountEligible: false,
+    excludeFromPctDiscount: true,
     detail: waived
-      ? 'Waived with recurring plan'
-      : `One-time $${RODENT.baitSetupFee} setup`,
+      ? 'Waived for WaveGuard members'
+      : `One-time $${RODENT.baitSetupFee} setup — waived for WaveGuard members`,
   };
 }
 
@@ -8769,7 +8801,7 @@ module.exports = {
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
   priceMosquito, priceTermiteBait, priceTermiteBond, priceTermiteStationRental,
   termiteMonitoringMonthlyForStations,
-  priceRodentBait, priceRodentTrapping,
+  priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,
   priceRodentInspection, priceTrapOnlyRetainer, priceRodentWireMesh,
   estimateRodentWireMeshLinearFeet, priceRodentBirdBoxes,

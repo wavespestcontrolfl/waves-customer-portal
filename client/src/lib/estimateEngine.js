@@ -2610,18 +2610,36 @@ export function calculateEstimate(inputs) {
   /* ── RODENT BAIT ─────────────────────────────────────────── */
   if (svcRodentBait && !isCommercial) {
     hasRec = true;
-    // v1.5: matrix classification — both footprint AND lot matter for rodent pressure
-    // A 2,600sf home on a 40,000sf lot has very different pressure than 2,600sf on 10,000sf
+    // Footprint-bracket quarterly pricing (owner directive 2026-08-29,
+    // mirrors server rodentBaitBracketFor): station allowance + per-visit
+    // price by home size; above 6,750 sf the ladder extends +1 station /
+    // +$10 per 1,000 sf. Billed per quarterly application — the monthly
+    // figure is display-only (annual / 12).
     const fpEff = footprint > 0 ? footprint : 2500;
-    let rodentScore = 0;
-    if (fpEff >= 2500) rodentScore += 2; else if (fpEff >= 1800) rodentScore += 1;
-    if (lotSqFt >= 20000) rodentScore += 2; else if (lotSqFt >= 12000) rodentScore += 1;
-    if (nearWater) rodentScore += 1;
-    if (treeDensity === 'HEAVY') rodentScore += 1;
-    const rmo = rodentScore >= 3 ? 69 : rodentScore <= 1 ? 49 : 59;
-    R.rodBaitMo = rmo;
-    R.rodBaitSize = rodentScore >= 3 ? 'Large' : rodentScore <= 1 ? 'Small' : 'Medium';
-    R.rodBaitScore = rodentScore;
+    const RB_BRACKETS = [
+      { maxSqFt: 1750, stations: 4, perVisit: 79 },
+      { maxSqFt: 2750, stations: 5, perVisit: 89 },
+      { maxSqFt: 3750, stations: 6, perVisit: 99 },
+      { maxSqFt: 4750, stations: 7, perVisit: 109 },
+      { maxSqFt: 5750, stations: 8, perVisit: 119 },
+      { maxSqFt: 6750, stations: 9, perVisit: 129 },
+    ];
+    let rbBracket = RB_BRACKETS.find(b => fpEff <= b.maxSqFt);
+    if (!rbBracket) {
+      const top = RB_BRACKETS[RB_BRACKETS.length - 1];
+      const steps = Math.ceil((fpEff - top.maxSqFt) / 1000);
+      rbBracket = { stations: top.stations + steps, perVisit: top.perVisit + steps * 10 };
+    }
+    const rbAnnual = rbBracket.perVisit * 4;
+    R.rodBaitMo = Math.round(rbAnnual / 12 * 100) / 100;
+    R.rodBaitSize = rbBracket.stations <= 5 ? 'Small' : rbBracket.stations <= 7 ? 'Medium' : 'Large';
+    R.rodBait = {
+      stations: rbBracket.stations,
+      perVisit: rbBracket.perVisit,
+      visitsPerYear: 4,
+      annual: rbAnnual,
+      detail: `Up to ${rbBracket.stations} stations · $${rbBracket.perVisit}/quarterly visit`,
+    };
   }
 
   /* ═══════════ ONE-TIME ═══════════ */
@@ -3342,6 +3360,33 @@ export function calculateEstimate(inputs) {
     ra += R.foamRec.ann;
     lineItems.push({ name: 'Recurring Foam', service: 'foam_recurring', ann: R.foamRec.ann, discountable: false });
   }
+  // Rodent Bait Stations — full WaveGuard member since 2026-08-29 (owner
+  // directive): tier-counted and bundle-%-discountable, INSIDE the recurring
+  // totals (the old rba add-on is retired). $99 one-time setup for
+  // non-members: fires only when rodent bait is the sole qualifying service
+  // on the estimate (mirrors the server; existing-customer priors are only
+  // known server-side).
+  if (R.rodBait) {
+    ac++;
+    ra += R.rodBait.annual;
+    lineItems.push({ name: 'Rodent Bait Stations', service: 'rodent_bait', ann: R.rodBait.annual, discountable: true });
+    wgServices.push({
+      name: 'Rodent Bait Stations',
+      service: 'rodent_bait',
+      mo: R.rodBaitMo,
+      perTreatment: R.rodBait.perVisit,
+      visitsPerYear: R.rodBait.visitsPerYear,
+    });
+    if (ac === 1) {
+      hasOT = true;
+      otItems.push({
+        service: 'rodent_bait_setup',
+        name: 'Bait Station Setup',
+        price: 99,
+        detail: 'One-time $99 setup — waived for WaveGuard members',
+      });
+    }
+  }
 
   // WaveGuard tier discounts — must match server
   // pricing-engine/constants.WAVEGUARD.tiers (see docs/pricing/POLICY.md).
@@ -3531,12 +3576,13 @@ export function calculateEstimate(inputs) {
     : 0;
   ot = Math.round(ot * 100) / 100;
 
-  const rba = R.rodBaitMo ? R.rodBaitMo * 12 : 0;
+  // Rodent bait rides INSIDE ad since 2026-08-29 (WaveGuard member) — the
+  // old rba add-on is gone.
   const palmAnn = R.injection ? R.injection.ann : 0;
   const palmMo = R.injection ? R.injection.mo : 0;
   const totalOT = ot + tmInstall;
-  const y1 = Math.round((ad + rba + palmAnn + totalOT) * 100) / 100;
-  const y2 = Math.round((ad + rba + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
+  const y1 = Math.round((ad + palmAnn + totalOT) * 100) / 100;
+  const y2 = Math.round((ad + palmAnn + (R.trench && !R.trench.quoteRequired && !R.trench.requiresMeasurement ? 325 : 0)) * 100) / 100;
   const y2mo = Math.round(y2 / 12 * 100) / 100;
 
   return {

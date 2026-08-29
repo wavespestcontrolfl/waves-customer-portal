@@ -118,8 +118,9 @@ inconsistent Platinum values) must import from here, not redefine.
 | Platinum | 4+ | **20%** |
 
 **Qualifying services** for tier counting: `lawn_care`, `pest_control`,
-`tree_shrub`, `mosquito`, `termite_bait`. **Not qualifiers:**
-`palm_injection`, `rodent_bait` (they're billed but don't bump the tier).
+`tree_shrub`, `mosquito`, `termite_bait`, `rodent_bait` (joined
+2026-08-29, owner directive). **Not a qualifier:** `palm_injection`
+(billed but doesn't bump the tier).
 
 **Rationale for the curve.**
 - Bronze 0% is intentional. Bronze isn't a discount — it's the
@@ -153,7 +154,13 @@ Rules in v4.3:
 3. **Excluded services** (`WAVEGUARD.excludedFromPercentDiscount`) get
    no percentage discount. Some get a fixed flat credit:
    - `palm_injection`: $10/palm/yr for Gold+ members
-   - `rodent_bait`: no WaveGuard credit, coupon, setup credit, discount, or tier benefit
+   - `rodent_bait` left this list 2026-08-29 (owner directive): it now
+     tier-counts AND takes the tier %. Footprint-bracket pricing,
+     $79–$129 per quarterly visit with an up-to-N station allowance
+     (ladder extends +1 station/+$10 per 1,000 sf above 6,750);
+     commercial uses the same brackets but stays flat. A $99 one-time
+     setup applies only to non-WaveGuard members (no other qualifying
+     recurring service).
    - `bed_bug_chemical` / `bed_bug_heat`: $50 flat WaveGuard credit
    - `bora_care`, `pre_slab_termidor`, `german_roach_initial`,
      `pest_initial_roach`: no discount, no credit. These are non-waivable
@@ -413,7 +420,8 @@ benefit from deeper write-ups:
   per-service targets above the floor?
 - Frequency-discount curves for pest (`v1` 0.85/0.70 vs `v2` 0.88/0.78).
   Currently `v2` is live. Is `v1` retired permanently or still a fallback?
-- Initial fees / setup fees: `PEST.initialFee = $99`, rodent setup $199.
+- Initial fees / setup fees: `PEST.initialFee = $99`, rodent setup $99
+  (non-WaveGuard members only, 2026-08-29).
   (German Roach Cleanout no longer carries a separate setup charge — its
   severity-tier price is all-in.) Are these calibrated against acquisition
   cost recovery or against a typical CAC payback target?

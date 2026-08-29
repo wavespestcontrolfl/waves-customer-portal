@@ -147,20 +147,90 @@ describe('revised rodent pricing rules', () => {
     expect(estimate.lineItems.find(i => i.service === 'trap_only_retainer').price).toBe(495);
   });
 
-  test('rodent bait remains excluded from WaveGuard tier benefit, setup credit, and manual coupon', () => {
-    const estimate = generateEstimate(baseInput({
-      services: {
-        rodentBait: {},
-      },
+  test('rodent bait brackets: footprint resolves the station allowance and per-visit price', () => {
+    // 2,000 sf footprint → 1,751–2,750 bracket: 5 stations, $89/quarterly visit.
+    const estimate = generateEstimate(baseInput({ services: { rodentBait: {} } }));
+    const bait = estimate.lineItems.find(i => i.service === 'rodent_bait');
+    expect(bait.perApp).toBe(89);
+    expect(bait.stations).toBe(5);
+    expect(bait.visitsPerYear).toBe(4);
+    expect(bait.annual).toBe(356);
+    expect(bait.excludeFromPctDiscount).toBe(false);
+
+    // ≤1,750 bracket.
+    const small = generateEstimate(baseInput({ homeSqFt: 1500, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(small.perApp).toBe(79);
+    expect(small.stations).toBe(4);
+
+    // Above 6,750 sf the ladder EXTENDS: +1 station / +$10 per 1,000 sf
+    // (owner ruling 2026-08-29) — never a manual quote on size alone.
+    const oversized = generateEstimate(baseInput({ homeSqFt: 8000, services: { rodentBait: {} } }))
+      .lineItems.find(i => i.service === 'rodent_bait');
+    expect(oversized.perApp).toBe(149); // 129 + 2 steps × $10
+    expect(oversized.stations).toBe(11);
+    expect(oversized.quoteRequired).toBeFalsy();
+  });
+
+  test('rodent bait is a full WaveGuard member: tier-counted, tier-discounted; manual coupon still excluded', () => {
+    // Rodent-only = 1 qualifying service = Bronze 0%, and the $99
+    // non-member setup fee fires.
+    const solo = generateEstimate(baseInput({
+      services: { rodentBait: {} },
       manualDiscount: { type: 'PERCENT', value: 50, label: 'Half off' },
     }));
-    const bait = estimate.lineItems.find(i => i.service === 'rodent_bait');
+    const soloBait = solo.lineItems.find(i => i.service === 'rodent_bait');
+    expect(solo.waveGuard.qualifyingCount).toBe(1);
+    expect(solo.waveGuard.activeServices).toEqual(['rodent_bait']);
+    expect(soloBait.discount.effectiveDiscount).toBe(0);
+    // Manual recurring discounts stay scoped to the four core programs.
+    expect(solo.summary.manualDiscount.amount).toBe(0);
+    const soloSetup = solo.lineItems.find(i => i.service === 'rodent_bait_setup');
+    expect(soloSetup.price).toBe(99);
 
-    expect(estimate.waveGuard.qualifyingCount).toBe(0);
-    expect(estimate.waveGuard.activeServices).toEqual([]);
-    expect(bait.discount.effectiveDiscount).toBe(0);
-    expect(bait.discount.setupCredit).toBeUndefined();
-    expect(estimate.summary.manualDiscount.amount).toBe(0);
+    // Rodent + pest = Silver: BOTH lines take the 10% tier discount and the
+    // setup fee is waived (WaveGuard member).
+    const member = generateEstimate(baseInput({
+      services: { pest: { frequency: 'quarterly' }, rodentBait: {} },
+    }));
+    const memberBait = member.lineItems.find(i => i.service === 'rodent_bait');
+    expect(member.waveGuard.tier).toBe('silver');
+    expect(memberBait.discount.effectiveDiscount).toBe(0.10);
+    expect(memberBait.annualAfterDiscount).toBeCloseTo(320.4, 2);
+    expect(member.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+
+    // An EXISTING member (prior qualifying service) adding rodent bait alone
+    // reaches Silver and skips the setup fee too.
+    const existing = generateEstimate(baseInput({
+      services: { rodentBait: {} },
+      priorQualifyingServices: ['lawn_care'],
+    }));
+    const existingBait = existing.lineItems.find(i => i.service === 'rodent_bait');
+    expect(existing.waveGuard.tier).toBe('silver');
+    expect(existingBait.discount.effectiveDiscount).toBe(0.10);
+    expect(existing.lineItems.find(i => i.service === 'rodent_bait_setup')).toBeUndefined();
+  });
+
+  test('commercial rodent bait uses the same brackets off the building footprint', () => {
+    const estimate = generateEstimate(baseInput({
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialSubtype: 'office',
+      buildingSizeMeasured: true,
+      homeSqFt: 3000,
+      services: { rodentBait: {} },
+    }));
+    const line = estimate.lineItems.find(i => i.service === 'commercial_rodent_bait');
+    expect(line).toBeDefined();
+    expect(line.quoteRequired).toBeFalsy();
+    // 3,000 sf building → 2,751–3,750 bracket: 6 stations, $99/visit.
+    expect(line.perVisit).toBe(99);
+    expect(line.stations).toBe(6);
+    // Commercial stays flat — never WaveGuard-discountable — but pays the
+    // $99 non-member setup like any non-member.
+    expect(line.excludeFromPctDiscount).toBe(true);
+    const setup = estimate.lineItems.find(i => i.service === 'rodent_bait_setup');
+    expect(setup?.price).toBe(99);
   });
 
   test('exclusion V2 quotes each section as its own line item, summing to the total', () => {

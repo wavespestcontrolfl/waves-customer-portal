@@ -1152,10 +1152,10 @@ function generateEstimate(input) {
       }
     } else {
       const result = priceRodentBait(property, { modifiers });
-      result.annual = Math.round(result.annual);
-      result.monthly = Math.round(result.annual / 12 * 100) / 100;
       lineItems.push(result);
-      // Rodent does NOT add to activeServiceKeys for tier determination
+      // WaveGuard member since 2026-08-29 (owner directive): counts toward
+      // the tier and receives the tier % like the other recurring programs.
+      activeServiceKeys.push('rodent_bait');
     }
   }
 
@@ -1626,18 +1626,23 @@ function generateEstimate(input) {
     lineItems.push(priceTrapOnlyRetainer(opts));
   }
 
-  // Bait station setup fee — waived when any recurring plan is on the
-  // estimate; only fires if explicitly forced or no recurring services.
-  if (services.rodentBait && !propertyIsCommercial) {
-    const hasAnyRecurring = !!(
-      services.pest || services.lawn || services.treeShrub ||
-      services.mosquito || services.termiteBait || services.rodentBait ||
-      palmService
-    );
-    const setup = priceBaitSetup({
-      waived: hasAnyRecurring && !services.rodentBaitSetupForce,
-    });
-    if (setup.price > 0) lineItems.push(setup);
+  // Bait-station setup fee (owner directive 2026-08-29): $99 one-time for
+  // NON-WaveGuard members only. "Member" = any OTHER qualifying recurring
+  // service, on this estimate or already active (priorQualifyingServices) —
+  // rodent bait itself doesn't self-waive its own setup. Commercial rodent
+  // programs are never WaveGuard members, so a priced commercial line
+  // carries the fee too (same pricing, owner directive). The old
+  // rodentBaitSetupForce escape hatch is retired with the $199 fee.
+  if (services.rodentBait) {
+    const rodentLine = lineItems.find((i) => i.service === 'rodent_bait' || i.service === 'commercial_rodent_bait');
+    const rodentPriced = !!rodentLine && !rodentLine.quoteRequired;
+    const otherQualifiers = [...new Set([...activeServiceKeys, ...priorQualifyingServices])]
+      .filter((key) => key !== 'rodent_bait');
+    const isWaveGuardMember = determineWaveGuardTier(otherQualifiers).qualifyingCount > 0;
+    if (rodentPriced && !isWaveGuardMember) {
+      const setup = priceBaitSetup({ waived: false });
+      if (setup.price > 0) lineItems.push(setup);
+    }
   }
 
   // ── Rodent bundle discount ──────────────────────────────────

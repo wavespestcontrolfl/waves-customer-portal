@@ -31,7 +31,17 @@ function perAppOf(s) {
 function hasSupplementalRecurring(estimate) {
   const data = estimate.estimate_data || {};
   const containers = [data.recurring, data.result?.recurring, data.results, data.result?.results].filter(Boolean);
-  return containers.some((c) => Number(c.rodentBaitMo) > 0 || Number(c.palmInjectionMo) > 0 || Number(c.rodBaitMo) > 0);
+  // 2026-08-29+: rodent bait is a REAL recurring.services row and the scalar
+  // rides only as legacy display fallback — a rodent_bait row means the row
+  // set already covers the money, so the scalar alone must not fail closed.
+  const serviceRows = [data.recurring?.services, data.result?.recurring?.services]
+    .filter(Array.isArray).flat();
+  const hasRodentRow = serviceRows.some((svc) => {
+    const raw = String(svc?.service || svc?.serviceKey || svc?.service_key || '').toLowerCase();
+    return raw === 'rodent_bait';
+  });
+  return containers.some((c) => Number(c.palmInjectionMo) > 0
+    || (!hasRodentRow && (Number(c.rodentBaitMo) > 0 || Number(c.rodBaitMo) > 0)));
 }
 
 const VISITS_PER_YEAR_BY_PATTERN = {
