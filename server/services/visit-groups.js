@@ -261,12 +261,13 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       throw err;
     }
 
+    const attachedVisitIds = [...new Set(fresh.map((r) => r.visit_id).filter(Boolean).map(String))];
+    if (attachedVisitIds.length > 1) {
+      throw new Error('visit membership conflict: rows span two visits');
+    }
     for (const r of fresh) {
       if (TERMINAL_ROW_STATUSES.includes(String(r.status || ''))) {
         throw new Error('visit membership conflict: a row is already terminal');
-      }
-      if (r.visit_id) {
-        throw new Error('visit membership conflict: a row is attached to another visit');
       }
       if (!r.groupable || !r.group_family) {
         throw new Error('rows not mutually groupable: not_groupable');
@@ -281,15 +282,32 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
     }
 
-    const openVisits = await t('service_visits')
-      .where({ stop_base_key: baseKey })
-      .whereIn('status', OPEN_STATUSES)
-      .orderBy('stop_seq', 'asc');
-
     let visit = null;
-    for (const v of openVisits) {
-      if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
-      if (fresh.every((r) => canJoin(r, v).ok)) { visit = v; break; }
+    if (attachedVisitIds.length === 1) {
+      // Join-to-existing: some rows already belong to one visit — the rest
+      // may only join THAT visit, and only while it is open and eligible.
+      const target = await t('service_visits').where({ id: attachedVisitIds[0] }).first();
+      if (!target || String(target.status) !== 'open' || target.stop_base_key !== baseKey) {
+        throw new Error('visit membership conflict: attached visit not open for joining');
+      }
+      for (const r of fresh) {
+        if (r.visit_id) continue; // already a member
+        const probe = canJoin(r, target);
+        if (!probe.ok) throw new Error(`rows not mutually groupable: ${probe.reason}`);
+      }
+      if (rowTechs.length && target.technician_id && String(target.technician_id) !== rowTechs[0]) {
+        throw new Error('rows not mutually groupable: technician');
+      }
+      visit = target;
+    } else {
+      const openVisits = await t('service_visits')
+        .where({ stop_base_key: baseKey })
+        .whereIn('status', OPEN_STATUSES)
+        .orderBy('stop_seq', 'asc');
+      for (const v of openVisits) {
+        if (rowTechs.length && v.technician_id && String(v.technician_id) !== rowTechs[0]) continue;
+        if (fresh.every((r) => canJoin(r, v).ok)) { visit = v; break; }
+      }
     }
 
     if (!visit) {
@@ -340,11 +358,14 @@ async function createOrJoinVisit({ rows, createdBy, trx = null }) {
       throw new Error('visit membership conflict: a completion attempt is in flight');
     }
 
-    const stamped = await t('scheduled_services')
-      .whereIn('id', ids)
-      .whereNull('visit_id')
-      .update({ visit_id: visit.id, ...(visit.technician_id ? { technician_id: visit.technician_id } : {}) });
-    if (Number(stamped) !== ids.length) {
+    const unattachedIds = fresh.filter((r) => !r.visit_id).map((r) => r.id);
+    const stamped = unattachedIds.length
+      ? await t('scheduled_services')
+        .whereIn('id', unattachedIds)
+        .whereNull('visit_id')
+        .update({ visit_id: visit.id, ...(visit.technician_id ? { technician_id: visit.technician_id } : {}) })
+      : 0;
+    if (Number(stamped) !== unattachedIds.length) {
       throw new Error('visit membership conflict: a row is attached to another visit');
     }
     return visit;
@@ -437,8 +458,58 @@ async function dissolveIfLastRow({ visitId }) {
   });
 }
 
+/**
+ * Stamping entry point for scheduling paths (converter same-trip rows,
+ * recurring seeder, future admin actions). Gate-checked, best-effort:
+ * grouping is an enhancement, so failures LOG and return null rather than
+ * breaking scheduling. Finds same-stop partner rows (same customer +
+ * property + date, non-terminal, groupable catalog type, unattached or in
+ * one open visit) and groups them with `rowId`.
+ */
+async function maybeGroupRow(rowId, { createdBy, database = db } = {}) {
+  const { gates } = require('../config/feature-gates');
+  if (!gates.visitGroups) return null;
+  try {
+    const row = await database('scheduled_services as ss')
+      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+      .where('ss.id', rowId)
+      .first('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date',
+        'ss.status', 'ss.visit_id', 'svc.groupable', 'svc.group_family');
+    if (!row || row.visit_id || !row.groupable || !row.group_family) return null;
+    if (TERMINAL_ROW_STATUSES.includes(String(row.status || ''))) return null;
+    const partnersQ = database('scheduled_services as ss')
+      .leftJoin('services as svc', 'ss.service_id', 'svc.id')
+      .leftJoin('service_visits as sv', 'sv.id', 'ss.visit_id')
+      .where('ss.customer_id', row.customer_id)
+      .where('ss.scheduled_date', dateOnly(row.scheduled_date))
+      .whereNot('ss.id', row.id)
+      .whereNotIn('ss.status', TERMINAL_ROW_STATUSES)
+      .where('svc.groupable', true)
+      .where('svc.group_family', row.group_family)
+      .where((q) => q.whereNull('ss.visit_id').orWhere('sv.status', 'open'))
+      .select('ss.id');
+    if (row.property_id) partnersQ.where('ss.property_id', row.property_id);
+    else partnersQ.whereNull('ss.property_id');
+    const partners = await partnersQ.limit(10);
+    if (!partners.length) return null;
+    return await createOrJoinVisit({
+      rows: [{ id: row.id }, ...partners.map((p) => ({ id: p.id }))],
+      createdBy: createdBy || 'dispatch',
+      // Inside a caller transaction (converter/seeder), group on the SAME
+      // trx — the new rows aren't visible outside it and a second
+      // transaction would deadlock against its row locks.
+      trx: database && database.isTransaction ? database : null,
+    });
+  } catch (err) {
+    const logger = require('./logger');
+    logger.warn(`[visit-groups] maybeGroupRow(${rowId}) skipped: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = {
   createOrJoinVisit,
+  maybeGroupRow,
   splitChild,
   dissolveIfLastRow,
   visitActivity,

@@ -113,6 +113,7 @@ function grassTypeToPersist(recurringServices, estimateData) {
 }
 
 const RecurringAppointmentSeeder = require('./recurring-appointment-seeder');
+const VisitGroups = require('./visit-groups');
 
 const WAVEGUARD_SETUP_FEE = 99;
 
@@ -3436,6 +3437,13 @@ async function seedRecurringFollowUpsForParent(database, parentRow, svc = {}, op
     weekendShift: 'forward',
     durationMinutes: serviceDurationMinutes || parentRow?.estimated_duration_minutes || undefined,
   });
+  // Visit groups: a seeded follow-up landing on a date where the customer
+  // already has an open groupable row is one physical stop (doc §2). Gate-
+  // checked + best-effort; runs before reminder registration so a grouped
+  // row's reminders can be visit-deduped by the effects worker later.
+  for (const seededRow of seedResult.insertedRows || []) {
+    await VisitGroups.maybeGroupRow(seededRow.id, { database, createdBy: 'seeder' });
+  }
   if (opts.registerReminders !== false) {
     await registerSeededFollowUpReminders(seedResult.insertedRows, parentRow.customer_id);
   }
@@ -4664,6 +4672,12 @@ const EstimateConverter = {
               if (guardError) logger.warn(`[estimate-converter] duplicate-series guard failed (scheduling proceeds): ${guardError.message}`);
               if (matches.length > 0) return { kept: matches[0] };
               const inserted = await trx('scheduled_services').insert(standaloneRow).returning('*');
+              // Visit groups (visit-group-scope.md §2): a same-trip row and
+              // the reserved start share one physical stop — stamp them at
+              // scheduling. Gate-checked + best-effort inside maybeGroupRow.
+              if (sameTrip && inserted[0]) {
+                await VisitGroups.maybeGroupRow(inserted[0].id, { database: trx, createdBy: 'converter' });
+              }
               const parentRow = Array.isArray(inserted) && typeof inserted[0] === 'object'
                 ? inserted[0]
                 : { ...standaloneRow, id: Array.isArray(inserted) ? inserted[0] : inserted };
