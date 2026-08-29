@@ -133,7 +133,9 @@ describe('resolveRestrictionCounty after a KNOWN move (hook P1 on ad0b1ed31)', (
     expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Englewood', zip: '34223' })).toBe('Sarasota');
     // The current address establishing the county wins after a move.
     expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: null, city: 'Bradenton', zip: '34205', homeMoved: true })).toBe('Manatee');
-    // A profile re-written for the current home (city matches) is trusted again.
-    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true })).toBe('Charlotte');
+    // gh-r31: a matching city is NOT proof the profile was rewritten (Englewood straddles the line) → null…
+    expect(resolveRestrictionCounty({ county: 'Sarasota', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', profileUpdatedAt: '2026-08-01T00:00:00Z' })).toBe(null);
+    // …a profile UPDATED after the move is trusted again.
+    expect(resolveRestrictionCounty({ county: 'Charlotte', profileCity: 'Englewood', city: 'Englewood', zip: '34223', homeMoved: true, movedAt: '2026-08-20T00:00:00Z', profileUpdatedAt: '2026-08-25T00:00:00Z' })).toBe('Charlotte');
   });
 });

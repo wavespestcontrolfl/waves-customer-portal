@@ -390,8 +390,8 @@ describe('snapshot lifecycle — exactness contract', () => {
     await expect(loadCurrentWeekPlan('c1', { now: NOW, pinnedSentAt: NOW.toISOString(), strict: true })).rejects.toMatchObject({ code: 'pinned_week_plan_unavailable', reason: 'unstamped' });
   });
 
-  test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlanEvents reads last week\'s SENT plan (codex gh-r19)', async () => {
-    const { renewWeekPlanClaim, loadPriorWeekPlanEvents } = require('../services/irrigation-week-plan');
+  test('renewWeekPlanClaim renews only the claimant\'s UNSENT row; loadPriorWeekPlan reads last week\'s delivered plan (codex gh-r19/r31)', async () => {
+    const { renewWeekPlanClaim, loadPriorWeekPlan } = require('../services/irrigation-week-plan');
     const cap = {};
     db.mockImplementation(() => ({
       where(w) { cap.where = w; return this; },
@@ -411,25 +411,30 @@ describe('snapshot lifecycle — exactness contract', () => {
     expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(false);
     db.mockImplementation(() => ({ where() { return this; }, whereNull() { return this; }, update: async () => { throw new Error('db down'); } }));
     expect(await renewWeekPlanClaim({ customerId: 'c1', weekEnding: '2026-08-23', claimToken: 'tok' })).toBe(null);
-    // Prior week: a STAMPED row counts directly.
+    // Prior week: a STAMPED row counts directly — events for the cadence, prescribed inches (events × depth) as last week's irrigation.
     const rig = (planRow, messages = []) => db.mockImplementation((table) => (table === 'email_messages'
       ? { where(w) { cap.msgWhere = w; return this; }, select: async () => messages }
       : { where(w) { cap.where = w; return this; }, first: async (...cols) => { cap.first = cols; return planRow; } }));
-    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: NOW, decision_hash: 'h1' });
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
     expect(cap.where).toEqual({ customer_id: 'c1', week_ending: '2026-08-16' });
+    // gh-r31: a HOLD prescribed nothing; a two-run plan prescribes events × depth.
+    rig({ week_plan: JSON.stringify({ action: 'hold', events: 0 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 0, prescribedInches: 0 });
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 2, depthInches: 0.5 }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 2, prescribedInches: 1 });
     // UNSTAMPED but provider-accepted (delivery record names its hash) counts too (gh-r20)…
-    rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(1);
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:h1']) }]);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: 1, prescribedInches: 0.75 });
     expect(cap.msgWhere).toEqual({ trigger_event_id: 'irrigation.weekly:c1:2026-08-16' });
-    // gh-r24: a CONDITIONAL prior plan is no evidence of a run (the rain may have arrived) → unknown.
-    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, conditionalOnForecast: true }), sent_at: NOW, decision_hash: 'h1' });
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    // gh-r24/r31: a CONDITIONAL prior plan is no evidence of a run (the rain may have arrived) → events unknown, nothing credited.
+    rig({ week_plan: JSON.stringify({ action: 'run', events: 1, depthInches: 0.75, conditionalOnForecast: true }), sent_at: NOW, decision_hash: 'h1' });
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toEqual({ events: null, prescribedInches: 0 });
     // …a record naming a DIFFERENT decision, one naming NO decision (legacy template), or no delivery at all, does not.
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['plan:older']) }]);
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'sent', categories: JSON.stringify(['irrigation']) }]);
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     // gh-r23: an attempt aborted at the queue transition is immediately retryable, never 'pending'.
     const { weekPlanDeliveryState } = require('../services/irrigation-week-plan');
     db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: NOW, error_message: 'aborted_by_caller_before_dispatch' }] }));
@@ -437,11 +442,11 @@ describe('snapshot lifecycle — exactness contract', () => {
     db.mockImplementation(() => ({ where() { return this; }, select: async () => [{ status: 'failed', categories: '[]', provider_message_id: null, queued_at: NOW, updated_at: new Date(), error_message: 'sendgrid 500' }] }));
     expect((await weekPlanDeliveryState({ triggerEventId: 't' })).state).toBe('pending');
     rig({ week_plan: JSON.stringify({ action: 'run', events: 1 }), sent_at: null, decision_hash: 'h1' }, [{ status: 'failed', categories: JSON.stringify(['plan:h1']) }]);
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     rig(null);
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
     db.mockImplementation(() => ({ where() { return this; }, first: async () => { throw new Error('db down'); } }));
-    expect(await loadPriorWeekPlanEvents({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
+    expect(await loadPriorWeekPlan({ customerId: 'c1', weekEnding: '2026-08-23' })).toBe(null);
   });
 
   test('persist is an atomic claim: replaces only an UNSENT, unleased row; returns claimed + hash; mark-sent binds to the hash; discard deletes only unsent', async () => {

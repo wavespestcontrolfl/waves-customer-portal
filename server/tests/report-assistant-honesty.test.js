@@ -161,7 +161,7 @@ describe('watering questions answer with the weekly plan when the report carries
     const data = {
       pressureIndex: null, dynamicContext: {},
       reportV2: {
-        water: { weekPlan: { ...plan, afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' } } },
+        water: { weekPlan: { ...plan, visitInPlanWeek: true, prescribesRun: true, afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' } } },
         aftercare: { watering: 'Water in today’s application — give the lawn a normal watering within the next 24 hours.', waterInRequired: true },
       },
     };
@@ -170,6 +170,11 @@ describe('watering questions answer with the weekly plan when the report carries
     expect(after).toMatch(/^Water in today’s application/);
     expect(after).toMatch(/covered by today’s treatment watering-in\. No further turf runs this week\./);
     expect(answerServiceReportQuestion({ question: 'How should I water this week?', data })).toBe(`${plan.title} ${plan.detail}`);
+    // gh-r31: a reopened HISTORICAL report (visit outside the plan week) never answers with the reduced plan.
+    const old = { ...data, reportV2: { ...data.reportV2, water: { weekPlan: { ...data.reportV2.water.weekPlan, visitInPlanWeek: false } } } };
+    const oldAnswer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: old });
+    expect(oldAnswer).toMatch(/^Water in today’s application/);
+    expect(oldAnswer).not.toMatch(/No further turf runs this week/);
     // Bare "minutes"/"zones" are not plan intent.
     expect(answerServiceReportQuestion({ question: 'How many minutes did the visit take?', data })).not.toMatch(/check the rain/);
   });

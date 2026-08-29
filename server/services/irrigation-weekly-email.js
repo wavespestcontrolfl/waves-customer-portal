@@ -29,7 +29,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
 const { buildIrrigationAdvice } = require('./service-report/irrigation-advice');
-const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaim, loadPriorWeekPlanEvents } = require('./irrigation-week-plan');
+const { decideWeekPlan, renderWeekPlanEmail, persistWeekPlan, markWeekPlanSent, hasSentWeekPlan, discardUnsentWeekPlan, weekPlanDeliveryState, planCategory, renewWeekPlanClaim, loadPriorWeekPlan } = require('./irrigation-week-plan');
 
 // Mirrors IRRIGATION_SIZING_FIELDS in routes/property.js: the settings the
 // plan sizes controller instructions from. A field that is empty on the row
@@ -395,6 +395,8 @@ function decideWeeklyEmail({
   scheduleUnconfirmed = false,
   // Last week's SENT plan's event count — cool-season cadence input.
   priorWeekEvents = null,
+  // Last week's delivered plan's prescribed inches (null = no delivered plan).
+  priorWeekPrescribedInches = null,
   rainSensor = null,
   rainSource = null,
   rainfallInches7d = null,
@@ -691,6 +693,7 @@ function decideWeeklyEmail({
       home,
       planWeekEnd,
       priorWeekEvents,
+      priorWeekPrescribedInches,
       rainOnlyCarryover: scheduleUnconfirmed,
       now,
     });
@@ -721,8 +724,15 @@ function decideWeeklyEmail({
         : `your irrigation schedule (${irrigationFmt}" per week)`;
       // A moved home's schedule is not quoted as last week's watering — the
       // narrative is rain-only until the settings are re-saved.
+      // From the second plan week on, last week's irrigation is what the
+      // delivered plan prescribed — never the programmed schedule it
+      // superseded (codex gh-r31); no surplus/deficit claim is made from it.
+      const priorPlanIrrig = !scheduleUnconfirmed && priorWeekPrescribedInches != null ? roundHundredth(priorWeekPrescribedInches) : null;
+      const priorPlanTotal = priorPlanIrrig != null ? roundHundredth(rainDisplayNum + priorPlanIrrig) : null;
       const lastWeekLine = scheduleUnconfirmed
         ? `Rain near your home last week came to ${rain}"; your ${grassLabel} needs about ${target}" this time of year.`
+        : priorPlanIrrig != null
+        ? `Between last week's rain (${rain}") and last week's watering plan (${formatInches(priorPlanIrrig)}" of irrigation), your lawn got about ${formatInches(priorPlanTotal)}" of water; your ${grassLabel} needs about ${target}" this time of year.`
         : advice.status === 'surplus'
         ? `Between last week's rain (${rain}") and ${scheduleClause}, your lawn got about ${total}" of water — roughly ${formatInches(differenceDisplayNum)}" more than the ${target}" your ${grassLabel} needs this time of year.`
         : advice.status === 'deficit'
@@ -751,8 +761,10 @@ function decideWeeklyEmail({
           // carry no hard-coded inch mark) so an unconfirmed schedule can say
           // so instead of quoting the former home's setting and a total that
           // mixes it with the new home's rain (codex gh-r23).
-          irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move' : `${irrigationFmt}"`,
-          total_inches: scheduleUnconfirmed ? `${rain}" (rain only)` : `${total}"`,
+          irrigation_inches: scheduleUnconfirmed ? 'Not on file — re-enter after your move'
+            : (priorPlanIrrig != null ? `${formatInches(priorPlanIrrig)}" (last week's plan)` : `${irrigationFmt}"`),
+          total_inches: scheduleUnconfirmed ? `${rain}" (rain only)`
+            : (priorPlanIrrig != null ? `${formatInches(priorPlanTotal)}"` : `${total}"`),
           // "What your grass needs right now" = THIS week's target (the plan's),
           // not the completed week's — they differ at month boundaries and
           // with a different forecast ET₀.
@@ -1012,6 +1024,8 @@ async function findEligibleCustomers({ now = new Date() } = {}) {
       'c.zip',
       'tp.county as turf_county',
       'tp.municipality as turf_city',
+      // A profile rewritten AFTER a move may be trusted for jurisdiction again.
+      'tp.updated_at as turf_updated_at',
       'tp.irrigation_inches_per_week as turf_irrigation_inches_per_week',
       'tp.irrigation_type as turf_irrigation_type',
       // LATEST non-null reading, and its value is passed through EVEN IF ZERO
@@ -1156,7 +1170,9 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
       // single re-saved field, a non-sizing irrigation edit, or the row-wide
       // updated_at never re-confirms the rest (codex gh-r20/r21).
       const scheduleUnconfirmed = scheduleUnconfirmedAfterMove(customer);
-      const priorWeekEvents = weekPlanEnabled ? await loadPriorWeekPlanEvents({ customerId: customer.id, weekEnding }) : null;
+      const priorWeek = weekPlanEnabled ? await loadPriorWeekPlan({ customerId: customer.id, weekEnding }) : null;
+      const priorWeekEvents = priorWeek ? priorWeek.events : null;
+      const priorWeekPrescribedInches = priorWeek ? priorWeek.prescribedInches : null;
       const decisionInputs = {
         firstName: customer.first_name,
         grassType: resolveGrassType(customer),
@@ -1175,12 +1191,13 @@ async function runWeeklyIrrigationEmailSweep({ now = new Date(), maxSendAttempts
         // gh-r22); the PLAN drops the sizing fields and says why.
         scheduleUnconfirmed,
         priorWeekEvents,
+        priorWeekPrescribedInches,
         rainSensor: customer.rain_sensor === true || customer.rain_sensor === 't',
         rainfallInches7d: weekWeather.rainInches,
         et0Inches: weekWeather.et0Inches,
         rainSource: weekWeather.rainSource,
         weekPlanEnabled,
-        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at }),
+        county: resolveRestrictionCounty({ county: customer.turf_county, profileCity: customer.turf_city, city: customer.city, zip: customer.zip, homeMoved: !!customer.irrigation_home_changed_at, movedAt: customer.irrigation_home_changed_at || null, profileUpdatedAt: customer.turf_updated_at || null }),
         home: { addressLine1: customer.address_line1, addressLine2: customer.address_line2, city: customer.city, zip: customer.zip, latitude: customer.latitude, longitude: customer.longitude },
         // The restriction must cover the WHOLE plan week (through this Sunday).
         planWeekEnd,

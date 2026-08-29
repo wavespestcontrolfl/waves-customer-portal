@@ -457,7 +457,11 @@ function answerServiceReportQuestion({
   // Aftercare: "should I water after today's treatment?" answers with the
   // label instruction, plus the reduced plan when a watering-in is credited.
   if (wateringIntent && aftercare?.watering && /\b(treat\w*|application|applied|product|spray\w*|today)\b/.test(q)) {
-    const reduced = aftercare.waterInRequired === true && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
+    // Same guards as the rendered card: a credited watering-in only for a
+    // REQUIRED watering-in, on a visit inside the plan week, on a plan that
+    // prescribes a run (codex gh-r31).
+    const credited = aftercare.waterInRequired === true && weekPlan?.visitInPlanWeek === true && weekPlan?.prescribesRun === true;
+    const reduced = credited && weekPlan?.afterTreatment?.title ? weekPlan.afterTreatment : null;
     return [aftercare.watering, reduced ? `${reduced.title}. ${reduced.detail}` : null].filter(Boolean).join(' ');
   }
   if (weekPlan?.title && wateringIntent) {

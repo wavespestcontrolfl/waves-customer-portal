@@ -171,10 +171,12 @@ describe('sweep — settings follow the home; claim renewed on the queue transit
     expect(sweep).toMatch(/scheduleUnconfirmed,\s*\}\);/); // renderWeekPlanEmail ctx
   });
   test('the prior week\'s sent plan feeds the cool-season cadence', () => {
-    expect(sweep).toMatch(/const priorWeekEvents = weekPlanEnabled \? await loadPriorWeekPlanEvents\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
+    expect(sweep).toMatch(/const priorWeek = weekPlanEnabled \? await loadPriorWeekPlan\(\{ customerId: customer\.id, weekEnding \}\) : null;/);
+    expect(sweep).toMatch(/const priorWeekPrescribedInches = priorWeek \? priorWeek\.prescribedInches : null;/);
     // A known move rides into the jurisdiction resolver (stale profile county rejected).
-    expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at \}\)/);
-    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
+    expect(sweep).toMatch(/resolveRestrictionCounty\(\{ county: customer\.turf_county, profileCity: customer\.turf_city, city: customer\.city, zip: customer\.zip, homeMoved: !!customer\.irrigation_home_changed_at, movedAt: customer\.irrigation_home_changed_at \|\| null, profileUpdatedAt: customer\.turf_updated_at \|\| null \}\)/);
+    expect(sweep).toMatch(/'tp\.updated_at as turf_updated_at',/);
+    expect(sweep).toMatch(/planWeekEnd,\s*priorWeekEvents,\s*priorWeekPrescribedInches,\s*rainOnlyCarryover: scheduleUnconfirmed,\s*now,/);
   });
   test('the snapshot claim is renewed by the library\'s onQueued hook, fired right after the queued row lands', () => {
     // Fail closed: only an explicit true renewal dispatches (null = unverifiable ⇒ abort).
@@ -238,6 +240,20 @@ describe('buildWeeklyEmailDecision — a moved home routes to the PLAN (events-o
     expect(moved.templateKey).toBe(TEMPLATE_WEEK_PLAN);
     expect(moved.payload.irrigation_inches).toBe('Not on file — re-enter after your move');
     expect(moved.payload.plan_note).toContain('Your address changed after your sprinkler settings were saved');
+  });
+
+  test('from the second plan week on, last week\'s irrigation is what the delivered plan prescribed, not the programmed schedule (codex gh-r31)', () => {
+    const held = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2, priorWeekPrescribedInches: 0 });
+    expect(held.templateKey).toBe(TEMPLATE_WEEK_PLAN);
+    expect(held.decisionInputs.appliedInches).toBe(0);
+    expect(held.decisionInputs.priorWeekPrescribedInches).toBe(0);
+    expect(held.weekPlan.carryoverInches).toBe(0); // no manufactured surplus from the superseded 2"/wk schedule
+    expect(held.payload.summary_line).toMatch(/last week's watering plan \(0" of irrigation\)/);
+    expect(held.payload.irrigation_inches).toBe('0" (last week\'s plan)');
+    expect(held.payload.total_inches).toBe('0.2"');
+    const first = buildWeeklyEmailDecision({ ...base, irrigationInchesPerWeek: 2 });
+    expect(first.decisionInputs.appliedInches).toBeGreaterThan(0);
+    expect(first.payload.summary_line).not.toMatch(/last week's watering plan/);
   });
 
   test('every LEGACY path withholds the former home\'s schedule (gate off / late retry / plan unavailable) → the setup ask, never stale totals (codex gh-r24)', () => {

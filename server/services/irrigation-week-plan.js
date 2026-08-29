@@ -108,6 +108,9 @@ function decideWeekPlan({
   planWeekEnd = null,
   // Last week's SENT plan's event count — cool-season cadence input.
   priorWeekEvents = null,
+  // Last week's delivered plan's prescribed inches — replaces the programmed
+  // schedule as last week's applied irrigation (null = no delivered plan).
+  priorWeekPrescribedInches = null,
   // Unconfirmed schedule after a move: carryover from observed RAIN only
   // (the former home's programmed irrigation is withheld).
   rainOnlyCarryover = false,
@@ -122,7 +125,7 @@ function decideWeekPlan({
     ?? recommendedInchesPerWeek(grassType, planMonth);
   const plan = buildWeekPlan({
     targetInchesPerWeek,
-    lastWeekAppliedInches: advice?.appliedInchesPerWeek ?? null,
+    lastWeekAppliedInches: priorWeekPrescribedInches != null ? priorWeekPrescribedInches : (advice?.appliedInchesPerWeek ?? null),
     lastWeekRainInches,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
     forecastRainInches,
@@ -143,8 +146,9 @@ function decideWeekPlan({
   const decisionInputs = {
     targetInches: targetInchesPerWeek,
     lastWeekTargetInches: advice?.recommendedInchesPerWeek ?? null,
-    appliedInches: advice?.appliedInchesPerWeek ?? null,
+    appliedInches: priorWeekPrescribedInches != null ? priorWeekPrescribedInches : (advice?.appliedInchesPerWeek ?? null),
     priorWeekEvents,
+    priorWeekPrescribedInches,
     rainOnlyCarryover: rainOnlyCarryover === true,
     lastWeekRainInches,
     rainKnown: advice?.rainKnown !== false,
@@ -507,10 +511,15 @@ async function renewWeekPlanClaim({ customerId, weekEnding, claimToken } = {}) {
   }
 }
 
-// The PRIOR week's sent plan's event count (null when none / unreadable):
-// the cool-season cadence ("every 10–14 days if needed") holds the week
-// after a run instead of prescribing one every Monday (codex #3565 gh-r19).
-async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
+// The PRIOR week's delivered plan — what the customer was told to do last
+// week: `events` (null when the plan was forecast-conditional: it may have
+// been skipped as instructed) drives the cool-season cadence, and
+// `prescribedInches` replaces the customer's programmed schedule as last
+// week's applied irrigation from the second plan week on (events × depth;
+// 0 for a hold or a conditional plan — conservative, never a manufactured
+// surplus/carryover from a schedule the plan superseded — codex gh-r31).
+// Null when there is no delivered prior plan (or it cannot be read).
+async function loadPriorWeekPlan({ customerId, weekEnding } = {}) {
   const prior = etDateStringPlusDays(weekEnding, -7);
   if (!customerId || !prior) return null;
   try {
@@ -519,23 +528,21 @@ async function loadPriorWeekPlanEvents({ customerId, weekEnding } = {}) {
       .first('week_plan', 'sent_at', 'decision_hash');
     if (!row) return null;
     // Delivered = stamped, OR the durable customer-week delivery record says
-    // the provider accepted it (sent_at can be null when markWeekPlanSent
-    // failed after acceptance) and names this decision (or none) — the same
-    // reconciliation the sweep and the merge use (codex gh-r20).
+    // the provider accepted it and names this decision — the same
+    // reconciliation the sweep and the merge use (codex gh-r20/r23).
     if (!row.sent_at) {
       const delivery = await weekPlanDeliveryState({ triggerEventId: `irrigation.weekly:${customerId}:${prior}` });
-      // The delivery must NAME this decision: a sent record with no
-      // plan:<hash> (a legacy template under the same customer-week trigger)
-      // is not proof this plan went out.
       if (delivery.state !== 'sent' || !delivery.decisionHash || delivery.decisionHash !== row.decision_hash) return null;
     }
     const plan = typeof row.week_plan === 'string' ? JSON.parse(row.week_plan) : row.week_plan;
-    // A plan conditional on forecast rain is no evidence the customer
-    // watered (the threshold rain may have arrived and the run been skipped
-    // exactly as instructed) — unknown, never a completed run (codex gh-r24).
-    if (plan?.conditionalOnForecast) return null;
-    const events = Number(plan?.events);
-    return Number.isFinite(events) ? events : null;
+    if (!plan || plan.action === 'unavailable') return null;
+    const events = Number(plan.events);
+    const depth = Number(plan.depthInches);
+    const ran = plan.action === 'run' && !plan.conditionalOnForecast && Number.isFinite(events) && events > 0;
+    return {
+      events: plan.conditionalOnForecast ? null : (Number.isFinite(events) ? events : null),
+      prescribedInches: ran && Number.isFinite(depth) ? Math.round(events * depth * 100) / 100 : 0,
+    };
   } catch (err) {
     logger.warn(`[irrigation-week-plan] prior-week lookup failed for ${customerId}/${weekEnding}: ${err.message}`);
     return null;
@@ -818,7 +825,7 @@ module.exports = {
   renderWeekPlanAfterTreatment,
   visitInPlanWeek,
   renewWeekPlanClaim,
-  loadPriorWeekPlanEvents,
+  loadPriorWeekPlan,
   PinnedWeekPlanUnavailable,
   persistWeekPlan,
   markWeekPlanSent,
