@@ -43,6 +43,7 @@ function fakeKnex(db, { hasColumn = true } = {}) {
     alterTable: async (t, cb) => { cb({ boolean: () => ({ notNullable: () => ({ defaultTo: () => {} }) }) }); for (const r of db[t] || []) if (r.public_quote_selectable === undefined) r.public_quote_selectable = false; },
   };
   knex.fn = { now: () => 'NOW' };
+  knex.raw = async (sql) => { if (!/LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE/.test(sql)) throw new Error(`fake raw: ${sql}`); db.locked = true; };
   return knex;
 }
 
@@ -88,6 +89,7 @@ describe('20260829000021 engine_keys backfill', () => {
       svc('other_row', { engine_keys: ['palm_injection'] }), // ACTIVE row already claims palm_injection
     ], system_settings: [] };
     await backfill.up(fakeKnex(db));
+    expect(db.locked).toBe(true); // owner-check → stamp span is serialized
     const ek = (k) => db.services.find((r) => r.service_key === k).engine_keys;
     expect(ek('flea_tick')).toEqual(['flea_knockdown_single', 'flea_package']);
     expect(ek('cockroach_control')).toEqual(['admin_custom', 'pest_initial_roach']); // appended, admin key kept

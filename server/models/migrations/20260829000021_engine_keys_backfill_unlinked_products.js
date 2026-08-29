@@ -38,6 +38,13 @@ function parseKeys(v) {
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('services')) || !(await knex.schema.hasColumn('services', 'engine_keys'))) return;
+  // Serialize the owner-check → stamp span against concurrent admin edits
+  // (same lock as 20260825000011 / 20260826000003): engine_keys has no
+  // member-level uniqueness, so a stamp landing between the check and the
+  // UPDATE would create two active owners and the linker would refuse both.
+  // Migrations run in a transaction — held until commit, writes to services
+  // block for the seconds up() takes; reads proceed.
+  await knex.raw('LOCK TABLE services IN SHARE ROW EXCLUSIVE MODE');
   const applied = [];
   for (const seed of SEEDS) {
     const row = await knex('services').where({ service_key: seed.service_key }).first('id', 'engine_keys');
