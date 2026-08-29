@@ -1635,11 +1635,12 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
             targetStart = isPrimary ? win.start : shiftClock(m.window_start, delta);
             targetEnd = isPrimary ? (win.end || (m.window_end ? shiftClock(m.window_end, delta) : null)) : shiftClock(m.window_end, delta);
             window = targetEnd ? `${targetStart}-${targetEnd}` : { start: targetStart, end: null };
-            // Dispatch validates only the tapped window up front; a DERIVED
-            // sibling window must pass the same admin rules (on the hour,
-            // ends by the day cutoff) BEFORE the first member write, or a
-            // chain shifted past the cutoff would persist (codex r4).
-            if (!isPrimary && options.adminWindowRules === true) {
+            // A DERIVED sibling window must pass the admin window rules (on
+            // the hour, ends by the day cutoff) BEFORE the first member
+            // write, for EVERY caller (codex r4/r9): dispatch validates only
+            // the tapped window; rain-out and auto-dispatch validate none —
+            // a legacy :30 sibling must not ride its offset onto a new slot.
+            if (!isPrimary) {
               try {
                 require('./scheduling/window-rules').assertAdminAppointmentWindow({ windowStart: targetStart, windowEnd: targetEnd, durationMinutes: m.estimated_duration_minutes });
               } catch (e) {
@@ -1804,13 +1805,17 @@ async function moveVisitAsUnit({ rebooker, serviceId, service, newDate, newWindo
       if (!visit || String(visit.status) !== 'open') return;
       const rows = await t('scheduled_services').where({ visit_id: plan.visitId })
         .whereNotIn('status', TERMINAL_ROW_STATUSES)
-        .select('id', 'scheduled_date', 'window_start', 'window_end');
+        .select('id', 'scheduled_date', 'window_start', 'window_end', 'technician_id');
       // A row that joined the visit AFTER the plan snapshot (the old stop
       // lock was released between plan and move — codex r2) is not part of
       // this move: detach it in place so it never trails a parent that
       // points at the new stop.
       const atTargetStop = (r) => {
         if (dateOnly(r.scheduled_date) !== newDateStr) return false;
+        // A reassignment moved the planned members to options.technicianId;
+        // a late joiner still on another tech is not at this stop (codex
+        // r9) — detached below rather than left as a split-tech visit.
+        if (options.technicianId !== undefined && String(r.technician_id || '') !== String(options.technicianId || '')) return false;
         if (!win.start) return true;
         // Same-day window move (codex r3): a late row still at the OLD window
         // never landed — compare against the moved primary's target window.

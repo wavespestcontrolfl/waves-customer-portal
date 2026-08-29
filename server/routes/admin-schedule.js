@@ -7061,7 +7061,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
       || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
-        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes');
+        .first('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id');
       if (!currentRow) return res.status(404).json({ error: 'Service not found' });
       // Presence is not change (same ruling the in-trx occupancy probe below
       // already applies): BOTH schedule editors echo the current date, window
@@ -7089,6 +7089,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         && effectiveSlotStart === storedSlotStart
         && effectiveSlotEnd === storedSlotEnd
         && effectiveSlotDuration === storedSlotDuration;
+      // Grouped visit (visit-group-scope.md §2; codex #3609 r9): this
+      // endpoint writes the row directly, so a slot change here would
+      // leave the stop's other services behind and detach the visit. Slot
+      // changes on a grouped row go through the schedule's move (the unit
+      // mover) or after separating the services; every other field edits
+      // normally. Same-slot echoes from the editors pass untouched.
+      if (!effectiveSlotUnchanged && currentRow.visit_id) {
+        const { openMembers } = require('../services/visit-groups');
+        const members = await openMembers(db, currentRow.visit_id);
+        if (members.length >= 2) {
+          return res.status(409).json({
+            error: 'This service is grouped with another at the same stop. Move the stop from the schedule (the whole visit moves together), or separate the services first — other details can still be edited here.',
+            code: 'VISIT_EDIT_SCHEDULE_UNSUPPORTED',
+            visitId: currentRow.visit_id,
+          });
+        }
+      }
       if (!effectiveSlotUnchanged && (updates.window_start || updates.window_end)) {
         // The CAS below is armed only when this pre-read actually fed a
         // derivation/validation (here and in the stored-window branch).

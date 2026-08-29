@@ -269,7 +269,7 @@ describe('start-only edit derives its end from the stored span, else estimated_d
 
   test('the pre-read selects estimated_duration_minutes and passes it as the fallback', () => {
     const ud = src.slice(src.indexOf("router.put('/:id/update-details'"), src.indexOf("router.put('/:id/assign'"));
-    expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes'\)/);
+    expect(ud).toMatch(/\.first\('scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'visit_id'\)/);
     expect(ud).toMatch(/windowDurationMinutes\(currentRow\.window_start, currentRow\.window_end, currentRow\.estimated_duration_minutes\)/);
   });
 

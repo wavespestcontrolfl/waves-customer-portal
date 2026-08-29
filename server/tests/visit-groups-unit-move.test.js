@@ -265,16 +265,19 @@ describe('moveVisitAsUnit', () => {
     ]);
   });
 
-  test('adminWindowRules: a DERIVED sibling window that breaks the admin rules refuses the move before any write', async () => {
-    db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
+  test('a DERIVED sibling window that breaks the admin window rules refuses the move before any write — for every caller', async () => {
+    for (const options of [{ adminWindowRules: true }, {}]) {
+      db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
+      const rebooker = fakeRebooker();
+      await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', options }))
+        .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
+      expect(rebooker.reschedule).not.toHaveBeenCalled();
+    }
+    // an on-hour sibling shifts cleanly
+    db.__script = script({ members: [member('a'), member('b', { window_start: '10:00', window_end: '11:00' })] });
     const rebooker = fakeRebooker();
-    await expect(moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00', options: { adminWindowRules: true } }))
-      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_MEMBER_WINDOW_INVALID', memberId: 'b' });
-    expect(rebooker.reschedule).not.toHaveBeenCalled();
-    // without the admin flag (rain-out, auto-dispatch) the derived :30 window is the rebooker's call, as before
-    db.__script = script({ members: [member('a'), member('b', { window_start: '09:30', window_end: '10:30' })] });
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', newWindow: '13:00-14:00' });
-    expect(rebooker.reschedule.mock.calls[1][2]).toBe('13:30-14:30');
+    expect(rebooker.reschedule.mock.calls[1][2]).toBe('14:00-15:00');
   });
 
   test('the primary carries excludeExpect (each hidden sibling\'s membership + snapshotted slot) so the rebooker locks and verifies them INSIDE its move transaction', async () => {
@@ -386,5 +389,16 @@ describe('moveVisitAsUnit', () => {
     db.__script = script({ members: [member('a'), member('b'), member('c')] });
     await moveVisitAsUnit({ rebooker, serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { maxUnitSize: 3 } });
     expect(rebooker.reschedule).toHaveBeenCalledTimes(3);
+  });
+
+  test('a reassignment detaches a late joiner still on another technician instead of keeping a split-tech visit', async () => {
+    db.__script = script({ members: [member('a'), member('b')], landed: [
+      { id: 'a', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' },
+      { id: 'b', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't2' },
+      { id: 'late', scheduled_date: '2026-09-02', window_start: '09:00', window_end: '10:00', technician_id: 't1' },
+    ] });
+    await moveVisitAsUnit({ rebooker: fakeRebooker(), serviceId: 'a', service: SERVICE, newDate: '2026-09-02', options: { technicianId: 't2' } });
+    const detach = db.__calls.find((c) => c.table === 'scheduled_services' && c.op === 'update' && c.values.visit_id === null);
+    expect(detach.ops).toEqual(expect.arrayContaining([['whereIn', 'id', ['late']]]));
   });
 });
