@@ -477,7 +477,7 @@ const goldChipButton = {
   textDecoration: 'none',
 };
 
-function CopyValueButton({ value, label }) {
+function CopyValueButton({ value, label, disabled = false }) {
   const [copied, setCopied] = useState(false);
   const canCopy = typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function';
   if (!canCopy) return <span aria-hidden="true" />;
@@ -485,6 +485,7 @@ function CopyValueButton({ value, label }) {
     <button
       type="button"
       data-glass-accent=""
+      disabled={disabled}
       aria-label={`Copy ${label}`}
       onClick={async () => {
         try {
@@ -518,9 +519,69 @@ const PAY_ROW_GRID_NARROW = {
   rowGap: SP.xs,
 };
 
+// Every configured recipient in one comparable key — the recipients ride
+// env, not the invoice row, so a rotated handle arrives with an unchanged
+// invoice version and must be detected on its own.
+function recipientsKey(opts) {
+  return JSON.stringify([opts?.zelle?.recipient ?? null, opts?.venmo?.handle ?? null, opts?.paypal?.handle ?? null]);
+}
+
 function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onInvoiceChanged }) {
   const [open, setOpen] = useState(false);
   const [staleNotice, setStaleNotice] = useState('');
+  // Fresh-read gate (codex r5 P1): Copy and the Zelle affordances cannot
+  // re-fetch per click — clipboard writes need transient user activation,
+  // which an awaited fetch spends (Safari). So the panel revalidates at the
+  // moments of intent instead: when it is expanded, and whenever this tab
+  // regains visibility (an old tab left open). Every control is disabled
+  // until the fresh read lands; a changed invoice/credit/recipient
+  // re-renders the whole panel from the fresh payload with a notice, so
+  // what is shown and copied is always the latest server truth.
+  const [validating, setValidating] = useState(false);
+  const readFresh = async () => {
+    const res = await fetch(`${API_BASE}/pay/${token}`);
+    const fresh = await res.json().catch(() => null);
+    const freshOpts = fresh?.manualPayOptions;
+    const freshVersion = freshOpts?.version ?? fresh?.invoice?.version ?? null;
+    const freshAmount = freshOpts?.amountDue ?? fresh?.invoice?.amountDue;
+    // The fresh read is the only truth a control may act on (codex r4 P1 ×2):
+    //  • creditPending on the fresh read (credit landed after the first GET
+    //    while the version/gross stayed put) means /setup will reduce the
+    //    invoice, so a gross transfer would overpay;
+    //  • the recipients ride env, so a rotated handle arrives with an
+    //    unchanged version and must be compared on its own.
+    const unchanged = res.ok
+      && !!freshOpts
+      && !freshOpts.creditPending
+      && (version == null || freshVersion === version)
+      && Number(freshAmount) === Number(amountDue)
+      && recipientsKey(freshOpts) === recipientsKey(options);
+    return { fresh, freshOpts, freshAmount, unchanged };
+  };
+  const STALE_NOTICE = 'This invoice was just updated — the details above have been refreshed. Please try again.';
+  const revalidate = async () => {
+    setValidating(true);
+    try {
+      const { fresh, unchanged } = await readFresh();
+      if (unchanged) {
+        setStaleNotice('');
+      } else {
+        setStaleNotice(STALE_NOTICE);
+        if (fresh?.invoice) onInvoiceChanged?.(fresh);
+      }
+    } catch {
+      setStaleNotice('Could not confirm the invoice details — check your connection and try again.');
+    } finally {
+      setValidating(false);
+    }
+  };
+  useEffect(() => {
+    if (!open || typeof document === 'undefined') return undefined;
+    revalidate();
+    const onVisible = () => { if (document.visibilityState === 'visible') revalidate(); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [open]);
   // Version-fenced open (codex #3610 r3 P1): a delivered invoice can be
   // edited by an admin after this page loaded, and no PaymentIntent fence
   // exists while Stripe is unavailable/pending. Open the tab synchronously
@@ -529,33 +590,20 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
   // refresh the page data instead.
   const openTransfer = async (row) => {
     setStaleNotice('');
-    const tab = typeof window !== 'undefined' ? window.open('', '_blank', 'noopener,noreferrer') : null;
+    // Plain `_blank` so the handle is retained (browsers honoring the
+    // `noopener` feature return null — codex r5 P2); sever `opener` on the
+    // handle itself before it is pointed anywhere.
+    const tab = typeof window !== 'undefined' ? window.open('', '_blank') : null;
+    if (tab) { try { tab.opener = null; } catch { /* cross-origin guard */ } }
     try {
-      const res = await fetch(`${API_BASE}/pay/${token}`);
-      const fresh = await res.json().catch(() => null);
-      const freshOpts = fresh?.manualPayOptions;
-      const freshVersion = freshOpts?.version ?? fresh?.invoice?.version ?? null;
-      const freshAmount = freshOpts?.amountDue ?? fresh?.invoice?.amountDue;
-      // codex r4 P1 ×2: the fresh read is the only truth the tab may act on —
-      //  • creditPending on the fresh read (credit landed after the first GET
-      //    while the version/gross stayed put) means /setup will reduce the
-      //    invoice, so a gross transfer would overpay → refuse, refresh;
-      //  • the recipient rides env, not the invoice row, so a rotated handle
-      //    arrives with an unchanged version → refuse and re-render the row
-      //    (the Copy button must show the new handle too) rather than
-      //    silently sending to whichever handle this render captured.
-      const unchanged = res.ok
-        && !!freshOpts
-        && !freshOpts.creditPending
-        && (version == null || freshVersion === version)
-        && Number(freshAmount) === Number(amountDue)
-        && row.recipientOf(freshOpts) === row.recipient;
+      const { fresh, freshOpts, freshAmount, unchanged } = await readFresh();
       if (!unchanged) {
         if (tab) tab.close();
-        setStaleNotice('This invoice was just updated — the amounts above have been refreshed. Please try again.');
+        setStaleNotice(STALE_NOTICE);
         if (fresh?.invoice) onInvoiceChanged?.(fresh);
         return;
       }
+      // Built from the FRESH options, never the render-time closure.
       const url = row.buildHref(Number(freshAmount), freshOpts);
       if (tab) tab.location.href = url;
       else if (typeof window !== 'undefined') window.location.assign(url);
@@ -594,8 +642,6 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     rows.push({
       key: 'venmo', name: 'Venmo', value: options.venmo.handle, copyValue: options.venmo.handle,
       hint: 'Send to', openLabel: 'Open Venmo',
-      recipient: options.venmo.handle,
-      recipientOf: (opts) => opts?.venmo?.handle,
       buildHref: (amt, opts) => venmoPayHref(opts.venmo.handle, amt, memo),
     });
   }
@@ -603,8 +649,6 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
     rows.push({
       key: 'paypal', name: 'PayPal', value: `paypal.me/${options.paypal.handle}`, copyValue: `https://paypal.me/${options.paypal.handle}`,
       hint: 'Send to', openLabel: 'Open PayPal',
-      recipient: options.paypal.handle,
-      recipientOf: (opts) => opts?.paypal?.handle,
       buildHref: (amt, opts) => paypalMeHref(opts.paypal.handle, amt),
     });
   }
@@ -690,7 +734,7 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
                   <div style={{ fontSize: FS.body, color: DOC.muted, marginTop: 2, ...(row.nowrap ? { whiteSpace: 'nowrap' } : { overflowWrap: 'anywhere' }) }}>
                     {row.hint}{' '}
                     {row.valueHref ? (
-                      <a href={row.valueHref} style={{ color: DOC.ink, fontWeight: FW.medium }}>{row.value}</a>
+                      <a href={row.valueHref} aria-disabled={validating || undefined} style={{ color: DOC.ink, fontWeight: FW.medium, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>{row.value}</a>
                     ) : (
                       <span style={{ color: DOC.ink, fontWeight: FW.medium }}>{row.value}</span>
                     )}
@@ -698,17 +742,17 @@ function OtherWaysToPay({ options, invoiceNumber, amountDue, token, version, onI
                 </div>
               </div>
               {row.buildHref ? (
-                <button type="button" data-glass-accent="" style={goldChipButton} onClick={() => openTransfer(row)}>
+                <button type="button" data-glass-accent="" disabled={validating} style={goldChipButton} onClick={() => openTransfer(row)}>
                   {row.openLabel}
                 </button>
               ) : row.href ? (
-                <a href={row.href} target="_blank" rel="noopener noreferrer" data-glass-accent="" style={goldChipButton}>
+                <a href={row.href} target="_blank" rel="noopener noreferrer" data-glass-accent="" aria-disabled={validating || undefined} style={{ ...goldChipButton, ...(validating ? { pointerEvents: 'none', opacity: 0.6 } : {}) }}>
                   {row.openLabel}
                 </a>
               ) : (
                 <span aria-hidden="true" />
               )}
-              <CopyValueButton value={row.copyValue} label={`${row.name} address`} />
+              <CopyValueButton value={row.copyValue} label={`${row.name} address`} disabled={validating} />
             </div>
           ))}
           {staleNotice && (
@@ -2162,6 +2206,9 @@ export default function PayPageV2() {
           clientSecret: setup.clientSecret,
           paymentIntentId: setup.paymentIntentId,
           baseAmount: setup.baseAmount ?? setup.amount,
+          // Post-mint row version (codex r5 P2): credit applied at mint
+          // advanced updated_at; the transfer fence compares against this.
+          version: setup.version ?? null,
           cardSurchargeRate: setup.cardSurchargeRate ?? 0.029,
           publishableKey: setup.publishableKey || data.stripe.publishableKey,
           // Server-authoritative combined breakdown (invoice list + total);
@@ -2954,7 +3001,7 @@ export default function PayPageV2() {
                 invoiceNumber={invoice.invoiceNumber}
                 amountDue={stripeSetup?.baseAmount ?? data.manualPayOptions?.amountDue ?? invoice.amountDue ?? invoice.total}
                 token={token}
-                version={data.manualPayOptions?.version ?? invoice.version ?? null}
+                version={stripeSetup?.version ?? data.manualPayOptions?.version ?? invoice.version ?? null}
                 onInvoiceChanged={(fresh) => setData(fresh)}
               />
             )}

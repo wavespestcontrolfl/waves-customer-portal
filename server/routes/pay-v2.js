@@ -385,6 +385,20 @@ router.get('/:token', async (req, res, next) => {
       ? manualPayOptionsFromEnv()
       : null;
     if (manualPayOptions) {
+      // Cross-rail fence (codex r5 P1): the SAME guard /setup applies before
+      // minting a public PI. A committed saved-card claim (off-session charge
+      // in flight or awaiting reconciliation) must not be offered a second
+      // rail — the customer could transfer while the attempt also settles.
+      // Read-only here (this GET never parks the invoice); a fenced state
+      // simply withholds the block, the way /setup 409s.
+      try {
+        await StripeService.assertNoInvoiceChargeReconciliationPending(data.id);
+      } catch (err) {
+        if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
+        manualPayOptions = null;
+      }
+    }
+    if (manualPayOptions) {
       // Transfer amount = what the invoice owes RIGHT NOW (gross amount due).
       // Partial account credit is applied only when /setup mints (codex r2
       // P1 → r3 P1: a projection is not a reservation — if /setup never runs,
@@ -612,8 +626,16 @@ router.post('/:token/setup', async (req, res, next) => {
       includeOpenBalance: true,
     });
     const captureNeeded = !!result.covered_by_credit && holdCoverageForCapture;
+    // Post-mint row version (codex r5 P2): partial account credit applied at
+    // mint advances updated_at, so the pay page's transfer fence must compare
+    // a later click against THIS version, not the GET's — else the first
+    // Open Venmo/PayPal after setup always false-rejects. A failed read
+    // leaves it null (client falls back to the GET version: safe direction).
+    const postMintRow = await db('invoices').where({ id: invoice.id }).first('updated_at').catch(() => null);
+    const postMintVersion = postMintRow?.updated_at ? new Date(postMintRow.updated_at).getTime() : null;
 
     res.json({
+      version: postMintVersion,
       clientSecret: result.clientSecret,
       paymentIntentId: result.paymentIntentId,
       amount: result.amount,

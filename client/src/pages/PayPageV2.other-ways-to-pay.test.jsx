@@ -112,10 +112,15 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     // Venmo / PayPal open the app pre-filled with the amount due (+ invoice
     // memo on Venmo) — version-fenced: the tab opens synchronously, the
     // invoice is re-fetched, and only an unchanged invoice gets the URL.
-    const tab = { close: vi.fn(), location: { href: '' } };
+    const tab = { close: vi.fn(), location: { href: '' }, opener: {} };
     vi.stubGlobal('open', vi.fn(() => tab));
+    // Controls are disabled until the expand-time fresh read lands.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Open Venmo' }));
     await waitFor(() => expect(tab.location.href).toBe('https://venmo.com/WavesPest?txn=pay&note=Invoice+WPC-2026-0123&amount=150.00'));
+    // Plain _blank keeps the handle; opener is severed on the handle itself (codex r5 P2).
+    expect(window.open).toHaveBeenCalledWith('', '_blank');
+    expect(tab.opener).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Open PayPal' }));
     await waitFor(() => expect(tab.location.href).toBe('https://paypal.me/WavesPest/150.00USD'));
     expect(tab.close).not.toHaveBeenCalled();
@@ -137,6 +142,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     fireEvent.click(toggle);
     expect(screen.queryByText('Zelle')).not.toBeInTheDocument();
     expect(screen.queryByText('PayPal')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Copy Venmo address' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('@WavesPest'));
     expect(await screen.findByText('Copied')).toBeInTheDocument();
@@ -148,7 +154,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     edited.invoice.amountDue = 175; edited.invoice.total = 175; edited.invoice.version = 2;
     let gets = 0;
     const fetchMock = vi.fn(async (url, init) => {
-      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets === 1 ? first : edited); }
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets <= 2 ? first : edited); }
       return response(204, {});
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -156,6 +162,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     vi.stubGlobal('open', vi.fn(() => tab));
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Open Venmo' }));
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
     expect(tab.location.href).toBe('');
@@ -170,7 +177,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     const credited = payload({ manualPayOptions: { venmo: { handle: '@WavesPest' }, amountDue: 150, creditPending: true, version: 1 } });
     let gets = 0;
     const fetchMock = vi.fn(async (url, init) => {
-      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets === 1 ? first : credited); }
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets <= 2 ? first : credited); }
       return response(204, {});
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -178,6 +185,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     vi.stubGlobal('open', vi.fn(() => tab));
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open Venmo' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Open Venmo' }));
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
     expect(tab.location.href).toBe('');
@@ -190,7 +198,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     const rotated = payload({ manualPayOptions: { paypal: { handle: 'WavesPestControl' }, amountDue: 150, version: 1 } });
     let gets = 0;
     const fetchMock = vi.fn(async (url, init) => {
-      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets === 1 ? first : rotated); }
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, gets <= 2 ? first : rotated); }
       return response(204, {});
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -199,6 +207,7 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: /Other ways to pay/ }));
     expect(screen.getByText('paypal.me/WavesPest')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Open PayPal' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Open PayPal' }));
     await waitFor(() => expect(tab.close).toHaveBeenCalled());
     expect(tab.location.href).toBe('');
@@ -206,6 +215,40 @@ describe('pay page — other ways to pay (Zelle / Venmo)', () => {
     // The row now shows (and copies) the rotated recipient, never the captured one.
     await waitFor(() => expect(screen.getByText('paypal.me/WavesPestControl')).toBeInTheDocument());
     expect(screen.queryByText('paypal.me/WavesPest')).not.toBeInTheDocument();
+  });
+
+  it('revalidates on expand and on tab re-focus so Copy and Zelle never act on stale details (codex r5 P1)', async () => {
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
+    const first = payload({ manualPayOptions: { zelle: { recipient: '9415551234' }, venmo: { handle: '@WavesPest' }, amountDue: 150, version: 1 } });
+    const rotated = payload({ manualPayOptions: { zelle: { recipient: '9415559999' }, venmo: { handle: '@WavesPestControl' }, amountDue: 150, version: 1 } });
+    let gets = 0;
+    let serve = first;
+    const fetchMock = vi.fn(async (url, init) => {
+      if (!init || !init.method || init.method === 'GET') { gets += 1; return response(200, serve); }
+      return response(204, {});
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    renderPage();
+    const toggle = await screen.findByRole('button', { name: /Other ways to pay/ });
+    // Recipients rotate after the initial GET; the expand-time fresh read catches it.
+    serve = rotated;
+    fireEvent.click(toggle);
+    // Every control is disabled until the fresh read lands.
+    expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeDisabled();
+    expect(screen.getByRole('link', { name: '(941) 555-1234' })).toHaveAttribute('aria-disabled', 'true');
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Copy Venmo address' })).toBeEnabled());
+    expect(gets).toBe(2);
+    expect(await screen.findByRole('status')).toHaveTextContent(/just updated/);
+    // The panel re-rendered from the fresh payload: new Zelle number, new Venmo handle, and Copy copies the NEW handle.
+    expect(screen.getByRole('link', { name: '(941) 555-9999' })).toHaveAttribute('href', 'tel:+19415559999');
+    expect(screen.queryByText('@WavesPest')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Copy Venmo address' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('@WavesPestControl'));
+    // An old tab regaining visibility re-reads too.
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    fireEvent(document, new Event('visibilitychange'));
+    await waitFor(() => expect(gets).toBe(3));
   });
 
   it('withholds the block while account credit is pending and Stripe setup has not answered (codex r3 P1)', async () => {

@@ -23,6 +23,7 @@ jest.mock('../services/invoice-attachments', () => ({ list: jest.fn(async () => 
 jest.mock('../services/stripe', () => ({
   isAvailable: () => true,
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined),
+  savedCardChargeSuppressesAlternateCollection: (err) => err?.code === 'STRIPE_CHARGE_IN_PROGRESS' || err?.code === 'STRIPE_CHARGE_RECONCILIATION_REQUIRED',
 }));
 jest.mock('../config/stripe-config', () => ({ publishableKey: 'pk_test_1' }));
 jest.mock('../services/pdf/invoice-pdf', () => ({ generateInvoicePDF: jest.fn() }));
@@ -145,6 +146,24 @@ describe('GET /pay/:token manualPayOptions', () => {
       amountDue: 150,
       version: null,
     });
+  });
+
+  test('env set ⇒ key absent while a saved-card attempt is in flight (codex r5 P1 cross-rail fence)', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const StripeService = require('../services/stripe');
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(
+      Object.assign(new Error('charge in progress'), { code: 'STRIPE_CHARGE_IN_PROGRESS' }),
+    );
+    const { body } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(body).not.toHaveProperty('manualPayOptions');
+    expect(StripeService.assertNoInvoiceChargeReconciliationPending).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('env set ⇒ a non-fence error from the reconciliation check still propagates', async () => {
+    process.env.VENMO_HANDLE = 'WavesPest';
+    const StripeService = require('../services/stripe');
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
+    await expect(getPayPage(invoiceData({ status: 'overdue' }))).rejects.toThrow('db down');
   });
 
   test('env set ⇒ key absent on a combined-balance session (codex r2 P1)', async () => {
