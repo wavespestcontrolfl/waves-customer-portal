@@ -2563,7 +2563,11 @@ function dropFilledLeadColumns(leadUpdates, lockedLead) {
 // restores the field to its old baseline — often null — erasing a value
 // an ACCEPTED later call independently stated. A supplied value that
 // DIFFERS from the lead's is not a reaffirmation and claims nothing.
-// Phone compares on the last 10 digits; other fields case-insensitively.
+// Phone compares on the last 10 digits; address on the canonical
+// street + unit key (so "Apt 4" / "#4" / "Unit 4" restate the same door —
+// the same canonicalization composeLeadAddress dedupes with, codex r2 P1);
+// other fields case-insensitively. A reaffirmation claims the lead's
+// CURRENT value, never the supplied spelling.
 function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
   const out = {};
   if (!lockedLead || !suppliedValues) return out;
@@ -2580,9 +2584,27 @@ function reaffirmedFilledLeadFields(suppliedValues, lockedLead) {
     const lockedVal = lockedLead[f];
     if (lockedVal === null || lockedVal === undefined || lockedVal === '') continue;
     const supplied = norm(f, suppliedValues[f]);
-    if (supplied && supplied === norm(f, lockedVal)) out[f] = lockedVal;
+    if (!supplied) continue;
+    const same = supplied === norm(f, lockedVal)
+      || (f === 'address' && leadAddressCompareKey(suppliedValues[f]) === leadAddressCompareKey(lockedVal));
+    if (same) out[f] = lockedVal;
   }
   return out;
+}
+
+// Canonical street|unit key for a leads.address value, tolerant of every
+// notation the composer accepts and of the fan-out's city/state tail:
+// "100 Main St, Apt 4" / "100 Main St #4" / "100 Main St, Unit 4, Sarasota,
+// FL 34236" all key to "100 main st|4". Empty when there is no street.
+function leadAddressCompareKey(v) {
+  const raw = String(v == null ? '' : v).trim();
+  if (!raw) return '';
+  const { splitStreetLineUnit, normalizeStreetLine, normalizeUnitLine, unitLineValueKey } = require('../utils/address-normalizer');
+  const { street, unit } = splitStreetLineUnit(raw);
+  const streetKey = String(normalizeStreetLine(street) || street || '').replace(/[.,]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (!streetKey) return '';
+  const unitK = unit ? unitLineValueKey(normalizeUnitLine(unit)) : '';
+  return unitK ? `${streetKey}|${unitK}` : streetKey;
 }
 
 // Re-decide the CONDITIONAL (non-identity) lead fields against the LOCKED
@@ -10030,7 +10052,11 @@ const CallRecordingProcessor = {
                   first_name: capitalizeName(extracted.first_name) || null,
                   last_name: capitalizeName(extracted.last_name) || null,
                   email: extracted.email || null,
-                  address: extracted.address_line1 || null,
+                  // Composed (street + unit) — this row loops back as
+                  // `current`, and the fill-only pass above skips a
+                  // non-empty address, so a bare street here would strand
+                  // the replacement lead unit-less (codex r2 P2).
+                  address: composedLeadAddress || null,
                   city: extracted.city || null,
                   zip: extracted.zip || null,
                   lead_type: extracted.is_voicemail ? 'voicemail' : 'inbound_call',
@@ -14517,6 +14543,7 @@ const LEAD_ADDRESS_MAX_LENGTH = 255;
 
 CallRecordingProcessor._test = {
   composeLeadAddress,
+  leadAddressCompareKey,
   isImplausibleTranscript,
   transcriptRejectionUpdate,
   reconcileFormerLeadLinkage,

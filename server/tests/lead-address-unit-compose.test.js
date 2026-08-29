@@ -61,3 +61,49 @@ describe('composeLeadAddress', () => {
     expect(composeLeadAddress(longStreet, null).length).toBeLessThanOrEqual(255);
   });
 });
+
+const { reaffirmedFilledLeadFields, leadAddressCompareKey } = require('../services/call-recording-processor')._test;
+
+describe('leadAddressCompareKey', () => {
+  test('equivalent unit notations key the same', () => {
+    const k = leadAddressCompareKey('100 Main St, Apt 4');
+    expect(k).toBe('100 main st|4');
+    expect(leadAddressCompareKey('100 Main St #4')).toBe(k);
+    expect(leadAddressCompareKey('100 Main St, Unit 4')).toBe(k);
+    expect(leadAddressCompareKey('100 Main Street Apt #4')).toBe(k);
+  });
+
+  test('fan-out city/state tail does not change the key', () => {
+    expect(leadAddressCompareKey('100 Main St, Apt 4, Sarasota, FL 34236')).toBe('100 main st|4');
+  });
+
+  test('different door or different street keys differently', () => {
+    expect(leadAddressCompareKey('100 Main St, Apt 5')).not.toBe(leadAddressCompareKey('100 Main St, Apt 4'));
+    expect(leadAddressCompareKey('100 Main St, Bldg 2 Apt 4')).not.toBe(leadAddressCompareKey('100 Main St, Apt 4'));
+    expect(leadAddressCompareKey('101 Main St, Apt 4')).not.toBe(leadAddressCompareKey('100 Main St, Apt 4'));
+    expect(leadAddressCompareKey('100 Main St')).not.toBe(leadAddressCompareKey('100 Main St, Apt 4'));
+  });
+
+  test('empty for no street', () => {
+    expect(leadAddressCompareKey(null)).toBe('');
+    expect(leadAddressCompareKey('   ')).toBe('');
+  });
+});
+
+describe('reaffirmedFilledLeadFields — address', () => {
+  test('a restated unit in another notation reaffirms the lead\'s CURRENT value', () => {
+    const locked = { address: '100 Main St, Apt 4' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, #4' }, locked)).toEqual({ address: '100 Main St, Apt 4' });
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Unit 4' }, locked)).toEqual({ address: '100 Main St, Apt 4' });
+  });
+
+  test('a different unit or street claims nothing', () => {
+    const locked = { address: '100 Main St, Apt 4' };
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St, Apt 5' }, locked)).toEqual({});
+    expect(reaffirmedFilledLeadFields({ address: '100 Main St' }, locked)).toEqual({});
+  });
+
+  test('exact case-insensitive match still reaffirms', () => {
+    expect(reaffirmedFilledLeadFields({ address: '100 main st, apt 4' }, { address: '100 Main St, Apt 4' })).toEqual({ address: '100 Main St, Apt 4' });
+  });
+});
