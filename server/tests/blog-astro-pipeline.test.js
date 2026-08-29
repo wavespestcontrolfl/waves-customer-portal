@@ -4341,6 +4341,30 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
     expect(written).toContain('![Live alt two](/images/blog/ant-trails-bradenton/body-2.webp)');
   });
 
+  test('publishAstro republish: a live post that moved on main by commit time throws transient and drops the branch — never overwritten (hook P0)', async () => {
+    const post = {
+      id: 'post-lock', title: 'Ant Trails in Bradenton', slug: 'ant-trails-bradenton',
+      meta_description: 'Bradenton homeowners can use this guide to identify ant trails, reduce entry points, and spot trouble early. Learn more on the Waves blog.',
+      keyword: 'ant control Bradenton', category: 'pest-control', post_type: 'location', service_areas_tag: ['Bradenton'], related_services: [], target_sites: ['wavespestcontrol.com'],
+      author_slug: 'adam', reviewer_slug: 'reviewer', technically_reviewed_at: '2026-05-08', fact_checked_by: 'Virginia Gelser', fact_checked_at: '2026-05-08',
+      featured_image_url: PATTERNS[4], hero_image_alt: 'Ant trail near a Bradenton patio',
+      content: '## What you are seeing\n\nAnt trails follow scent lines along patio edges.\n\n## What to do first\n\nWipe the trail and seal the entry point.',
+    };
+    const liveMd = fmModule.stringify(validFrontmatter({ slug: '/pest-control/ant-trails-bradenton/', title: post.title, hero_image: { src: '/images/blog/ant-trails-bradenton/hero.webp', alt: 'h' }, og_image: '/images/blog/ant-trails-bradenton/hero.webp' }), '## What you are seeing\n\nOld.\n');
+    const read = chain({ first: jest.fn().mockResolvedValue(post) });
+    const update = chain();
+    db.mockImplementation(() => read);
+    gh.getFile.mockImplementation(async (path, ref) => (path === 'src/content/blog/ant-trails-bradenton.md' ? { content: liveMd, sha: ref ? 'moved' : 'live' } : null));
+    let thrown;
+    try { await AstroPublisher.publishAstro('post-lock'); } catch (err) { thrown = err; }
+    expect(thrown?.message).toMatch(/ant-trails-bradenton\.md \(post changed: expected live, found moved\)/);
+    expect(thrown?.code).toBeUndefined();
+    expect(gh.commitFiles).not.toHaveBeenCalled();
+    expect(gh.createPr).not.toHaveBeenCalled();
+    expect(gh.deleteRef).toHaveBeenCalledWith(expect.stringMatching(/^content\/blog-ant-trails-bradenton-/));
+    void update;
+  });
+
   test('unpublishAstro removes the generated body-N.webp assets with the hero (GH r19)', async () => {
     const read = chain({ first: jest.fn().mockResolvedValue({ id: 'post-un', astro_status: 'live', slug: 'ant-trails-bradenton', title: 'Ant Trails' }) });
     db.mockImplementation(() => read);

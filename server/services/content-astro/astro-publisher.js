@@ -1180,11 +1180,21 @@ async function publishAstro(postId) {
 
     await gh.createBranch(branch);
     branchCreated = true;
-    // Generated asset paths must still be free and pinned/reused pictures
-    // unchanged on the fresh branch (the catch below drops the orphan).
+    // Optimistic lock (the catch below drops the orphan branch): the post
+    // must still carry the SHA it was read at (the tree write replaces it
+    // unconditionally — a concurrent edit on main would otherwise be
+    // overwritten and auto-merged), a NEW post's path must still be absent,
+    // and generated / pinned / reused / superseded pictures must be as
+    // resolved. A plain (transient) error → the scheduler retries.
     {
       const conflicts = await bodyImageCommitConflicts(bodyImages, branch);
-      if (conflicts.length) throw new Error(`body images for ${slug} changed since they were resolved on ${branch}: ${conflicts.join('; ')} — retry`);
+      const onBranch = await gh.getFile(filePath, branch);
+      if (liveFile) {
+        if (!onBranch || onBranch.sha !== liveFile.sha) conflicts.push(`${filePath} (post changed: expected ${liveFile.sha}, found ${onBranch?.sha || 'missing'})`);
+      } else if (onBranch) {
+        conflicts.push(`${filePath} (appeared since the publish was resolved)`);
+      }
+      if (conflicts.length) throw new Error(`${slug} changed since it was resolved on ${branch}: ${conflicts.join('; ')} — retry against the live content`);
     }
 
     // 3. Hero + markdown in ONE commit (git data API). Splitting them into
