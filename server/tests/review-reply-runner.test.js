@@ -378,6 +378,22 @@ describe('processDueAutoReplies — state machine', () => {
     expect(await Runner.processDueAutoReplies()).toMatchObject({ lowRatingReleased: 0, claimed: 0 });
   });
 
+  test('Post now that discards a stale under-4★ pipeline draft and then cannot redraft also clears the mirrored "[DRAFT]" text — it never becomes a human draft; an edited slot stays (codex #3587 r6)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    // Stored draft whose grounding fingerprint no longer matches ⇒ discarded ⇒ redraft ⇒ providers down.
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'provider_unavailable', error: 'all providers down', rejections: [] });
+    state.rows = [row({ id: 'pn', star_rating: 2, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Old machine words.', review_reply: '[DRAFT] Old machine words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+    const r = await Runner.postNow('pn', { type: 'admin' }, { expectedDraft: 'Old machine words.' });
+    expect(r).toEqual({ outcome: 'failed', reason: 'provider_unavailable' });
+    expect(state.rows[0]).toMatchObject({ auto_reply_status: null, auto_reply_reason: 'low_rating_requested', auto_reply_draft: null, review_reply: null, reply_updated_at: null, auto_reply_claimed_until: null });
+    expect(Runner.humanDraftOn(state.rows[0])).toBeNull();
+    // A slot a person edited meanwhile is theirs: the release keeps it.
+    mockDraft.mockResolvedValueOnce({ ok: false, reason: 'verifier_reject', rejections: ['url'], mode: 'service_quality', version: 'reply-v1' });
+    state.rows = [row({ id: 'pn2', star_rating: 1, auto_reply_status: 'parked', auto_reply_reason: 'low_rating_requested', auto_reply_draft: 'Old machine words.', review_reply: '[DRAFT] My own words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+    // humanDraftOn() sees a human draft here, so Post now publishes it instead of drafting — assert the classifier only.
+    expect(Runner.humanDraftOn(state.rows[0])).toBe('My own words.');
+  });
+
   test('gate OFF: the scheduler entry runModeIndependentSweeps still releases legacy under-4★ parks and re-rings failed bells; processDueAutoReplies(off) reports the same and claims nothing (codex #3587 r3)', async () => {
     delete process.env.GATE_REVIEW_AUTO_REPLY;
     expect(Runner.mode()).toBe('off');

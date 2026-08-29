@@ -686,7 +686,23 @@ async function processClaimedRow(row, { intent = 'cron', actor = null, cfg = con
     // answers 409 and the person tries again. No bell: they are looking at it.
     if (intent === 'post_now' && (rating === 0 || rating <= 3)) {
       const error = draft.reason === 'provider_unavailable' ? String(draft.error || '') : `verifier_reject: ${(draft.rejections || []).join(', ')}`;
-      await releaseClaim(row, { ...lowRatingExitFields(rating === 0 ? 'unrated_requested' : 'low_rating_requested'), auto_reply_error: error });
+      const exit = { ...lowRatingExitFields(rating === 0 ? 'unrated_requested' : 'low_rating_requested'), auto_reply_error: error };
+      // The pipeline draft this Post now discarded (stale grounding / no
+      // longer verifies) may still be mirrored in the reply slot. With
+      // auto_reply_draft cleared, humanDraftOn() would read that text as a
+      // person's draft and the next Post now would publish it unverified —
+      // so the mirrored text goes too, compare-and-set on the exact text:
+      // if someone edited the slot meanwhile it is genuinely theirs and
+      // stays (codex #3587 r6).
+      const mirrored = merged.auto_reply_draft && isDraftReply(merged.review_reply)
+        && stripDraftPrefix(merged.review_reply).trim() === String(merged.auto_reply_draft).trim();
+      if (mirrored) {
+        const n = await db('google_reviews')
+          .where({ id: row.id, auto_reply_claimed_until: row._claimToken, review_reply: merged.review_reply })
+          .update({ auto_reply_claimed_until: null, review_reply: null, reply_updated_at: null, ...exit });
+        if ((Array.isArray(n) ? n.length : n) > 0) return { outcome: 'failed', reason: draft.reason === 'provider_unavailable' ? 'provider_unavailable' : 'verifier_reject' };
+      }
+      await releaseClaim(row, exit);
       return { outcome: 'failed', reason: draft.reason === 'provider_unavailable' ? 'provider_unavailable' : 'verifier_reject' };
     }
     if (draft.reason === 'provider_unavailable') {
