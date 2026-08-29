@@ -76,11 +76,14 @@ function resolveTermiteStatus({ termiteActivity, baitConsumption, checked, inacc
  * 'activity' or 'serviced', never both, so the copy must not attach
  * "serviced" to the activity stations themselves (codex P2 #3600 r1).
  */
-function servicedSentence({ servicedCount, servicedToday }) {
+function servicedSentence({ servicedCount, servicedToday, statusKey }) {
+  // "Previous feeding noted" is historical evidence — never escalate it to
+  // "active" stations in the continuation (codex P2 #3600 r4).
+  const which = statusKey === 'evidence' ? 'affected' : 'active';
   if (servicedCount > 0) {
-    return ` Bait was serviced at ${servicedCount} station${plural(servicedCount)} today, and the active stations will continue to be monitored.`;
+    return ` Bait was serviced at ${servicedCount} station${plural(servicedCount)} today, and the ${which} stations will continue to be monitored.`;
   }
-  if (servicedToday) return ' Bait service was performed today, and the active stations will continue to be monitored.';
+  if (servicedToday) return ` Bait service was performed today, and the ${which} stations will continue to be monitored.`;
   return ' They will continue to be monitored closely.';
 }
 
@@ -95,7 +98,7 @@ function servicedSentence({ servicedCount, servicedToday }) {
  */
 function buildTodaysResultCopy({
   statusKey, checked, total, activityCount = null, servicedCount = 0, servicedToday = false,
-  inaccessible = 0, activeLocation = null,
+  inaccessible = 0, activeLocation = null, baitFeeding = false,
 }) {
   if (checked == null || checked <= 0) {
     return {
@@ -118,7 +121,25 @@ function buildTodaysResultCopy({
     else where = `${noun} was observed at the stations inspected today.`;
     return {
       headline: counted ? `${noun} observed at ${activityCount} station${plural(activityCount)}` : `${noun} observed`,
-      body: `${where}${servicedSentence({ servicedCount, servicedToday })}${accessNote}`,
+      body: `${where}${servicedSentence({ servicedCount, servicedToday, statusKey })}${accessNote}`,
+    };
+  }
+  // 'monitoring' with stations inspected: either bait feeding was recorded
+  // (legacy snapshots can pair it with "None observed" — the feeding
+  // evidence must not vanish under a clean headline, codex P2 #3600 r4) or
+  // the visit carries no usable activity reading. Neither may claim "No
+  // termite activity observed".
+  if (statusKey === 'monitoring') {
+    const scope = total && total > checked ? `${checked} of ${total}` : `${checked}`;
+    if (baitFeeding) {
+      return {
+        headline: 'Bait feeding noted — monitoring continues',
+        body: `We inspected ${scope} bait station${plural(checked)} today. Bait feeding was noted, which means foraging termites have found a station and are taking the bait — that is the system working. We will keep monitoring it.${accessNote}`,
+      };
+    }
+    return {
+      headline: `${scope} station${plural(checked)} inspected`,
+      body: `We inspected ${scope} bait station${plural(checked)} today and will continue monitoring your system on schedule.${accessNote}`,
     };
   }
   if (inaccessible > 0) {
@@ -132,7 +153,9 @@ function buildTodaysResultCopy({
   }
   return {
     headline: 'No termite activity observed',
-    body: `We inspected all ${checked} bait station${plural(checked)} around your home today. No termite activity was observed at the stations inspected.`,
+    // Property-neutral: the same profile serves commercial bait programs
+    // (warehouse, office, multifamily), so never "your home".
+    body: `We inspected all ${checked} bait station${plural(checked)} around the property today. No termite activity was observed at the stations inspected.`,
   };
 }
 
@@ -142,15 +165,20 @@ function buildTodaysResultCopy({
  * form with no station count renders "Observed", never "None observed"
  * beside a headline that says otherwise.
  */
-function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0 }) {
+function buildTodaysMetrics({ checked, total, activityCount = null, activityObserved = false, servicedCount = 0, servicedToday = false }) {
   if (checked == null) return null;
   let activityValue = 'None observed';
   if (activityCount != null && activityCount > 0) activityValue = `${activityCount} station${plural(activityCount)}`;
   else if (activityObserved) activityValue = 'Observed';
+  // Form-documented bait/station work with no per-station serviced pins
+  // (fail-soft sync) proves service happened but gives no count — never
+  // print "0" under a body that says service was performed.
+  let servicedValue = String(servicedCount || 0);
+  if (!servicedCount && servicedToday) servicedValue = 'Performed';
   return [
     { label: 'Stations inspected', value: total && total !== checked ? `${checked} of ${total}` : `${checked} of ${checked}` },
     { label: 'Termite activity', value: activityValue },
-    { label: 'Stations serviced', value: String(servicedCount || 0) },
+    { label: 'Stations serviced', value: servicedValue },
   ];
 }
 
@@ -310,6 +338,7 @@ function buildTermiteReportV2({
     servicedToday,
     inaccessible,
     activeLocation: values.active_station_location ? String(values.active_station_location).trim() : null,
+    baitFeeding: FEEDING_VALUES.has(values.bait_consumption),
   });
   const status = { ...statusBase, label: copy.headline };
   const statusSummary = copy.body;
@@ -330,14 +359,20 @@ function buildTermiteReportV2({
   return {
     status,
     statusSummary,
-    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount }),
+    metrics: buildTodaysMetrics({ checked, total, activityCount, activityObserved, servicedCount, servicedToday }),
     supportingMetric,
     defense: network ? { summary: network.summary, items: network.items } : null,
     nextStep: nextStepText,
     nextVisit: nextVisit && nextVisit.scheduledDate ? nextVisit : null,
     primaryMove: buildPrimaryMove({ values }),
     visitSequence: visitSequence || 1,
-    aiSummary: technicianReport || null,
+    // Tech-reviewed narrative (accepted "Generate AI report" body or the
+    // live typed narrative). Same { headline, body } shape as the pest and
+    // mosquito heroes; the dashboard is the report's ONE summary surface,
+    // so it must carry it (codex P2 #3600 r4).
+    aiSummary: typeof technicianReport === 'string' && technicianReport.trim()
+      ? { headline: null, body: technicianReport.trim() }
+      : null,
   };
 }
 

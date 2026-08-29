@@ -8898,6 +8898,7 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
               /* Same-line next visit only — the builder scopes it; the
                  top-level nextAppointment may be ANY service line. */
               nextVisitLabel={formatNextAppointmentLabel(data.termiteReportV2.nextVisit)}
+              narrative={data.termiteReportV2.aiSummary?.body ? cleanVisitSummary(data.termiteReportV2.aiSummary.body) : null}
               bondLines={(data.termiteBonds || [])
                 .map((bond) => ({ serviceType: bond.serviceType || null, label: formatTermiteBondRenewalLabel(bond) }))
                 .filter((entry) => entry.label)}

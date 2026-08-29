@@ -68,9 +68,9 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
   it('clean full inspection names the count and scopes the claim to stations inspected', () => {
     const copy = buildTodaysResultCopy({ statusKey: 'protected', checked: 12, total: 12, activityCount: 0, servicedToday: false, inaccessible: 0 });
     expect(copy.headline).toBe('No termite activity observed');
-    expect(copy.body).toMatch(/all 12 bait stations/);
+    expect(copy.body).toMatch(/all 12 bait stations around the property/);
     expect(copy.body).toMatch(/at the stations inspected/);
-    expect(copy.body).not.toMatch(/termite[- ]free|no termites/i);
+    expect(copy.body).not.toMatch(/termite[- ]free|no termites|your home/i);
   });
 
   it('partial access leads with "N of M inspected" and promises the re-check', () => {
@@ -106,10 +106,26 @@ describe('buildTodaysResultCopy — absence claims scoped to stations inspected'
     expect(copy.body).not.toMatch(/1 station/);
   });
 
-  it('evidence (previous feeding) never escalates to an active-termites claim', () => {
+  it('evidence (previous feeding) never escalates to an active-termites claim — headline or continuation', () => {
     const copy = buildTodaysResultCopy({ statusKey: 'evidence', checked: 8, total: 8, activityCount: 1, servicedToday: false, inaccessible: 0 });
     expect(copy.headline).toMatch(/^Evidence of termite activity/);
     expect(copy.body).not.toMatch(/Active termites/);
+    const serviced = buildTodaysResultCopy({ statusKey: 'evidence', checked: 8, total: 8, activityCount: 1, servicedCount: 1, servicedToday: true, inaccessible: 0 });
+    expect(serviced.body).toMatch(/the affected stations will continue to be monitored/);
+    expect(serviced.body).not.toMatch(/active stations/);
+  });
+
+  it('monitoring with feeding recorded keeps the feeding evidence out of a clean headline', () => {
+    // Legacy snapshot: "None observed" beside positive bait consumption →
+    // resolveTermiteStatus returns 'monitoring'; the copy must not say
+    // "No termite activity observed" while the station card says feeding.
+    const copy = buildTodaysResultCopy({ statusKey: 'monitoring', checked: 12, total: 12, inaccessible: 0, baitFeeding: true });
+    expect(copy.headline).toBe('Bait feeding noted — monitoring continues');
+    expect(copy.body).toMatch(/Bait feeding was noted/);
+    const noReading = buildTodaysResultCopy({ statusKey: 'monitoring', checked: 10, total: 12, inaccessible: 2 });
+    expect(noReading.headline).toBe('10 of 12 stations inspected');
+    expect(noReading.body).not.toMatch(/No termite activity/);
+    expect(noReading.body).toMatch(/2 stations could not be accessed/);
   });
 
   it('no inspected count → neutral monitoring copy', () => {
@@ -129,6 +145,8 @@ describe('buildTodaysMetrics', () => {
     // Activity recorded with no count: "Observed", never "None observed"
     // under a headline that says otherwise.
     expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: null, activityObserved: true, servicedCount: 0 })[1].value).toBe('Observed');
+    // Form-documented service with no serviced pins: "Performed", never "0".
+    expect(buildTodaysMetrics({ checked: 12, total: 12, activityCount: 0, servicedCount: 0, servicedToday: true })[2].value).toBe('Performed');
     expect(buildTodaysMetrics({ checked: null })).toBeNull();
   });
 });
@@ -237,6 +255,7 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
 
     const fromForm = buildTermiteReportV2({ typedSnapshotValues: { ...values, bait_actions: 'Bait replaced' }, typedReportType: 'termite_bait_station' });
     expect(fromForm.statusSummary).toMatch(/Bait service was performed today/);
+    expect(fromForm.metrics[2]).toEqual({ label: 'Stations serviced', value: 'Performed' });
 
     const undocumented = buildTermiteReportV2({ typedSnapshotValues: values, typedReportType: 'termite_bait_station' });
     expect(undocumented.statusSummary).not.toMatch(/serviced/);
@@ -267,9 +286,18 @@ describe('buildTermiteReportV2 — assembly and guards', () => {
     expect(none.nextVisit).toBeNull();
   });
 
-  it('passes the technician report through as aiSummary', () => {
-    const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', technicianReport: 'Reviewed copy.' });
-    expect(out.aiSummary).toBe('Reviewed copy.');
+  it('carries the tech-reviewed narrative as aiSummary in the pest/mosquito hero shape', () => {
+    const out = buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', technicianReport: '  Reviewed copy.  ' });
+    expect(out.aiSummary).toEqual({ headline: null, body: 'Reviewed copy.' });
+    expect(buildTermiteReportV2({ typedSnapshotValues: CLEAN_VALUES, typedReportType: 'termite_bait_station', technicianReport: '' }).aiSummary).toBeNull();
+  });
+
+  it('legacy "None observed" + feeding → monitoring headline that keeps the feeding evidence', () => {
+    const out = buildTermiteReportV2({
+      typedSnapshotValues: { ...CLEAN_VALUES, bait_consumption: 'Light feeding' },
+      typedReportType: 'termite_bait_station',
+    });
+    expect(out.status).toEqual({ key: 'monitoring', tone: 'watch', label: 'Bait feeding noted — monitoring continues' });
   });
 });
 

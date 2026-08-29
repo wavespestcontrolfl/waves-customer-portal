@@ -196,6 +196,17 @@ describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => 
     expect(within(products).queryByText(/Trelona/)).toBeNull();
   });
 
+  it('carries the tech-reviewed narrative in the hero (the one summary surface)', async () => {
+    const narrated = JSON.parse(JSON.stringify(termiteReportV2));
+    narrated.termiteReportV2.aiSummary = { headline: null, body: 'Stations 6 and 10 showed fresh feeding; both cartridges were replaced.' };
+    const { container } = renderReport(narrated);
+    await screen.findAllByText('Termite activity observed at 2 stations');
+    const hero = container.querySelector('#visit-summary');
+    expect(within(hero).getByText(/both cartridges were replaced/)).toBeInTheDocument();
+    expect(screen.queryByText('Visit Summary')).toBeNull();
+    expect(container.querySelector('#todays-result')).toBeNull();
+  });
+
   it('never labels a cross-line appointment as the next monitoring visit, and no ACTIVE badge without a bond', async () => {
     const crossLine = JSON.parse(JSON.stringify(termiteReportV2));
     // Builder scoped nextVisit to null (next appointment was another line);

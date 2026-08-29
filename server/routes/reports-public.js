@@ -564,8 +564,14 @@ async function buildServiceReportV1ResponseData(service, token, {
         // be an earlier liquid/trench visit or a cross-line fallback).
         // Already null in pdf/static modes (stripLiveOnlyScheduleFields).
         nextVisit: data.termiteNextMonitoringVisit || null,
-        // Same typed-report double-print guard as the pest/mosquito heroes.
-        technicianReport: null,
+        // The dashboard suppresses BOTH legacy summary surfaces (Visit
+        // Summary + typed Today's Result), so the approved narrative rides
+        // the hero instead: the accepted technician-report body or the live
+        // typed narrative (report-data sets summarySource for each).
+        technicianReport: (data.summarySource === 'technician_report' || data.summarySource === 'typed_narrative')
+          && typeof data.summary === 'string'
+          ? data.summary
+          : null,
       });
       if (termiteReportV2) data.termiteReportV2 = termiteReportV2;
     } catch { /* best-effort — never block the report */ }

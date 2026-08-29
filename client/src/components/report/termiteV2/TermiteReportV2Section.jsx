@@ -29,6 +29,9 @@ export default function TermiteReportV2Section({
   stationPins = false,
   nextVisitLabel = null,
   bondLines = [],
+  // Tech-reviewed narrative, cleaned by the page (cleanVisitSummary) — the
+  // dashboard is the report's one summary surface.
+  narrative = null,
 }) {
   if (!data) return null;
   return (
@@ -37,6 +40,7 @@ export default function TermiteReportV2Section({
         status={data.status}
         statusSummary={data.statusSummary}
         metrics={data.metrics}
+        narrative={narrative}
         visitSequence={data.visitSequence}
       />
       {/* Live web only — pdf/static have no satellite basemap to pin against

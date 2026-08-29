@@ -66,7 +66,9 @@ const eyebrow = {
 };
 
 // ── 1. Today's result: headline · body · three metrics ─────────────────────────
-export function TermiteStatusHero({ status, statusSummary, metrics, visitSequence = 1 }) {
+// `narrative` = the tech-reviewed body (payload aiSummary.body), already
+// cleaned by the page the same way the typed Today's Result card cleans it.
+export function TermiteStatusHero({ status, statusSummary, metrics, narrative = null, visitSequence = 1 }) {
   if (!status) return null;
   const t = tone(status.tone);
   return (
@@ -78,6 +80,9 @@ export function TermiteStatusHero({ status, statusSummary, metrics, visitSequenc
       <h2 style={{ margin: 0, fontSize: 22, lineHeight: 1.25, color: TEXT }}>{status.label}</h2>
       {statusSummary ? (
         <p style={{ margin: '10px 0 0', fontSize: 15, lineHeight: 1.55, color: TEXT }}>{statusSummary}</p>
+      ) : null}
+      {narrative ? (
+        <p className="ai-summary-body" style={{ margin: '12px 0 0', fontSize: 14, lineHeight: 1.5, color: MUTED }}>{narrative}</p>
       ) : null}
       {Array.isArray(metrics) && metrics.length ? (
         <div style={{ marginTop: 16, display: 'grid', gap: 6 }}>
