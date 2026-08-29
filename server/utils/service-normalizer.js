@@ -60,7 +60,7 @@ const SERVICE_TYPE_MAP = [
   // Mosquito — cadence identities are catalog services (mosquito_seasonal /
   // mosquito_monthly) and must survive; the bare pattern is the legacy fallback.
   { match: /seasonal.*mosquito|mosquito.*seasonal/i,        type: 'Seasonal Mosquito Control Service' },
-  { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Mosquito Control Service (Monthly)' },
+  { match: /monthly.*mosquito|mosquito.*monthly/i,          type: 'Monthly Mosquito Control Service' },
   { match: /mosquito/i,                                     type: 'Mosquito Barrier Treatment' },
 
   // Tree & shrub

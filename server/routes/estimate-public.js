@@ -14645,9 +14645,9 @@ const ADMIN_IP_ALLOWLIST = (process.env.WAVES_ADMIN_IPS || '')
 const { bandFrequencyForIntent } = require('../services/pricing-engine/unit-band-pricing');
 
 const FREQUENCY_LADDER = [
-  { key: 'quarterly',  label: 'Quarterly (4 visits)',   engineFrequency: 'quarterly' },
-  { key: 'bi_monthly', label: 'Bi-monthly (6 visits)',  engineFrequency: 'bimonthly' },
-  { key: 'monthly',    label: 'Monthly (12 visits)',    engineFrequency: 'monthly' },
+  { key: 'quarterly',  label: 'Quarterly (4 visits/year)',   engineFrequency: 'quarterly' },
+  { key: 'bi_monthly', label: 'Bi-Monthly (6 visits/year)',  engineFrequency: 'bimonthly' },
+  { key: 'monthly',    label: 'Monthly (12 visits/year)',    engineFrequency: 'monthly' },
 ];
 
 function extractRequestIp(req) {
@@ -18651,7 +18651,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_quarterly',
         name: 'Quarterly Tree & Shrub Care Service',
         frequencyKey: 'quarterly',
-        label: 'Quarterly (4 visits)',
+        label: 'Quarterly (4 visits/year)',
         visitsPerYear: 4,
       };
     case 'standard':
@@ -18660,7 +18660,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_program',
         name: 'Bi-Monthly Tree & Shrub Care Service',
         frequencyKey: 'bi_monthly',
-        label: 'Bi-monthly (6 visits)',
+        label: 'Bi-Monthly (6 visits/year)',
         visitsPerYear: 6,
       };
     case 'enhanced':
@@ -18669,7 +18669,7 @@ function treeShrubTierRuntimeMeta(tierKey) {
         serviceKey: 'tree_shrub_6week',
         name: 'Every 6 Weeks Tree & Shrub Care Service',
         frequencyKey: 'every_6_weeks',
-        label: 'Every 6 weeks (9 visits)',
+        label: 'Every 6 Weeks (9 visits/year)',
         visitsPerYear: 9,
       };
     default:
@@ -18867,10 +18867,12 @@ function applySelectedTreeShrubTierToEstimateData(estData = {}, frequency = {}) 
 // established (bi_monthly / every_6_weeks / monthly) so the accepted recurring
 // line rides the proven downstream scheduling + billing plumbing.
 const LAWN_CADENCE_RUNTIME = {
-  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly (4 visits)', visitsPerYear: 4 },
-  standard: { tierKey: 'standard', serviceKey: 'lawn_care_bimonthly', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-monthly (6 visits)', visitsPerYear: 6 },
-  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 weeks (9 visits)', visitsPerYear: 9 },
-  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly (12 visits)', visitsPerYear: 12 },
+  // serviceKey is the CATALOG key (the 6-visit lawn row is lawn_care_recurring;
+  // 'lawn_care_bimonthly' named no row — scope v2 finding 3).
+  basic: { tierKey: 'basic', serviceKey: 'lawn_care_quarterly', name: 'Quarterly Lawn Care Service', frequencyKey: 'quarterly', label: 'Quarterly (4 visits/year)', visitsPerYear: 4 },
+  standard: { tierKey: 'standard', serviceKey: 'lawn_care_recurring', name: 'Bi-Monthly Lawn Care Service', frequencyKey: 'bi_monthly', label: 'Bi-Monthly (6 visits/year)', visitsPerYear: 6 },
+  enhanced: { tierKey: 'enhanced', serviceKey: 'lawn_care_6week', name: 'Every 6 Weeks Lawn Care Service', frequencyKey: 'every_6_weeks', label: 'Every 6 Weeks (9 visits/year)', visitsPerYear: 9 },
+  premium: { tierKey: 'premium', serviceKey: 'lawn_care_monthly', name: 'Monthly Lawn Care Service', frequencyKey: 'monthly', label: 'Monthly (12 visits/year)', visitsPerYear: 12 },
 };
 function lawnTierRuntimeMeta(tierKey) {
   return LAWN_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;
@@ -18987,8 +18989,8 @@ function applySelectedLawnTierToEstimateData(estData = {}, frequency = {}) {
 // (Seasonal = 9 Mar–Nov, Monthly = 12). Seasonal reuses the proven 9-visit
 // scheduling key (same as lawn Enhanced).
 const MOSQUITO_CADENCE_RUNTIME = {
-  seasonal9: { tierKey: 'seasonal9', serviceKey: 'mosquito_seasonal', name: 'Seasonal Mosquito Control', frequencyKey: 'every_6_weeks', label: 'Seasonal', visitsPerYear: 9 },
-  monthly12: { tierKey: 'monthly12', serviceKey: 'mosquito_monthly', name: 'Monthly Mosquito Control', frequencyKey: 'monthly', label: 'Monthly', visitsPerYear: 12 },
+  seasonal9: { tierKey: 'seasonal9', serviceKey: 'mosquito_seasonal', name: 'Seasonal Mosquito Control Service', frequencyKey: 'every_6_weeks', label: 'Seasonal (9 visits/year)', visitsPerYear: 9 },
+  monthly12: { tierKey: 'monthly12', serviceKey: 'mosquito_monthly', name: 'Monthly Mosquito Control Service', frequencyKey: 'monthly', label: 'Monthly (12 visits/year)', visitsPerYear: 12 },
 };
 function mosquitoTierRuntimeMeta(tierKey) {
   return MOSQUITO_CADENCE_RUNTIME[String(tierKey || '').trim().toLowerCase()] || null;

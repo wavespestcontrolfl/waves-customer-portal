@@ -8991,19 +8991,19 @@ function LearnTab({ customer }) {
 // =========================================================================
 const SERVICE_CATALOG = [
   {
-    id: 'pest_control', name: 'Quarterly Pest Control', icon: 'bug',
+    id: 'pest_control', name: 'Pest Control', icon: 'bug',
     frequencies: ['Quarterly (4x)', 'Bi-Monthly (6x)', 'Monthly (12x)'],
     basePrice: 55, description: 'Interior + exterior treatment, granular perimeter band, bait station check, cobweb sweep on all eaves',
     products: ['Demand CS', 'Advion WDG Granular', 'Alpine WSG'],
   },
   {
-    id: 'lawn_care', name: 'Lawn Care Program', icon: 'sprout',
+    id: 'lawn_care', name: 'Lawn Care', icon: 'sprout',
     frequencies: ['4 Apps', '6 Apps', '9 Apps', '12 Apps'],
     basePrice: 84, description: 'Fertilization, weed control, fungicide treatments, soil testing, thatch monitoring',
     products: ['Prodiamine 65 WDG', 'Celsius WG', '16-4-8 + Micros', 'Headway G'],
   },
   {
-    id: 'mosquito', name: 'Mosquito Barrier Treatment', icon: 'bug',
+    id: 'mosquito', name: 'Mosquito Control', icon: 'bug',
     // My Plan renders frequencies[0] as the cadence line for whichever mosquito
     // service it matched, and SERVICE_CATALOG carries no link to the customer's
     // enrolled program — so naming either cadence here states the wrong one for
@@ -9020,7 +9020,7 @@ const SERVICE_CATALOG = [
     products: ['Bifen I/T', 'Tekko Pro IGR'],
   },
   {
-    id: 'tree_shrub', name: 'Tree & Shrub Program', icon: 'palm',
+    id: 'tree_shrub', name: 'Tree & Shrub', icon: 'palm',
     frequencies: ['4x per year', '6x per year'],
     basePrice: 50, description: 'Deep root feeding, insect & disease treatment, palm injections (Arborjet)',
     products: ['Merit 75 WP', 'Keel Fungicide', 'Arborjet TREE-age'],
@@ -9039,7 +9039,7 @@ const SERVICE_CATALOG = [
   // Service', 4 applications/year — estimate-converter), not the monthly
   // billing rate.
   {
-    id: 'rodent_bait', name: 'Rodent Bait Stations', icon: 'shield',
+    id: 'rodent_bait', name: 'Rodent Bait Station', icon: 'shield',
     frequencies: ['Quarterly (4x)'],
     basePrice: 49, description: 'Exterior bait station inspection, bait replenishment and rotation, exclusion check around entry points',
   },
@@ -9073,10 +9073,10 @@ function resolveActiveTierName(customer = {}) {
 }
 
 const TIER_SERVICE_NAMES = {
-  Bronze: ['Quarterly Pest Control'],
-  Silver: ['Quarterly Pest Control', 'Lawn Care Program'],
-  Gold: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment'],
-  Platinum: ['Quarterly Pest Control', 'Lawn Care Program', 'Mosquito Barrier Treatment', 'Tree & Shrub Program'],
+  Bronze: ['Pest Control'],
+  Silver: ['Pest Control', 'Lawn Care'],
+  Gold: ['Pest Control', 'Lawn Care', 'Mosquito Control'],
+  Platinum: ['Pest Control', 'Lawn Care', 'Mosquito Control', 'Tree & Shrub'],
 };
 
 // Coverage details for each included service

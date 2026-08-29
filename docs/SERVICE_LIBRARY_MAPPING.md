@@ -99,3 +99,29 @@
 - **Square "header" items** like "Pest Control Service — Recurring Services" are category groupings, not bookable services. They have no `service_key` and are not stored in the DB.
 - **Rodent Bait Station** appears twice in Square with different billing cycles (annually vs quarterly). Both map to `rodent_monitoring` — differentiate by the `frequency` field or create a `rodent_monitoring_quarterly` key if you need distinct line items.
 - Services already in the original seed (migration `20260401000105`) include: `pest_general_quarterly`, `pest_general_monthly`, `pest_initial_cleanout`, `lawn_fertilization`, `lawn_fungicide`, `lawn_insect_control`, `lawn_aeration`, `mosquito_monthly`, `mosquito_event`, `termite_liquid`, `termite_bait`, `termite_renewal`, `rodent_exclusion`, `rodent_monitoring`, `tree_shrub_program`, `palm_treatment`, `wdo_inspection`, `lawn_inspection`, `new_customer_inspection`, `fire_ant`, `flea_tick`, `bee_wasp_removal`, `waveguard_membership`.
+
+
+## Cadence naming convention (owner rulings 2026-08-28, migration 20260829000010)
+
+Standard cadence-based catalog rows are named **`<Cadence> <Family> Service`** using exactly this vocabulary:
+
+**Semiannual · Quarterly · Bi-Monthly · Every 6 Weeks · Monthly · Seasonal · Annual**
+
+Alternate customer-facing spellings (`Bimonthly`, `Bi-monthly`, `Every 2 Months`, `6-Weekly`, cadence-in-parentheses) are not introduced into standard cadence rows; internal enums/keys (`bimonthly`, `bi_monthly`) are implementation vocabulary and unchanged. Where cadence ambiguity matters, copy adds the visit count: *Bi-Monthly (6 visits/year)*.
+
+Exceptions by design (never "clean up" to the pattern): one-time and specialty services, inspections, the callback-based rodent trap-only retainer, approved combo products, and the termite system/term rows (`termite_bait`, `termite_monitoring`, the bond terms). The rodent recurring family is **Rodent Bait Station**.
+
+| Key | Shipped name (pre-08-29) | Canonical name |
+|---|---|---|
+| `pest_general_bimonthly` | General Pest Control Service (Bi-Monthly) | Bi-Monthly Pest Control Service |
+| `pest_general_semiannual` | General Pest Control Service (Semiannual) | Semiannual Pest Control Service |
+| `lawn_care_quarterly` | Lawn Care Program — Quarterly | Quarterly Lawn Care Service |
+| `lawn_care_recurring` | Lawn Care Program Service | Bi-Monthly Lawn Care Service |
+| `lawn_care_6week` | Lawn Care Program — Every 6 Weeks | Every 6 Weeks Lawn Care Service |
+| `lawn_care_monthly` | Lawn Care Program — Monthly | Monthly Lawn Care Service |
+| `mosquito_monthly` | Mosquito Control Service (Monthly) | Monthly Mosquito Control Service |
+| `rodent_monitoring` | Rodent Monitoring Service (Monthly) | Monthly Rodent Bait Station Service |
+| `termite_active_bait_quarterly` | Termite Active Bait Station Service (Quarterly) | Quarterly Termite Active Bait Station Service |
+| `termite_active_annual` | Termite Active Annual Bait Station Service | Annual Termite Active Bait Station Service |
+
+Already on the convention and untouched: `pest_general_quarterly`, `pest_general_monthly`, `mosquito_seasonal`, `rodent_bait_quarterly`, `tree_shrub_quarterly`, `tree_shrub_program` (Bi-Monthly), `tree_shrub_6week`. `termite_bait` also had `frequency='annual'` with `visits_per_year=4`; migration 20260829000011 sets it to `quarterly` (owner ruling).
