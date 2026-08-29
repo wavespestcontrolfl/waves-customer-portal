@@ -4245,6 +4245,23 @@ describe('autonomous body images (owner rule 2026-08-27: ≥3 images per post)',
       'public/images/blog/shrub-diseases-sarasota-fl/body-2.webp',
       'src/content/blog/shrub-diseases-sarasota-fl.md',
     ]);
+    // A live post whose two body paths hold the SAME picture (or a missing asset) is short of the contract too (hook P1):
+    // the unchanged refresh runs — and parks, because the draft body carries the invalid pictures.
+    const dupBody = `## Hibiscus\n\nHibiscus prose.\n\n![p](/images/blog/shrub-diseases-sarasota-fl/body-1.webp)\n\n## Oleander\n\nOleander prose.\n\n![q](/images/blog/shrub-diseases-sarasota-fl/body-2.webp)\n`;
+    const dupMd = fmModule.stringify(liveFm, dupBody);
+    const same = (await AstroPublisher._internals.compressToWebp(Buffer.from(PATTERNS[1].split(',')[1], 'base64'), { width: 1200 })).toString('base64');
+    gh.getFile.mockImplementation(async (path) => {
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.mdx') return null;
+      if (path === 'src/content/blog/shrub-diseases-sarasota-fl.md') return { content: dupMd, sha: 'live' };
+      if (path === `public${heroSrc}`) return { content: '', sha: 'h', raw: { content: heroWebp.toString('base64') } };
+      if (/shrub-diseases-sarasota-fl\/body-[12]\.webp$/.test(path)) return { content: '', sha: 'same', raw: { content: same } };
+      if (path === 'src/content/services/pest-control-venice-fl.md') return { content: '---\ntitle: S\nmeta_description: d\n---\nService body.', sha: 's' };
+      return null;
+    });
+    let thrown;
+    try { await AstroPublisher.publishRefresh({ ...draft, body: dupBody }, { action_type: 'refresh_existing_page', target_url: draft.page_url }); } catch (err) { thrown = err; }
+    expect(thrown?.code).toBe('BLOG_BODY_IMAGES_FAILED');
+    expect(thrown.message).toMatch(/near-duplicate/);
     // Non-blog target, identical → still a no-op.
     const svc = await AstroPublisher.publishRefresh({ type: 'draft', page_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/', frontmatter: {}, body: 'Service body.' }, { action_type: 'refresh_existing_page', target_url: 'https://www.wavespestcontrol.com/pest-control-venice-fl/' });
     expect(svc.status).toBe('no_changes');

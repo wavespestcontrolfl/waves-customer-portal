@@ -2908,9 +2908,19 @@ async function publishRefresh(draft, brief = {}) {
   // do not count).
   let liveShortOfImages = false;
   if (refreshBlogTarget && bodyImagesEnabled()) {
+    // The SAME contract resolveBodyImages enforces — every reference
+    // committed, ≥ minimum distinct sources, distinct PICTURES (dHash) —
+    // judged on the live body; anything short of it means the refresh must
+    // run (and, for a broken live post, park for a human rather than
+    // silently completing as no_changes). A read error propagates.
     const hero = String(nextFrontmatter?.hero_image?.src || '');
-    const nonHero = bodyImageRefs(oldBody).map((r) => String(r.src || '')).filter((src) => !((hero && src === hero) || /\/hero\.(?:webp|jpe?g|png|avif)$/i.test(src)));
-    liveShortOfImages = new Set(nonHero).size < BODY_IMAGE_MIN;
+    const getLive = (path) => gh.getFile(path);
+    const valid = await validateBodyImageRefs({ body: oldBody, heroSrc: hero, getFile: getLive, legacyHeroSrcs: legacyHeroRefs(oldBody, hero) });
+    if (!valid.ok || valid.distinct < BODY_IMAGE_MIN) liveShortOfImages = true;
+    else {
+      const pictures = await assertDistinctPictures({ srcs: [...new Set(valid.refs.map((r) => r.src))], heroSrc: hero, getFile: getLive });
+      liveShortOfImages = !pictures.ok;
+    }
   }
   // Semantic no-op check (a parse→stringify round-trip rarely reproduces the
   // source byte-for-byte, so compare meaning, not text).
