@@ -25,19 +25,34 @@ const UNTOUCHED = ['claimed', 'done', 'pending_review'];
 
 exports.up = async function up(knex) {
   if (!(await knex.schema.hasTable('opportunity_queue'))) return;
+  const untouched = UNTOUCHED.map(() => '?').join(', ');
   for (const [id, oldSlug, newSlug, newTitle] of RETARGET) {
-    await knex.raw(
-      `UPDATE opportunity_queue
-         SET signal_metadata = jsonb_set(
-               CASE WHEN ? IS NULL THEN signal_metadata
-                    ELSE jsonb_set(signal_metadata, '{category_brief,working_title}', to_jsonb(?::text), true) END,
-               '{category_brief,slug}', to_jsonb(?::text), true),
-             updated_at = now()
-       WHERE dedupe_key = ?
-         AND status NOT IN (${UNTOUCHED.map(() => '?').join(', ')})
-         AND (signal_metadata->'category_brief'->>'slug' = ? OR (? IS NOT NULL AND signal_metadata->'category_brief'->>'working_title' <> ?))`,
-      [newTitle, newTitle, newSlug, `${DEDUPE_PREFIX}${id}`, ...UNTOUCHED, oldSlug, newTitle, newTitle],
-    );
+    // Two statement shapes rather than a NULL bind: Postgres cannot type a
+    // bare NULL parameter inside CASE / IS NULL.
+    if (newTitle) {
+      await knex.raw(
+        `UPDATE opportunity_queue
+           SET signal_metadata = jsonb_set(
+                 jsonb_set(signal_metadata, '{category_brief,working_title}', to_jsonb(?::text), true),
+                 '{category_brief,slug}', to_jsonb(?::text), true),
+               updated_at = now()
+         WHERE dedupe_key = ?::text
+           AND status NOT IN (${untouched})
+           AND (signal_metadata->'category_brief'->>'slug' = ?::text
+                OR signal_metadata->'category_brief'->>'working_title' <> ?::text)`,
+        [newTitle, newSlug, `${DEDUPE_PREFIX}${id}`, ...UNTOUCHED, oldSlug, newTitle],
+      );
+    } else {
+      await knex.raw(
+        `UPDATE opportunity_queue
+           SET signal_metadata = jsonb_set(signal_metadata, '{category_brief,slug}', to_jsonb(?::text), true),
+               updated_at = now()
+         WHERE dedupe_key = ?::text
+           AND status NOT IN (${untouched})
+           AND signal_metadata->'category_brief'->>'slug' = ?::text`,
+        [newSlug, `${DEDUPE_PREFIX}${id}`, ...UNTOUCHED, oldSlug],
+      );
+    }
   }
 };
 
