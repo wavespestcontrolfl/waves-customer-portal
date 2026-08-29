@@ -3183,10 +3183,14 @@ export default function EstimateToolViewV2({
     0;
   useEffect(() => {
     setEnginePreviewSf(null);
+    // Bump the sequence BEFORE any early return so an in-flight answer for
+    // the previous profile can never land after the lot clears (pre-push
+    // P1: switching to a lot-less address would otherwise re-display the
+    // prior property's turf area).
+    const seq = ++enginePreviewSeq.current;
     // Without a lot the engine has nothing to derive from — the local
     // heuristic returns null there too, so skip the round-trip.
     if (previewLotSqFt <= 0) return undefined;
-    const seq = ++enginePreviewSeq.current;
     const timer = setTimeout(async () => {
       try {
         // The SAME builder doGenerate uses — preview and priced request
