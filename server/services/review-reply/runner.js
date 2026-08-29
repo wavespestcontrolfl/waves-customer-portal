@@ -1070,6 +1070,16 @@ async function postNow(reviewId, actor, { expectedDraft = undefined } = {}) {
       throw err;
     }
   }
+  // A reconciliation park (google_uncertain / persist_failed) may have OUR
+  // earlier text live on Google: Post now re-attempts THAT text (the
+  // publisher's live read promotes it — codex r69 / r76). Once the stored
+  // draft is discarded there is nothing safe to publish — a fresh draft, or
+  // any failure drafting one, would rewrite the state the next sync keys on
+  // to recognise the landed reply (codex #3587 r7). Refuse; the park stands.
+  if (!existing && row.auto_reply_status === STATUS.PARKED && RECONCILE_REASONS.has(row.auto_reply_reason)) {
+    await releaseClaim(row);
+    throw new ReviewReplyError(CODES.STALE, 'An earlier reply on this review may already be live on Google and its draft no longer applies — wait for the next sync to confirm it, or retract it, before posting again.', { status: 409 });
+  }
   if (existing) {
     const publishedAt = new Date().toISOString();
     try {

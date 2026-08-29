@@ -1518,6 +1518,17 @@ describe('admin actions', () => {
     expect(state.rows[0]).toMatchObject({ auto_reply_status: 'posted', review_reply: draft, auto_reply_claimed_until: null });
     expect(state.rows[0].auto_reply_reason).not.toBe('already_replied');
   });
+  test('postNow on a reconciliation park whose stored draft no longer applies refuses (409) and leaves the park intact — never a fresh draft over a reply that may be live (codex #3587 r7)', async () => {
+    process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
+    for (const [reason, star_rating] of [['google_uncertain', 2], ['persist_failed', 5]]) {
+      mockDraft.mockClear(); mockPublish.mockClear();
+      state.rows = [row({ id: 'rc', star_rating, auto_reply_status: 'parked', auto_reply_reason: reason, auto_reply_draft: 'Old words.', review_reply: '[DRAFT] Old words.', auto_reply_version: 'reply-v1', auto_reply_grounding: { fingerprint: 'stale', accountFingerprint: 'stale' } })];
+      await expect(Runner.postNow('rc', { type: 'admin' }, { expectedDraft: 'Old words.' })).rejects.toMatchObject({ code: 'stale_claim', status: 409 });
+      expect(state.rows[0]).toMatchObject({ auto_reply_status: 'parked', auto_reply_reason: reason, auto_reply_draft: 'Old words.', review_reply: '[DRAFT] Old words.', auto_reply_claimed_until: null });
+      expect(mockDraft).not.toHaveBeenCalled();
+      expect(mockPublish).not.toHaveBeenCalled();
+    }
+  });
   test('postNow on a 1-3★ / unrated row with NO surfaced draft never posts an unseen reply: it drafts + parks; the next Post now publishes it (hook P1)', async () => {
     process.env.GATE_REVIEW_AUTO_REPLY = 'auto';
     for (const star_rating of [2, 0]) {
