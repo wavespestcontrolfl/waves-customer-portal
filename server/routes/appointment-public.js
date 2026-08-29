@@ -243,7 +243,11 @@ async function visitServicesFor(svc) {
       .orderBy('window_start', 'asc')
       .select('id', 'service_type');
     if (members.length < 2) return {};
-    return { visit: { serviceCount: members.length, services: members.map((m) => m.service_type || 'service') } };
+    // The stop's canonical start (service_visits.window_start — the
+    // earliest member's) drives the arrival promise: two links to the same
+    // physical visit must quote the same window (codex r10).
+    const parent = await db('service_visits').where({ id: svc.visit_id }).first('window_start');
+    return { visit: { serviceCount: members.length, services: members.map((m) => m.service_type || 'service'), windowStart: hhmm(parent?.window_start) || null } };
   } catch (err) {
     logger.warn(`[appointment-public] visit members lookup failed for ${svc.id}: ${err.message}`);
     return {};
@@ -343,8 +347,11 @@ router.get('/:token', async (req, res, next) => {
       service: { type: await resolveServiceLabel(svc), ...visitInfo },
       appointment: {
         date: apptDateStr(svc.scheduled_date),
+        // windowStart stays the ROW's own start — it pins the slot the
+        // confirm POST proves (slotMatchesShown). The arrival promise is
+        // the VISIT's when grouped: the technician arrives for the stop.
         windowStart: hhmm(svc.window_start),
-        arrivalWindow: arrivalWindowLabel(hhmm(svc.window_start)),
+        arrivalWindow: arrivalWindowLabel(visitInfo.visit?.windowStart || hhmm(svc.window_start)),
       },
     };
     if (state !== 'upcoming') return res.json({ ...base, tech: null, plan: null, weather: null });
@@ -571,7 +578,12 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
     // the history table is the canonical transition audit, so a lost row
     // must fail the confirm rather than silently succeed without it.
     let updated = 0;
-    await db.transaction(async (trx) => {
+    // lockStopForRow's peek→lock→verify contract throws VISIT_STOP_MOVED
+    // when the stop moved between the two reads; retry like every other
+    // caller, and turn an exhausted retry into the page's CHANGED reload
+    // instead of a 500 (codex r10).
+    let stopMovedRetries = 0;
+    const confirmOnce = async () => db.transaction(async (trx) => {
       // Visit writers (createOrJoinVisit, split, unit move) take the STOP
       // lock before any member row lock; this confirm follows the same
       // stop→row order so the two can never form a lock cycle (codex #3609
@@ -630,7 +642,9 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
           .where({ visit_id: svc.visit_id, status: 'pending' })
           .whereNot('id', svc.id)
           .forUpdate()
-          .select('id', 'source_action', 'customer_confirmed');
+          // status is part of the projection: dispatchOwnedUnreviewed keys on
+          // it, and a missing column made the guard a no-op (codex r10 P1).
+          .select('id', 'status', 'source_action', 'customer_confirmed');
         for (const sib of siblings) {
           if (dispatchOwnedUnreviewed(sib)) continue;
           const n = await trx('scheduled_services')
@@ -641,6 +655,18 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
         }
       }
     });
+    for (;;) {
+      try {
+        await confirmOnce();
+        break;
+      } catch (err) {
+        if (err && err.code === 'VISIT_STOP_MOVED' && stopMovedRetries < 2) { stopMovedRetries += 1; updated = 0; continue; }
+        if (err && err.code === 'VISIT_STOP_MOVED') {
+          return res.status(409).json({ error: 'This appointment just changed — please refresh.', code: 'CHANGED' });
+        }
+        throw err;
+      }
+    }
     if (updated === 0) {
       // Losing the guarded update is not automatically an error: two taps
       // racing both pass the early idempotency check, the first commits,
@@ -687,6 +713,7 @@ router._test = {
   arrivalWindowLabel,
   slotMatchesShown,
   dispatchOwnedUnreviewed,
+  visitServicesFor,
 };
 
 module.exports = router;

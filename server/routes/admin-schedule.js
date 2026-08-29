@@ -6712,6 +6712,13 @@ async function planCollectiveEditDateMove(req) {
         actorId: req.technicianId,
         reasonText: null,
       });
+      // Grouped siblings moved singly by moveVisitAsUnit sit outside the
+      // series effects' broadcast — other boards need them (codex #3609 r10).
+      for (const movedId of (result.visitMove?.moved || []).map(String).filter((id) => id !== String(row.id))) {
+        try { await emitDispatchJobUpdate({ jobId: movedId, actorId: req.technicianId }); } catch (err) {
+          logger.error(`[schedule/update-details] series board broadcast failed for grouped member ${movedId}: ${err.message}`);
+        }
+      }
       return {
         seriesMoveId: result.seriesMoveId || null,
         occurrencesRescheduled: result.occurrencesRescheduled || 0,
@@ -7058,6 +7065,9 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // occupies (start + new duration), so it validates too: 19:00 + 60→120
     // is 19:00-21:00 and refused.
     let preReadWindowRow = null;
+    // Observed visit membership at the slot-change pre-read; CAS'd on the
+    // locked row inside the transaction (codex #3609 r10).
+    let preReadVisitId;
     if (updates.window_start || updates.window_end || updates.scheduled_date !== undefined
       || updates.estimated_duration_minutes !== undefined) {
       const currentRow = await db('scheduled_services').where({ id: req.params.id })
@@ -7095,6 +7105,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       // changes on a grouped row go through the schedule's move (the unit
       // mover) or after separating the services; every other field edits
       // normally. Same-slot echoes from the editors pass untouched.
+      if (!effectiveSlotUnchanged) preReadVisitId = currentRow.visit_id || null;
       if (!effectiveSlotUnchanged && currentRow.visit_id) {
         const { openMembers } = require('../services/visit-groups');
         const members = await openMembers(db, currentRow.visit_id);
@@ -7962,6 +7973,16 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
             // estimated_duration_minutes is part of the compare: a start-only
             // edit derives its end from it, so a concurrent duration-only
             // edit must not be overwritten with a block built on the old one.
+            // Grouped-membership CAS (codex #3609 r10): the unlocked
+            // grouped-row refusal above read visit_id; a row grouped (or
+            // split) since must not have its slot written alone.
+            if (preReadVisitId !== undefined && String(occRow.visit_id || '') !== String(preReadVisitId || '')) {
+              throw Object.assign(new Error('This appointment was grouped with another service while saving — reload and save again.'), {
+                statusCode: 409,
+                isOperational: true,
+                code: 'VISIT_CHANGED_RETRY',
+              });
+            }
             if (preReadWindowRow && (
               dateOnly(occRow.scheduled_date) !== dateOnly(preReadWindowRow.scheduled_date)
               || normalizeHHMM(occRow.window_start) !== normalizeHHMM(preReadWindowRow.window_start)

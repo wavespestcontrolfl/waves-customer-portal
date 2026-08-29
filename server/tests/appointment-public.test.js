@@ -355,3 +355,20 @@ describe('codex #3429 r3 P2 — dispatch-owned unreviewed bookings hide self-ser
     expect(dispatchOwnedUnreviewed({ status: 'pending', source_action: null, customer_confirmed: false })).toBe(false);
   });
 });
+
+describe('grouped visit payload (codex #3609 r10)', () => {
+  test('visitServicesFor lists the live members and the VISIT start for the shared arrival promise', async () => {
+    const { visitServicesFor } = appointmentRouter._test;
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, orderBy: () => api,
+        select: async () => [{ id: 'a', service_type: 'Quarterly Pest Control' }, { id: 'b', service_type: 'Lawn Fertilization' }],
+        first: async () => (table === 'service_visits' ? { window_start: '09:00:00' } : null),
+      };
+      return api;
+    });
+    expect(await visitServicesFor({ id: 'b', visit_id: 'v1', window_start: '10:00' }))
+      .toEqual({ visit: { serviceCount: 2, services: ['Quarterly Pest Control', 'Lawn Fertilization'], windowStart: '09:00' } });
+    expect(await visitServicesFor({ id: 'x', visit_id: null })).toEqual({});
+  });
+});
